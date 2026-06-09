@@ -181,6 +181,10 @@ pub struct LLVMJitBackend<'ctx> {
     /// Set at the start of compile_function_body, used in Return terminator
     current_sret_ptr: Option<inkwell::values::PointerValue<'ctx>>,
 
+    /// Current hidden closure environment parameter for the function being compiled.
+    /// ClosureEnv reads this value, matching the Cranelift backend's closure ABI.
+    current_env_param: Option<BasicValueEnum<'ctx>>,
+
     /// AOT mode: when true, struct→ptr coercion for extern calls uses
     /// alloca+store (C ABI), and per-function verification prints errors.
     aot_mode: bool,
@@ -257,6 +261,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             extern_function_ids: std::collections::BTreeSet::new(),
             sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
+            current_env_param: None,
             aot_mode: false,
             alloca_ids: std::collections::BTreeSet::new(),
             global_vars: Vec::new(),
@@ -1658,9 +1663,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // IMPORTANT: Match Cranelift's calling convention for Haxe functions
         // Order of hidden parameters:
         // 1. sret pointer (if uses_sret) - struct return via hidden pointer
-        // 2. env parameter (i64) - environment/closure pointer
+        // 2. env parameter (i64) - environment/closure pointer, unless the
+        //    function already has an explicit first `env` parameter (lambda ABI)
         // 3. actual user parameters
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let already_has_env_param = !function.signature.parameters.is_empty()
+            && function.signature.parameters[0].name == "env";
 
         // Check if this function uses sret (struct return by hidden pointer)
         let uses_sret = function.signature.uses_sret;
@@ -1675,8 +1683,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             );
         }
 
-        // Add hidden env parameter (i64)
-        param_types.push(self.context.i64_type().into());
+        if !already_has_env_param {
+            // Add hidden env parameter (i64)
+            param_types.push(self.context.i64_type().into());
+        }
 
         // Then add actual IR parameters
         for param in &function.signature.parameters {
@@ -1721,8 +1731,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         func_name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
         // Translate parameter types with hidden params first
-        // Order: sret (if needed), env, user params
+        // Order: sret (if needed), env (unless explicit lambda env), user params
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let already_has_env_param = !function.signature.parameters.is_empty()
+            && function.signature.parameters[0].name == "env";
 
         // Check if this function uses sret (struct return by hidden pointer)
         let uses_sret = function.signature.uses_sret;
@@ -1737,8 +1749,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             );
         }
 
-        // Add hidden env parameter (i64)
-        param_types.push(self.context.i64_type().into());
+        if !already_has_env_param {
+            // Add hidden env parameter (i64)
+            param_types.push(self.context.i64_type().into());
+        }
 
         // Then add actual IR parameters
         for param in &function.signature.parameters {
@@ -1774,11 +1788,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         self.phi_map.clear();
         self.alloca_ids.clear();
         self.current_sret_ptr = None;
+        self.current_env_param = None;
 
         // Check if this function uses sret (struct return)
         let uses_sret = self.sret_function_ids.contains(&func_id);
         // Check if this function uses C calling convention (no hidden env param)
         let is_c_abi = self.extern_function_ids.contains(&func_id);
+        let already_has_env_param = !function.signature.parameters.is_empty()
+            && function.signature.parameters[0].name == "env";
 
         // Map function parameters to LLVM values using their actual IrIds
         // Note: we filter out void parameters but need to handle IrIds correctly
@@ -1817,10 +1834,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Calculate the offset for IR parameters based on hidden params:
         // - C ABI (is_c_abi): no hidden params, param_offset = 0
+        // - Lambda with explicit env: no extra hidden env; first IR param is env
         // - Haxe with sret: param 0 = sret ptr, param 1 = env, params 2+ = IR params
         // - Haxe no sret: param 0 = env, params 1+ = IR params
         let param_offset = if is_c_abi {
             0 // C ABI: no hidden parameters
+        } else if already_has_env_param {
+            if uses_sret {
+                1 // sret only, then explicit env/user params
+            } else {
+                0 // explicit env is the first user parameter
+            }
         } else if uses_sret {
             2 // Haxe with sret: sret + env
         } else {
@@ -1834,13 +1858,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.current_sret_ptr = Some(llvm_param.into_pointer_value());
                 continue;
             }
-            if !is_c_abi && i == (if uses_sret { 1 } else { 0 }) {
+            if !is_c_abi && !already_has_env_param && i == (if uses_sret { 1 } else { 0 }) {
                 // Skip the hidden env parameter (Haxe ABI only)
+                self.current_env_param = Some(llvm_param);
                 continue;
             }
             let ir_param_idx = i - param_offset;
             if ir_param_idx < non_void_params.len() {
                 let param_id = non_void_params[ir_param_idx].reg;
+                if already_has_env_param && ir_param_idx == 0 {
+                    self.current_env_param = Some(llvm_param);
+                }
                 self.value_map.insert(param_id, llvm_param);
             }
         }
@@ -1974,7 +2002,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Pass 3: Fill in phi node incoming values
         for (block_id, mir_block) in &sorted_blocks {
             for phi in &mir_block.phi_nodes {
-                self.fill_phi_incoming(phi)?;
+                self.fill_phi_incoming(phi, *block_id, function)?;
             }
         }
 
@@ -2006,7 +2034,29 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     }
 
     /// Fill in phi node incoming values (after all blocks are compiled)
-    fn fill_phi_incoming(&mut self, phi: &IrPhiNode) -> Result<(), String> {
+    fn terminator_targets(term: &IrTerminator, target: IrBlockId) -> bool {
+        match term {
+            IrTerminator::Branch { target: t } => *t == target,
+            IrTerminator::CondBranch {
+                true_target,
+                false_target,
+                ..
+            } => *true_target == target || *false_target == target,
+            IrTerminator::Switch { cases, default, .. } => {
+                *default == target || cases.iter().any(|(_, t)| *t == target)
+            }
+            IrTerminator::Return { .. }
+            | IrTerminator::Unreachable
+            | IrTerminator::NoReturn { .. } => false,
+        }
+    }
+
+    fn fill_phi_incoming(
+        &mut self,
+        phi: &IrPhiNode,
+        target_block_id: IrBlockId,
+        function: &IrFunction,
+    ) -> Result<(), String> {
         // Skip void phi nodes - they were given placeholders
         if phi.ty == IrType::Void {
             return Ok(());
@@ -2021,6 +2071,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Add incoming values
         for (block_id, value_id) in &phi.incoming {
+            let is_actual_predecessor = function
+                .cfg
+                .blocks
+                .get(block_id)
+                .map(|block| Self::terminator_targets(&block.terminator, target_block_id))
+                .unwrap_or(false);
+            if !is_actual_predecessor {
+                continue;
+            }
+
             let llvm_block = self
                 .block_map
                 .get(block_id)
@@ -2092,6 +2152,33 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             .map_err(|e| format!("Failed to truncate phi int: {}", e))?
                             .into()
                     }
+                } else if llvm_value.is_int_value() && expected_ty.is_pointer_type() {
+                    self.builder
+                        .build_int_to_ptr(
+                            llvm_value.into_int_value(),
+                            expected_ty.into_pointer_type(),
+                            &cast_name,
+                        )
+                        .map_err(|e| format!("Failed to cast phi int->ptr: {}", e))?
+                        .into()
+                } else if llvm_value.is_pointer_value() && expected_ty.is_int_type() {
+                    self.builder
+                        .build_ptr_to_int(
+                            llvm_value.into_pointer_value(),
+                            expected_ty.into_int_type(),
+                            &cast_name,
+                        )
+                        .map_err(|e| format!("Failed to cast phi ptr->int: {}", e))?
+                        .into()
+                } else if llvm_value.is_pointer_value() && expected_ty.is_pointer_type() {
+                    self.builder
+                        .build_pointer_cast(
+                            llvm_value.into_pointer_value(),
+                            expected_ty.into_pointer_type(),
+                            &cast_name,
+                        )
+                        .map_err(|e| format!("Failed to cast phi ptr->ptr: {}", e))?
+                        .into()
                 } else {
                     // For other cases, use as-is (might fail verification but gives better error)
                     *llvm_value
@@ -2930,8 +3017,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             } else {
                                 int_val.into()
                             }
+                        } else if captured_val.is_pointer_value() {
+                            self.builder
+                                .build_ptr_to_int(
+                                    captured_val.into_pointer_value(),
+                                    i64_type,
+                                    "env_cast",
+                                )
+                                .map_err(|e| format!("Failed to ptrtoint env val: {}", e))?
+                                .into()
                         } else {
-                            // For pointers/floats, bitcast to i64
+                            // Floats are stored as raw bits in pointer-sized env slots.
                             self.builder
                                 .build_bit_cast(captured_val, i64_type, "env_cast")
                                 .map_err(|e| format!("Failed to bitcast env val: {}", e))?
@@ -3021,34 +3117,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .map_err(|e| format!("Failed to load closure func: {}", e))?;
                 self.value_map.insert(*dest, func_ptr_val);
             }
-            IrInstruction::ClosureEnv { dest, closure } => {
-                // Load environment pointer from closure offset 8
-                let closure_val = self.get_value(*closure)?.into_pointer_value();
-                let i64_type = self.context.i64_type();
-                let env_slot = unsafe {
-                    self.builder
-                        .build_gep(
-                            self.context.i8_type(),
-                            closure_val,
-                            &[i64_type.const_int(8, false)],
-                            "closure_env_gep",
-                        )
-                        .map_err(|e| format!("Failed to GEP closure env: {}", e))?
-                };
+            IrInstruction::ClosureEnv { dest, closure: _ } => {
+                // In the unified closure ABI, the active closure environment is
+                // passed as the current function's hidden env parameter. The
+                // MIR operand can still name a closure object, but lambda
+                // bodies need the current env slot, not a reload through that
+                // operand.
                 let env_val = self
-                    .builder
-                    .build_load(i64_type, env_slot, "closure_env")
-                    .map_err(|e| format!("Failed to load closure env: {}", e))?;
-                // Convert i64 back to pointer
-                let env_ptr = self
-                    .builder
-                    .build_int_to_ptr(
-                        env_val.into_int_value(),
-                        self.context.ptr_type(AddressSpace::default()),
-                        "env_ptr",
-                    )
-                    .map_err(|e| format!("Failed to inttoptr env: {}", e))?;
-                self.value_map.insert(*dest, env_ptr.into());
+                    .current_env_param
+                    .unwrap_or_else(|| self.context.i64_type().const_zero().into());
+                self.value_map.insert(*dest, env_val);
             }
             IrInstruction::DebugLoc { .. } => {
                 // Debug locations are metadata, skip for now
@@ -5365,6 +5443,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         let (uses_sret, expects_env) = if num_llvm_params == num_ir_args {
             // Exact match - C calling convention (no hidden params)
             (false, false)
+        } else if num_llvm_params == num_ir_args + 1 && first_is_ptr {
+            // One extra leading pointer - sret without a hidden env.
+            // This is used by lambdas with an explicit `env` parameter.
+            (true, false)
         } else if num_llvm_params == num_ir_args + 1 && first_is_i64 {
             // One extra param that's i64 - Haxe convention with env only
             (false, true)
@@ -5590,6 +5672,35 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             arg_values.push(coerced);
         }
 
+        // Some cross-module/interface calls can arrive from MIR with
+        // trailing optional/default parameters omitted. HIR normally expands
+        // those, but cached/interface paths occasionally miss the default
+        // metadata. Match the fallback used by the MIR lowerer: synthesize a
+        // zero/null value for any still-missing trailing LLVM parameters.
+        while arg_values.len() < expected_params.len() {
+            let expected_ty = expected_params[arg_values.len()];
+            let default_value: BasicMetadataValueEnum = if expected_ty.is_int_type() {
+                expected_ty.into_int_type().const_zero().into()
+            } else if expected_ty.is_float_type() {
+                expected_ty.into_float_type().const_zero().into()
+            } else if expected_ty.is_pointer_type() {
+                expected_ty.into_pointer_type().const_null().into()
+            } else if expected_ty.is_struct_type() {
+                expected_ty.into_struct_type().const_zero().into()
+            } else if expected_ty.is_array_type() {
+                expected_ty.into_array_type().const_zero().into()
+            } else if expected_ty.is_vector_type() {
+                expected_ty.into_vector_type().const_zero().into()
+            } else {
+                return Err(format!(
+                    "Cannot synthesize default for missing call argument {} of type {:?}",
+                    arg_values.len(),
+                    expected_ty
+                ));
+            };
+            arg_values.push(default_value);
+        }
+
         let call_site = self
             .builder
             .build_call(*llvm_func, &arg_values, "call")
@@ -5625,6 +5736,44 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Handle type mismatches - when actual LLVM value type differs from MIR type
         // This happens due to Haxe's dynamic numeric promotion
+        //
+        // Some MIR types are semantically richer than their machine
+        // representation. `String`, `Any`, and function values are all pointer
+        // shaped in LLVM even when earlier MIR inference has temporarily held
+        // them in an i64 slot (for example phi/array reads of HaxeString*).
+        // Key off the actual translated LLVM type here so `cast i64 -> string`
+        // becomes inttoptr instead of falling through to the scalar cast table.
+        if target_llvm_ty.is_pointer_type() {
+            let target_ptr_ty = target_llvm_ty.into_pointer_type();
+            if src.is_pointer_value() {
+                let src_ptr = src.into_pointer_value();
+                if src_ptr.get_type() == target_ptr_ty {
+                    return Ok(src);
+                }
+                let result = self
+                    .builder
+                    .build_pointer_cast(src_ptr, target_ptr_ty, &name)
+                    .map_err(|e| format!("Failed to build pointer-shaped cast: {}", e))?;
+                return Ok(result.into());
+            }
+            if src.is_int_value() {
+                let result = self
+                    .builder
+                    .build_int_to_ptr(src.into_int_value(), target_ptr_ty, &name)
+                    .map_err(|e| format!("Failed to build int to pointer-shaped cast: {}", e))?;
+                return Ok(result.into());
+            }
+        } else if target_llvm_ty.is_int_type() && src.is_pointer_value() {
+            let result = self
+                .builder
+                .build_ptr_to_int(
+                    src.into_pointer_value(),
+                    target_llvm_ty.into_int_type(),
+                    &name,
+                )
+                .map_err(|e| format!("Failed to build pointer-shaped to int cast: {}", e))?;
+            return Ok(result.into());
+        }
 
         // If actual value is float but target is int, convert float->int
         if actual_is_float && to_ty.is_integer() {
@@ -5682,6 +5831,29 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 .builder
                 .build_int_z_extend(src_int, target_int_ty, &name)
                 .map_err(|e| format!("Failed to build bool-to-int cast: {}", e))?;
+            return Ok(result.into());
+        }
+
+        // Integer to Bool cast (Bool is i8 but not in is_integer()).
+        // Match Cranelift's ireduce behavior so raw Haxe truthy slots
+        // preserve their low byte instead of requiring a normalized 0/1.
+        if actual_is_int && *to_ty == IrType::Bool {
+            let src_int = src.into_int_value();
+            let target_int_ty = target_llvm_ty.into_int_type();
+            let src_width = src_int.get_type().get_bit_width();
+            let target_width = target_int_ty.get_bit_width();
+
+            let result = if src_width == target_width {
+                src_int
+            } else if src_width > target_width {
+                self.builder
+                    .build_int_truncate(src_int, target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build int-to-bool cast: {}", e))?
+            } else {
+                self.builder
+                    .build_int_z_extend(src_int, target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build int-to-bool cast: {}", e))?
+            };
             return Ok(result.into());
         }
 
@@ -5775,13 +5947,33 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Pointer to integer
         if from_ty.is_pointer() && to_ty.is_integer() {
-            let src_ptr = src.into_pointer_value();
             let target_int_ty = target_llvm_ty.into_int_type();
 
-            let result = self
-                .builder
-                .build_ptr_to_int(src_ptr, target_int_ty, &name)
-                .map_err(|e| format!("Failed to build ptr to int: {}", e))?;
+            let result = if src.is_pointer_value() {
+                self.builder
+                    .build_ptr_to_int(src.into_pointer_value(), target_int_ty, &name)
+                    .map_err(|e| format!("Failed to build ptr to int: {}", e))?
+            } else if src.is_int_value() {
+                let src_int = src.into_int_value();
+                let src_width = src_int.get_type().get_bit_width();
+                let target_width = target_int_ty.get_bit_width();
+                if src_width == target_width {
+                    src_int
+                } else if src_width > target_width {
+                    self.builder
+                        .build_int_truncate(src_int, target_int_ty, &name)
+                        .map_err(|e| format!("Failed to truncate pointer-shaped int: {}", e))?
+                } else {
+                    self.builder
+                        .build_int_z_extend(src_int, target_int_ty, &name)
+                        .map_err(|e| format!("Failed to extend pointer-shaped int: {}", e))?
+                }
+            } else {
+                return Err(format!(
+                    "Pointer-to-integer cast expected pointer/int LLVM value, got {:?}",
+                    src.get_type()
+                ));
+            };
 
             return Ok(result.into());
         }
