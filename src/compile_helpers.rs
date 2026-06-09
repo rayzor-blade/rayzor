@@ -33,6 +33,29 @@ pub fn compile_haxe_to_mir(
     Ok((result.module, result.diagnostics))
 }
 
+/// Compile Haxe source through the full pipeline with explicit cache controls.
+pub fn compile_haxe_to_mir_with_cache(
+    source: &str,
+    filename: &str,
+    plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
+    extra_source_dirs: &[PathBuf],
+    safety_warnings: bool,
+    enable_cache: bool,
+    cache_dir: Option<PathBuf>,
+) -> Result<(compiler::ir::IrModule, Vec<diagnostics::Diagnostic>), String> {
+    let result = compile_haxe_to_mir_with_defines_and_cache(
+        source,
+        filename,
+        plugins,
+        extra_source_dirs,
+        safety_warnings,
+        &[],
+        enable_cache,
+        cache_dir,
+    )?;
+    Ok((result.module, result.diagnostics))
+}
+
 /// Same as `compile_haxe_to_mir` but returns the full `MirCompilationResult`.
 pub fn compile_haxe_to_mir_full(
     source: &str,
@@ -60,15 +83,46 @@ pub fn compile_haxe_to_mir_with_defines(
     safety_warnings: bool,
     extra_defines: &[&str],
 ) -> Result<MirCompilationResult, String> {
+    compile_haxe_to_mir_with_defines_and_cache(
+        source,
+        filename,
+        plugins,
+        extra_source_dirs,
+        safety_warnings,
+        extra_defines,
+        true,
+        None,
+    )
+}
+
+/// Compile with additional preprocessor defines and explicit cache controls.
+pub fn compile_haxe_to_mir_with_defines_and_cache(
+    source: &str,
+    filename: &str,
+    plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
+    extra_source_dirs: &[PathBuf],
+    safety_warnings: bool,
+    extra_defines: &[&str],
+    enable_cache: bool,
+    cache_dir: Option<PathBuf>,
+) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     let mut config = CompilationConfig {
         load_stdlib: true,
+        enable_cache,
+        cache_dir,
         emit_safety_warnings: safety_warnings,
         extra_defines: extra_defines.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
     config.pipeline_config = config.pipeline_config.skip_analysis();
+    if std::env::var("RAYZOR_TRACE_CACHE").is_ok() {
+        eprintln!(
+            "[cache] compile_haxe_to_mir enable_cache={} cache_dir={:?} defines={:?}",
+            config.enable_cache, config.cache_dir, config.extra_defines
+        );
+    }
 
     let mut unit = CompilationUnit::new(config);
 

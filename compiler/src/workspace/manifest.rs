@@ -254,4 +254,39 @@ hxml = "build.hxml"
             _ => panic!("Expected SingleProject"),
         }
     }
+
+    #[test]
+    fn test_parse_direct_tier_config() {
+        let toml = r#"
+[project]
+name = "tiered"
+entry = "Main.hx"
+
+[tier]
+interpreter_threshold = 1
+warm_threshold = 0
+hot_threshold = 0
+blazing_threshold = "max"
+sample_rate = 1
+start_interpreted = true
+verbosity = 0
+enable_stack_traces = false
+auto_upgrade_to_llvm_after_main_entry = true
+"#;
+        let manifest = parse_manifest(toml).unwrap();
+        match manifest {
+            RayzorManifest::SingleProject(p) => {
+                let tier = p.tier.as_ref().expect("tier config");
+                assert_eq!(tier.profile_config.interpreter_threshold, 1);
+                assert_eq!(tier.profile_config.warm_threshold, 0);
+                assert_eq!(tier.profile_config.hot_threshold, 0);
+                assert_eq!(tier.profile_config.blazing_threshold, u64::MAX);
+                assert_eq!(tier.profile_config.sample_rate, 1);
+                assert!(tier.start_interpreted);
+                assert!(!tier.enable_stack_traces);
+                assert!(tier.auto_upgrade_to_llvm_after_main_entry);
+            }
+            _ => panic!("Expected SingleProject"),
+        }
+    }
 }

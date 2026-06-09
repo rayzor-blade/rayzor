@@ -84,7 +84,7 @@ name = "macro_bench"
 harness = false
 
 [features]
-default = ["cranelift-backend", "wasm-runtime"]
+default = ["cranelift-backend", "llvm-backend", "wasm-runtime"]
 cranelift-backend = []
 llvm-backend = ["inkwell", "llvm-sys"]
 wasm-runtime = ["wasmtime", "wasi-common", "rayzor-gpu", "pollster", "wgpu"]

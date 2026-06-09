@@ -10,23 +10,34 @@ native-libs = ["../../../target/release/libnue_plugins.dylib"]
 
 # nue-tuned tier config.
 #
-# Per direct feedback during 2026-06-02 session: keep start_interpreted=true
-# because skipping interpreter for cold-start costs ~80ms (Cranelift bulk
-# compile of every function before first execution). Interpreter is the
-# faster bootstrap path; first call runs interpreted, threshold=1 promotes
-# to Cranelift on the next call.
+# Llama-chat wants the old forced-native path: compile all Haxe bodies to
+# Cranelift before Main.main enters. With start_interpreted=true the program
+# eventually bails upward to Cranelift, but the extra interpreter/bootstrap path
+# regresses sustained decode (observed ~68-70 tok/s vs ~74 tok/s on the 808-token
+# Voronoi run).
+#
+# Today the warm/hot/blazing thresholds mostly do not affect llama-chat steady
+# state: compiled direct calls do not feed TieredBackend::record_call, so beadie
+# sees no internal call traffic (`Profile: 3 functions ... 3 total calls`).
+# Keep the knobs present for future tier-counter work, but tune this workload
+# around the bulk Cranelift path for now.
+#
+# Disable tier promotion as well: any asynchronous Standard/Optimized/LLVM
+# compile work competes with the decode loop and can look like a streaming hang.
+# With start_interpreted=false, this still compiles all functions up front.
 #
 # blazing_threshold = "max" disables count-based LLVM promotion;
 # auto_upgrade_to_llvm_after_main_entry triggers a single bulk
 # upgrade_to_llvm call after module __init__ returns and before Main.main
-# runs, amortising LLVM compile cost over the entire decode loop.
+# runs. For this workload it currently costs more than it gives back.
 [tier]
 interpreter_threshold = 1
-warm_threshold = 3
-hot_threshold = 10
+warm_threshold = 10
+hot_threshold = 20
 blazing_threshold = "max"
 sample_rate = 1
 start_interpreted = true
+enable_tier_promotion = true
 verbosity = 0
 enable_stack_traces = false
 auto_upgrade_to_llvm_after_main_entry = true

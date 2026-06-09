@@ -116,6 +116,34 @@ pub enum DebugCommands {
         #[arg(long)]
         no_cache_scrub: bool,
 
+        /// Tier preset passed to each child `rayzor run`
+        #[arg(long, default_value = "application")]
+        preset: String,
+
+        /// Repeatable tier threshold variant: interpreter/warm/hot[/blazing], e.g. 1/15/5
+        #[arg(long, value_name = "I/W/H[/B]")]
+        tier_thresholds: Vec<String>,
+
+        /// Make each tier variant start from CLI --preset instead of rayzor.toml [tier]
+        #[arg(long)]
+        preset_override_toml: bool,
+
+        /// Constant tier sample-rate override passed to each child run
+        #[arg(long, value_name = "N")]
+        tier_sample_rate: Option<u64>,
+
+        /// Constant start_interpreted override passed to each child run
+        #[arg(long, value_name = "BOOL")]
+        tier_start_interpreted: Option<bool>,
+
+        /// Constant enable_tier_promotion override passed to each child run
+        #[arg(long, value_name = "BOOL")]
+        tier_promotion: Option<bool>,
+
+        /// Cooldown between subprocess runs, in milliseconds
+        #[arg(long, default_value_t = 0)]
+        cooldown_ms: u64,
+
         /// Args to forward to the Haxe program (after `--`)
         #[arg(last = true)]
         program_args: Vec<String>,

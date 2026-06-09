@@ -6,6 +6,7 @@ import nue.loader.GGUFLoader;
 import nue.sampling.Sampler;
 import nue.sampling.GenerationLoop;
 import nue.tokenizer.Tokenizer;
+import nue.tokenizer.BPETokenizer;
 import nue.CausalLanguageModel;
 import rayzor.ds.Tensor;
 
@@ -311,6 +312,15 @@ class Main {
         // prompt mentioned). Skip it until the precision-drift work
         // lands.
         var startHdr = tok.specialId("<|start_header_id|>");
+        trace("[chat] prompt content >>" + prompt + "<<");
+        trace("[chat] prompt.len=" + prompt.length + " startHdr=" + startHdr);
+        // Compare against the args array re-fetched right here.
+        var args2 = Sys.args();
+        var prompt2 = (args2.length > 1) ? args2[1] : "FALLBACK";
+        trace("[chat] re-fetched prompt2 content >>" + prompt2 + "<<");
+        trace("[chat] re-fetched prompt2.len=" + prompt2.length);
+        var fresh = "Paris is the capital of";
+        trace("[chat] literal fresh.len=" + fresh.length);
         var modelPrompt:String = prompt;
         if (startHdr >= 0) {
             modelPrompt =
@@ -320,6 +330,8 @@ class Main {
                 + "<|eot_id|>"
                 + "<|start_header_id|>assistant<|end_header_id|>\n\n";
             trace("[chat] wrapping prompt in Llama-3 Instruct template");
+            trace("[chat] modelPrompt.len=" + modelPrompt.length);
+            Sys.println("[chat-content] >>" + modelPrompt.substr(0, 80) + "<<");
         }
 
         // Dump the prompt-encoding for diff harnesses
@@ -327,9 +339,22 @@ class Main {
         // prefixed with `[dbg.prompt-id]` so the harness can grep it
         // back out without confusing other trace output. Same shape
         // as `[129 ids]` then `12345`, one per line.
+        trace("[dbg.encode] modelPrompt.length=" + modelPrompt.length);
         var promptIds = tok.encode(modelPrompt);
-        trace("[dbg.prompt-len] " + promptIds.length);
-        for (i in 0...promptIds.length) {
+        trace("[dbg.encode] returned, null=" + (promptIds == null));
+        var directTok = cast(tok, BPETokenizer);
+        trace("[dbg.direct-encode] specials=" + directTok.specialNames.length);
+        var directIds = directTok.encode(modelPrompt);
+        trace("[dbg.direct-encode] len=" + directIds.length);
+        if (directIds.length > 0) trace("[dbg.direct-encode] first=" + directIds[0]);
+        var promptLen = promptIds.length;
+        trace("[dbg.prompt-len] " + promptLen);
+        if (promptIds.length > 0) {
+            trace("[dbg.encode] first id=" + promptIds[0]);
+        }
+        var dumpLen = promptLen;
+        if (dumpLen > 64) dumpLen = 64;
+        for (i in 0...dumpLen) {
             trace("[dbg.prompt-id] " + i + " " + promptIds[i]);
         }
 

@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
 
-use compile_helpers::compile_haxe_to_mir;
+use compile_helpers::{compile_haxe_to_mir, compile_haxe_to_mir_with_cache};
 
 #[derive(Parser)]
 #[command(name = "rayzor")]
@@ -81,7 +81,27 @@ enum Commands {
         #[arg(long, value_enum, default_value = "application")]
         preset: Preset,
 
-        /// Disable BLADE cache for incremental compilation
+        /// Let CLI --preset replace rayzor.toml [tier] instead of using manifest tier settings
+        #[arg(long)]
+        preset_override_toml: bool,
+
+        /// Override tier thresholds as interpreter/warm/hot[/blazing], e.g. 1/15/5 or 1/15/5/max
+        #[arg(long, value_name = "I/W/H[/B]")]
+        tier_thresholds: Option<TierThresholds>,
+
+        /// Override tier profiling sample rate
+        #[arg(long, value_name = "N")]
+        tier_sample_rate: Option<u64>,
+
+        /// Override start_interpreted in the resolved tier config
+        #[arg(long, value_name = "BOOL")]
+        tier_start_interpreted: Option<bool>,
+
+        /// Override enable_tier_promotion in the resolved tier config
+        #[arg(long, value_name = "BOOL")]
+        tier_promotion: Option<bool>,
+
+        /// Disable entry MIR and BLADE caches for incremental compilation
         #[arg(long)]
         no_cache: bool,
 
@@ -578,6 +598,62 @@ enum Preset {
     Embedded,
 }
 
+#[derive(Clone, Debug)]
+struct TierThresholds {
+    interpreter: u64,
+    warm: u64,
+    hot: u64,
+    blazing: Option<u64>,
+}
+
+impl TierThresholds {
+    fn apply_to(&self, config: &mut compiler::codegen::TieredConfig) {
+        config.profile_config.interpreter_threshold = self.interpreter;
+        config.profile_config.warm_threshold = self.warm;
+        config.profile_config.hot_threshold = self.hot;
+        if let Some(blazing) = self.blazing {
+            config.profile_config.blazing_threshold = blazing;
+        }
+    }
+}
+
+impl std::str::FromStr for TierThresholds {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<_> = s
+            .split(|c| matches!(c, '/' | ',' | ':'))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !(parts.len() == 3 || parts.len() == 4) {
+            return Err(
+                "expected interpreter/warm/hot or interpreter/warm/hot/blazing".to_string(),
+            );
+        }
+
+        Ok(Self {
+            interpreter: parse_threshold_component(parts[0])?,
+            warm: parse_threshold_component(parts[1])?,
+            hot: parse_threshold_component(parts[2])?,
+            blazing: if parts.len() == 4 {
+                Some(parse_threshold_component(parts[3])?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+fn parse_threshold_component(s: &str) -> Result<u64, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "max" | "never" => Ok(u64::MAX),
+        _ => s
+            .parse::<u64>()
+            .map_err(|_| format!("invalid threshold value `{s}`")),
+    }
+}
+
 impl Preset {
     fn to_tier_preset(self) -> compiler::codegen::TierPreset {
         match self {
@@ -606,6 +682,11 @@ fn main() {
             tier,
             llvm,
             preset,
+            preset_override_toml,
+            tier_thresholds,
+            tier_sample_rate,
+            tier_start_interpreted,
+            tier_promotion,
             no_cache,
             cache_dir,
             release,
@@ -625,6 +706,11 @@ fn main() {
                     tier,
                     llvm,
                     preset,
+                    preset_override_toml,
+                    tier_thresholds,
+                    tier_sample_rate,
+                    tier_start_interpreted,
+                    tier_promotion,
                     !no_cache,
                     cache_dir,
                     release,
@@ -860,8 +946,13 @@ fn run_file(
     _tier: u8,
     _llvm: bool,
     preset: Preset,
+    preset_override_toml: bool,
+    tier_thresholds: Option<TierThresholds>,
+    tier_sample_rate: Option<u64>,
+    tier_start_interpreted: Option<bool>,
+    tier_promotion: Option<bool>,
     cache_enabled: bool,
-    _cache_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
     release: bool,
     rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
@@ -973,6 +1064,15 @@ fn run_file(
     // eprintln!("[DEBUG] extra_source_dirs={:?}", extra_source_dirs_from_manifest);
     let manifest_dirs = extra_source_dirs_from_manifest.clone();
     rpkg_source_dirs.extend(extra_source_dirs_from_manifest);
+    let run_cache_dir = cache_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".rayzor/blade/cache"));
+    if std::env::var("RAYZOR_TRACE_CACHE").is_ok() {
+        eprintln!(
+            "[cache] run cache_enabled={} cache_dir={:?} entry_dir={:?}",
+            cache_enabled, cache_dir, run_cache_dir
+        );
+    }
 
     // Resolve manifest [dependencies] → .rpkg paths and merge with any
     // explicit --rpkg flags. CLI flags take precedence by appearing later
@@ -1038,8 +1138,10 @@ fn run_file(
     // own rayzor.toml; resolution is relative to the manifest's root.
     let mut loaded_native_libs: Vec<libloading::Library> = Vec::new();
     let mut manifest_native_symbols: Vec<(String, *const u8)> = Vec::new();
+    let mut manifest_native_lib_inputs: Vec<PathBuf> = Vec::new();
     if let Some(project) = manifest_project.as_ref() {
         for lib_path in project.resolved_native_libs() {
+            manifest_native_lib_inputs.push(lib_path.clone());
             match native_libs::load_manifest_native_lib(&lib_path) {
                 Ok((lib, plugin, runtime_symbols)) => {
                     loaded_native_libs.push(lib);
@@ -1084,8 +1186,48 @@ fn run_file(
     let source_hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        fn hash_file_fingerprint<H: Hasher>(path: &Path, h: &mut H) {
+            path.to_string_lossy().hash(h);
+            if let Ok(abs) = path.canonicalize() {
+                abs.to_string_lossy().hash(h);
+            }
+            if let Ok(meta) = path.metadata() {
+                meta.len().hash(h);
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        dur.as_nanos().hash(h);
+                    }
+                }
+            }
+        }
         let mut h = DefaultHasher::new();
+        "rayzor-run-entry-mir-cache-v2".hash(&mut h);
         source.hash(&mut h);
+        file.to_string_lossy().hash(&mut h);
+        if let Ok(abs) = file.canonicalize() {
+            abs.to_string_lossy().hash(&mut h);
+        }
+        safety_warnings.hash(&mut h);
+        std::env::var("RAYZOR_OPT_LEVEL").ok().hash(&mut h);
+        std::env::var("RAYZOR_RAW_MIR").is_ok().hash(&mut h);
+        for dir in &manifest_dirs {
+            dir.to_string_lossy().hash(&mut h);
+            if let Ok(abs) = dir.canonicalize() {
+                abs.to_string_lossy().hash(&mut h);
+            }
+        }
+        for path in &rpkg_files {
+            hash_file_fingerprint(path, &mut h);
+        }
+        for path in &manifest_native_lib_inputs {
+            hash_file_fingerprint(path, &mut h);
+        }
+        let mut native_symbol_names: Vec<&str> = manifest_native_symbols
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        native_symbol_names.sort_unstable();
+        native_symbol_names.hash(&mut h);
         // Include modification times of all .hx files in class paths
         for dir in &manifest_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1122,10 +1264,11 @@ fn run_file(
         h.finish()
     };
     let mir_cache_path = {
-        let cache_dir = std::path::PathBuf::from(".rayzor/cache");
-        let _ = std::fs::create_dir_all(&cache_dir);
+        if cache_enabled {
+            let _ = std::fs::create_dir_all(&run_cache_dir);
+        }
         let fname = file.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
-        cache_dir.join(format!("{}.mir.cache", fname))
+        run_cache_dir.join(format!("{}.mir.cache", fname))
     };
 
     let (mir_module, _cache_hit) = 'load_mir: {
@@ -1163,12 +1306,18 @@ fn run_file(
             h.begin_phase("compile");
         }
         let t_compile = std::time::Instant::now();
-        let (mut mir_module, compile_diagnostics) = compile_haxe_to_mir(
+        let (mut mir_module, compile_diagnostics) = compile_haxe_to_mir_with_cache(
             &source,
             file.to_str().unwrap_or("unknown"),
             compiler_plugins,
             &rpkg_source_dirs,
             safety_warnings,
+            cache_enabled,
+            if cache_enabled {
+                Some(run_cache_dir.clone())
+            } else {
+                None
+            },
         )?;
         if let Some(ref h) = progress_handle {
             h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
@@ -1312,23 +1461,45 @@ fn run_file(
     // Set up tiered JIT backend.
     //
     // Config selection:
-    //   * If the manifest carries an explicit `[tier]` block (parsed into
-    //     `ProjectManifest::tier`), feed it through `TierPreset::Custom`
-    //     so every knob — bailout strategy, profile thresholds, tier
-    //     promotion gating, auto-LLVM-upgrade — wins over the named
-    //     preset's defaults.
-    //   * Otherwise fall back to the CLI-selected preset.
-    let manifest_tier_config: Option<TieredConfig> = manifest_project
-        .as_ref()
-        .and_then(|p| p.tier_config().cloned());
+    //   * If the manifest carries an explicit `[tier]` block, it remains the
+    //     default source of truth.
+    //   * `--preset-override-toml` lets benchmarking runs start from a named
+    //     CLI preset instead.
+    //   * The narrow `--tier-*` overrides are then applied last, so one-off
+    //     sweeps can manipulate thresholds without editing rayzor.toml.
+    let manifest_tier_config: Option<TieredConfig> = if preset_override_toml {
+        None
+    } else {
+        manifest_project
+            .as_ref()
+            .and_then(|p| p.tier_config().cloned())
+    };
     let mut config = match manifest_tier_config {
         Some(custom) => TieredConfig::from_preset(compiler::codegen::TierPreset::Custom(custom)),
-        None => TieredConfig::from_preset(preset.to_tier_preset()),
+        None => {
+            let mut config = TieredConfig::from_preset(preset.to_tier_preset());
+            // Preserve the historical native CLI default for ad hoc runs
+            // without a manifest-level `[tier]` block. Explicit manifest
+            // configs must be able to tune `start_interpreted`.
+            config.start_interpreted = false;
+            config
+        }
     };
+    if let Some(thresholds) = &tier_thresholds {
+        thresholds.apply_to(&mut config);
+    }
+    if let Some(sample_rate) = tier_sample_rate {
+        config.profile_config.sample_rate = sample_rate.max(1);
+    }
+    if let Some(start_interpreted) = tier_start_interpreted {
+        config.start_interpreted = start_interpreted;
+    }
+    if let Some(enable_tier_promotion) = tier_promotion {
+        config.enable_tier_promotion = enable_tier_promotion;
+    }
     config.verbosity = if verbose { 2 } else { 0 };
-    config.start_interpreted = false; // Start with JIT for immediate execution
-                                      // In release mode, suppress stack-trace instrumentation overhead even if
-                                      // the preset enables it. Debug runs honour the preset.
+    // In release mode, suppress stack-trace instrumentation overhead even if
+    // the preset enables it. Debug runs honour the preset.
     if release {
         config.enable_stack_traces = false;
     }
@@ -1407,6 +1578,28 @@ fn run_file(
     backend
         .execute_function(main_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
+
+    if stats {
+        let backend_stats = backend.get_statistics();
+        let beadie_stats = backend.beadie_stats();
+        eprintln!("{}", backend_stats.format());
+        eprintln!(
+            "Beadie: adapter={} routes={} (standard={} optimized={}) installs={} (standard={} optimized={}) beads={} (standard={} optimized={}) compiled={} (standard={} optimized={})",
+            beadie_stats.adapter_enabled,
+            beadie_stats.routes_attempted,
+            beadie_stats.standard_routes_attempted,
+            beadie_stats.optimized_routes_attempted,
+            beadie_stats.installs,
+            beadie_stats.standard_installs,
+            beadie_stats.optimized_installs,
+            beadie_stats.registered_beads,
+            beadie_stats.standard_registered_beads,
+            beadie_stats.optimized_registered_beads,
+            beadie_stats.standard_compiled_beads + beadie_stats.optimized_compiled_beads,
+            beadie_stats.standard_compiled_beads,
+            beadie_stats.optimized_compiled_beads
+        );
+    }
 
     // Remove trace callback
     rayzor_runtime::haxe_sys::set_trace_callback(None);
@@ -1801,6 +1994,11 @@ fn build_from_hxml(
                     0,     // tier
                     false, // llvm
                     Preset::Application,
+                    false,      // preset_override_toml
+                    None,       // tier_thresholds
+                    None,       // tier_sample_rate
+                    None,       // tier_start_interpreted
+                    None,       // tier_promotion
                     false,      // cache flag
                     None,       // cache_dir
                     false,      // release
@@ -2397,6 +2595,7 @@ fn cache_clear(cache_dir: Option<PathBuf>) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     let mut config = CompilationConfig::default();
+    let using_default_cache = cache_dir.is_none();
     if let Some(dir) = cache_dir {
         config.cache_dir = Some(dir);
     }
@@ -2404,10 +2603,20 @@ fn cache_clear(cache_dir: Option<PathBuf>) -> Result<(), String> {
     let unit = CompilationUnit::new(config);
     let cache_path = unit.config.get_cache_dir();
 
-    println!("🗑️  Clearing BLADE cache...");
+    println!("🗑️  Clearing Rayzor cache...");
     println!("Cache directory: {:?}", cache_path);
 
     unit.clear_cache()?;
+    if using_default_cache {
+        let legacy_mir_cache = PathBuf::from(".rayzor/cache");
+        if legacy_mir_cache.exists() {
+            std::fs::remove_dir_all(&legacy_mir_cache)
+                .map_err(|e| format!("Failed to clear legacy MIR cache: {}", e))?;
+            std::fs::create_dir_all(&legacy_mir_cache)
+                .map_err(|e| format!("Failed to recreate legacy MIR cache: {}", e))?;
+            println!("Legacy MIR cache directory: {:?}", legacy_mir_cache);
+        }
+    }
 
     println!("✓ Cache cleared successfully");
 
