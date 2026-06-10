@@ -20,6 +20,7 @@ VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
 COLD_PROFILE="${COLD_PROFILE:-true}"
 PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
+STREAM="${STREAM:-${RAYZOR_SERVER_STREAM:-false}}"
 PRESET="${PRESET:-application}"
 PORT_BASE="${PORT_BASE:-19890}"
 NO_CACHE="${NO_CACHE:-true}"
@@ -266,17 +267,25 @@ for line in open(sys.argv[1], errors="replace"):
         continue
     vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
     try:
-        client.append((int(float(vals["id"])), float(vals["seconds"])))
+        client.append((
+            int(float(vals["id"])),
+            float(vals["seconds"]),
+            float(vals["first_byte_s"]),
+        ))
     except KeyError:
         pass
 
 client.sort(key=lambda row: row[0])
 if client:
     first = client[0][1]
+    first_byte = client[0][2]
     median = statistics.median(row[1] for row in client)
-    print(f"{ready:.6f}\t{first:.6f}\t{ready + first:.6f}\t{median:.6f}")
+    print(
+        f"{ready:.6f}\t{first:.6f}\t{first_byte:.6f}\t"
+        f"{ready + first:.6f}\t{ready + first_byte:.6f}\t{median:.6f}"
+    )
 else:
-    print(f"{ready:.6f}\tnan\tnan\tnan")
+    print(f"{ready:.6f}\tnan\tnan\tnan\tnan\tnan")
 PY
 }
 
@@ -306,6 +315,9 @@ run_one() {
   fi
   if [[ "$PREFILL_MORSELS" == "true" || "$PREFILL_MORSELS" == "1" || "$PREFILL_MORSELS" == "yes" ]]; then
     env_cmd+=("RAYZOR_PREFILL_MORSELS=1")
+  fi
+  if [[ "$STREAM" == "true" || "$STREAM" == "1" || "$STREAM" == "yes" ]]; then
+    env_cmd+=("RAYZOR_SERVER_STREAM=1")
   fi
   local launch_start
   launch_start="$(now_s)"
@@ -394,7 +406,15 @@ for line in open(path):
 if cold_on:
     for line in open(cold_path):
         parts = line.rstrip("\n").split("\t")
-        if len(parts) != 5:
+        if len(parts) == 5:
+            label = parts[0]
+            try:
+                ready, first, cold_first, client_med = (float(v) for v in parts[1:])
+            except ValueError:
+                continue
+            cold.setdefault(label, []).append((ready, first, float("nan"), cold_first, float("nan"), client_med))
+            continue
+        if len(parts) != 7:
             continue
         label = parts[0]
         try:
@@ -425,15 +445,25 @@ for label in variants:
     if cold_on and cold_samples:
         ready = [row[0] for row in cold_samples if math.isfinite(row[0])]
         first = [row[1] for row in cold_samples if math.isfinite(row[1])]
-        cold_first = [row[2] for row in cold_samples if math.isfinite(row[2])]
-        client_med = [row[3] for row in cold_samples if math.isfinite(row[3])]
+        first_byte = [row[2] for row in cold_samples if math.isfinite(row[2])]
+        cold_first = [row[3] for row in cold_samples if math.isfinite(row[3])]
+        cold_byte = [row[4] for row in cold_samples if math.isfinite(row[4])]
+        client_med = [row[5] for row in cold_samples if math.isfinite(row[5])]
         if ready and first and cold_first and client_med:
-            print(
+            line = (
                 f"{'':14} cold: ready_med={statistics.median(ready):.2f}s  "
                 f"first_rtt_med={statistics.median(first):.2f}s  "
+            )
+            if first_byte and cold_byte:
+                line += (
+                    f"first_byte_med={statistics.median(first_byte):.2f}s  "
+                    f"cold_ttft_med={statistics.median(cold_byte):.2f}s  "
+                )
+            line += (
                 f"first_done_med={statistics.median(cold_first):.2f}s  "
                 f"client_med={statistics.median(client_med):.2f}s"
             )
+            print(line)
 PY
 }
 
@@ -452,6 +482,7 @@ fi
 echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
 echo "prefill: morsels=$PREFILL_MORSELS"
+echo "stream:  $STREAM"
 if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
   echo "cold:   launch/listen + client RTT enabled"
 fi
