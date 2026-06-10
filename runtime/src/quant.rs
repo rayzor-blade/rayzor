@@ -98,6 +98,7 @@ use half::f16;
 // `crate::quant::Q4KMBlock` callsites — Haxe FFI, BLADE, tensor_pool — keep
 // resolving without touching every call site. Migration plan:
 // docs/design/runtime_core_extraction.md.
+use rayon::prelude::*;
 use rayzor_runtime_core::quant::{
     int8::{int8_matmul_f32, quantise_int8_row},
     matmul::{dot_f32_simd, prepare_x_q8k_blocks_into},
@@ -606,24 +607,41 @@ pub unsafe extern "C" fn rayzor_qtensor_requant_q6k_to_q4km(src_ptr: i64) -> i64
         return 0;
     }
 
-    let dst = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
-    if dst.is_null() {
+    let dst_ptr = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
+    if dst_ptr.is_null() {
         return 0;
     }
-    let dst_ref = &*dst;
 
     let blocks_per_row = cols / Q6_K_BLOCK_SIZE;
-    let mut stage = [0.0f32; 256];
-    for r in 0..rows {
-        let src_row_ptr = src.data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
-        let dst_row_ptr = (dst_ref.data as *mut Q4KMBlock).add(r * blocks_per_row);
-        for b in 0..blocks_per_row {
-            dequant_q6_k_block(src_row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
-            *dst_row_ptr.add(b) = quantize_block_q4_k_m(&stage);
-        }
-    }
 
-    dst as i64
+    // Parallelize the row-by-row requantization.
+    // This uses `std::thread::scope` to avoid using the global worker pool,
+    // which can be problematic when called from JIT'd code during startup.
+    // The one-off fork-join cost of `std::thread::scope` is acceptable for this
+    // startup-only task.
+    let src_data_us = src.data as usize;
+    let dst_data_us = (*dst_ptr).data as usize;
+
+    // Use rayon for parallelization to avoid issues with std::thread::scope
+    // and the JIT environment. Rayon's global thread pool is generally safer
+    // to use in these contexts.
+    (0..rows).into_par_iter().for_each(|r| {
+        // Each thread gets its own stack-allocated scratch buffer.
+        let mut stage = [0.0f32; 256];
+        let src_data = src_data_us as *const u8;
+        let dst_data = dst_data_us as *mut Q4KMBlock;
+
+        unsafe {
+            let src_row_ptr = src_data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
+            let dst_row_ptr = dst_data.add(r * blocks_per_row);
+            for b in 0..blocks_per_row {
+                dequant_q6_k_block(src_row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+                *dst_row_ptr.add(b) = quantize_block_q4_k_m(&stage);
+            }
+        }
+    });
+
+    dst_ptr as i64
 }
 
 /// `qt.rows() -> i64`
