@@ -16,6 +16,7 @@ chrono = "0.4"
 log = "0.4"
 parking_lot = "0.12"
 regex = "1"
+rayon = "1.8"
 backtrace = "0.3"
 flate2 = "1"
 # Half-precision floats (IEEE f16 + brain float bf16). Phase 3b uses
