@@ -269,20 +269,28 @@ class Main {
 
             var prevLen = [0];
             var nTokens = [0];
+            var socketOutput = [conn != null ? conn.output : null];
             var started = Sys.time();
-            var output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
-                if (stream) {
-                    var delta = partial.substr(prevLen[0]);
+            var output:String;
+            if (stream) {
+                output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
+                    var delta = partial.substring(prevLen[0], partial.length);
                     prevLen[0] = partial.length;
                     Sys.print(delta);
-                    if (conn != null) {
-                        conn.output.writeString(delta);
-                        conn.output.flush();
+                    var out = socketOutput[0];
+                    if (out != null) {
+                        out.writeString(delta);
+                        out.flush();
                     }
-                }
-                nTokens[0] = nTokens[0] + 1;
-                return true;
-            });
+                    nTokens[0] = nTokens[0] + 1;
+                    return true;
+                });
+            } else {
+                output = loop.generate(modelPrompt, function(_id:Int, _partial:String):Bool {
+                    nTokens[0] = nTokens[0] + 1;
+                    return true;
+                });
+            }
             var seconds = Sys.time() - started;
             if (stream) Sys.println("");
             if (conn != null) {
