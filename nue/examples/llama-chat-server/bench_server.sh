@@ -19,6 +19,7 @@ TIER_PROMOTION="${TIER_PROMOTION:-false}"
 VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
 COLD_PROFILE="${COLD_PROFILE:-true}"
+REQUEST_PROFILE="${REQUEST_PROFILE:-true}"
 PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
 STREAM="${STREAM:-${RAYZOR_SERVER_STREAM:-false}}"
 PRESET="${PRESET:-application}"
@@ -254,6 +255,58 @@ if extras:
 PY
 }
 
+request_label() {
+  local log="$1"
+  if [[ "$REQUEST_PROFILE" != "true" && "$REQUEST_PROFILE" != "1" && "$REQUEST_PROFILE" != "yes" ]]; then
+    return 0
+  fi
+  /usr/bin/python3 - "$log" <<'PY'
+import re, sys
+
+requests = []
+clients = {}
+for line in open(sys.argv[1], errors="replace"):
+    if "[request-done]" in line:
+        match = re.search(
+            r"id=(\d+).*tokens=([0-9.]+).*seconds=([0-9.]+).*tok/s=([0-9.]+)",
+            line,
+        )
+        if match:
+            requests.append((
+                int(match.group(1)),
+                float(match.group(2)),
+                float(match.group(3)),
+                float(match.group(4)),
+            ))
+    elif "[client-request]" in line:
+        vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
+        try:
+            clients[int(float(vals["id"]))] = (
+                float(vals["seconds"]),
+                float(vals["first_byte_s"]),
+                int(float(vals["bytes"])),
+            )
+        except KeyError:
+            pass
+
+requests.sort(key=lambda row: row[0])
+if not requests:
+    raise SystemExit(0)
+
+req_tps = "/".join(f"{row[3]:.1f}" for row in requests)
+req_s = "/".join(f"{row[2]:.2f}" for row in requests)
+first_b = "/".join(
+    f"{clients[row[0]][1]:.2f}" if row[0] in clients else "nan"
+    for row in requests
+)
+bytes_s = "/".join(
+    str(clients[row[0]][2]) if row[0] in clients else "nan"
+    for row in requests
+)
+print(f"  req_tps={req_tps} req_s={req_s} fb={first_b} bytes={bytes_s}")
+PY
+}
+
 extract_cold_metrics() {
   local log="$1"
   local ready_s="$2"
@@ -376,11 +429,13 @@ run_one() {
 
   local profile
   profile="$(profile_label "$log")"
+  local requests
+  requests="$(request_label "$log")"
   echo -e "${variant}\t$metric" >> "$RESULTS"
   if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
     echo -e "${variant}\t$(extract_cold_metrics "$log" "$ready_s")" >> "$COLD_RESULTS"
   fi
-  printf "  run %3d  %-14s ok       tok/s=%.2f%s\n" "$run_no" "$variant" "$metric" "$profile"
+  printf "  run %3d  %-14s ok       tok/s=%.2f%s%s\n" "$run_no" "$variant" "$metric" "$profile" "$requests"
 }
 
 print_summary() {
@@ -483,6 +538,7 @@ echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
 echo "prefill: morsels=$PREFILL_MORSELS"
 echo "stream:  $STREAM"
+echo "request: per-request profile=$REQUEST_PROFILE"
 if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
   echo "cold:   launch/listen + client RTT enabled"
 fi
