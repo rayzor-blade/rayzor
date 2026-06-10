@@ -103,11 +103,8 @@ use rayzor_runtime_core::quant::{
     matmul::{dot_f32_simd, prepare_x_q8k_blocks_into},
     q4_k_m::{decode_q4_k_block, dequant_q4_k_block, q4_k_m_matmul_f32, quantize_block_q4_k_m},
     q6_k::dequant_q6_k_block,
-    q8_k::x_q8_cache_get,
+    q8_k::{quantize_row_q8_K, x_q8_cache_get},
 };
-// `quantize_row_q8_K` is only referenced by the in-crate test module below.
-#[cfg(test)]
-use rayzor_runtime_core::quant::q8_k::quantize_row_q8_K;
 pub use rayzor_runtime_core::quant::{
     Q4KBlock, Q4KMBlock, Q8Block, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE,
     Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE, QSCHEME_INT8, QSCHEME_Q4_K_M, QSCHEME_Q6_K,
@@ -1070,6 +1067,61 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         });
     }
 
+    // Experimental multi-row prefill path. The decode SDOT fast path above
+    // handles `batch == 1`; prompt prefill arrives as `batch == seq_len`, so
+    // the old fallback dequantised each Q4_K_M weight block to F32 and dotted
+    // it against every prompt row. Here we pre-quantise every prompt row to
+    // Q8_K once, then run the same Q4_K_M × Q8_K block dot over output-row
+    // bands. This keeps scheduling inside the native worker pool and avoids a
+    // Haxe-side WorkerPool/FFI fan-out.
+    let use_prefill_morsels = prefill_morsels_enabled()
+        && sdot_enabled_runtime()
+        && batch > 1
+        && qt.scheme == QSCHEME_Q4_K_M
+        && x_is_row_major_contiguous(x_tensor, k);
+    if use_prefill_morsels {
+        let setup_guard =
+            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
+        let x_data = x_tensor_data_ptr(x_tensor);
+        let row_stride = x_tensor_row_stride(x_tensor);
+
+        return X_Q8K_SCRATCH.with(|cell| {
+            let mut x_q8k = cell.borrow_mut();
+            prepare_x_q8k_batch_into(x_data, batch, k, row_stride, &mut x_q8k);
+            let nb = k / Q4_K_M_BLOCK_SIZE;
+
+            if t <= 1 {
+                drop(setup_guard);
+                qmatmul_chunk_impl_sdot_q4km_batch(
+                    qt_w,
+                    out_tensor,
+                    0,
+                    n as i64,
+                    batch,
+                    &x_q8k[..batch * nb],
+                );
+                return out_tensor;
+            }
+
+            let q8k_ptr = x_q8k.as_ptr() as usize;
+            let q8k_len = batch * nb;
+            let qh = qt_w;
+            let yh = out_tensor;
+            drop(setup_guard);
+            let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
+                &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
+            );
+            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
+                let _work_guard = crate::kernel_timing::TimerGuard::new(
+                    &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
+                );
+                let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+                qmatmul_chunk_impl_sdot_q4km_batch(qh, yh, lo as i64, hi as i64, batch, q8k_slice);
+            });
+            out_tensor
+        });
+    }
+
     if t <= 1 {
         qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
         return out_tensor;
@@ -1496,6 +1548,19 @@ fn sdot_enabled_runtime() -> bool {
     }
 }
 
+/// Experimental prefill path gate. This only affects multi-row Q4_K_M
+/// matmuls (`X[seq, hidden] @ Wq.T`) and leaves single-token decode on the
+/// established SDOT path. Kept opt-in while we validate prompt parity and TTFT.
+fn prefill_morsels_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("RAYZOR_PREFILL_MORSELS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// Cheap wrapper: is `x_tensor` 2-D F32 contiguous along axis 1?
 /// The SDOT pre-quant path requires `strides[1] == 1` so it can hand
 /// the inner kernel a flat `*const f32` view of each X super-block.
@@ -1539,6 +1604,84 @@ unsafe fn x_tensor_data_ptr(x_tensor: i64) -> *const f32 {
         numa_node: i32,
     }
     (*(x_tensor as *const TensorHead)).data as *const f32
+}
+
+/// Row stride of a 2-D F32 tensor, in elements. Caller must have validated the
+/// tensor shape before using this in pointer arithmetic.
+#[inline]
+unsafe fn x_tensor_row_stride(x_tensor: i64) -> usize {
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let head = &*(x_tensor as *const TensorHead);
+    let strides = std::slice::from_raw_parts(head.strides, 2);
+    strides[0]
+}
+
+/// Is `x_tensor` a dense row-major `[batch, k]` F32 matrix?
+///
+/// The multi-row prefill SDOT path pre-quantises full activation rows by
+/// slicing `k` contiguous f32s from each row. Strided innermost views already
+/// miss the existing decode SDOT gate; this helper additionally requires
+/// `strides[0] == k` so row `b + 1` starts exactly after row `b`.
+#[inline]
+unsafe fn x_is_row_major_contiguous(x_tensor: i64, k: usize) -> bool {
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let head = &*(x_tensor as *const TensorHead);
+    if head.ndim != 2 || head.dtype != 0 {
+        return false;
+    }
+    let strides = std::slice::from_raw_parts(head.strides, 2);
+    strides[1] == 1 && strides[0] == k
+}
+
+/// Pre-quantise every row of a dense prefill activation matrix into one
+/// contiguous Q8_K scratch buffer. Layout is `[batch][k / 256]`.
+unsafe fn prepare_x_q8k_batch_into(
+    x_data: *const f32,
+    batch: usize,
+    k: usize,
+    row_stride: usize,
+    dest: &mut Vec<Q8KBlock>,
+) {
+    debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
+    let nb = k / Q4_K_M_BLOCK_SIZE;
+    let needed = batch * nb;
+    if dest.len() < needed {
+        dest.resize(
+            needed,
+            Q8KBlock {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            },
+        );
+    }
+    for b in 0..batch {
+        let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
+        let start = b * nb;
+        quantize_row_q8_K(row, &mut dest[start..start + nb]);
+    }
 }
 
 // `prepare_x_q8k_blocks` and `prepare_x_q8k_blocks_into` live in
@@ -1667,6 +1810,81 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
         }
 
         *y_data.add(n_idx) = sum;
+    }
+}
+
+/// Batch-prefill sibling of `qmatmul_chunk_impl_sdot_q4km`.
+///
+/// Computes `Y[b, n_idx] = X[b, :] · Wq[n_idx, :]` for
+/// `n_idx in [n_start, n_end)` and every prompt row `b`. `x_q8k` must have
+/// layout `[batch][blocks_per_row]`, produced by
+/// `prepare_x_q8k_batch_into`. Workers split disjoint output-feature bands,
+/// so every worker writes a unique `n_idx` column across all batch rows.
+unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
+    qt_w: i64,
+    y_tensor: i64,
+    n_start: i64,
+    n_end: i64,
+    batch: usize,
+    x_q8k: &[Q8KBlock],
+) {
+    let qt = &*(qt_w as *const RayzorQTensor);
+    let block_size = Q4_K_M_BLOCK_SIZE;
+    let block_bytes = Q4_K_M_BLOCK_BYTES;
+
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let y_head = &*(y_tensor as *const TensorHead);
+    let y_data = y_head.data as *mut f32;
+
+    let n = qt.rows;
+    let blocks_per_row = qt.cols / block_size;
+    debug_assert_eq!(x_q8k.len(), batch * blocks_per_row);
+
+    let lo = (n_start.max(0) as usize).min(n);
+    let hi = (n_end.max(0) as usize).min(n);
+    if lo >= hi || batch == 0 {
+        return;
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+    let use_llamacpp = !std::env::var("RAYZOR_LEGACY_KERNEL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+    let use_llamacpp = false;
+
+    for n_idx in lo..hi {
+        let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+        for b in 0..batch {
+            let x_blocks = &x_q8k[b * blocks_per_row..(b + 1) * blocks_per_row];
+            let mut sum = 0.0f32;
+
+            if use_llamacpp {
+                #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
+                    let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
+                    sum += dot_q4_k_q8_kblock_llamacpp(weight, x_block);
+                }
+            } else {
+                for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
+                    let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
+                    sum += vec_dot_q4_K_q8_K(weight, x_block);
+                }
+            }
+
+            *y_data.add(b * n + n_idx) = sum;
+        }
     }
 }
 
@@ -2778,6 +2996,72 @@ mod tests {
 
             rayzor_qtensor_free(qt_a);
             rayzor_qtensor_free(qt_b);
+        }
+    }
+
+    #[test]
+    fn prefill_sdot_batch_q4km_writes_all_batch_rows() {
+        // Weight: 256 output rows, K=512. Each output row is constant
+        // `(row + 1)` across both 256-wide Q4_K_M blocks.
+        let mut blocks: Vec<u8> = Vec::with_capacity(512 * Q4_K_M_BLOCK_BYTES);
+        for o in 0..256 {
+            let v = (o + 1) as f32;
+            blocks.extend_from_slice(&build_constant_block(v));
+            blocks.extend_from_slice(&build_constant_block(v));
+        }
+
+        let mut src = blocks.clone();
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(src.as_mut_ptr(), src.len(), src.capacity());
+        let handle = &bytes as *const _ as i64;
+
+        let batch = 3usize;
+        let k = 512usize;
+        let x_data = vec![1.0f32; k]
+            .into_iter()
+            .chain(vec![0.5f32; k])
+            .chain(vec![-0.25f32; k])
+            .collect::<Vec<_>>();
+        let out_shape = [batch, 256usize];
+
+        unsafe {
+            let qt = rayzor_qtensor_from_bytes_q4_k_m(handle, 256, 512);
+            assert!(qt != 0);
+            let out = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+            assert!(out != 0);
+
+            let mut q8 = Vec::new();
+            prepare_x_q8k_batch_into(x_data.as_ptr(), batch, k, k, &mut q8);
+            qmatmul_chunk_impl_sdot_q4km_batch(qt, out, 0, 256, batch, &q8);
+
+            #[repr(C)]
+            struct TensorHead {
+                data: *mut u8,
+                _shape: *mut usize,
+                _strides: *mut usize,
+                _ndim: usize,
+                _numel: usize,
+                _dtype: u8,
+            }
+            let head = &*(out as *const TensorHead);
+            let y = std::slice::from_raw_parts(head.data as *const f32, batch * 256);
+
+            let row_scales = [1.0f32, 0.5, -0.25];
+            for b in 0..batch {
+                for n in 0..256 {
+                    let expected = row_scales[b] * (n as f32 + 1.0) * k as f32;
+                    let actual = y[b * 256 + n];
+                    let diff = (actual - expected).abs();
+                    let tol = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        diff <= tol,
+                        "y[{b},{n}]={actual}, expected={expected}, diff={diff}, tol={tol}",
+                    );
+                }
+            }
+
+            rayzor_qtensor_free(qt);
+            crate::tensor::rayzor_tensor_free(out);
         }
     }
 

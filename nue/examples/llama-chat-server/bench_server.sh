@@ -18,6 +18,7 @@ START_INTERPRETED="${START_INTERPRETED:-false}"
 TIER_PROMOTION="${TIER_PROMOTION:-false}"
 VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
+PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
 PRESET="${PRESET:-application}"
 PORT_BASE="${PORT_BASE:-19890}"
 NO_CACHE="${NO_CACHE:-true}"
@@ -203,11 +204,14 @@ run_one() {
   cmd+=("--tier-promotion" "$TIER_PROMOTION")
   cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
 
+  local env_cmd=("env" "RAYZOR_SERVER_MODEL=$MODEL_PATH")
   if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
-    RAYZOR_PROFILE_DECODE=1 RAYZOR_SERVER_MODEL="$MODEL_PATH" "${cmd[@]}" > "$log" 2>&1 &
-  else
-    RAYZOR_SERVER_MODEL="$MODEL_PATH" "${cmd[@]}" > "$log" 2>&1 &
+    env_cmd+=("RAYZOR_PROFILE_DECODE=1")
   fi
+  if [[ "$PREFILL_MORSELS" == "true" || "$PREFILL_MORSELS" == "1" || "$PREFILL_MORSELS" == "yes" ]]; then
+    env_cmd+=("RAYZOR_PREFILL_MORSELS=1")
+  fi
+  "${env_cmd[@]}" "${cmd[@]}" > "$log" 2>&1 &
   CURRENT_PID=$!
 
   if ! wait_for_server "$log" "$CURRENT_PID"; then
@@ -310,6 +314,7 @@ if [[ ${#VARIANT_LIST[@]} -gt 1 ]]; then
 fi
 echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
+echo "prefill: morsels=$PREFILL_MORSELS"
 if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
   echo "decode:  tail-latency profile enabled"
 fi
