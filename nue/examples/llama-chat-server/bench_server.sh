@@ -18,10 +18,12 @@ START_INTERPRETED="${START_INTERPRETED:-false}"
 TIER_PROMOTION="${TIER_PROMOTION:-false}"
 VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
+LOAD_PROFILE="${LOAD_PROFILE:-false}"
 COLD_PROFILE="${COLD_PROFILE:-true}"
 REQUEST_PROFILE="${REQUEST_PROFILE:-true}"
 PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
 STREAM="${STREAM:-${RAYZOR_SERVER_STREAM:-false}}"
+REQUANT_LM_HEAD="${REQUANT_LM_HEAD:-${RAYZOR_REQUANT_LM_HEAD:-}}"
 PRESET="${PRESET:-application}"
 PORT_BASE="${PORT_BASE:-19890}"
 NO_CACHE="${NO_CACHE:-true}"
@@ -158,13 +160,15 @@ PY
 profile_label() {
   local log="$1"
   if [[ "$DECODE_PROFILE" != "true" && "$DECODE_PROFILE" != "1" && "$DECODE_PROFILE" != "yes" \
+     && "$LOAD_PROFILE" != "true" && "$LOAD_PROFILE" != "1" && "$LOAD_PROFILE" != "yes" \
      && "$COLD_PROFILE" != "true" && "$COLD_PROFILE" != "1" && "$COLD_PROFILE" != "yes" ]]; then
     return 0
   fi
-  /usr/bin/python3 - "$log" "$DECODE_PROFILE" "$COLD_PROFILE" <<'PY'
+  /usr/bin/python3 - "$log" "$DECODE_PROFILE" "$COLD_PROFILE" "$LOAD_PROFILE" <<'PY'
 import re, statistics, sys
 decode_on = sys.argv[2].lower() in ("1", "true", "yes")
 cold_on = sys.argv[3].lower() in ("1", "true", "yes")
+load_on = sys.argv[4].lower() in ("1", "true", "yes")
 profiles = []
 load = None
 ready_s = None
@@ -187,12 +191,7 @@ for line in open(sys.argv[1], errors="replace"):
     if "[profile-load]" in line:
         vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
         try:
-            load = (
-                float(vals["total_s"]),
-                float(vals["tensors_s"]),
-                float(vals["build_s"]),
-                float(vals["tokenizer_s"]),
-            )
+            load = vals
         except KeyError:
             pass
     if not decode_on or "[profile-decode]" not in line:
@@ -220,9 +219,9 @@ if decode_on and profiles:
     tokenize = [p[5] * 1000.0 for p in profiles if p[5] == p[5]]
     prompt_tokens = [p[6] for p in profiles if p[6] > 0]
     if load is not None:
-        extras.append(f"load={load[0]:.2f}s")
-        extras.append(f"tensors={load[1]:.2f}s")
-        extras.append(f"build={load[2]:.2f}s")
+        extras.append(f"load={float(load['total_s']):.2f}s")
+        extras.append(f"tensors={float(load['tensors_s']):.2f}s")
+        extras.append(f"build={float(load['build_s']):.2f}s")
     if prefill:
         extras.append(f"prefill_med={statistics.median(prefill):.2f}ms")
     if tokenize:
@@ -234,7 +233,23 @@ elif decode_on:
     if load is None:
         extras.append("profile=missing")
     else:
-        extras.append(f"load={load[0]:.2f}s tensors={load[1]:.2f}s build={load[2]:.2f}s tokbuild={load[3]:.2f}s")
+        extras.append(
+            f"load={float(load['total_s']):.2f}s "
+            f"tensors={float(load['tensors_s']):.2f}s "
+            f"build={float(load['build_s']):.2f}s "
+            f"tokbuild={float(load['tokenizer_s']):.2f}s"
+        )
+
+if load_on and load is not None and not decode_on:
+    extras.append(
+        f"load={float(load['total_s']):.2f}s "
+        f"file={float(load['file_s']):.2f}s "
+        f"reader={float(load['reader_s']):.2f}s "
+        f"meta={float(load['metadata_s']):.2f}s "
+        f"tensors={float(load['tensors_s']):.2f}s "
+        f"build={float(load['build_s']):.2f}s "
+        f"tokbuild={float(load['tokenizer_s']):.2f}s"
+    )
 
 if cold_on:
     client.sort(key=lambda row: row[0])
@@ -248,6 +263,7 @@ if cold_on:
         extras.append(f"first_byte={first_byte:.2f}s")
         if ready_s is not None:
             extras.append(f"cold_first={ready_s + first_req:.2f}s")
+            extras.append(f"cold_ttft={ready_s + first_byte:.2f}s")
         extras.append(f"client_med={statistics.median(rtts):.2f}s")
 
 if extras:
@@ -366,8 +382,14 @@ run_one() {
   if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
     env_cmd+=("RAYZOR_PROFILE_DECODE=1")
   fi
+  if [[ "$LOAD_PROFILE" == "true" || "$LOAD_PROFILE" == "1" || "$LOAD_PROFILE" == "yes" ]]; then
+    env_cmd+=("RAYZOR_PROFILE_LOAD=1")
+  fi
   if [[ "$PREFILL_MORSELS" == "true" || "$PREFILL_MORSELS" == "1" || "$PREFILL_MORSELS" == "yes" ]]; then
     env_cmd+=("RAYZOR_PREFILL_MORSELS=1")
+  fi
+  if [[ -n "$REQUANT_LM_HEAD" ]]; then
+    env_cmd+=("RAYZOR_REQUANT_LM_HEAD=$REQUANT_LM_HEAD")
   fi
   if [[ "$STREAM" == "true" || "$STREAM" == "1" || "$STREAM" == "yes" ]]; then
     env_cmd+=("RAYZOR_SERVER_STREAM=1")
@@ -538,12 +560,18 @@ echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
 echo "prefill: morsels=$PREFILL_MORSELS"
 echo "stream:  $STREAM"
+if [[ -n "$REQUANT_LM_HEAD" ]]; then
+  echo "lm_head: requant=$REQUANT_LM_HEAD"
+fi
 echo "request: per-request profile=$REQUEST_PROFILE"
 if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
   echo "cold:   launch/listen + client RTT enabled"
 fi
 if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
   echo "decode:  tail-latency profile enabled"
+fi
+if [[ "$LOAD_PROFILE" == "true" || "$LOAD_PROFILE" == "1" || "$LOAD_PROFILE" == "yes" ]]; then
+  echo "load:   startup profile enabled"
 fi
 if (( COOLDOWN_MS > 0 )); then
   echo "cooldown: $COOLDOWN_MS ms between subprocesses"
