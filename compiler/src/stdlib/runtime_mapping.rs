@@ -2213,10 +2213,10 @@ impl StdlibMapping {
                 types: &[PtrU8]),
             // socket.read() -> String
             map_method!(instance "sys_net_Socket", "read" => "sys_net_Socket_read", params: 0, mir_wrapper,
-                types: &[PtrU8] => PtrU8),
+                types: &[PtrU8] => PtrString),
             // socket.write(content: String)
             map_method!(instance "sys_net_Socket", "write" => "sys_net_Socket_write", params: 1, mir_wrapper,
-                types: &[PtrU8, PtrU8]),
+                types: &[PtrU8, PtrString]),
             // socket.shutdown(read: Bool, write: Bool)
             map_method!(instance "sys_net_Socket", "shutdown" => "sys_net_Socket_shutdown", params: 2, mir_wrapper,
                 types: &[PtrU8, I32, I32]),
@@ -2251,11 +2251,11 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(instance "SocketInput", "readByte" => "sys_net_SocketInput_readByte", params: 0, mir_wrapper,
+            map_method!(instance "sys_net_SocketInput", "readByte" => "sys_net_SocketInput_readByte", params: 0, mir_wrapper,
                 types: &[PtrU8] => I32),
-            map_method!(instance "SocketInput", "readBytes" => "sys_net_SocketInput_readBytes", params: 3, mir_wrapper,
+            map_method!(instance "sys_net_SocketInput", "readBytes" => "sys_net_SocketInput_readBytes", params: 3, mir_wrapper,
                 types: &[PtrU8, PtrVoid, I32, I32] => I32),
-            map_method!(instance "SocketInput", "close" => "sys_net_SocketInput_close", params: 0, mir_wrapper,
+            map_method!(instance "sys_net_SocketInput", "close" => "sys_net_SocketInput_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
@@ -2270,15 +2270,15 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(instance "SocketOutput", "writeByte" => "sys_net_SocketOutput_writeByte", params: 1, mir_wrapper,
+            map_method!(instance "sys_net_SocketOutput", "writeByte" => "sys_net_SocketOutput_writeByte", params: 1, mir_wrapper,
                 types: &[PtrU8, I32]),
-            map_method!(instance "SocketOutput", "writeBytes" => "sys_net_SocketOutput_writeBytes", params: 3, mir_wrapper,
+            map_method!(instance "sys_net_SocketOutput", "writeBytes" => "sys_net_SocketOutput_writeBytes", params: 3, mir_wrapper,
                 types: &[PtrU8, PtrVoid, I32, I32] => I32),
-            map_method!(instance "SocketOutput", "writeString" => "sys_net_SocketOutput_writeString", params: 1, mir_wrapper,
-                types: &[PtrU8, PtrU8]),
-            map_method!(instance "SocketOutput", "flush" => "sys_net_SocketOutput_flush", params: 0, mir_wrapper,
+            map_method!(instance "sys_net_SocketOutput", "writeString" => "sys_net_SocketOutput_writeString", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrString]),
+            map_method!(instance "sys_net_SocketOutput", "flush" => "sys_net_SocketOutput_flush", params: 0, mir_wrapper,
                 types: &[PtrU8]),
-            map_method!(instance "SocketOutput", "close" => "sys_net_SocketOutput_close", params: 0, mir_wrapper,
+            map_method!(instance "sys_net_SocketOutput", "close" => "sys_net_SocketOutput_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
