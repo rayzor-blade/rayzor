@@ -52,6 +52,7 @@ pub fn build_socket_type(builder: &mut MirBuilder) {
 
 fn declare_socket_externs(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let ptr_string = builder.ptr_type(IrType::String);
     let i32_ty = builder.i32_type();
     let void_ty = builder.void_type();
     let f64_ty = IrType::F64;
@@ -118,7 +119,7 @@ fn declare_socket_externs(builder: &mut MirBuilder) {
     let id = builder
         .begin_function("rayzor_socket_read")
         .param("handle", ptr_u8.clone())
-        .returns(ptr_u8.clone())
+        .returns(ptr_string.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(id);
@@ -127,7 +128,7 @@ fn declare_socket_externs(builder: &mut MirBuilder) {
     let id = builder
         .begin_function("rayzor_socket_write")
         .param("handle", ptr_u8.clone())
-        .param("data", ptr_u8.clone())
+        .param("data", ptr_string.clone())
         .returns(void_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -427,11 +428,12 @@ fn build_socket_close(builder: &mut MirBuilder) {
 /// Socket_read(self: *u8) -> *u8 (HaxeString*)
 fn build_socket_read(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let ptr_string = builder.ptr_type(IrType::String);
 
     let func_id = builder
         .begin_function("sys_net_Socket_read")
         .param("self", ptr_u8.clone())
-        .returns(ptr_u8)
+        .returns(ptr_string)
         .calling_convention(CallingConvention::C)
         .build();
     builder.set_current_function(func_id);
@@ -447,12 +449,13 @@ fn build_socket_read(builder: &mut MirBuilder) {
 /// Socket_write(self: *u8, content: *u8)
 fn build_socket_write(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let ptr_string = builder.ptr_type(IrType::String);
     let void_ty = builder.void_type();
 
     let func_id = builder
         .begin_function("sys_net_Socket_write")
         .param("self", ptr_u8.clone())
-        .param("content", ptr_u8)
+        .param("content", ptr_string)
         .returns(void_ty)
         .calling_convention(CallingConvention::C)
         .build();
@@ -687,6 +690,7 @@ fn build_host_localhost(builder: &mut MirBuilder) {
 
 fn declare_socket_io_externs(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let ptr_string = builder.ptr_type(IrType::String);
     let i32_ty = builder.i32_type();
     let void_ty = builder.void_type();
 
@@ -748,7 +752,7 @@ fn declare_socket_io_externs(builder: &mut MirBuilder) {
     let id = builder
         .begin_function("rayzor_socket_write_string")
         .param("handle", ptr_u8.clone())
-        .param("str", ptr_u8.clone())
+        .param("str", ptr_string.clone())
         .returns(void_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -931,11 +935,12 @@ fn build_socket_output_write_bytes(builder: &mut MirBuilder) {
 
 fn build_socket_output_write_string(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let ptr_string = builder.ptr_type(IrType::String);
     let void_ty = builder.void_type();
     let func_id = builder
         .begin_function("sys_net_SocketOutput_writeString")
         .param("self", ptr_u8.clone())
-        .param("s", ptr_u8)
+        .param("s", ptr_string)
         .returns(void_ty)
         .calling_convention(CallingConvention::C)
         .build();
