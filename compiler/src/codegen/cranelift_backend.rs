@@ -2204,10 +2204,37 @@ impl CraneliftBackend {
             return Err(format!("Verifier errors in {}: {}", function.name, errors));
         }
 
-        // Define the function in the module
-        self.module
-            .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function '{}': {}", function.name, e))?;
+        // Define the function in the module. Cranelift can still panic while
+        // lowering/register-allocating target code; catch that so users see
+        // the Rayzor/MIR function that produced invalid CLIF instead of only
+        // a backend-internal assertion.
+        let define_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.module.define_function(func_id, &mut self.ctx)
+        }));
+        match define_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "Failed to define function '{}': {}",
+                    function.name, e
+                ));
+            }
+            Err(payload) => {
+                let panic_msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("<non-string panic>");
+                return Err(format!(
+                    "Cranelift panicked while defining function '{}' (qualified={:?}, mir={:?}, cl={:?}): {}",
+                    function.name,
+                    function.qualified_name,
+                    mir_func_id,
+                    func_id,
+                    panic_msg
+                ));
+            }
+        }
 
         // Post-elaboration CLIF dump — what actually runs after egraph
         // elaboration / GVN / DCE / regalloc. Pair with the pre-
@@ -2302,11 +2329,43 @@ impl CraneliftBackend {
                 match (actual_type, expected_cl_type) {
                     // i64 -> i32 truncation
                     (types::I64, types::I32) => builder.ins().ireduce(types::I32, cl_value),
+                    (types::I64, types::I8) => builder.ins().ireduce(types::I8, cl_value),
+                    (types::I32, types::I8) => builder.ins().ireduce(types::I8, cl_value),
                     // i32 -> i64 extension
                     (types::I32, types::I64) => builder.ins().sextend(types::I64, cl_value),
                     // i8 -> i32/i64
                     (types::I8, types::I32) => builder.ins().sextend(types::I32, cl_value),
                     (types::I8, types::I64) => builder.ins().sextend(types::I64, cl_value),
+                    // integer <-> float coercions on phi edges. Without these,
+                    // Cranelift can accept mismatched block-argument types in
+                    // release builds and later panic in AArch64 regalloc when
+                    // moving between GPR and FPR classes.
+                    (types::I8, types::F32) => {
+                        let wide = builder.ins().sextend(types::I32, cl_value);
+                        builder.ins().fcvt_from_sint(types::F32, wide)
+                    }
+                    (types::I8, types::F64) => {
+                        let wide = builder.ins().sextend(types::I32, cl_value);
+                        builder.ins().fcvt_from_sint(types::F64, wide)
+                    }
+                    (types::I32, types::F32) => builder.ins().fcvt_from_sint(types::F32, cl_value),
+                    (types::I32, types::F64) => builder.ins().fcvt_from_sint(types::F64, cl_value),
+                    (types::I64, types::F32) => builder.ins().fcvt_from_sint(types::F32, cl_value),
+                    (types::I64, types::F64) => builder.ins().fcvt_from_sint(types::F64, cl_value),
+                    (types::F32, types::I8) => {
+                        let int = builder.ins().fcvt_to_sint(types::I32, cl_value);
+                        builder.ins().ireduce(types::I8, int)
+                    }
+                    (types::F64, types::I8) => {
+                        let int = builder.ins().fcvt_to_sint(types::I32, cl_value);
+                        builder.ins().ireduce(types::I8, int)
+                    }
+                    (types::F32, types::I32) => builder.ins().fcvt_to_sint(types::I32, cl_value),
+                    (types::F32, types::I64) => builder.ins().fcvt_to_sint(types::I64, cl_value),
+                    (types::F64, types::I32) => builder.ins().fcvt_to_sint(types::I32, cl_value),
+                    (types::F64, types::I64) => builder.ins().fcvt_to_sint(types::I64, cl_value),
+                    (types::F32, types::F64) => builder.ins().fpromote(types::F64, cl_value),
+                    (types::F64, types::F32) => builder.ins().fdemote(types::F32, cl_value),
                     // Same type - no conversion needed
                     (from, to) if from == to => cl_value,
                     // Fallback: log warning and use as-is (may cause verifier error)
