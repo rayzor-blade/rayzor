@@ -72,6 +72,11 @@ class GenerationLoop {
         var _pSample = 0.0;
         var _pDecodeStr = 0.0;
         var _pFreeLogits = 0.0;
+        var _pTokenize = 0.0;
+        var _pPrefillForward = 0.0;
+        var _pPrefillLastRow = 0.0;
+        var _pPrefillSample = 0.0;
+        var _pPromptTokens = 0;
         var _pCount = 0;
         var _pHistBuckets = 1024;
         var _pHistScale = 4.0;
@@ -87,14 +92,23 @@ class GenerationLoop {
 
         model.resetCache();
 
+        var _tPrefill = _profileOn ? Sys.time() : 0.0;
         var ids = tokenizer.encode(prompt);
+        if (_profileOn) _pTokenize = Sys.time() - _tPrefill;
         if (ids.length == 0) return prompt;
+        _pPromptTokens = ids.length;
 
         // Prefill: feed the entire prompt; take the last row of logits
         // as the prediction for "what comes after the prompt".
+        _tPrefill = _profileOn ? Sys.time() : 0.0;
         var logits = model.forwardIds(ids);
+        if (_profileOn) _pPrefillForward = Sys.time() - _tPrefill;
+        _tPrefill = _profileOn ? Sys.time() : 0.0;
         var lr0 = lastRow(logits);
+        if (_profileOn) _pPrefillLastRow = Sys.time() - _tPrefill;
+        _tPrefill = _profileOn ? Sys.time() : 0.0;
         var nextId = sampler.sample(lr0);
+        if (_profileOn) _pPrefillSample = Sys.time() - _tPrefill;
         if (lr0 != logits) lr0.free();
 
         var generated:Array<Int> = [];
@@ -202,6 +216,12 @@ class GenerationLoop {
                 + " sample_s=" + _pSample
                 + " decodeStr_s=" + _pDecodeStr
                 + " free_s=" + _pFreeLogits
+                + " prompt_tokens=" + _pPromptTokens
+                + " tokenize_s=" + _pTokenize
+                + " prefill_s=" + (_pPrefillForward + _pPrefillLastRow + _pPrefillSample)
+                + " prefill_fwd_s=" + _pPrefillForward
+                + " prefill_lastRow_s=" + _pPrefillLastRow
+                + " prefill_sample_s=" + _pPrefillSample
                 + " decode_start_s=" + _decodeStart
                 + " decode_end_s=" + _decodeEnd
                 + " step_p50_ms=" + _p50
