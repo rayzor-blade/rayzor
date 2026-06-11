@@ -33,6 +33,10 @@ pub struct BundleConfig {
     pub enable_cache: bool,
     /// Custom BLADE cache directory
     pub cache_dir: Option<PathBuf>,
+    /// Extra source directories (class paths)
+    pub extra_source_dirs: Vec<PathBuf>,
+    /// Compiler plugins to register
+    pub plugins: Vec<Box<dyn crate::compiler_plugin::CompilerPlugin>>,
 }
 
 /// Configuration for symbol extraction.
@@ -50,7 +54,7 @@ pub struct PrebladeConfig {
 /// Create a .rzb bundle from source files.
 ///
 /// Returns the number of modules in the bundle.
-pub fn create_bundle(config: &BundleConfig) -> Result<usize, String> {
+pub fn create_bundle(mut config: BundleConfig) -> Result<usize, String> {
     use std::time::Instant;
 
     println!("Creating Rayzor Bundle: {}", config.output.display());
@@ -61,8 +65,18 @@ pub fn create_bundle(config: &BundleConfig) -> Result<usize, String> {
     let mut comp_config = CompilationConfig::default();
     comp_config.enable_cache = config.enable_cache;
     comp_config.cache_dir = config.cache_dir.clone();
+    comp_config.pipeline_config = comp_config.pipeline_config.skip_analysis();
+    comp_config.emit_safety_warnings = false;
 
     let mut unit = CompilationUnit::new(comp_config);
+
+    for dir in &config.extra_source_dirs {
+        unit.add_source_path(dir.clone());
+    }
+
+    for plugin in config.plugins.drain(..) {
+        unit.register_compiler_plugin(plugin);
+    }
 
     // Load stdlib
     if config.verbose {

@@ -6986,7 +6986,7 @@ impl CompilationUnit {
     /// called before `lower_to_tast()`.
     pub fn register_compiler_plugin(
         &mut self,
-        plugin: Box<dyn crate::compiler_plugin::CompilerPlugin>,
+        plugin: Box<dyn crate::compiler_plugin::CompilerPlugin + 'static>,
     ) {
         self.compiler_plugin_registry.register(plugin);
     }

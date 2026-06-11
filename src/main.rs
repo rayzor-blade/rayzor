@@ -39,6 +39,7 @@ mod wasm_cmd;
 static GLOBAL: rayzor_runtime::TrackingAllocator = rayzor_runtime::TrackingAllocator;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use compiler::compiler_plugin::CompilerPlugin;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -254,12 +255,11 @@ enum Commands {
     /// Create a .rzb bundle from source files
     Bundle {
         /// Source files to compile
-        #[arg(required = true)]
         files: Vec<PathBuf>,
 
         /// Output .rzb path
         #[arg(short, long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
 
         /// Optimization level (0-3)
         #[arg(short = 'O', long, default_value = "2")]
@@ -289,7 +289,7 @@ enum Commands {
     /// Compile Haxe to a native executable via LLVM (AOT)
     Aot {
         /// Source files to compile
-        #[arg(required = true)]
+        #[arg(num_args = 0..)]
         files: Vec<PathBuf>,
 
         /// Output path
@@ -667,6 +667,35 @@ impl Preset {
     }
 }
 
+fn run_artifact_build_on_large_stack<F>(name: &'static str, f: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let stack_size = std::env::var("RAYZOR_ARTIFACT_STACK_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(128)
+        .saturating_mul(1024 * 1024);
+
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(stack_size)
+        .spawn(f)
+        .map_err(|e| format!("failed to start {name} worker: {e}"))?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            Err(format!("{name} worker panicked: {message}"))
+        }
+    }
+}
+
 fn main() {
     #[cfg(feature = "profile")]
     unsafe {
@@ -777,19 +806,42 @@ fn main() {
             no_cache,
             cache_dir,
             verbose,
-        } => cmd_bundle(
-            files,
-            output,
-            opt_level,
-            strip,
-            no_compress,
-            !no_cache,
-            cache_dir,
-            verbose,
-        ),
+        } => run_artifact_build_on_large_stack("rayzor-bundle", move || {
+            let out_path = output.unwrap_or_else(|| {
+                let stem = if !files.is_empty() {
+                    files[0]
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                } else if let Ok((entry, manifest)) = resolve_from_manifest() {
+                    if let Some(p) = manifest.and_then(|m| m.output_path()) {
+                        return p;
+                    }
+                    entry
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    "bundle".to_string()
+                };
+                std::path::PathBuf::from(format!("{}.rzb", stem))
+            });
+            cmd_bundle(
+                files,
+                out_path,
+                opt_level,
+                strip,
+                no_compress,
+                !no_cache,
+                cache_dir,
+                verbose,
+            )
+        }),
         Commands::Aot {
-            files,
-            output,
+            mut files,
+            mut output,
             target,
             emit,
             opt_level,
@@ -801,21 +853,43 @@ fn main() {
             no_cache,
             cache_dir,
             verbose,
-        } => cmd_aot(
-            files,
-            output,
-            target,
-            emit,
-            opt_level,
-            strip,
-            strip_symbols,
-            runtime_dir,
-            linker,
-            sysroot,
-            !no_cache,
-            cache_dir,
-            verbose,
-        ),
+        } => run_artifact_build_on_large_stack("rayzor-aot", move || {
+            if files.is_empty() {
+                if let Ok((entry, manifest)) = resolve_from_manifest() {
+                    files.push(entry);
+                    if output.is_none() {
+                        if let Some(project) = manifest {
+                            output = project.output_path().map(|p| {
+                                p.with_extension(if emit == "gcc" || emit == "exe" {
+                                    ""
+                                } else {
+                                    emit.as_str()
+                                })
+                            });
+                        }
+                    }
+                }
+            }
+            if files.is_empty() {
+                Err("No source files provided and no rayzor.toml found".to_string())
+            } else {
+                cmd_aot(
+                    files,
+                    output,
+                    target,
+                    emit,
+                    opt_level,
+                    strip,
+                    strip_symbols,
+                    runtime_dir,
+                    linker,
+                    sysroot,
+                    !no_cache,
+                    cache_dir,
+                    verbose,
+                )
+            }
+        }),
         Commands::Init {
             name,
             workspace,
@@ -883,7 +957,14 @@ fn main() {
     }
 }
 
-fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
+fn run_bundle(
+    file: &Path,
+    verbose: bool,
+    stats: bool,
+    preset: Preset,
+    manifest_project: Option<compiler::workspace::Project>,
+    cli_rpkg_files: Vec<PathBuf>,
+) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
     use compiler::ir::load_bundle;
 
@@ -905,9 +986,53 @@ fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result
         );
     }
 
+    let mut effective_rpkg_files = if let Some(project) = manifest_project.as_ref() {
+        compiler::workspace::resolve_dependencies(&project.manifest, &project.root)?
+    } else {
+        Vec::new()
+    };
+    effective_rpkg_files.extend(cli_rpkg_files.iter().cloned());
+
+    let mut loaded_rpkgs = Vec::new();
+    for rpkg_path in &effective_rpkg_files {
+        if let Ok(rpkg) = compiler::rpkg::install::RpkgPlugin::load(rpkg_path) {
+            loaded_rpkgs.push(rpkg);
+        }
+    }
+
+    let mut loaded_native_libs = Vec::new();
+    let mut manifest_native_symbols = Vec::new();
+    if let Some(project) = manifest_project.as_ref() {
+        for lib_path in project.resolved_native_libs() {
+            if let Ok((lib, _plugin, runtime_symbols)) =
+                crate::native_libs::load_manifest_native_lib(&lib_path)
+            {
+                loaded_native_libs.push(lib);
+                manifest_native_symbols.extend(runtime_symbols);
+            }
+        }
+    }
+
     // Get runtime symbols
     let plugin = rayzor_runtime::get_plugin();
-    let symbols = plugin.runtime_symbols();
+    let mut symbols = plugin.runtime_symbols();
+
+    let rpkg_owned_symbols: Vec<(String, *const u8)> = loaded_rpkgs
+        .iter()
+        .flat_map(|r| r.runtime_symbols.clone())
+        .collect();
+    for (name, ptr) in &rpkg_owned_symbols {
+        let name: &'static str = Box::leak(name.clone().into_boxed_str());
+        symbols.push((name, *ptr));
+    }
+    for (name, ptr) in &manifest_native_symbols {
+        let name: &'static str = Box::leak(name.clone().into_boxed_str());
+        symbols.push((name, *ptr));
+    }
+
+    let _loaded_native_libs = loaded_native_libs;
+    let _loaded_rpkgs = loaded_rpkgs;
+
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
     let mut config = TieredConfig::from_preset(preset.to_tier_preset());
@@ -966,15 +1091,21 @@ fn run_file(
         Some(f) => {
             // Even with explicit file, try to load manifest from its parent directory
             // for class-paths, dependencies, and build settings
-            let file_dir = f.parent().and_then(|p| {
+            let project_from_file = f.parent().and_then(|p| {
                 let abs = if p.is_absolute() {
                     p.to_path_buf()
                 } else {
                     std::env::current_dir().unwrap_or_default().join(p)
                 };
                 compiler::workspace::find_project_root(&abs)
+                    .and_then(|root| compiler::workspace::load_project(&root).ok())
             });
-            let project = file_dir.and_then(|root| compiler::workspace::load_project(&root).ok());
+            let project = project_from_file.or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| compiler::workspace::find_project_root(&cwd))
+                    .and_then(|root| compiler::workspace::load_project(&root).ok())
+            });
             (f, project)
         }
         None => resolve_from_manifest()?,
@@ -995,7 +1126,7 @@ fn run_file(
             profile,
             &format!("{:?}", preset),
         );
-        return run_bundle(&file, verbose, stats, preset);
+        return run_bundle(&file, verbose, stats, preset, manifest_project, rpkg_files);
     }
 
     // Handle .hxml build files (no TUI for these)
@@ -2625,7 +2756,7 @@ fn cache_clear(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_bundle(
-    files: Vec<PathBuf>,
+    mut files: Vec<PathBuf>,
     output: PathBuf,
     opt_level: u8,
     strip: bool,
@@ -2636,6 +2767,57 @@ fn cmd_bundle(
 ) -> Result<(), String> {
     use compiler::ir::optimization::OptimizationLevel;
     use compiler::tools::preblade::{create_bundle, BundleConfig};
+
+    // Resolve project config from the first file or current dir
+    let mut manifest_project = None;
+    if files.is_empty() {
+        if let Ok((entry, manifest)) = resolve_from_manifest() {
+            files.push(entry);
+            manifest_project = manifest;
+        }
+    } else {
+        let f = &files[0];
+        let file_dir = f.parent().and_then(|p| {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            compiler::workspace::find_project_root(&abs)
+        });
+        manifest_project = file_dir.and_then(|root| compiler::workspace::load_project(&root).ok());
+    }
+
+    if files.is_empty() {
+        return Err("No source files provided and no rayzor.toml found".to_string());
+    }
+
+    let extra_source_dirs: Vec<PathBuf> = manifest_project
+        .as_ref()
+        .map(|p| p.resolved_class_paths())
+        .unwrap_or_default();
+
+    let mut plugins: Vec<Box<dyn CompilerPlugin + 'static>> = Vec::new();
+    let mut _loaded_native_libs = Vec::new();
+    if let Some(project) = manifest_project.as_ref() {
+        let rpkgs = compiler::workspace::resolve_dependencies(&project.manifest, &project.root)
+            .unwrap_or_default();
+        for rpkg_path in rpkgs {
+            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path) {
+                if let Some(plugin) = rpkg.compiler_plugin.take() {
+                    plugins.push(Box::new(plugin));
+                }
+            }
+        }
+        for lib_path in project.resolved_native_libs() {
+            if let Ok((lib, plugin, _symbols)) =
+                crate::native_libs::load_manifest_native_lib(&lib_path)
+            {
+                _loaded_native_libs.push(lib);
+                plugins.push(Box::new(plugin));
+            }
+        }
+    }
 
     let opt = match opt_level {
         0 => Some(OptimizationLevel::O0),
@@ -2658,9 +2840,11 @@ fn cmd_bundle(
         compress: !no_compress,
         enable_cache: cache,
         cache_dir,
+        extra_source_dirs,
+        plugins,
     };
 
-    match create_bundle(&config) {
+    match create_bundle(config) {
         Ok(module_count) => {
             println!();
             println!("Bundle created: {}", output.display());
@@ -2673,8 +2857,8 @@ fn cmd_bundle(
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_aot(
-    files: Vec<PathBuf>,
-    output: Option<PathBuf>,
+    mut files: Vec<PathBuf>,
+    mut output: Option<PathBuf>,
     target: Option<String>,
     emit: String,
     opt_level: u8,
@@ -2687,6 +2871,71 @@ fn cmd_aot(
     _cache_dir: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), String> {
+    // Resolve project config from the first file or current dir
+    let mut manifest_project = None;
+    if files.is_empty() {
+        if let Ok((entry, manifest)) = resolve_from_manifest() {
+            files.push(entry);
+            manifest_project = manifest;
+            if output.is_none() {
+                if let Some(p) = manifest_project.as_ref().and_then(|m| m.output_path()) {
+                    output = Some(p.with_extension(if emit == "gcc" || emit == "exe" {
+                        ""
+                    } else {
+                        emit.as_str()
+                    }));
+                }
+            }
+        }
+    } else {
+        let f = &files[0];
+        let file_dir = f.parent().and_then(|p| {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            compiler::workspace::find_project_root(&abs)
+        });
+        manifest_project = file_dir.and_then(|root| compiler::workspace::load_project(&root).ok());
+    }
+
+    if files.is_empty() {
+        return Err("No source files provided and no rayzor.toml found".to_string());
+    }
+
+    let extra_source_dirs: Vec<PathBuf> = manifest_project
+        .as_ref()
+        .map(|p| p.resolved_class_paths())
+        .unwrap_or_default();
+    let native_link_libs: Vec<PathBuf> = manifest_project
+        .as_ref()
+        .map(|p| p.resolved_native_libs())
+        .unwrap_or_default();
+
+    let mut plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>> = Vec::new();
+    // Native libs have to live as long as compilation
+    let mut _loaded_native_libs = Vec::new();
+    if let Some(project) = manifest_project.as_ref() {
+        let rpkgs = compiler::workspace::resolve_dependencies(&project.manifest, &project.root)
+            .unwrap_or_default();
+        for rpkg_path in rpkgs {
+            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path) {
+                if let Some(plugin) = rpkg.compiler_plugin.take() {
+                    plugins.push(Box::new(plugin));
+                }
+            }
+        }
+        for lib_path in &native_link_libs {
+            if let Ok((lib, plugin, _symbols)) =
+                crate::native_libs::load_manifest_native_lib(&lib_path)
+            {
+                _loaded_native_libs.push(lib);
+                plugins.push(Box::new(plugin));
+            }
+        }
+    }
+
     // C backend does not require LLVM
     if emit == "c" || emit == "gcc" {
         use compiler::codegen::aot_compiler::{AotCompiler, OutputFormat};
@@ -2724,14 +2973,19 @@ fn cmd_aot(
             } else {
                 OutputFormat::CSource
             },
+            target_triple: target,
+            strip_symbols,
             verbose,
-            runtime_dir: runtime_dir.clone(),
+            linker,
+            sysroot,
+            runtime_dir,
+            extra_source_dirs,
+            native_link_libs: native_link_libs.clone(),
             strip,
-            ..Default::default()
         };
 
         println!("Rayzor C Backend");
-        match compiler.compile_c(&source_files, &output_path) {
+        match compiler.compile_c_with_plugins(&source_files, &output_path, plugins) {
             Ok(result) => {
                 println!(
                     "  emit     {} ({} bytes)",
@@ -2813,9 +3067,11 @@ fn cmd_aot(
             sysroot,
             enable_cache: _cache,
             cache_dir: _cache_dir,
+            extra_source_dirs,
+            native_link_libs,
         };
 
-        run_aot(config)
+        run_aot(config, plugins)
     }
 }
 

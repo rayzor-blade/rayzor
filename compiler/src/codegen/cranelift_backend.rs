@@ -10,7 +10,7 @@
 /// - Compilation: 50-200ms per function
 /// - Runtime: 15-25x interpreter speed
 use cranelift::prelude::*;
-use cranelift_codegen::ir::{ArgumentPurpose, BlockArg, Function, StackSlot};
+use cranelift_codegen::ir::{ArgumentPurpose, BlockArg, Function, Signature, StackSlot};
 use cranelift_codegen::settings;
 use cranelift_frontend::Variable;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -1330,55 +1330,6 @@ impl CraneliftBackend {
         // Determine if this is an extern function (empty CFG)
         let is_extern = function.cfg.blocks.is_empty();
 
-        // CRITICAL: Check if this function was already declared (by name)
-        // Both extern functions AND stdlib wrapper functions are shared across modules,
-        // so we must not declare them twice!
-        // We use runtime_functions to track all such functions (not just libc ones)
-        if let Some(&existing_func_id) = self.runtime_functions.get(&function.name) {
-            self.function_map.insert(mir_func_id, existing_func_id);
-            self.funcid_display_name
-                .entry(existing_func_id)
-                .or_insert_with(|| {
-                    function
-                        .qualified_name
-                        .clone()
-                        .unwrap_or_else(|| function.name.clone())
-                });
-            let s = function.source_location;
-            self.funcid_source_loc
-                .entry(existing_func_id)
-                .or_insert((s.file_id, s.line, s.column));
-            return Ok(());
-        }
-
-        // CROSS-MODULE LINKING: Check if this function's qualified name matches a forward reference
-        // Forward references are created when compiling cross-module calls (e.g., StringIteratorUnicode
-        // calling StringTools.unsafeCodeAt before StringTools is fully compiled).
-        // Forward refs use qualified name as their function name (e.g., "StringTools.unsafeCodeAt")
-        if let Some(ref qualified_name) = function.qualified_name {
-            // Check if there's a forward reference with this qualified name
-            if let Some(&forward_ref_func_id) = self.runtime_functions.get(qualified_name) {
-                // Only link if this function has a body (non-extern)
-                // This allows the real implementation to use the forward ref's func_id
-                if !is_extern {
-                    debug!(
-                        ": Linking function '{}' to forward reference '{}' - MIR {:?} -> Cranelift {:?}",
-                        function.name, qualified_name, mir_func_id, forward_ref_func_id
-                    );
-                    self.function_map.insert(mir_func_id, forward_ref_func_id);
-                    self.funcid_display_name
-                        .insert(forward_ref_func_id, qualified_name.clone());
-                    let s = function.source_location;
-                    self.funcid_source_loc
-                        .insert(forward_ref_func_id, (s.file_id, s.line, s.column));
-                    // Also track by qualified name for future lookups
-                    self.qualified_name_to_func
-                        .insert(qualified_name.clone(), forward_ref_func_id);
-                    return Ok(());
-                }
-            }
-        }
-
         // Build Cranelift signature
         let mut sig = self.module.make_signature();
 
@@ -1524,19 +1475,103 @@ impl CraneliftBackend {
             }
         }
 
+        // CRITICAL: Check if this function was already declared (by name).
+        // Both extern functions and stdlib wrapper functions can be shared
+        // across modules, but bundled artifacts can also contain stale/bare
+        // same-name functions with different arity. Reusing those poisons the
+        // callee signature and Cranelift panics during call lowering, so reuse
+        // only when the declared ABI is identical.
+        let mut runtime_name_conflict = false;
+        if let Some(&existing_func_id) = self.runtime_functions.get(&function.name) {
+            let existing_decl = self
+                .module
+                .declarations()
+                .get_function_decl(existing_func_id);
+            if Self::signatures_match(&existing_decl.signature, &sig) {
+                self.function_map.insert(mir_func_id, existing_func_id);
+                self.funcid_display_name
+                    .entry(existing_func_id)
+                    .or_insert_with(|| {
+                        function
+                            .qualified_name
+                            .clone()
+                            .unwrap_or_else(|| function.name.clone())
+                    });
+                let s = function.source_location;
+                self.funcid_source_loc
+                    .entry(existing_func_id)
+                    .or_insert((s.file_id, s.line, s.column));
+                return Ok(());
+            }
+
+            runtime_name_conflict = true;
+            warn!(
+                "Cranelift: not reusing runtime symbol '{}' for {:?}; signature mismatch existing={} expected={}",
+                function.name,
+                mir_func_id,
+                Self::format_signature(&existing_decl.signature),
+                Self::format_signature(&sig)
+            );
+        }
+
+        // CROSS-MODULE LINKING: Check if this function's qualified name matches a forward reference
+        // Forward references are created when compiling cross-module calls (e.g., StringIteratorUnicode
+        // calling StringTools.unsafeCodeAt before StringTools is fully compiled).
+        // Forward refs use qualified name as their function name (e.g., "StringTools.unsafeCodeAt")
+        if let Some(ref qualified_name) = function.qualified_name {
+            // Check if there's a forward reference with this qualified name
+            if let Some(&forward_ref_func_id) = self.runtime_functions.get(qualified_name) {
+                // Only link if this function has a body (non-extern)
+                // This allows the real implementation to use the forward ref's func_id
+                if !is_extern {
+                    let forward_decl = self
+                        .module
+                        .declarations()
+                        .get_function_decl(forward_ref_func_id);
+                    if Self::signatures_match(&forward_decl.signature, &sig) {
+                        debug!(
+                            ": Linking function '{}' to forward reference '{}' - MIR {:?} -> Cranelift {:?}",
+                            function.name, qualified_name, mir_func_id, forward_ref_func_id
+                        );
+                        self.function_map.insert(mir_func_id, forward_ref_func_id);
+                        self.funcid_display_name
+                            .insert(forward_ref_func_id, qualified_name.clone());
+                        let s = function.source_location;
+                        self.funcid_source_loc
+                            .insert(forward_ref_func_id, (s.file_id, s.line, s.column));
+                        // Also track by qualified name for future lookups
+                        self.qualified_name_to_func
+                            .insert(qualified_name.clone(), forward_ref_func_id);
+                        return Ok(());
+                    }
+
+                    warn!(
+                        "Cranelift: not linking '{}' to forward reference '{}'; signature mismatch existing={} expected={}",
+                        function.name,
+                        qualified_name,
+                        Self::format_signature(&forward_decl.signature),
+                        Self::format_signature(&sig)
+                    );
+                }
+            }
+        }
+
         // Determine linkage and name based on whether this is an extern function
         let is_extern = function.cfg.blocks.is_empty();
+        let stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+        let is_stdlib_mir_wrapper =
+            !runtime_name_conflict && stdlib_mapping.is_mir_wrapper_function(&function.name);
         let (func_name, linkage) = if is_extern {
             // Extern functions use their actual name and Import linkage
-            (function.name.clone(), Linkage::Import)
+            if runtime_name_conflict {
+                (
+                    format!("{}__extern_{}", function.name, mir_func_id.0),
+                    Linkage::Import,
+                )
+            } else {
+                (function.name.clone(), Linkage::Import)
+            }
         } else {
-            // Check if this is a stdlib MIR wrapper function by looking it up in the runtime mapping
-            // Stdlib wrappers are functions registered in the runtime mapping system
-            let stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
-            let is_stdlib_mir_wrapper = stdlib_mapping
-                .find_by_runtime_name(&function.name)
-                .is_some();
-
             if is_stdlib_mir_wrapper {
                 // Stdlib MIR wrappers use their actual names with Export linkage
                 // so that forward references can resolve to them
@@ -1593,20 +1628,38 @@ impl CraneliftBackend {
         // DO NOT track all functions — unqualified names like "new", "get", "toString"
         // collide across classes, causing signature mismatches.
         if is_extern {
-            self.runtime_functions
-                .insert(function.name.clone(), func_id);
-        } else {
-            let stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
-            if stdlib_mapping
-                .find_by_runtime_name(&function.name)
-                .is_some()
-            {
+            if !runtime_name_conflict {
                 self.runtime_functions
                     .insert(function.name.clone(), func_id);
             }
+        } else if is_stdlib_mir_wrapper {
+            self.runtime_functions
+                .insert(function.name.clone(), func_id);
         }
 
         Ok(())
+    }
+
+    fn signatures_match(existing: &Signature, expected: &Signature) -> bool {
+        existing.call_conv == expected.call_conv
+            && existing.params == expected.params
+            && existing.returns == expected.returns
+    }
+
+    fn format_signature(sig: &Signature) -> String {
+        let params = sig
+            .params
+            .iter()
+            .map(|p| format!("{:?}/{:?}", p.value_type, p.purpose))
+            .collect::<Vec<_>>()
+            .join(",");
+        let returns = sig
+            .returns
+            .iter()
+            .map(|r| format!("{:?}/{:?}", r.value_type, r.purpose))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("({}) -> ({})", params, returns)
     }
 
     /// Declare a libc function (malloc, realloc, free)

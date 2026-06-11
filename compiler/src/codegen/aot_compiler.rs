@@ -9,8 +9,10 @@ use inkwell::context::Context;
 use inkwell::targets::RelocMode;
 
 use crate::compilation::{CompilationConfig, CompilationUnit};
+use crate::compiler_plugin::CompilerPlugin;
 use crate::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
 use crate::ir::tree_shake;
+use crate::ir::IrModule;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -59,6 +61,10 @@ pub struct AotCompiler {
     pub sysroot: Option<PathBuf>,
     /// Strip debug symbols from binary
     pub strip_symbols: bool,
+    /// Extra source directories (class paths) for import resolution
+    pub extra_source_dirs: Vec<PathBuf>,
+    /// Native libraries that provide symbols for compiler plugins
+    pub native_link_libs: Vec<PathBuf>,
 }
 
 impl Default for AotCompiler {
@@ -73,32 +79,31 @@ impl Default for AotCompiler {
             runtime_dir: None,
             sysroot: None,
             strip_symbols: false,
+            extra_source_dirs: Vec::new(),
+            native_link_libs: Vec::new(),
         }
     }
 }
 
 impl AotCompiler {
-    /// Compile Haxe source files to native output.
-    #[cfg(feature = "llvm-backend")]
-    pub fn compile(
+    fn prepare_modules(
         &self,
         source_files: &[String],
-        output_path: &Path,
-    ) -> Result<AotOutput, String> {
-        use crate::codegen::llvm_aot_backend;
-        use crate::codegen::llvm_jit_backend::LLVMJitBackend;
-        use std::time::Instant;
-
-        let t0 = Instant::now();
-
-        // --- Phase 1: Parse and compile to MIR ---
-        if self.verbose {
-            println!("  Parsing and lowering to MIR...");
-        }
-
+        plugins: Vec<Box<dyn CompilerPlugin + 'static>>,
+    ) -> Result<Vec<IrModule>, String> {
         let mut config = CompilationConfig::default();
         config.pipeline_config = config.pipeline_config.skip_analysis();
+        config.emit_safety_warnings = false;
         let mut unit = CompilationUnit::new(config);
+
+        for dir in &self.extra_source_dirs {
+            unit.add_source_path(dir.clone());
+        }
+
+        for plugin in plugins {
+            unit.register_compiler_plugin(plugin);
+        }
+
         unit.load_stdlib()
             .map_err(|e| format!("Failed to load stdlib: {}", e))?;
 
@@ -119,7 +124,39 @@ impl AotCompiler {
             return Err("No MIR modules generated".to_string());
         }
 
-        let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
+        Ok(mir_modules.iter().map(|m| (**m).clone()).collect())
+    }
+
+    /// Compile Haxe source files to native output.
+    #[cfg(feature = "llvm-backend")]
+    pub fn compile(
+        &self,
+        source_files: &[String],
+        output_path: &Path,
+    ) -> Result<AotOutput, String> {
+        self.compile_with_plugins(source_files, output_path, Vec::new())
+    }
+
+    /// Compile Haxe source files to native output with compiler plugins.
+    #[cfg(feature = "llvm-backend")]
+    pub fn compile_with_plugins(
+        &self,
+        source_files: &[String],
+        output_path: &Path,
+        plugins: Vec<Box<dyn CompilerPlugin + 'static>>,
+    ) -> Result<AotOutput, String> {
+        use crate::codegen::llvm_aot_backend;
+        use crate::codegen::llvm_jit_backend::LLVMJitBackend;
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+
+        // --- Phase 1: Parse and compile to MIR ---
+        if self.verbose {
+            println!("  Parsing and lowering to MIR...");
+        }
+
+        let mut modules = self.prepare_modules(source_files, plugins)?;
 
         // --- Phase 2: Find entry point ---
         let (entry_module_name, entry_function_name) = find_entry_point(&modules)?;
@@ -382,6 +419,9 @@ impl AotCompiler {
 
         // Runtime library (static)
         cmd.arg(&runtime_path);
+        for native_lib in &self.native_link_libs {
+            cmd.arg(native_lib);
+        }
 
         // Optimization level for linker (matches LLVM codegen optimization)
         let opt_flag = match self.opt_level {
@@ -477,6 +517,9 @@ impl AotCompiler {
         cmd.arg(obj_path);
         cmd.arg(&main_c_path);
         cmd.arg(&runtime_path);
+        for native_lib in &self.native_link_libs {
+            cmd.arg(native_lib);
+        }
 
         let opt_flag = match self.opt_level {
             OptimizationLevel::O0 => "-O0",
@@ -625,43 +668,28 @@ impl AotCompiler {
         source_files: &[String],
         output_path: &Path,
     ) -> Result<AotOutput, String> {
+        self.compile_c_with_plugins(source_files, output_path, Vec::new())
+    }
+
+    /// Compile Haxe source files to C with compiler plugins, then compile with gcc/g++.
+    pub fn compile_c_with_plugins(
+        &self,
+        source_files: &[String],
+        output_path: &Path,
+        plugins: Vec<Box<dyn CompilerPlugin + 'static>>,
+    ) -> Result<AotOutput, String> {
         use crate::codegen::c_backend::CBackend;
         use std::process::Command;
         use std::time::Instant;
 
         let t0 = Instant::now();
-
-        // --- Phase 1: Parse and compile to MIR ---
-        let mut config = CompilationConfig::default();
-        config.pipeline_config = config.pipeline_config.skip_analysis();
-        let mut unit = CompilationUnit::new(config);
-        unit.load_stdlib()
-            .map_err(|e| format!("Failed to load stdlib: {}", e))?;
-
-        for source_file in source_files {
-            let source = std::fs::read_to_string(source_file)
-                .map_err(|e| format!("Failed to read {}: {}", source_file, e))?;
-            unit.add_file(&source, source_file)
-                .map_err(|e| format!("Failed to add {}: {}", source_file, e))?;
-        }
-
-        unit.lower_to_tast().map_err(|errors| {
-            unit.print_compilation_errors(&errors);
-            format!("Compilation failed with {} error(s)", errors.len())
-        })?;
+        let mut modules = self.prepare_modules(source_files, plugins)?;
 
         let t_frontend = if self.verbose {
             t0.elapsed()
         } else {
             std::time::Duration::ZERO
         };
-
-        let mir_modules = unit.get_mir_modules();
-        if mir_modules.is_empty() {
-            return Err("No MIR modules generated".to_string());
-        }
-
-        let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
 
         // --- Phase 2: Find entry point ---
         let (_entry_module_name, entry_function_name) = find_entry_point(&modules)?;
@@ -751,6 +779,9 @@ impl AotCompiler {
         cmd.arg("-o").arg(output_path);
         cmd.arg(&c_path);
         cmd.arg(&runtime_lib);
+        for native_lib in &self.native_link_libs {
+            cmd.arg(native_lib);
+        }
         cmd.arg(opt_flag);
         cmd.arg("-pipe"); // Use pipes instead of temp files for speed
         cmd.arg("-ffp-contract=on");

@@ -2,9 +2,12 @@
 //!
 //! Wraps `AotCompiler` with a config struct for CLI integration.
 
-#[cfg(feature = "llvm-backend")]
-use crate::codegen::aot_compiler::{AotCompiler, OutputFormat};
 use crate::ir::optimization::OptimizationLevel;
+#[cfg(feature = "llvm-backend")]
+use crate::{
+    codegen::aot_compiler::{AotCompiler, OutputFormat},
+    compiler_plugin::CompilerPlugin,
+};
 use std::path::PathBuf;
 
 /// Configuration for AOT compilation via the unified CLI.
@@ -36,13 +39,17 @@ pub struct AotConfig {
     pub enable_cache: bool,
     /// Custom BLADE cache directory
     pub cache_dir: Option<PathBuf>,
+    /// Extra source directories (class paths)
+    pub extra_source_dirs: Vec<PathBuf>,
+    /// Native libraries to link into executable outputs
+    pub native_link_libs: Vec<PathBuf>,
 }
 
 /// Run AOT compilation with the given config.
 ///
 /// Returns Ok(()) on success.
 #[cfg(feature = "llvm-backend")]
-pub fn run_aot(config: AotConfig) -> Result<(), String> {
+pub fn run_aot(config: AotConfig, plugins: Vec<Box<dyn CompilerPlugin>>) -> Result<(), String> {
     if config.source_files.is_empty() {
         return Err("No source files specified".to_string());
     }
@@ -51,12 +58,14 @@ pub fn run_aot(config: AotConfig) -> Result<(), String> {
     compiler.target_triple = config.target_triple;
     compiler.output_format = config.output_format;
     compiler.opt_level = config.opt_level;
-    compiler.strip = !config.strip; // AotCompiler.strip means "don't tree-shake" when false
+    compiler.strip = config.strip;
     compiler.strip_symbols = config.strip_symbols;
     compiler.verbose = config.verbose;
     compiler.linker = config.linker;
     compiler.runtime_dir = config.runtime_dir;
     compiler.sysroot = config.sysroot;
+    compiler.extra_source_dirs = config.extra_source_dirs;
+    compiler.native_link_libs = config.native_link_libs;
 
     // Default output path
     let output = config.output.unwrap_or_else(|| {
@@ -109,9 +118,9 @@ pub fn run_aot(config: AotConfig) -> Result<(), String> {
     }
 
     let compile_result = if compiler.output_format == OutputFormat::CSource {
-        compiler.compile_c(&config.source_files, &output)
+        compiler.compile_c_with_plugins(&config.source_files, &output, plugins)
     } else {
-        compiler.compile(&config.source_files, &output)
+        compiler.compile_with_plugins(&config.source_files, &output, plugins)
     };
     match compile_result {
         Ok(result) => {
