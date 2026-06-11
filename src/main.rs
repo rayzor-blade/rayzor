@@ -667,6 +667,68 @@ impl Preset {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_tier_config(
+    preset: Preset,
+    preset_override_toml: bool,
+    tier_thresholds: Option<&TierThresholds>,
+    tier_sample_rate: Option<u64>,
+    tier_start_interpreted: Option<bool>,
+    tier_promotion: Option<bool>,
+    manifest_project: Option<&compiler::workspace::Project>,
+    verbose: bool,
+    release: bool,
+) -> compiler::codegen::tiered_backend::TieredConfig {
+    // Config selection:
+    //   * If the manifest carries an explicit `[tier]` block, it remains the
+    //     default source of truth.
+    //   * `--preset-override-toml` lets benchmarking runs start from a named
+    //     CLI preset instead.
+    //   * The narrow `--tier-*` overrides are then applied last, so one-off
+    //     sweeps can manipulate thresholds without editing rayzor.toml.
+    let manifest_tier_config = if preset_override_toml {
+        None
+    } else {
+        manifest_project.and_then(|p| p.tier_config().cloned())
+    };
+
+    let mut config = match manifest_tier_config {
+        Some(custom) => compiler::codegen::tiered_backend::TieredConfig::from_preset(
+            compiler::codegen::TierPreset::Custom(custom),
+        ),
+        None => {
+            let mut config =
+                compiler::codegen::tiered_backend::TieredConfig::from_preset(preset.to_tier_preset());
+            // Preserve the historical native CLI default for ad hoc runs
+            // without a manifest-level `[tier]` block. Explicit manifest
+            // configs must be able to tune `start_interpreted`.
+            config.start_interpreted = false;
+            config
+        }
+    };
+
+    if let Some(thresholds) = tier_thresholds {
+        thresholds.apply_to(&mut config);
+    }
+    if let Some(sample_rate) = tier_sample_rate {
+        config.profile_config.sample_rate = sample_rate.max(1);
+    }
+    if let Some(start_interpreted) = tier_start_interpreted {
+        config.start_interpreted = start_interpreted;
+    }
+    if let Some(enable_tier_promotion) = tier_promotion {
+        config.enable_tier_promotion = enable_tier_promotion;
+    }
+    config.verbosity = if verbose { 2 } else { 0 };
+    // In release mode, suppress stack-trace instrumentation overhead even if
+    // the preset enables it. Debug runs honour the preset.
+    if release {
+        config.enable_stack_traces = false;
+    }
+
+    config
+}
+
 fn run_artifact_build_on_large_stack<F>(name: &'static str, f: F) -> Result<(), String>
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
@@ -962,11 +1024,17 @@ fn run_bundle(
     verbose: bool,
     stats: bool,
     preset: Preset,
+    preset_override_toml: bool,
+    tier_thresholds: Option<TierThresholds>,
+    tier_sample_rate: Option<u64>,
+    tier_start_interpreted: Option<bool>,
+    tier_promotion: Option<bool>,
+    release: bool,
     manifest_project: Option<compiler::workspace::Project>,
     cli_rpkg_files: Vec<PathBuf>,
     program_args: Vec<String>,
 ) -> Result<(), String> {
-    use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
+    use compiler::codegen::tiered_backend::TieredBackend;
     use compiler::ir::load_bundle;
 
     if !file.exists() {
@@ -1036,9 +1104,18 @@ fn run_bundle(
 
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
-    let mut config = TieredConfig::from_preset(preset.to_tier_preset());
-    config.verbosity = if verbose { 2 } else { 0 };
-    config.start_interpreted = false;
+    let config = resolve_tier_config(
+        preset,
+        preset_override_toml,
+        tier_thresholds.as_ref(),
+        tier_sample_rate,
+        tier_start_interpreted,
+        tier_promotion,
+        manifest_project.as_ref(),
+        verbose,
+        release,
+    );
+    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 
@@ -1048,12 +1125,24 @@ fn run_bundle(
             .map_err(|e| format!("Failed to compile module '{}': {}", module.name, e))?;
     }
 
-    if stats {
-        let backend_stats = backend.get_statistics();
-        println!("  tier 0   {} functions", backend_stats.baseline_functions);
-        println!("  tier 1   {} functions", backend_stats.standard_functions);
-        println!("  tier 2   {} functions", backend_stats.optimized_functions);
-        println!("  tier 3   {} functions", backend_stats.llvm_functions);
+    if auto_upgrade_to_llvm {
+        #[cfg(feature = "llvm-backend")]
+        {
+            if let Err(e) = backend.upgrade_to_llvm() {
+                eprintln!(
+                    "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
+                    e
+                );
+            } else if verbose {
+                eprintln!("[tier] Upgraded to LLVM");
+            }
+        }
+        #[cfg(not(feature = "llvm-backend"))]
+        {
+            eprintln!(
+                "[tier] manifest requested auto-upgrade to LLVM, but this build was compiled without the `llvm-backend` feature; continuing on Cranelift"
+            );
+        }
     }
 
     rayzor_runtime::haxe_sys::init_program_args(&program_args);
@@ -1061,6 +1150,28 @@ fn run_bundle(
     backend
         .execute_function(entry_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
+
+    if stats {
+        let backend_stats = backend.get_statistics();
+        println!("{}", backend_stats.format());
+        let beadie_stats = backend.beadie_stats();
+        println!(
+            "Beadie: adapter={} routes={} (standard={} optimized={}) installs={} (standard={} optimized={}) beads={} (standard={} optimized={}) compiled={} (standard={} optimized={})",
+            beadie_stats.adapter_enabled,
+            beadie_stats.routes_attempted,
+            beadie_stats.standard_routes_attempted,
+            beadie_stats.optimized_routes_attempted,
+            beadie_stats.installs,
+            beadie_stats.standard_installs,
+            beadie_stats.optimized_installs,
+            beadie_stats.registered_beads,
+            beadie_stats.standard_registered_beads,
+            beadie_stats.optimized_registered_beads,
+            beadie_stats.standard_compiled_beads + beadie_stats.optimized_compiled_beads,
+            beadie_stats.standard_compiled_beads,
+            beadie_stats.optimized_compiled_beads
+        );
+    }
 
     // Execution complete — no banner needed, output speaks for itself
     Ok(())
@@ -1087,7 +1198,7 @@ fn run_file(
     interactive: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
-    use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
+    use compiler::codegen::tiered_backend::TieredBackend;
 
     // Resolve file: from arg or rayzor.toml
     let (file, manifest_project) = match file_arg {
@@ -1134,6 +1245,12 @@ fn run_file(
             verbose,
             stats,
             preset,
+            preset_override_toml,
+            tier_thresholds,
+            tier_sample_rate,
+            tier_start_interpreted,
+            tier_promotion,
+            release,
             manifest_project,
             rpkg_files,
             program_args,
@@ -1601,50 +1718,17 @@ fn run_file(
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
     // Set up tiered JIT backend.
-    //
-    // Config selection:
-    //   * If the manifest carries an explicit `[tier]` block, it remains the
-    //     default source of truth.
-    //   * `--preset-override-toml` lets benchmarking runs start from a named
-    //     CLI preset instead.
-    //   * The narrow `--tier-*` overrides are then applied last, so one-off
-    //     sweeps can manipulate thresholds without editing rayzor.toml.
-    let manifest_tier_config: Option<TieredConfig> = if preset_override_toml {
-        None
-    } else {
-        manifest_project
-            .as_ref()
-            .and_then(|p| p.tier_config().cloned())
-    };
-    let mut config = match manifest_tier_config {
-        Some(custom) => TieredConfig::from_preset(compiler::codegen::TierPreset::Custom(custom)),
-        None => {
-            let mut config = TieredConfig::from_preset(preset.to_tier_preset());
-            // Preserve the historical native CLI default for ad hoc runs
-            // without a manifest-level `[tier]` block. Explicit manifest
-            // configs must be able to tune `start_interpreted`.
-            config.start_interpreted = false;
-            config
-        }
-    };
-    if let Some(thresholds) = &tier_thresholds {
-        thresholds.apply_to(&mut config);
-    }
-    if let Some(sample_rate) = tier_sample_rate {
-        config.profile_config.sample_rate = sample_rate.max(1);
-    }
-    if let Some(start_interpreted) = tier_start_interpreted {
-        config.start_interpreted = start_interpreted;
-    }
-    if let Some(enable_tier_promotion) = tier_promotion {
-        config.enable_tier_promotion = enable_tier_promotion;
-    }
-    config.verbosity = if verbose { 2 } else { 0 };
-    // In release mode, suppress stack-trace instrumentation overhead even if
-    // the preset enables it. Debug runs honour the preset.
-    if release {
-        config.enable_stack_traces = false;
-    }
+    let config = resolve_tier_config(
+        preset,
+        preset_override_toml,
+        tier_thresholds.as_ref(),
+        tier_sample_rate,
+        tier_start_interpreted,
+        tier_promotion,
+        manifest_project.as_ref(),
+        verbose,
+        release,
+    );
 
     // Snapshot the upgrade flag before moving `config` into the backend.
     let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry;
