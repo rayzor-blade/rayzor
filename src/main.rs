@@ -964,6 +964,7 @@ fn run_bundle(
     preset: Preset,
     manifest_project: Option<compiler::workspace::Project>,
     cli_rpkg_files: Vec<PathBuf>,
+    program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
     use compiler::ir::load_bundle;
@@ -1055,6 +1056,8 @@ fn run_bundle(
         println!("  tier 3   {} functions", backend_stats.llvm_functions);
     }
 
+    rayzor_runtime::haxe_sys::init_program_args(&program_args);
+
     backend
         .execute_function(entry_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
@@ -1126,7 +1129,15 @@ fn run_file(
             profile,
             &format!("{:?}", preset),
         );
-        return run_bundle(&file, verbose, stats, preset, manifest_project, rpkg_files);
+        return run_bundle(
+            &file,
+            verbose,
+            stats,
+            preset,
+            manifest_project,
+            rpkg_files,
+            program_args,
+        );
     }
 
     // Handle .hxml build files (no TUI for these)
