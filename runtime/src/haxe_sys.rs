@@ -1680,7 +1680,9 @@ pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
             Some(s) => s,
-            None => return std::ptr::null_mut(),
+            None => crate::exception::throw_with_message(
+                "File.getBytes: null or invalid path".to_string(),
+            ),
         };
 
         #[cfg(unix)]
@@ -1702,8 +1704,10 @@ pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes
                 Box::into_raw(Box::new(HaxeBytes::new_malloc(ptr, len, cap)))
             }
             Err(e) => {
-                debug!("File.getBytes error: {} - {}", path_str, e);
-                std::ptr::null_mut()
+                crate::exception::throw_with_message(format!(
+                    "File.getBytes: failed to read '{}': {}",
+                    path_str, e
+                ))
             }
         }
     }
