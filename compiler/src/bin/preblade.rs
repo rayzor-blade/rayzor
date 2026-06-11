@@ -98,9 +98,11 @@ fn main() {
             compress,
             enable_cache: false,
             cache_dir: None,
+            extra_source_dirs: Vec::new(),
+            plugins: Vec::new(),
         };
 
-        match preblade::create_bundle(&config) {
+        match preblade::create_bundle(config) {
             Ok(module_count) => {
                 println!();
                 println!("Bundle created: {}", bundle_out.display());

@@ -467,6 +467,28 @@ impl CBackend {
         for block in function.cfg.blocks.values() {
             for phi in &block.phi_nodes {
                 all_regs.entry(phi.dest).or_insert_with(|| phi.ty.clone());
+                for (_pred, value) in &phi.incoming {
+                    all_regs
+                        .entry(*value)
+                        .or_insert_with(|| Self::reg_type_or_i64(function, *value));
+                }
+            }
+
+            for inst in &block.instructions {
+                if let Some((dest, ty)) = Self::instruction_dest_type(function, inst) {
+                    all_regs.entry(dest).or_insert(ty);
+                }
+                for used in inst.uses() {
+                    all_regs
+                        .entry(used)
+                        .or_insert_with(|| Self::reg_type_or_i64(function, used));
+                }
+            }
+
+            for used in Self::terminator_uses(&block.terminator) {
+                all_regs
+                    .entry(used)
+                    .or_insert_with(|| Self::reg_type_or_i64(function, used));
             }
         }
 
@@ -532,6 +554,95 @@ impl CBackend {
         self.emit_line("");
 
         Ok(())
+    }
+
+    fn reg_type_or_i64(function: &crate::ir::IrFunction, id: IrId) -> IrType {
+        function
+            .register_types
+            .get(&id)
+            .cloned()
+            .unwrap_or(IrType::I64)
+    }
+
+    fn instruction_dest_type(
+        function: &crate::ir::IrFunction,
+        inst: &IrInstruction,
+    ) -> Option<(IrId, IrType)> {
+        let dest = inst.dest()?;
+        let ty = function
+            .register_types
+            .get(&dest)
+            .cloned()
+            .unwrap_or_else(|| Self::fallback_instruction_dest_type(inst));
+        Some((dest, ty))
+    }
+
+    fn fallback_instruction_dest_type(inst: &IrInstruction) -> IrType {
+        match inst {
+            IrInstruction::Const { value, .. } => Self::value_type(value),
+            IrInstruction::SsaBarrier { ty, .. }
+            | IrInstruction::Load { ty, .. }
+            | IrInstruction::LoadGlobal { ty, .. }
+            | IrInstruction::BitCast { ty, .. }
+            | IrInstruction::LandingPad { ty, .. }
+            | IrInstruction::Alloc { ty, .. }
+            | IrInstruction::GetElementPtr { ty, .. }
+            | IrInstruction::CreateUnion { ty, .. }
+            | IrInstruction::CreateStruct { ty, .. }
+            | IrInstruction::PtrAdd { ty, .. }
+            | IrInstruction::Undef { ty, .. } => ty.clone(),
+            IrInstruction::Cast { to_ty, .. } => to_ty.clone(),
+            IrInstruction::Cmp { .. } => IrType::Bool,
+            IrInstruction::VectorLoad { vec_ty, .. }
+            | IrInstruction::VectorBinOp { vec_ty, .. }
+            | IrInstruction::VectorSplat { vec_ty, .. }
+            | IrInstruction::VectorUnaryOp { vec_ty, .. }
+            | IrInstruction::VectorMinMax { vec_ty, .. } => vec_ty.clone(),
+            IrInstruction::CallIndirect { signature, .. } => {
+                if let IrType::Function { return_type, .. } = signature {
+                    (**return_type).clone()
+                } else {
+                    IrType::I64
+                }
+            }
+            _ => IrType::I64,
+        }
+    }
+
+    fn value_type(value: &IrValue) -> IrType {
+        match value {
+            IrValue::Void => IrType::Void,
+            IrValue::Undef => IrType::I64,
+            IrValue::Null => IrType::Ptr(Box::new(IrType::Void)),
+            IrValue::Bool(_) => IrType::Bool,
+            IrValue::I8(_) => IrType::I8,
+            IrValue::I16(_) => IrType::I16,
+            IrValue::I32(_) => IrType::I32,
+            IrValue::I64(_) => IrType::I64,
+            IrValue::U8(_) => IrType::U8,
+            IrValue::U16(_) => IrType::U16,
+            IrValue::U32(_) => IrType::U32,
+            IrValue::U64(_) => IrType::U64,
+            IrValue::F32(_) => IrType::F32,
+            IrValue::F64(_) => IrType::F64,
+            IrValue::String(_) => IrType::String,
+            IrValue::Array(_) | IrValue::Struct(_) => IrType::Ptr(Box::new(IrType::Void)),
+            IrValue::Function(_) | IrValue::Closure { .. } => IrType::Function {
+                params: Vec::new(),
+                return_type: Box::new(IrType::Void),
+                varargs: true,
+            },
+        }
+    }
+
+    fn terminator_uses(term: &IrTerminator) -> Vec<IrId> {
+        match term {
+            IrTerminator::Branch { .. } | IrTerminator::Unreachable => Vec::new(),
+            IrTerminator::CondBranch { condition, .. } => vec![*condition],
+            IrTerminator::Switch { value, .. } => vec![*value],
+            IrTerminator::Return { value } => value.iter().copied().collect(),
+            IrTerminator::NoReturn { call } => vec![*call],
+        }
     }
 
     /// Build C function signature string.

@@ -127,9 +127,11 @@ fn main() {
         sysroot,
         enable_cache: false,
         cache_dir: None,
+        extra_source_dirs: Vec::new(),
+        native_link_libs: Vec::new(),
     };
 
-    if let Err(e) = aot_build::run_aot(config) {
+    if let Err(e) = aot_build::run_aot(config, Vec::new()) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
