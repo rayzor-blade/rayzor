@@ -3230,6 +3230,34 @@ impl CompilationUnit {
             self.store_inline_vars(&cached_maps.inline_vars);
         }
 
+        // Step 4.5: Mark this import's SOURCE-DECLARED functions (methods +
+        // constructors from cached_maps.functions) as OWNED, exactly like
+        // the fresh-compile path does via last_compiled_own_func_ids.
+        // Without this, a cache-loaded user module's methods (e.g.
+        // KVCache.append) are unprotected at the stdlib merge: the merge
+        // deletes/rewrites them, fresh modules lowering against them fall
+        // through to a degenerate bare-name extern stub, and the JIT panics
+        // at finalize with "can't resolve symbol append" (the AOT link
+        // fails on the same bare symbol). This was the touch-entry-file /
+        // edit-one-dep mixed-cache crash.
+        //
+        // Scope strictly to DECLARED functions: marking every non-empty-CFG
+        // function also protects generated stdlib wrapper placeholders
+        // inside the user module, which then shadow the real stdlib MIR
+        // after the merge (first symptom: cached StringMap.get dispatching
+        // into a stub — "missing meta key 'general.architecture'").
+        // Stdlib files keep placeholder method bodies the stdlib wrappers
+        // must replace, so the guard stays user-packages-only, mirroring
+        // the fresh path.
+        let is_user_package = !filename.contains("haxe-std");
+        if is_user_package {
+            let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+            for entry in &cached_maps.functions {
+                let new_id = crate::ir::IrFunctionId(entry.func_id + import_base);
+                self.import_own_func_ids.insert(new_id);
+            }
+        }
+
         // Step 5: Renumber and push to import_mir_modules
         self.renumber_and_push_import_mir(mir);
 
