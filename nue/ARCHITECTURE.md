@@ -7,11 +7,14 @@ WebGPU+WASM. It is **inference-only** — no autograd, no training. Everything
 above the runtime FFI is pure Haxe.
 
 The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
-`examples/llama-chat-server/Main.hx` on M1 Pro at **81.4 tok/s median decode**
-(tiers `1/30/5`, `start_interpreted=false`) — identical under JIT and AOT.
-`rayzor aot` of the server reaches listening in 0.37s with 0.56s cold TTFT on
-every launch (the JIT pays 8.4s on a cold `.rayzor` cache). llama.cpp CPU on
-the same machine/model measures ~87 (Metal: ~140).
+`examples/llama-chat-server/Main.hx` on M1 Pro at **90.1 tok/s median decode**
+(tiers `1/30/5`, `start_interpreted=false`, 2026-06-12 stack: caller-assist
+fork-join + QoS-pinned orchestrator + NEON q8_K quantizer + GQA per-token
+frees + morsels-on). `rayzor aot` of the server reaches listening in 0.37s
+with ~0.6s cold TTFT on every launch (the JIT pays 6-8s compile on a cold
+`.rayzor` cache). llama.cpp CPU tg128 on the same machine measures ~95-103
+(Metal: ~140). Bench numbers are thermal-sensitive: deltas only count from
+alternating-pair runs on a rested machine.
 
 ---
 
