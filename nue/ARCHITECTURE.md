@@ -73,6 +73,9 @@ binaries). Three rules learned the hard way:
 | Pool-wide `auto_kernel_threads` | unblocks RAYZOR_WORKERS sweeps | was 5× hardcoded 6 |
 | AOT compilation of the server | cold TTFT 8.4s → 0.56s; decode parity | `rayzor aot` (manifest mode) |
 | Q8_0 KV cache | 3.76× smaller KV; parity at short ctx, expected win >4k | `RAYZOR_KV_Q8=1` (opt-in) |
+| NEON q8_K activation quantizer | +2.5 tok/s median (ABBA), bit-identical (FCVTAS ties-away = roundf) | runtime-core q8_k.rs |
+| Prefill morsels default ON | bare deployments no longer 2.8× slower prefill | `RAYZOR_PREFILL_MORSELS=0` opts out |
+| Hot-path env::var hoist | ~490 env-lock hits/token removed | `llamacpp_kernel_enabled()` OnceLock |
 
 ### Refuted (do not retry without changed conditions)
 
@@ -87,6 +90,9 @@ binaries). Three rules learned the hard way:
 | mpsc → atomic-countdown fork-join | wash; std::mpsc already tuned |
 | TensorPool default-on | 65% hit rate, +0.3% sub-noise; alloc ceiling is 0.5-2.3% of wall (stays opt-in `RAYZOR_POOL=1`) |
 | `-O3` AOT | no change vs `-O2` |
+| ggml 4×8 repack GEMV | refuted on M1 Pro — llama-bench ABBA sign 3-3, median +0.4 within noise; port killed at zero LOC |
+| NEON silu (vector exp) | 0-3 ABBA pairs; true scalar cost ~0.1ms/token (KERNEL_TIMING had inflated it); in tree behind `RAYZOR_NEON_SILU=1` |
+| Speculative decoding (on CPU) | pre-refuted by measurement: prefill GEMM is only 12% cheaper per token than decode GEMV (compute-bound at batch>1) — batch-verify pays only on GPU |
 
 ### Open levers (current state of the hunt)
 
