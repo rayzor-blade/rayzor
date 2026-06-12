@@ -697,8 +697,9 @@ fn resolve_tier_config(
             compiler::codegen::TierPreset::Custom(custom),
         ),
         None => {
-            let mut config =
-                compiler::codegen::tiered_backend::TieredConfig::from_preset(preset.to_tier_preset());
+            let mut config = compiler::codegen::tiered_backend::TieredConfig::from_preset(
+                preset.to_tier_preset(),
+            );
             // Preserve the historical native CLI default for ad hoc runs
             // without a manifest-level `[tier]` block. Explicit manifest
             // configs must be able to tune `start_interpreted`.
@@ -3022,11 +3023,18 @@ fn cmd_aot(
             }
         }
         for lib_path in &native_link_libs {
-            if let Ok((lib, plugin, _symbols)) =
-                crate::native_libs::load_manifest_native_lib(&lib_path)
-            {
-                _loaded_native_libs.push(lib);
-                plugins.push(Box::new(plugin));
+            match crate::native_libs::load_manifest_native_lib(lib_path) {
+                Ok((lib, plugin, _symbols)) => {
+                    _loaded_native_libs.push(lib);
+                    plugins.push(Box::new(plugin));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to load native lib {}: {}",
+                        lib_path.display(),
+                        e
+                    );
+                }
             }
         }
     }
