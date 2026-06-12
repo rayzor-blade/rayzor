@@ -2480,7 +2480,41 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
+    // NEON silu (vectorized Cephes exp) exists behind RAYZOR_NEON_SILU=1
+    // but is OFF by default: decode A/B on Llama 3.2 1B lost all three
+    // ABBA pairs (-3/-12/-6 tok/s under thermal drift). The 17µs/call
+    // sizing that motivated it came from a KERNEL_TIMING run whose
+    // per-call inflation overstated the true cost (~0.1ms/token, under
+    // the noise floor), and NEON divide latency eats the exp saving at
+    // ffn=8192. Re-evaluate on models with larger FFN widths. Output is
+    // ~1-2 ULP off libm (canonical-prompt gate passed when tested).
+    #[cfg(target_arch = "aarch64")]
+    {
+        if a != 0 && neon_silu_opted_in() {
+            let t = &*(a as *const RayzorTensor);
+            if t.dtype == DTYPE_F32 && t.is_contiguous() {
+                let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+                let result = alloc_tensor(shape, t.dtype, None);
+                if result != 0 {
+                    let r = &*(result as *const RayzorTensor);
+                    crate::tensor_simd::silu_slice_neon(
+                        t.data as *const f32,
+                        r.data as *mut f32,
+                        t.numel,
+                    );
+                    return result;
+                }
+            }
+        }
+    }
     tensor_unary(a, |x| x / (1.0 + (-x).exp()))
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_silu_opted_in() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("RAYZOR_NEON_SILU").map_or(false, |v| v == "1"))
 }
 
 /// Softmax over the last dimension.
