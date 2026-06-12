@@ -38,31 +38,22 @@ import nue.tokenizer.Tokenizer;
  */
 class GGUFTokenizer {
     public static function build(reader:GGUFReader):Tokenizer {
-        trace("[gtb] 1");
         var modelType = readStringOr(reader, "tokenizer.ggml.model", "gpt2");
-        trace("[gtb] 2 mt=" + modelType);
         var byteLevel = (modelType == "gpt2");
 
-        trace("[gtb] 3 before readStringArray");
         var tokens = readStringArray(reader, "tokenizer.ggml.tokens");
-        trace("[gtb] 4 after readStringArray, n=" + ((tokens==null)?-1:tokens.length));
         if (tokens == null || tokens.length == 0) {
             throw "GGUFTokenizer: missing 'tokenizer.ggml.tokens' — file does not embed a vocabulary.";
         }
 
-        trace("[gtb] 5 before scores");
         var scores = readFloatArrayOr(reader, "tokenizer.ggml.scores");
-        trace("[gtb] 6 vocab new");
         var vocab = new Vocab();
-        trace("[gtb] 7 vocab loop");
         for (i in 0...tokens.length) {
             var score = (scores != null && i < scores.length) ? scores[i] : 0.0;
             vocab.addWithScore(tokens[i], score);
         }
-        trace("[gtb] 8 merges read");
 
         var mergeStrings = readStringArrayOr(reader, "tokenizer.ggml.merges");
-        trace("[gtb] 9 merges loop");
         var merges:Array<MergeRule> = [];
         if (mergeStrings != null) {
             for (m in mergeStrings) {
@@ -70,10 +61,8 @@ class GGUFTokenizer {
                 if (rule != null) merges.push(rule);
             }
         }
-        trace("[gtb] 10 BPE new");
 
         var tok = new BPETokenizer(vocab, merges, byteLevel);
-        trace("[gtb] 11 specials");
 
         // Register the standard special-token IDs when present. The
         // string keys here mirror what Llama-3 / Mistral chat templates

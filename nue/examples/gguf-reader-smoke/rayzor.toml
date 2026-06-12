@@ -1,0 +1,6 @@
+[project]
+name = "gguf-reader-smoke"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]
