@@ -1572,10 +1572,13 @@ fn sdot_enabled_runtime() -> bool {
 fn prefill_morsels_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
+    // Default ON since 2026-06: 2.8x prefill speedup (0.64s → 0.23s on a
+    // 21-token Llama 3.2 1B prompt), stable across every JIT/AOT bench.
+    // `RAYZOR_PREFILL_MORSELS=0` opts out.
     *CACHED.get_or_init(|| {
         std::env::var("RAYZOR_PREFILL_MORSELS")
             .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
