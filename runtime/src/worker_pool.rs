@@ -190,7 +190,18 @@ impl WorkerPool {
         if rows == 0 {
             return;
         }
-        let n = threads.min(self.n).min(rows);
+        // Caller participation: the calling thread computes band 0 while
+        // workers run bands 1..n. Pre-change the caller pure-spun on the
+        // join for the whole op, occupying a P-core without contributing —
+        // on an 8-P-core M1 Pro that capped compute at `workers` threads
+        // and made `workers = 8` catastrophically oversubscribed
+        // (9 runnable → E-core straggler gates every join → 2.3x decode
+        // collapse, measured). With participation, RAYZOR_WORKERS=7 means
+        // 8 compute threads on 8 P-cores with zero oversubscription.
+        // `RAYZOR_NO_CALLER_BAND=1` restores the old spin-only join.
+        let caller_assists = caller_band_enabled() && !self.legacy_mode;
+        let max_width = if caller_assists { self.n + 1 } else { self.n };
+        let n = threads.min(max_width).min(rows);
         if n <= 1 {
             f(0, rows);
             return;
@@ -202,16 +213,22 @@ impl WorkerPool {
 
         let chunk = rows.div_ceil(n);
 
-        // Build per-worker bands. Any worker whose band is empty
-        // (lo >= rows) we skip — `pending` is set to the number of
-        // ACTUAL workers we dispatch to, not `n`.
+        // Build bands. Any band whose lo >= rows is empty and skipped —
+        // `pending` is set to the number of ACTUAL worker dispatches.
+        let first_worker_band = if caller_assists { 1 } else { 0 };
         let mut dispatched = 0usize;
-        for w in 0..n {
+        for w in first_worker_band..n {
             let lo = w * chunk;
             if lo >= rows {
                 break;
             }
             dispatched += 1;
+        }
+
+        if dispatched == 0 {
+            // Tiny row count: everything fits in the caller's band.
+            f(0, rows);
+            return;
         }
 
         // Initialise pending BEFORE flipping any state bits so a worker
@@ -225,10 +242,10 @@ impl WorkerPool {
         let f_ptr: *const F = &f;
         let trampoline = trampoline_for::<F> as *mut ();
 
-        for w in 0..dispatched {
+        for (slot_idx, w) in (first_worker_band..first_worker_band + dispatched).enumerate() {
             let lo = w * chunk;
             let hi = (lo + chunk).min(rows);
-            let slot = &self.inner.slots[w];
+            let slot = &self.inner.slots[slot_idx];
             slot.lo.store(lo, Ordering::Relaxed);
             slot.hi.store(hi, Ordering::Relaxed);
             slot.closure_ptr.store(f_ptr as *mut (), Ordering::Relaxed);
@@ -236,6 +253,16 @@ impl WorkerPool {
             // Release: workers must see all the Relaxed writes above
             // before they observe state == 1.
             slot.state.store(1, Ordering::Release);
+        }
+
+        if caller_assists {
+            // Compute band 0 on this thread while workers run theirs.
+            // Mark the thread as a worker for the duration so any nested
+            // `parallel_rows_no_nest` from kernel code runs inline instead
+            // of corrupting the busy worker slots.
+            WORKER_THREAD.with(|on| *on.borrow_mut() = true);
+            f(0, chunk.min(rows));
+            WORKER_THREAD.with(|on| *on.borrow_mut() = false);
         }
 
         // Spin-wait for pending → 0. Acquire pairs with each worker's
@@ -445,11 +472,43 @@ fn bias_to_performance_core() {
     }
 }
 
+/// Band count kernels should use for fork-join fan-out. Follows the global
+/// pool's worker count, so `RAYZOR_WORKERS` sweeps the WHOLE dispatch width.
+/// Historically five kernel call sites hardcoded 6 bands independently of
+/// the pool size, which silently capped the dominant matmul at 6 threads on
+/// 8-P-core machines regardless of the env knob.
+///
+/// With caller participation (the calling thread computes band 0), total
+/// compute width is `workers + 1` — RAYZOR_WORKERS=7 → 8 compute threads.
+pub fn auto_kernel_threads() -> usize {
+    let w = global().workers();
+    if caller_band_enabled() {
+        w + 1
+    } else {
+        w
+    }
+}
+
+/// Whether `parallel_rows` runs band 0 on the calling thread.
+/// `RAYZOR_NO_CALLER_BAND=1` restores the pre-participation spin-only join.
+fn caller_band_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1"))
+}
+
 /// Process-wide singleton. Lazily constructed on first `global()` call with a
 /// worker count picked from `RAYZOR_WORKERS` (or 6 by default on M-series).
 pub fn global() -> &'static WorkerPool {
     static POOL: std::sync::OnceLock<WorkerPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
+        // `get_or_init` runs on the ORCHESTRATOR thread (first kernel
+        // call site), so this QoS hint lands on the caller — the thread
+        // that runs all sequential kernels, the Haxe decode loop, and
+        // every fork-join wait. Workers get the same hint at spawn;
+        // without this the caller competes at default QoS against
+        // max-QoS spinners and can be demoted to an E-core under
+        // thermal pressure, inflating the glue slice of every token.
+        bias_to_performance_core();
         let n = std::env::var("RAYZOR_WORKERS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
