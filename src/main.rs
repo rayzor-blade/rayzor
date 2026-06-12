@@ -1636,6 +1636,15 @@ fn run_file(
             h.set_functions(mir_module.functions.len());
         }
 
+        // TODO(blade-coherence F4): skip the cache write when
+        // compile_diagnostics contains Errors — one failing mixed-cache
+        // run poisons every later "all-cached" run. Deferred until the
+        // routine latent compile errors (F8: Int32/abstract member
+        // pre-registration, extern stdlib statics, …) are fixed; today a
+        // NORMAL successful run of llama-chat-server stores ~19 error
+        // diagnostics, so gating on them would disable the warm path
+        // entirely and force every run into the (still broken) mixed
+        // state.
         // Save MIR cache with pre-rendered diagnostic strings
         if cache_enabled {
             // Render diagnostics to strings for cache replay
