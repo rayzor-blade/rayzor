@@ -1703,12 +1703,10 @@ pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes
                 std::mem::forget(content);
                 Box::into_raw(Box::new(HaxeBytes::new_malloc(ptr, len, cap)))
             }
-            Err(e) => {
-                crate::exception::throw_with_message(format!(
-                    "File.getBytes: failed to read '{}': {}",
-                    path_str, e
-                ))
-            }
+            Err(e) => crate::exception::throw_with_message(format!(
+                "File.getBytes: failed to read '{}': {}",
+                path_str, e
+            )),
         }
     }
 }
