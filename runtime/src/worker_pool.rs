@@ -295,20 +295,98 @@ impl WorkerPool {
     where
         F: Fn(usize, usize) + Send + Sync + 'static,
     {
-        // Target ~4 chunks per thread so a straggler forfeits at most
-        // ~1/(4n) of the work; floor at 8 rows to bound cursor traffic
-        // for small row counts (q_heads etc.).
-        let chunk = rows.div_ceil(n * 4).max(8).min(rows);
-        let cursor = CachelinePad {
-            inner: AtomicUsize::new(0),
-        };
+        // Band-local stealing: each thread OWNS a contiguous band (so the
+        // weight stream stays sequential for the hardware prefetcher —
+        // pure shared-cursor stealing cost ~6 tok/s of median on a quiet
+        // machine by scattering each thread's spans across the matrix)
+        // and drains it in chunks through its own cache-line-private
+        // cursor. Only threads that FINISH their band steal chunks from
+        // the band with the most unclaimed rows, so a stalled thread
+        // forfeits at most one chunk of its remainder to each helper
+        // while the fast path keeps band locality.
+        struct BandState {
+            cursor: AtomicUsize,
+            hi: usize,
+        }
+        let band = rows.div_ceil(n);
+        // ~8 chunks per band: owner pays 8 uncontended fetch_adds on its
+        // own line; straggler bound is band/8. Floor 8 rows.
+        let chunk = band.div_ceil(8).max(8).min(rows);
+        let bands: Vec<CachelinePad<BandState>> = (0..n)
+            .map(|t| {
+                let lo = (t * band).min(rows);
+                let hi = ((t + 1) * band).min(rows);
+                CachelinePad {
+                    inner: BandState {
+                        cursor: AtomicUsize::new(lo),
+                        hi,
+                    },
+                }
+            })
+            .collect();
+        let bands_ref = &bands;
+        let f_ref = &f;
 
-        let driver = move |_lo: usize, _hi: usize| loop {
-            let lo = cursor.fetch_add(chunk, Ordering::Relaxed);
-            if lo >= rows {
-                break;
+        // The slot's `lo` field carries the band index for this op.
+        let driver = move |band_idx: usize, _hi: usize| {
+            // Phase 1: drain the owned band front-to-back with GUIDED
+            // claims — half the remaining band per claim, floored at
+            // `chunk`. The first claims are huge contiguous spans (the
+            // hardware prefetcher's favourite shape and only 2-4 atomics
+            // on a private line); the tail claims shrink to `chunk` so a
+            // straggling owner leaves fine-grained pieces for thieves.
+            let mine = &bands_ref[band_idx].inner;
+            loop {
+                let cur = mine.cursor.load(Ordering::Relaxed);
+                if cur >= mine.hi {
+                    break;
+                }
+                let want = ((mine.hi - cur) / 2).max(chunk);
+                let lo = mine.cursor.fetch_add(want, Ordering::Relaxed);
+                if lo >= mine.hi {
+                    break;
+                }
+                f_ref(lo, (lo + want).min(mine.hi));
             }
-            f(lo, (lo + chunk).min(rows));
+            // Phase 2: help stragglers. Pick the band with the most
+            // unclaimed rows ONCE, then keep stealing `chunk`-sized
+            // pieces from that victim until it drains; only then rescan.
+            // A spin hint between empty scans keeps finished threads from
+            // hammering the owners' cursor cache lines.
+            loop {
+                let mut victim: Option<usize> = None;
+                let mut victim_left = 0usize;
+                for (i, b) in bands_ref.iter().enumerate() {
+                    if i == band_idx {
+                        continue;
+                    }
+                    let cur = b.inner.cursor.load(Ordering::Relaxed);
+                    let left = b.inner.hi.saturating_sub(cur);
+                    if left > victim_left {
+                        victim_left = left;
+                        victim = Some(i);
+                    }
+                }
+                let Some(v) = victim else { break };
+                let vb = &bands_ref[v].inner;
+                let mut stole_any = false;
+                loop {
+                    let lo = vb.cursor.fetch_add(chunk, Ordering::Relaxed);
+                    if lo >= vb.hi {
+                        break;
+                    }
+                    stole_any = true;
+                    f_ref(lo, (lo + chunk).min(vb.hi));
+                }
+                if !stole_any {
+                    // Lost the race for the last pieces — brief pause
+                    // before rescanning so we don't ping-pong cursor
+                    // lines under the remaining workers.
+                    for _ in 0..32 {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
         };
 
         let workers = if caller_assists { n - 1 } else { n };
@@ -320,8 +398,11 @@ impl WorkerPool {
             (d as *const D as *const (), trampoline_for::<D> as *mut ())
         }
         let (d_ptr, trampoline) = erase(&driver);
-        for slot in self.inner.slots.iter().take(workers) {
-            slot.lo.store(0, Ordering::Relaxed);
+        // Caller (when assisting) takes band 0; workers take 1..n.
+        let first_worker_band = if caller_assists { 1 } else { 0 };
+        for (slot_idx, slot) in self.inner.slots.iter().take(workers).enumerate() {
+            slot.lo
+                .store(first_worker_band + slot_idx, Ordering::Relaxed);
             slot.hi.store(0, Ordering::Relaxed);
             slot.closure_ptr.store(d_ptr as *mut (), Ordering::Relaxed);
             slot.trampoline.store(trampoline, Ordering::Relaxed);
