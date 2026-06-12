@@ -1540,13 +1540,26 @@ fn run_file(
                     let cached_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
                     let diag_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
                     if cached_hash == source_hash && data.len() >= 12 + diag_len {
-                        // Replay cached diagnostic strings
+                        // Replay cached diagnostic strings — warnings and
+                        // advice only. Error-severity strings describe the
+                        // PREVIOUS compile and replaying them verbatim on a
+                        // warm run made every cached start look like it had
+                        // just failed (the "spurious cache errors" IMPORT
+                        // storm users reported). The stored errors
+                        // themselves are tracked by the blade-coherence
+                        // F4/F7/F8 work; the replay was wrong independently.
+                        // RAYZOR_REPLAY_CACHED_ERRORS=1 restores the old
+                        // behavior for debugging.
                         if diag_len > 0 {
                             if let Ok(diag_strings) =
                                 postcard::from_bytes::<Vec<String>>(&data[12..12 + diag_len])
                             {
+                                let replay_errors =
+                                    std::env::var_os("RAYZOR_REPLAY_CACHED_ERRORS").is_some();
                                 for s in &diag_strings {
-                                    eprint!("{}", s);
+                                    if replay_errors || !s.contains("Error:") {
+                                        eprint!("{}", s);
+                                    }
                                 }
                             }
                         }
