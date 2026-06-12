@@ -1566,6 +1566,20 @@ fn sdot_enabled_runtime() -> bool {
     }
 }
 
+/// Cached `RAYZOR_LEGACY_KERNEL` gate. This used to be a raw
+/// `std::env::var` in the per-chunk matmul workers — ~490 environment
+/// lock acquisitions per decoded token across the fork-join fan-out.
+#[inline]
+fn llamacpp_kernel_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        !std::env::var("RAYZOR_LEGACY_KERNEL")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
 /// Experimental prefill path gate. This only affects multi-row Q4_K_M
 /// matmuls (`X[seq, hidden] @ Wq.T`) and leaves single-token decode on the
 /// established SDOT path. Kept opt-in while we validate prompt parity and TTFT.
@@ -1788,9 +1802,7 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
     // RAYZOR_LEGACY_KERNEL=1 to fall back to the 2-block paired path
     // for A/B or in case of numerical regression on a specific workload.
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_llamacpp = !std::env::var("RAYZOR_LEGACY_KERNEL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let use_llamacpp = llamacpp_kernel_enabled();
     #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
     let use_llamacpp = false;
 
@@ -1879,9 +1891,7 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_llamacpp = !std::env::var("RAYZOR_LEGACY_KERNEL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let use_llamacpp = llamacpp_kernel_enabled();
     #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
     let use_llamacpp = false;
 
