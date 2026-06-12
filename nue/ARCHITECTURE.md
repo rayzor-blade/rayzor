@@ -7,8 +7,11 @@ WebGPU+WASM. It is **inference-only** — no autograd, no training. Everything
 above the runtime FFI is pure Haxe.
 
 The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
-`examples/llama-chat/Main.hx` on M1 Pro at ~73-74 tok/s sustained decode, with
-~690 MB peak RSS in the post-flash-attention / post-Q4_K_M-SDOT path.
+`examples/llama-chat-server/Main.hx` on M1 Pro at **81.4 tok/s median decode**
+(tiers `1/30/5`, `start_interpreted=false`) — identical under JIT and AOT.
+`rayzor aot` of the server reaches listening in 0.37s with 0.56s cold TTFT on
+every launch (the JIT pays 8.4s on a cold `.rayzor` cache). llama.cpp CPU on
+the same machine/model measures ~87 (Metal: ~140).
 
 ---
 
@@ -33,104 +36,87 @@ The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
 
 ---
 
-## Throughput Roadmap: Rayzor Tiering + Hybrid Parallelism
+## Performance Levers — the Ledger
 
-`llama-chat` throughput is now less about finding a higher peak and more about
-controlling tail variance. A June 2026 clean benchmark sweep over tier
-promotion thresholds on the long Voronoi prompt, with decode profiling disabled
-and a 30s round-robin cooldown, showed the useful variants clustering around a
-~76 tok/s median.
+Decode throughput work is empirical here: every lever below was A/B-benched
+(alternating pairs, cooldowns, sign tests; see `bench.sh` /
+`bench_server.sh`, including its `SERVER_BIN=` mode for prebuilt AOT
+binaries). Three rules learned the hard way:
 
-| Variant (`interpreter/warm/hot`) | n | Mean tok/s | Median tok/s | StdDev | Min | Max | Read |
-|---|---:|---:|---:|---:|---:|---:|---|
-| `1/20/5` | 6 | 75.91 | 76.00 | 0.71 | 74.85 | 76.68 | Stable, no severe tail in this sweep. |
-| `1/20/2` | 6 | 75.80 | 76.49 | 1.48 | 72.77 | 77.02 | Highest peak, worst variance. |
-| `1/30/5` | 6 | 76.24 | 76.44 | 0.64 | 74.94 | 76.81 | Best mean/median/stability balance. |
+- **Microbench the actual overhead before building.** Four llama.cpp-mirroring
+  attempts washed out because the overhead they amortised was assumed, not
+  measured.
+- **Never compare profiled and unprofiled runs.** `DECODE_PROFILE=1` costs
+  2-3 tok/s; `RAYZOR_KERNEL_TIMING=1` ~7%. Use them for fractions, not walls.
+- **Scrub `.rayzor` caches after any compiler rebuild** before a
+  `NO_CACHE=false` bench — stale BLADE caches poison imports.
 
-The practical conclusion is:
+### Landed (measured wins)
 
-- **Default for long decode should prefer stability over the single fastest
-  peak.** `1/30/5` is the current best candidate from this data because it
-  preserves the ~76 tok/s band with the strongest mean/median/stability
-  balance.
-- **Treat tier thresholds as a runtime-stability knob, not a kernel-speed
-  knob.** The heavy math already lives behind FFI kernels (`Q4_K_M` SDOT,
-  fused QKV, flash-attn decode). Thresholds mostly affect Haxe control-flow,
-  bootstrap, callback, sampler, and promotion scheduling.
-- **Keep decode profiling out of throughput sweeps.** `DECODE_PROFILE=true`
-  is useful for tail-latency diagnosis, but its per-token timers are invasive
-  enough that profiled and non-profiled tok/s should not be compared directly.
-- **Do not infer inner-loop promotion from the current top-level stats alone.**
-  In the compiled native path, many direct calls do not re-enter
-  `TieredBackend::record_call`; current stats can show only a few profiled
-  entry functions even while the model is doing hundreds of kernel calls per
-  token. The next benchmark gate must pair tok/s with kernel timing and tier
-  event timestamps.
+| Lever | Gain | Where |
+|---|---|---|
+| Fused flash-attn decode kernel | +40.7% | `rayzor_tensor_flash_attn_decode` |
+| JIT trap-stub/inlining fix | +71.7% long-form (correctness-as-perf) | compiler 655d7ac |
+| llama.cpp NEON Q4_K kernel port | +15.4% | quant.rs (RAYZOR_LEGACY_KERNEL=1 reverts) |
+| FFI-batched top-k scan | +23% canonical / +3% long | `rayzor_tensor_topk_scan` |
+| NEON SIMD top-k scan | +6.3% | same kernel |
+| Persistent spin-wait worker pool | condvar → >70 tok/s steady | worker_pool.rs (RAYZOR_LEGACY_POOL=1) |
+| Q4_K_M SDOT 4-way partial-acc unroll | +1.4% short / +7% long | quant.rs |
+| Q4_K_M 2-block paired SDOT (register tiling) | +3.0% | `dot_q4_k_q8_kblock_2` |
+| flash-attn per-q_head parallelisation | +4.5% at long context | gated cache_len ≥ 256 |
+| lm_head requant Q6_K → Q4_K_M | ~+21% on long-form | `RAYZOR_REQUANT_LM_HEAD` (default on) |
+| Fused QKV projection | 1 dispatch + 1 activation-quant for q/k/v | `fusedQkvMatmul` |
+| Prefill morsels | prefill 0.64s → 0.23s | `RAYZOR_PREFILL_MORSELS=1` |
+| Tier tuning `1/30/5`, `start_interpreted=false` | ~70-74 → ~81 band | rayzor.toml (locked in) |
+| Caller-assist fork-join | +0.5%, frees a P-core | worker_pool.rs (RAYZOR_NO_CALLER_BAND=1 reverts) |
+| QoS-pin orchestrator + GQA per-token frees | ~+3 tok/s (AOT) | worker_pool.rs + GQAttention.hx |
+| Pool-wide `auto_kernel_threads` | unblocks RAYZOR_WORKERS sweeps | was 5× hardcoded 6 |
+| AOT compilation of the server | cold TTFT 8.4s → 0.56s; decode parity | `rayzor aot` (manifest mode) |
+| Q8_0 KV cache | 3.76× smaller KV; parity at short ctx, expected win >4k | `RAYZOR_KV_Q8=1` (opt-in) |
 
-### Immediate Tiering Work
+### Refuted (do not retry without changed conditions)
 
-Before changing the parallel executor, Rayzor should make tiering predictable
-for long-running inference:
+| Attempt | Result |
+|---|---|
+| Static 8-band fan-out + spinning caller | **2.3× collapse** — 9 runnable on 8 P-cores, E-core straggler gates every join |
+| Compute width 7 → 8 (with caller assist) | +0.1% and fragile; 6 → 7 was +0.5%. DRAM-pattern-bound, not core-bound |
+| ggml-style per-layer mega-dispatch | below the line — marginal join cost measured ~1-2µs × 97 joins/token ≈ 0.15ms |
+| SwiGLU gate+up fusion | -0.2%; per-op sync was 10-30µs, not 100µs |
+| Q4_K_M 2-row SDOT tile; 4-block pairing; Q6_K SDOT; Q6_K 8-way unroll | each washed out or regressed — M1 OoO/prefetch already saturated at those widths |
+| F32 flash-attn GQA restructure | tie — L1 absorbs the redundant K/V loads |
+| mpsc → atomic-countdown fork-join | wash; std::mpsc already tuned |
+| TensorPool default-on | 65% hit rate, +0.3% sub-noise; alloc ceiling is 0.5-2.3% of wall (stays opt-in `RAYZOR_POOL=1`) |
+| `-O3` AOT | no change vs `-O2` |
 
-1. **Quiesce promotion work before streaming.** Any async Beadie or LLVM work
-   that is launched before `Main.main` reaches the decode loop should either be
-   installed before token streaming starts or explicitly disabled for the run.
-   Pending compiled beads that never install do not help decode throughput, but
-   can still contend with it.
-2. **Separate compiler work from inference workers.** Tier promotion must not
-   borrow the same hot spin workers used by matmul/flash-attn kernels. Compiler
-   tasks belong on a separate low-priority lane or an explicit pre-main warmup
-   phase.
-3. **Measure tail latency, not only final tok/s.** The benchmark harness should
-   continue reporting stddev and drift, and the decode profiler should track
-   p50/p95 per-token latency, tier events, kernel timings, and thermal/run
-   order.
-4. **Keep `start_interpreted=false` as the simple stability lever for
-   production-style decode** when it proves faster on a given machine. Use
-   `start_interpreted=true` only when measuring tier behavior deliberately.
+### Open levers (current state of the hunt)
 
-### Hybrid Parallelism Direction
+The step budget at 81.4 tok/s is ~12.3ms: ~85% Q4_K matmul streaming ~0.7
+GB/token of weights, with compute width and dispatch overhead both measured
+to exhaustion. What remains, ranked by evidence:
 
-A morsel-driven scheduler is attractive, but only for the part of the workload
-where it fits the tensor shapes.
+1. **Bytes per token (bandwidth side).** Candidate: int8-activation dot path
+   (ggml dots q4_K×q8_K with activations quantised once per row) and ggml's
+   4-row interleaved repack for GEMV, which amortises scale loads across
+   rows. Under active investigation.
+2. **Metal/GPU decode.** llama.cpp Metal at ~140 tok/s on this hardware is
+   the existence proof for a ~1.7× leap; rayzor's `gpu/` crate (KernelIR,
+   MSL/WGSL codegen, wgpu) is the substrate. Also the path that converges
+   with the WebGPU/WASM edge story. Being scoped.
+3. **Prefill GEMM cache blocking.** Prefill is the one matmul with weight
+   reuse (real tiling target); a TTFT lever, not a tok/s lever.
+4. **Dynamic chunk stealing** in matmul bands: stabilises 8-wide configs
+   (kills the straggler fragility) but median-neutral at current widths.
+5. **Decode-loop alloc churn**: ~490 frees/token remain after the GQA fixes;
+   bounded at 0.5-2.3% of wall by the arena measurement — cleanup value,
+   not a throughput lever.
 
-**Prefill should get morsels first.** Multi-token prompt processing has enough
-rows to amortize task overhead. The promising decomposition is token-row
-morsels, for example 16/32/64 rows at a time, with static task metadata built
-when `LlamaArch.build()` constructs the model. Prefill morsels can eventually
-fuse local work such as:
+### Decode vs prefill split
 
-- Q/K/V projection bands plus RoPE and KV append.
-- FFN `gate` + `up` projection bands, local SiLU/mul, then `down` projection.
-- Per-layer prompt chunks that keep intermediate F32 vectors hot in L1/L2
-  instead of forcing full-tensor barriers between every sub-op.
-
-**Decode should stay on the current fused/spin-pool path.** Single-token
-generation is memory-bandwidth-bound: `[1, hidden]` matmuls and
-`flashAttnDecode` do not have enough independent row work to justify task
-metadata, work stealing, or cache-line contention. For decode, the right
-direction is smaller and more local:
-
-- Keep Q4_K_M/Q6_K weights quantised end-to-end.
-- Keep fused QKV projection and fused flash-attn decode on the fast path.
-- Reuse per-worker scratch buffers inside flash-attn and matmul kernels where
-  practical.
-- Gate parallel flash-attn by cache length, as the runtime already does, so
-  short-context decode stays single-threaded when fork/join overhead would
-  dominate.
-
-### Morsel Runtime Constraints
-
-If/when a prefill morsel runtime lands, keep it deliberately boring from the
-Haxe side:
-
-- Use flat preallocated arrays/classes for task descriptors; avoid anonymous
-  typedef task records and `Dynamic` task payloads.
-- Avoid `Array.push` in hot scheduling paths; fill arrays by index.
-- Build static task topology in the arch builder, then mutate only primitive
-  cursor/range fields at runtime.
-- Expose the runtime as a small set of FFI entry points rather than making
-  every `Module.forward()` allocate scheduler objects.
+**Decode stays on the fused/spin-pool path** — single-token GEMV has no
+weight reuse, so the wins are register tiling, fused kernels, fewer bytes,
+and keeping all eight P-cores computing (caller assist). **Prefill gets the
+parallel structure** — multi-token GEMM has rows to amortise; morsels landed
+(`RAYZOR_PREFILL_MORSELS`), cache-blocked micro-kernels are the open follow-on.
 
 ---
 
