@@ -151,34 +151,96 @@ pub fn quantize_row_q8_K(x: &[f32], dest: &mut [Q8KBlock]) {
 
     for b in 0..nb {
         let src = &x[b * Q4_K_M_BLOCK_SIZE..(b + 1) * Q4_K_M_BLOCK_SIZE];
+        dest[b] = quantize_block_q8_K(src);
+    }
+}
 
-        // Pass 1: absolute max over the 256-element super-block.
-        let mut max_abs = 0.0f32;
+/// Quantise one 256-element super-block to the canonical `Q8KBlock`.
+///
+/// NEON path on aarch64, scalar elsewhere — bit-identical by construction:
+/// `vcvtaq_s32_f32` (FCVTAS) rounds ties AWAY from zero, exactly matching
+/// the scalar `roundf`, and `x*inv_d ∈ [-127, 127]` by the absmax scale so
+/// the saturating narrows reproduce the defensive `[-128, 127]` clamp.
+#[inline]
+fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
+    debug_assert_eq!(src.len(), Q4_K_M_BLOCK_SIZE);
+
+    // Pass 1: absolute max over the 256-element super-block.
+    #[allow(unused_assignments)] // overwritten in aarch64 path, read in fallback
+    let mut max_abs = 0.0f32;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        let pa = src.as_ptr();
+        let abs_mask = vdupq_n_u32(0x7FFF_FFFF);
+        let mut m0 = vdupq_n_f32(0.0);
+        let mut m1 = vdupq_n_f32(0.0);
+        let mut m2 = vdupq_n_f32(0.0);
+        let mut m3 = vdupq_n_f32(0.0);
+        let mut i = 0;
+        while i < 256 {
+            let v0 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i))), abs_mask);
+            let v1 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))), abs_mask);
+            let v2 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))), abs_mask);
+            let v3 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))), abs_mask);
+            m0 = vmaxq_f32(m0, vreinterpretq_f32_u32(v0));
+            m1 = vmaxq_f32(m1, vreinterpretq_f32_u32(v1));
+            m2 = vmaxq_f32(m2, vreinterpretq_f32_u32(v2));
+            m3 = vmaxq_f32(m3, vreinterpretq_f32_u32(v3));
+            i += 16;
+        }
+        max_abs = vmaxvq_f32(vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3)));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
         for &v in src {
             let a = v.abs();
             if a > max_abs {
                 max_abs = a;
             }
         }
+    }
 
-        // Degenerate block: zero quants, scale=0, bsums=0. Matches llama.cpp
-        // which sets `d=0` and skips the encode loop.
-        if max_abs == 0.0 {
-            dest[b] = Q8KBlock {
-                d: 0.0,
-                qs: [0i8; 256],
-                bsums: [0i16; 16],
-            };
-            continue;
+    // Degenerate block: zero quants, scale=0, bsums=0. Matches llama.cpp
+    // which sets `d=0` and skips the encode loop.
+    if max_abs == 0.0 {
+        return Q8KBlock {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16],
+        };
+    }
+
+    let d = max_abs / 127.0;
+    let inv_d = 127.0 / max_abs;
+
+    let mut qs = [0i8; 256];
+    let mut bsums = [0i16; 16];
+
+    // Pass 2: quant + 16-elem partial sums.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        let pa = src.as_ptr();
+        let inv = vdupq_n_f32(inv_d);
+        for s in 0..16 {
+            let base = s * 16;
+            // 16 floats → 4 lanes of i32 (FCVTAS = round ties away, as roundf).
+            let q0 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(pa.add(base)), inv));
+            let q1 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(pa.add(base + 4)), inv));
+            let q2 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(pa.add(base + 8)), inv));
+            let q3 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(pa.add(base + 12)), inv));
+            // Saturating narrows i32→i16→i8 (values are within ±127).
+            let h0 = vcombine_s16(vqmovn_s32(q0), vqmovn_s32(q1));
+            let h1 = vcombine_s16(vqmovn_s32(q2), vqmovn_s32(q3));
+            let b8 = vcombine_s8(vqmovn_s16(h0), vqmovn_s16(h1));
+            vst1q_s8(qs.as_mut_ptr().add(base), b8);
+            // Widening horizontal sum of 16 i8s — max |sum| 2032, fits i16.
+            bsums[s] = vaddlvq_s8(b8);
         }
-
-        let d = max_abs / 127.0;
-        let inv_d = 127.0 / max_abs;
-
-        let mut qs = [0i8; 256];
-        let mut bsums = [0i16; 16];
-
-        // Pass 2: quant + 16-elem partial sums.
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
         for s in 0..16 {
             let mut sum: i32 = 0;
             for j in 0..16 {
@@ -192,7 +254,108 @@ pub fn quantize_row_q8_K(x: &[f32], dest: &mut [Q8KBlock]) {
             // the type clean).
             bsums[s] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
+    }
 
-        dest[b] = Q8KBlock { d, qs, bsums };
+    Q8KBlock { d, qs, bsums }
+}
+
+#[cfg(test)]
+mod q8k_neon_tests {
+    use super::*;
+
+    /// Scalar reference — the exact pre-NEON loop, kept verbatim so the
+    /// vector path is checked against known-good semantics (roundf ties
+    /// away from zero, defensive [-128,127] clamp, i16 bsums).
+    fn quantize_block_q8_k_ref(src: &[f32]) -> Q8KBlock {
+        let mut max_abs = 0.0f32;
+        for &v in src {
+            let a = v.abs();
+            if a > max_abs {
+                max_abs = a;
+            }
+        }
+        if max_abs == 0.0 {
+            return Q8KBlock {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            };
+        }
+        let d = max_abs / 127.0;
+        let inv_d = 127.0 / max_abs;
+        let mut qs = [0i8; 256];
+        let mut bsums = [0i16; 16];
+        for s in 0..16 {
+            let mut sum: i32 = 0;
+            for j in 0..16 {
+                let q = roundf(src[s * 16 + j] * inv_d).clamp(-128.0, 127.0) as i8;
+                qs[s * 16 + j] = q;
+                sum += q as i32;
+            }
+            bsums[s] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
+        Q8KBlock { d, qs, bsums }
+    }
+
+    fn assert_block_eq(a: &Q8KBlock, b: &Q8KBlock, label: &str) {
+        assert_eq!(a.d.to_bits(), b.d.to_bits(), "{label}: d differs");
+        assert_eq!(a.qs, b.qs, "{label}: qs differ");
+        assert_eq!(a.bsums, b.bsums, "{label}: bsums differ");
+    }
+
+    #[test]
+    fn neon_matches_scalar_reference_exactly() {
+        // Deterministic LCG so the test is reproducible.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as i32 as f32) / (1 << 20) as f32
+        };
+        for round in 0..64 {
+            let src: Vec<f32> = (0..256).map(|_| next()).collect();
+            assert_block_eq(
+                &quantize_block_q8_K(&src),
+                &quantize_block_q8_k_ref(&src),
+                &format!("random round {round}"),
+            );
+        }
+    }
+
+    #[test]
+    fn neon_matches_scalar_on_edges() {
+        // All zeros (degenerate path).
+        let zeros = vec![0.0f32; 256];
+        assert_block_eq(
+            &quantize_block_q8_K(&zeros),
+            &quantize_block_q8_k_ref(&zeros),
+            "zeros",
+        );
+        // Exact rounding ties: with max_abs = 127.0, inv_d = 1.0, so values
+        // like 0.5, 1.5, -2.5 hit the round-half boundary exactly — the
+        // case where vcvtnq (ties-to-even) would diverge from roundf
+        // (ties-away). vcvtaq must match roundf on every one.
+        let mut ties = vec![0.0f32; 256];
+        ties[0] = 127.0; // pins max_abs so inv_d == 1.0
+        for (i, slot) in ties.iter_mut().enumerate().skip(1) {
+            let half = (i as f32) - 128.0 + 0.5;
+            *slot = half.clamp(-127.0, 127.0);
+        }
+        assert_block_eq(
+            &quantize_block_q8_K(&ties),
+            &quantize_block_q8_k_ref(&ties),
+            "rounding ties",
+        );
+        // Saturation guard: ±max everywhere.
+        let mut sat = vec![127.5f32; 256];
+        for v in sat.iter_mut().skip(128) {
+            *v = -127.5;
+        }
+        assert_block_eq(
+            &quantize_block_q8_K(&sat),
+            &quantize_block_q8_k_ref(&sat),
+            "saturation",
+        );
     }
 }
