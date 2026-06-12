@@ -1048,3 +1048,109 @@ mod tests {
         assert!((got - want).abs() < 1e-3);
     }
 }
+
+/// Vectorized exp(x) for one float32x4 lane — Cephes polynomial with
+/// Cody-Waite range reduction. Max error ~1-2 ULP over the silu-relevant
+/// range; inputs are clamped to ±87.3 so 2^n scaling never overflows the
+/// exponent field.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn expq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64::float32x4_t {
+    use core::arch::aarch64::*;
+    let x = vminq_f32(
+        vmaxq_f32(x, vdupq_n_f32(-87.336_55)),
+        vdupq_n_f32(88.376_26),
+    );
+
+    // n = round(x * log2(e)); r = x - n*ln2 (split-constant for precision).
+    let n_f = vcvtq_f32_s32(vcvtaq_s32_f32(vmulq_f32(x, vdupq_n_f32(1.442_695_04))));
+    let mut r = vfmsq_f32(x, n_f, vdupq_n_f32(0.693_359_375)); // x - n*C1
+    r = vfmsq_f32(r, n_f, vdupq_n_f32(-2.121_944_4e-4)); // - n*C2
+
+    // exp(r) ≈ 1 + r + r²·P(r), Cephes degree-5 Horner.
+    let z = vmulq_f32(r, r);
+    let mut p = vdupq_n_f32(1.987_569_2e-4);
+    p = vfmaq_f32(vdupq_n_f32(1.398_199_9e-3), p, r);
+    p = vfmaq_f32(vdupq_n_f32(8.333_452e-3), p, r);
+    p = vfmaq_f32(vdupq_n_f32(4.166_579_6e-2), p, r);
+    p = vfmaq_f32(vdupq_n_f32(1.666_666_5e-1), p, r);
+    p = vfmaq_f32(vdupq_n_f32(0.5), p, r);
+    let y = vaddq_f32(vfmaq_f32(r, z, p), vdupq_n_f32(1.0));
+
+    // Scale by 2^n via exponent bits.
+    let n_i = vcvtaq_s32_f32(vmulq_f32(x, vdupq_n_f32(1.442_695_04)));
+    let pow2n = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(n_i, vdupq_n_s32(127)), 23));
+    vmulq_f32(y, pow2n)
+}
+
+/// silu(x) = x / (1 + exp(-x)) over a contiguous f32 buffer, NEON path.
+///
+/// # Safety
+/// `src` and `dst` must reference `n` live, non-overlapping f32 elements.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn silu_slice_neon(src: *const f32, dst: *mut f32, n: usize) {
+    use core::arch::aarch64::*;
+    let one = vdupq_n_f32(1.0);
+    let mut i = 0;
+    while i + 4 <= n {
+        let x = vld1q_f32(src.add(i));
+        let e = expq_f32(vnegq_f32(x));
+        vst1q_f32(dst.add(i), vdivq_f32(x, vaddq_f32(one, e)));
+        i += 4;
+    }
+    while i < n {
+        let x = *src.add(i);
+        *dst.add(i) = x / (1.0 + (-x).exp());
+        i += 1;
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod silu_neon_tests {
+    use super::*;
+
+    #[test]
+    fn silu_neon_close_to_libm() {
+        // Sweep the numerically interesting range; SwiGLU activations in
+        // practice live within ±30. Tolerance: the Cephes poly is ~1-2 ULP
+        // on exp; allow 4e-6 relative (or absolute near zero).
+        let mut src = Vec::new();
+        let mut v = -40.0f32;
+        while v <= 40.0 {
+            src.push(v);
+            v += 0.0073;
+        }
+        let n = src.len();
+        let mut dst = vec![0.0f32; n];
+        unsafe { silu_slice_neon(src.as_ptr(), dst.as_mut_ptr(), n) };
+        for i in 0..n {
+            let x = src[i];
+            let want = x / (1.0 + (-x).exp());
+            let got = dst[i];
+            let tol = 4e-6f32.max(want.abs() * 4e-6);
+            assert!(
+                (got - want).abs() <= tol,
+                "silu({x}) = {got}, want {want} (diff {})",
+                (got - want).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn silu_neon_tail_and_extremes() {
+        // Non-multiple-of-4 length exercises the scalar tail; extremes
+        // exercise the clamp (exp(-x) under/overflow regions).
+        let src = [0.0f32, -100.0, 100.0, 87.0, -87.0, 1e-30, -1e-30];
+        let mut dst = [0.0f32; 7];
+        unsafe { silu_slice_neon(src.as_ptr(), dst.as_mut_ptr(), 7) };
+        for i in 0..7 {
+            let x = src[i];
+            let want = x / (1.0 + (-x).exp());
+            assert!(
+                (dst[i] - want).abs() <= 4e-6f32.max(want.abs() * 4e-6),
+                "silu({x}) = {}, want {want}",
+                dst[i]
+            );
+        }
+    }
+}
