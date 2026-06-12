@@ -79,6 +79,7 @@ binaries). Three rules learned the hard way:
 | NEON q8_K activation quantizer | +2.5 tok/s median (ABBA), bit-identical (FCVTAS ties-away = roundf) | runtime-core q8_k.rs |
 | Prefill morsels default ON | bare deployments no longer 2.8× slower prefill | `RAYZOR_PREFILL_MORSELS=0` opts out |
 | Hot-path env::var hoist | ~490 env-lock hits/token removed | `llamacpp_kernel_enabled()` OnceLock |
+| Dynamic chunk stealing | variance: σ 33.6→1.5, min 7.6→80.9 on busy box; median +9 vs static bands same conditions | worker_pool.rs (`RAYZOR_STATIC_BANDS=1` reverts) |
 
 ### Refuted (do not retry without changed conditions)
 
@@ -113,8 +114,9 @@ to exhaustion. What remains, ranked by evidence:
    with the WebGPU/WASM edge story. Being scoped.
 3. **Prefill GEMM cache blocking.** Prefill is the one matmul with weight
    reuse (real tiling target); a TTFT lever, not a tok/s lever.
-4. **Dynamic chunk stealing** in matmul bands: stabilises 8-wide configs
-   (kills the straggler fragility) but median-neutral at current widths.
+4. ~~Dynamic chunk stealing~~ — LANDED as the variance fix (see ledger);
+   the earlier "median-neutral" call was made before caller-assist created
+   an exclusively-owned band that a stalled caller could strand.
 5. **Decode-loop alloc churn**: ~490 frees/token remain after the GQA fixes;
    bounded at 0.5-2.3% of wall by the arena measurement — cleanup value,
    not a throughput lever.
