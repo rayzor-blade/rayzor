@@ -32,12 +32,12 @@ native-libs = ["../../../target/release/libnue_plugins.dylib"]
 # runs. For this workload it currently costs more than it gives back.
 [tier]
 interpreter_threshold = 1
-warm_threshold = 10
-hot_threshold = 20
+warm_threshold = 30
+hot_threshold = 5
 blazing_threshold = "max"
 sample_rate = 1
-start_interpreted = true
+start_interpreted = false
 enable_tier_promotion = true
 verbosity = 0
 enable_stack_traces = false
-auto_upgrade_to_llvm_after_main_entry = true
+auto_upgrade_to_llvm_after_main_entry = false
