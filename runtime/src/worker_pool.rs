@@ -211,6 +211,19 @@ impl WorkerPool {
             return self.parallel_rows_legacy(rows, n, f);
         }
 
+        // Dynamic chunk stealing (default): all compute threads pull
+        // fixed-size chunks from a shared atomic cursor instead of owning
+        // one static band each. With static bands, ONE preempted thread
+        // (tier-promotion compile, the streaming client waking per token,
+        // any 9th runnable on 8 P-cores) stalls the join for its entire
+        // band — measured as 10-20 tok/s dips on an otherwise ~90 tok/s
+        // decode. With stealing, a preempted thread delays at most one
+        // chunk. Each row is still computed wholly by one thread, so
+        // outputs stay bit-identical. `RAYZOR_STATIC_BANDS=1` reverts.
+        if chunk_stealing_enabled() {
+            return self.parallel_rows_stealing(rows, n, caller_assists, f);
+        }
+
         let chunk = rows.div_ceil(n);
 
         // Build bands. Any band whose lo >= rows is empty and skipped —
@@ -268,6 +281,59 @@ impl WorkerPool {
         // Spin-wait for pending → 0. Acquire pairs with each worker's
         // Release fetch_sub, ensuring the closure's writes (to
         // `out_tensor`) are visible before we return.
+        while self.inner.pending.load(Ordering::Acquire) > 0 {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Chunk-stealing fork-join: dispatch a shared *driver* closure to the
+    /// workers (and run it on the caller when assisting); every compute
+    /// thread pulls `[lo, lo+chunk)` spans off one atomic cursor until the
+    /// row space is drained. Reuses the existing slot/pending protocol —
+    /// the driver simply ignores the static band written into its slot.
+    fn parallel_rows_stealing<F>(&self, rows: usize, n: usize, caller_assists: bool, f: F)
+    where
+        F: Fn(usize, usize) + Send + Sync + 'static,
+    {
+        // Target ~4 chunks per thread so a straggler forfeits at most
+        // ~1/(4n) of the work; floor at 8 rows to bound cursor traffic
+        // for small row counts (q_heads etc.).
+        let chunk = rows.div_ceil(n * 4).max(8).min(rows);
+        let cursor = CachelinePad {
+            inner: AtomicUsize::new(0),
+        };
+
+        let driver = move |_lo: usize, _hi: usize| loop {
+            let lo = cursor.fetch_add(chunk, Ordering::Relaxed);
+            if lo >= rows {
+                break;
+            }
+            f(lo, (lo + chunk).min(rows));
+        };
+
+        let workers = if caller_assists { n - 1 } else { n };
+        let workers = workers.min(self.n);
+
+        self.inner.pending.store(workers, Ordering::Release);
+
+        fn erase<D: Fn(usize, usize) + Send + Sync>(d: &D) -> (*const (), *mut ()) {
+            (d as *const D as *const (), trampoline_for::<D> as *mut ())
+        }
+        let (d_ptr, trampoline) = erase(&driver);
+        for slot in self.inner.slots.iter().take(workers) {
+            slot.lo.store(0, Ordering::Relaxed);
+            slot.hi.store(0, Ordering::Relaxed);
+            slot.closure_ptr.store(d_ptr as *mut (), Ordering::Relaxed);
+            slot.trampoline.store(trampoline, Ordering::Relaxed);
+            slot.state.store(1, Ordering::Release);
+        }
+
+        if caller_assists {
+            WORKER_THREAD.with(|on| *on.borrow_mut() = true);
+            driver(0, 0);
+            WORKER_THREAD.with(|on| *on.borrow_mut() = false);
+        }
+
         while self.inner.pending.load(Ordering::Acquire) > 0 {
             std::hint::spin_loop();
         }
@@ -494,6 +560,13 @@ pub fn auto_kernel_threads() -> usize {
 fn caller_band_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1"))
+}
+
+/// Whether fork-joins use dynamic chunk stealing (default) instead of one
+/// static band per thread. `RAYZOR_STATIC_BANDS=1` reverts.
+fn chunk_stealing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1"))
 }
 
 /// Process-wide singleton. Lazily constructed on first `global()` call with a
