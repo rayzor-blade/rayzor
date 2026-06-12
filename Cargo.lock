@@ -2903,6 +2903,7 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "rayon",
  "rayzor-plugin",
  "rayzor-runtime-core",
  "regex",

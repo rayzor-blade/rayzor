@@ -2873,6 +2873,38 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
     slot_index: i32,
     closure_ptr: i64,
 ) {
+    if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
+        // Slot values are FunctionRef closures {fn_ptr, env}; symbolize the
+        // inner fn_ptr, which is the dispatch thunk (or the method itself).
+        let symbolize = |addr: i64| -> String {
+            unsafe {
+                let mut info: libc::Dl_info = std::mem::zeroed();
+                if libc::dladdr(addr as *const libc::c_void, &mut info) != 0
+                    && !info.dli_sname.is_null()
+                {
+                    std::ffi::CStr::from_ptr(info.dli_sname)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::from("?")
+                }
+            }
+        };
+        let inner_fn = if closure_ptr > 0x1000 {
+            unsafe { *(closure_ptr as *const i64) }
+        } else {
+            0
+        };
+        eprintln!(
+            "[iface_set_slot] class={} iface={} slot={} ptr={:#x} fn={:#x} fn_sym={}",
+            class_type_id as u32,
+            iface_type_id as u32,
+            slot_index,
+            closure_ptr,
+            inner_fn,
+            symbolize(inner_fn)
+        );
+    }
     let mut registry = IFACE_VTABLE_REGISTRY.write().unwrap();
     let map = registry.get_or_insert_with(HashMap::new);
     let key = (class_type_id as u32, iface_type_id as u32);
@@ -2894,16 +2926,37 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
 /// interface (no registry entry).
 #[no_mangle]
 pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32) -> *mut u8 {
+    let debug = std::env::var_os("RAYZOR_IFACE_DEBUG").is_some();
     if obj_ptr.is_null() || (obj_ptr as usize) < 0x1000 {
+        if debug {
+            eprintln!(
+                "[iface_fat_ptr_build] null/low obj_ptr={:p} iface={}",
+                obj_ptr, iface_type_id
+            );
+        }
         return std::ptr::null_mut();
     }
     let class_type_id = unsafe { *(obj_ptr as *const i64) } as u32;
     let registry = IFACE_VTABLE_REGISTRY.read().unwrap();
     let Some(map) = registry.as_ref() else {
+        if debug {
+            eprintln!(
+                "[iface_fat_ptr_build] registry EMPTY (no module ran register_interface_impl); class_id={} iface={}",
+                class_type_id, iface_type_id
+            );
+        }
         return std::ptr::null_mut();
     };
     let key = (class_type_id, iface_type_id as u32);
     let Some(vtable) = map.get(&key) else {
+        if debug {
+            eprintln!(
+                "[iface_fat_ptr_build] MISS class_id={} iface={} (registry has {} entries)",
+                class_type_id,
+                iface_type_id,
+                map.len()
+            );
+        }
         return std::ptr::null_mut();
     };
     let total_size = 8 + 8 * vtable.len();

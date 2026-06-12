@@ -205,6 +205,12 @@ pub struct HirToMirContext<'a> {
     /// underlying method.
     method_ref_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
 
+    /// Thunks for virtual/interface dispatch slots. The generic indirect-call
+    /// ABI prepends a closure env pointer, while class methods are declared as
+    /// `(this, ...args)`. These thunks use `(env, this, ...args)` and forward to
+    /// the real method, ignoring `env`.
+    vtable_dispatch_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
+
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
     constructor_name_map: BTreeMap<String, IrFunctionId>,
@@ -665,6 +671,7 @@ impl<'a> HirToMirContext<'a> {
             constructor_map: BTreeMap::new(),
             constructor_reflect_wrappers: BTreeMap::new(),
             method_ref_thunks: BTreeMap::new(),
+            vtable_dispatch_thunks: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             current_hir_types: hir_types,
             stdlib_mapping,
@@ -33275,7 +33282,10 @@ impl<'a> HirToMirContext<'a> {
                 .copied()
                 .or_else(|| self.external_function_map.get(method_sym).copied());
             if let Some(func_id) = func_id_opt {
-                let fn_ref = self.builder.build_function_ref(func_id)?;
+                let dispatch_func_id = self
+                    .ensure_vtable_dispatch_thunk(func_id)
+                    .unwrap_or(func_id);
+                let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
                 let offset_val = self
                     .builder
                     .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
@@ -36544,6 +36554,111 @@ impl<'a> HirToMirContext<'a> {
     /// Wrapper ABI: `fn(obj_ptr: *u8, args: *void) -> void`
     /// Runtime passes raw 64-bit array slots via `args`; wrappers reinterpret/cast
     /// each slot to match the concrete constructor signature.
+    fn ensure_vtable_dispatch_thunk(
+        &mut self,
+        method_func_id: IrFunctionId,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.vtable_dispatch_thunks.get(&method_func_id) {
+            return Some(*cached);
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (method_sig, method_qname) = {
+            let func = self.builder.module.functions.get(&method_func_id)?;
+            let qname = func
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| func.name.clone());
+            (func.signature.clone(), qname)
+        };
+        if method_sig.parameters.is_empty() {
+            return None;
+        }
+
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8.clone())
+            .returns(method_sig.return_type.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for param in &method_sig.parameters {
+            sig_builder = sig_builder.param(param.name.clone(), param.ty.clone());
+        }
+        let thunk_sig = sig_builder.build();
+
+        let thunk_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        // Name the thunk by the target method's QUALIFIED name, not its raw
+        // module-local func id. Local ids collide across modules post-merge:
+        // two modules both emit `__vtable_dispatch_thunk_2` for different
+        // methods, the LLVM declare pass dedupes by name, and whichever
+        // FunctionRef escaped renumbering binds to the FIRST module's thunk —
+        // dispatching e.g. `forwardIds` into an unrelated `forward` whose
+        // first op reads x.shape() from a token array (SIGSEGV in
+        // rayzor_tensor_shape). A qualified-name thunk is behaviorally
+        // identical no matter which module's copy a stale ref lands on.
+        let sanitized_qname: String = method_qname
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let thunk_name = format!("__vtable_dispatch_thunk__{}", sanitized_qname);
+
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        let saved_strict_move_locals = self.strict_move_locals.clone();
+        self.symbol_map.clear();
+        self.strict_move_locals.clear();
+
+        let thunk_id = self
+            .builder
+            .start_function(thunk_symbol, thunk_name, thunk_sig);
+
+        let call_args = {
+            let Some(func) = self.builder.current_function() else {
+                self.builder.finish_function();
+                self.builder.current_function = saved_current_function;
+                self.builder.current_block = saved_current_block;
+                self.symbol_map = saved_symbol_map;
+                self.strict_move_locals = saved_strict_move_locals;
+                return None;
+            };
+            let mut args = Vec::with_capacity(method_sig.parameters.len());
+            for i in 0..method_sig.parameters.len() {
+                if let Some(reg) = func.get_param_reg(i + 1) {
+                    args.push(reg);
+                } else {
+                    self.builder.finish_function();
+                    self.builder.current_function = saved_current_function;
+                    self.builder.current_block = saved_current_block;
+                    self.symbol_map = saved_symbol_map;
+                    self.strict_move_locals = saved_strict_move_locals;
+                    return None;
+                }
+            }
+            args
+        };
+
+        let ret_ty = method_sig.return_type.clone();
+        if matches!(ret_ty, IrType::Void) {
+            self.builder
+                .build_call_direct(method_func_id, call_args, IrType::Void);
+            self.builder.build_return(None);
+        } else {
+            let result = self
+                .builder
+                .build_call_direct(method_func_id, call_args, ret_ty.clone());
+            self.builder.build_return(result);
+        }
+
+        self.builder.finish_function();
+        self.builder.current_function = saved_current_function;
+        self.builder.current_block = saved_current_block;
+        self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
+
+        self.vtable_dispatch_thunks.insert(method_func_id, thunk_id);
+        Some(thunk_id)
+    }
+
     /// Generate (or return cached) a thunk for `obj.method` lvalue
     /// support. The thunk bridges the closure-call ABI
     /// `fn_ptr(env_ptr, ...args)` to the underlying method's
@@ -36935,7 +37050,10 @@ impl<'a> HirToMirContext<'a> {
             // For each slot, create a FunctionRef closure and store it.
             for (slot_idx, method_sym) in vtable.iter().enumerate() {
                 if let Some(&func_id) = self.function_map.get(method_sym) {
-                    let closure_ptr = self.builder.build_function_ref(func_id);
+                    let dispatch_func_id = self
+                        .ensure_vtable_dispatch_thunk(func_id)
+                        .unwrap_or(func_id);
+                    let closure_ptr = self.builder.build_function_ref(dispatch_func_id);
                     let slot_reg = self.builder.build_const(IrValue::I32(slot_idx as i32));
                     let type_id_reg2 = self.builder.build_const(IrValue::I32(type_id));
                     if let (Some(cp), Some(sr), Some(tid2)) = (closure_ptr, slot_reg, type_id_reg2)
@@ -36969,6 +37087,21 @@ impl<'a> HirToMirContext<'a> {
         for ((class_sym, iface_sym), methods) in &interface_vtables {
             let class_tid = self.deterministic_class_type_id(*class_sym);
             let iface_tid = self.deterministic_iface_or_enum_type_id(*iface_sym, "iface");
+            if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
+                let names: Vec<&str> = methods
+                    .iter()
+                    .map(|m| {
+                        self.symbol_table
+                            .get_symbol(*m)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .unwrap_or("?")
+                    })
+                    .collect();
+                eprintln!(
+                    "[iface_vtable_emit] class_tid={:?} iface_tid={:?} methods={:?}",
+                    class_tid, iface_tid, names
+                );
+            }
             if let (Some(class_tid), Some(iface_tid)) = (class_tid, iface_tid) {
                 for (slot_idx, method_sym) in methods.iter().enumerate() {
                     // Only emit for locally-compiled methods. Imported
@@ -36980,7 +37113,10 @@ impl<'a> HirToMirContext<'a> {
                     // trap-stubs the entire init.
                     let func_id = self.function_map.get(method_sym).copied();
                     if let Some(func_id) = func_id {
-                        let closure_ptr = self.builder.build_function_ref(func_id);
+                        let dispatch_func_id = self
+                            .ensure_vtable_dispatch_thunk(func_id)
+                            .unwrap_or(func_id);
+                        let closure_ptr = self.builder.build_function_ref(dispatch_func_id);
                         let class_tid_reg =
                             self.builder.build_const(IrValue::I32(class_tid as i32));
                         let iface_tid_reg =

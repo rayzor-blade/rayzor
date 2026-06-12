@@ -119,6 +119,8 @@ impl AotCompiler {
             format!("Compilation failed with {} error(s)", errors.len())
         })?;
 
+        unit.finalize_mir_references();
+
         let mir_modules = unit.get_mir_modules();
         if mir_modules.is_empty() {
             return Err("No MIR modules generated".to_string());
@@ -437,13 +439,9 @@ impl AotCompiler {
             cmd.arg(format!("--target={}", triple));
         }
 
-        // Sysroot for cross-compilation
-        if let Some(ref sysroot) = self.sysroot {
-            cmd.arg(format!("--sysroot={}", sysroot.display()));
-        }
-
         // Platform-specific linker flags
         let triple_str = self.target_triple.as_deref().unwrap_or("");
+        self.configure_toolchain_sysroot(&mut cmd, triple_str)?;
         if triple_str.contains("darwin") || triple_str.is_empty() && cfg!(target_os = "macos") {
             // macOS
             cmd.args(["-lSystem", "-lc", "-lm", "-lpthread"]);
@@ -532,11 +530,9 @@ impl AotCompiler {
         if let Some(ref triple) = self.target_triple {
             cmd.arg(format!("--target={}", triple));
         }
-        if let Some(ref sysroot) = self.sysroot {
-            cmd.arg(format!("--sysroot={}", sysroot.display()));
-        }
 
         let triple_str = self.target_triple.as_deref().unwrap_or("");
+        self.configure_toolchain_sysroot(&mut cmd, triple_str)?;
         if triple_str.contains("darwin") || triple_str.is_empty() && cfg!(target_os = "macos") {
             cmd.args(["-lSystem", "-lc", "-lm", "-lpthread"]);
             cmd.args(["-framework", "CoreFoundation", "-framework", "Security"]);
@@ -579,6 +575,7 @@ impl AotCompiler {
         for candidate in &["clang", "gcc", "cc"] {
             if Command::new(candidate)
                 .arg("--version")
+                .env_remove("SDKROOT")
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false)
@@ -588,6 +585,66 @@ impl AotCompiler {
         }
 
         Err("No linker found. Install clang or gcc, or pass --linker <path>.".to_string())
+    }
+
+    fn configure_toolchain_sysroot(
+        &self,
+        cmd: &mut Command,
+        target_triple: &str,
+    ) -> Result<(), String> {
+        if target_triple.contains("darwin") || target_triple.is_empty() && cfg!(target_os = "macos")
+        {
+            if let Some(sdk) = self.resolve_macos_sdk_path()? {
+                cmd.arg("-isysroot").arg(&sdk);
+                // Prevent clang from inheriting a stale SDKROOT such as
+                // /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk.
+                cmd.env("SDKROOT", &sdk);
+            } else {
+                cmd.env_remove("SDKROOT");
+            }
+        } else if let Some(ref sysroot) = self.sysroot {
+            if !sysroot.exists() {
+                return Err(format!("AOT sysroot does not exist: {}", sysroot.display()));
+            }
+            cmd.arg(format!("--sysroot={}", sysroot.display()));
+        }
+
+        Ok(())
+    }
+
+    fn resolve_macos_sdk_path(&self) -> Result<Option<PathBuf>, String> {
+        if let Some(ref sysroot) = self.sysroot {
+            if sysroot.exists() {
+                return Ok(Some(sysroot.clone()));
+            }
+            return Err(format!("AOT sysroot does not exist: {}", sysroot.display()));
+        }
+
+        if let Ok(sdkroot) = std::env::var("SDKROOT") {
+            let path = PathBuf::from(sdkroot);
+            if path.exists() {
+                return Ok(Some(path));
+            }
+        }
+
+        if cfg!(target_os = "macos") {
+            let output = Command::new("xcrun")
+                .args(["--sdk", "macosx", "--show-sdk-path"])
+                .output();
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        let path = PathBuf::from(path);
+                        if path.exists() {
+                            return Ok(Some(path));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Find the runtime static library
@@ -789,6 +846,12 @@ impl AotCompiler {
         cmd.arg("-Wno-incompatible-pointer-types");
         cmd.arg("-lm");
 
+        if let Some(ref triple) = self.target_triple {
+            cmd.arg(format!("--target={}", triple));
+        }
+        let triple_str = self.target_triple.as_deref().unwrap_or("");
+        self.configure_toolchain_sysroot(&mut cmd, triple_str)?;
+
         // Platform-specific flags
         #[cfg(target_os = "linux")]
         {
@@ -885,32 +948,42 @@ fn find_entry_llvm_name(
 #[cfg(feature = "llvm-backend")]
 fn find_startup_llvm_names(
     backend: &crate::codegen::llvm_jit_backend::LLVMJitBackend,
-    modules: &[crate::ir::IrModule],
+    _modules: &[crate::ir::IrModule],
 ) -> Vec<String> {
     use std::collections::BTreeSet;
 
-    let symbols = backend.get_function_symbols();
-    let mut startup_names = Vec::new();
+    // Scan the LLVM module directly for defined startup hooks instead of
+    // mapping per-MIR-module func_ids through the symbol table. Multi-module
+    // builds emit one `__vtable_init__` per module — the backend dedupes the
+    // LLVM symbol names by suffixing (`__vtable_init___<func_id>`), and the
+    // id→symbol indirection used to drop all but the first couple, leaving
+    // the interface-vtable registry unpopulated at runtime (every
+    // iface-to-iface cast then returned a null fat pointer and the first
+    // interface dispatch SIGSEGV'd).
+    //
+    // Order matters loosely: all vtable registrations run before user
+    // `__init__` hooks, since static initializers may construct objects
+    // that need interface dispatch.
+    let mut vtable_inits = Vec::new();
+    let mut user_inits = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for module in modules {
-        for hook_name in ["__vtable_init__", "__init__"] {
-            let Some((func_id, _)) = module.functions.iter().find(|(_, f)| f.name == hook_name)
-            else {
-                continue;
-            };
-
-            let Some(symbol_name) = symbols.get(func_id) else {
-                continue;
-            };
-
-            if seen.insert(symbol_name.clone()) {
-                startup_names.push(symbol_name.clone());
+    let mut f = backend.get_module().get_first_function();
+    while let Some(func) = f {
+        let name = func.get_name().to_string_lossy().to_string();
+        // Declarations (no body) are cross-module forward refs — skip.
+        if func.count_basic_blocks() > 0 && seen.insert(name.clone()) {
+            if name == "__vtable_init__" || name.starts_with("__vtable_init___") {
+                vtable_inits.push(name);
+            } else if name == "__init__" || name.starts_with("__init___") {
+                user_inits.push(name);
             }
         }
+        f = func.get_next_function();
     }
 
-    startup_names
+    vtable_inits.extend(user_inits);
+    vtable_inits
 }
 
 fn format_command(cmd: &Command) -> String {

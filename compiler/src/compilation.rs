@@ -3633,33 +3633,60 @@ impl CompilationUnit {
         // current CallDirect's func_id directly avoids the
         // first-stub-wins miss. The id space is unique per
         // post-renumber session so there's no key collision.
-        let mut stub_name_by_id: std::collections::BTreeMap<crate::ir::IrFunctionId, String> =
-            std::collections::BTreeMap::new();
-        let mut record_stub =
-            |id: &crate::ir::IrFunctionId,
-             func: &crate::ir::IrFunction,
-             out: &mut std::collections::BTreeMap<crate::ir::IrFunctionId, String>| {
-                let is_empty_stub = func.cfg.blocks.len() == 1
-                    && func.cfg.blocks.values().all(|b| {
-                        b.instructions.is_empty()
-                            && matches!(b.terminator, IrTerminator::Unreachable)
-                    });
-                if is_empty_stub {
+        let mut stub_by_id: std::collections::BTreeMap<
+            crate::ir::IrFunctionId,
+            (String, crate::ir::IrFunctionSignature),
+        > = std::collections::BTreeMap::new();
+        let mut real_funcs_by_bare_name: std::collections::BTreeMap<
+            String,
+            Vec<(crate::ir::IrFunctionId, crate::ir::IrFunctionSignature)>,
+        > = std::collections::BTreeMap::new();
+
+        fn is_empty_forward_ref_stub(func: &crate::ir::IrFunction) -> bool {
+            func.cfg.blocks.len() == 1
+                && func.cfg.blocks.values().all(|b| {
+                    b.instructions.is_empty() && matches!(b.terminator, IrTerminator::Unreachable)
+                })
+        }
+
+        fn bare_function_name(name: &str) -> &str {
+            name.rsplit('.').next().unwrap_or(name)
+        }
+
+        for m in &self.import_mir_modules {
+            for (id, func) in &m.functions {
+                if is_empty_forward_ref_stub(func) {
                     let name = func
                         .qualified_name
                         .clone()
                         .unwrap_or_else(|| func.name.clone());
-                    out.insert(*id, name);
+                    stub_by_id.insert(*id, (name, func.signature.clone()));
                 }
-            };
-        for m in &self.import_mir_modules {
-            for (id, func) in &m.functions {
-                record_stub(id, func, &mut stub_name_by_id);
+                if !func.cfg.blocks.is_empty() {
+                    let qname = func.qualified_name.as_deref().unwrap_or(&func.name);
+                    real_funcs_by_bare_name
+                        .entry(bare_function_name(qname).to_string())
+                        .or_default()
+                        .push((*id, func.signature.clone()));
+                }
             }
         }
         for m in &self.mir_modules {
             for (id, func) in &m.functions {
-                record_stub(id, func, &mut stub_name_by_id);
+                if is_empty_forward_ref_stub(func) {
+                    let name = func
+                        .qualified_name
+                        .clone()
+                        .unwrap_or_else(|| func.name.clone());
+                    stub_by_id.insert(*id, (name, func.signature.clone()));
+                }
+                if !func.cfg.blocks.is_empty() {
+                    let qname = func.qualified_name.as_deref().unwrap_or(&func.name);
+                    real_funcs_by_bare_name
+                        .entry(bare_function_name(qname).to_string())
+                        .or_default()
+                        .push((*id, func.signature.clone()));
+                }
             }
         }
 
@@ -3674,12 +3701,72 @@ impl CompilationUnit {
         // the real stdlib impl. The previous version rewrote only the
         // import side, leaving user CallDirects pointing at stubs that
         // would never get a body.
-        let stub_name_by_id = &stub_name_by_id;
+        let stub_by_id = &stub_by_id;
+        let real_funcs_by_bare_name = &real_funcs_by_bare_name;
         let stdlib_map = &self.stdlib_function_name_map;
         let all_func_ids = &all_func_ids;
+        fn signatures_match(
+            a: &crate::ir::IrFunctionSignature,
+            b: &crate::ir::IrFunctionSignature,
+        ) -> bool {
+            a.calling_convention == b.calling_convention
+                && a.return_type == b.return_type
+                && a.uses_sret == b.uses_sret
+                && a.parameters.len() == b.parameters.len()
+                && a.parameters
+                    .iter()
+                    .zip(b.parameters.iter())
+                    .all(|(pa, pb)| pa.ty == pb.ty && pa.by_ref == pb.by_ref)
+        }
+        fn unique_bare_match(
+            name: &str,
+            sig: &crate::ir::IrFunctionSignature,
+            real_funcs_by_bare_name: &std::collections::BTreeMap<
+                String,
+                Vec<(crate::ir::IrFunctionId, crate::ir::IrFunctionSignature)>,
+            >,
+            skip_id: Option<crate::ir::IrFunctionId>,
+        ) -> Option<crate::ir::IrFunctionId> {
+            let bare_name = bare_function_name(name);
+            let candidates = real_funcs_by_bare_name.get(bare_name)?;
+            let mut matches = candidates
+                .iter()
+                .filter_map(|(candidate_id, candidate_sig)| {
+                    if Some(*candidate_id) == skip_id {
+                        return None;
+                    }
+                    if signatures_match(candidate_sig, sig) {
+                        Some(*candidate_id)
+                    } else {
+                        None
+                    }
+                });
+            let real_id = matches.next()?;
+            if matches.next().is_none() {
+                Some(real_id)
+            } else {
+                None
+            }
+        }
 
         let mut rewrite_module = |module: &mut crate::ir::IrModule| {
             let ext_names = module.external_function_names.clone();
+            let ext_sigs: std::collections::BTreeMap<
+                crate::ir::IrFunctionId,
+                crate::ir::IrFunctionSignature,
+            > = module
+                .extern_functions
+                .iter()
+                .map(|(id, ext)| (*id, ext.signature.clone()))
+                .collect();
+            let ext_decl_by_id: std::collections::BTreeMap<
+                crate::ir::IrFunctionId,
+                (String, crate::ir::IrFunctionSignature),
+            > = module
+                .extern_functions
+                .iter()
+                .map(|(id, ext)| (*id, (ext.name.clone(), ext.signature.clone())))
+                .collect();
             for func in module.functions.values_mut() {
                 for block in func.cfg.blocks.values_mut() {
                     for inst in &mut block.instructions {
@@ -3704,6 +3791,29 @@ impl CompilationUnit {
                                 if let Some(name) = ext_names.get(func_id) {
                                     if let Some(&current_id) = stdlib_map.get(name) {
                                         *func_id = current_id;
+                                        continue;
+                                    }
+                                    if let Some(sig) = ext_sigs.get(func_id) {
+                                        if let Some(real_id) = unique_bare_match(
+                                            name,
+                                            sig,
+                                            real_funcs_by_bare_name,
+                                            None,
+                                        ) {
+                                            *func_id = real_id;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if let Some((name, sig)) = ext_decl_by_id.get(func_id) {
+                                    if let Some(&current_id) = stdlib_map.get(name.as_str()) {
+                                        *func_id = current_id;
+                                        continue;
+                                    }
+                                    if let Some(real_id) =
+                                        unique_bare_match(name, sig, real_funcs_by_bare_name, None)
+                                    {
+                                        *func_id = real_id;
                                     }
                                     continue;
                                 }
@@ -3717,9 +3827,18 @@ impl CompilationUnit {
                                 // missing-impl error rather than silently
                                 // dispatching to an unrelated function).
                                 if all_func_ids.contains(func_id) {
-                                    if let Some(stub_name) = stub_name_by_id.get(func_id) {
+                                    if let Some((stub_name, stub_sig)) = stub_by_id.get(func_id) {
                                         if let Some(&real_id) = stdlib_map.get(stub_name.as_str()) {
                                             if real_id != *func_id {
+                                                *func_id = real_id;
+                                            }
+                                        } else {
+                                            if let Some(real_id) = unique_bare_match(
+                                                stub_name,
+                                                stub_sig,
+                                                real_funcs_by_bare_name,
+                                                Some(*func_id),
+                                            ) {
                                                 *func_id = real_id;
                                             }
                                         }
@@ -6711,6 +6830,16 @@ impl CompilationUnit {
     /// Returns a vector of MIR modules corresponding to the compiled files.
     pub fn get_mir_modules(&self) -> Vec<std::sync::Arc<crate::ir::IrModule>> {
         self.mir_modules.clone()
+    }
+
+    /// Finalize cross-module MIR references after all imports and user files
+    /// have been lowered. Artifact builders such as AOT clone MIR directly
+    /// after `lower_to_tast()`, so they need the same coherency pass that the
+    /// interactive compile path runs before codegen.
+    pub fn finalize_mir_references(&mut self) {
+        self.fixup_stale_cross_module_refs();
+        self.fixup_stale_constructor_ids();
+        self.fixup_stale_method_ids();
     }
 
     /// Get extern function → JS module name mappings (from @:jsImport classes).
