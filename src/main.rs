@@ -1636,15 +1636,30 @@ fn run_file(
             h.set_functions(mir_module.functions.len());
         }
 
-        // TODO(blade-coherence F4): skip the cache write when
-        // compile_diagnostics contains Errors — one failing mixed-cache
-        // run poisons every later "all-cached" run. Deferred until the
-        // routine latent compile errors (F8: Int32/abstract member
-        // pre-registration, extern stdlib statics, …) are fixed; today a
-        // NORMAL successful run of llama-chat-server stores ~19 error
-        // diagnostics, so gating on them would disable the warm path
-        // entirely and force every run into the (still broken) mixed
-        // state.
+        // TODO(blade-coherence F4): gate this write on
+        // `compile_diagnostics` containing no Error-severity entries, so
+        // an erroring compile can never poison later all-cached runs.
+        // The abstract-member pre-pass cut the silently-stored errors
+        // from ~19 to 8; the guard stays off until the remaining three
+        // classes are fixed (else the warm path turns off entirely):
+        //   1. "Int32: Invalid assignment target" x4 — abstract
+        //      op-assign lowering.
+        //   2. "BytesBuffer: Cannot access field 'high'/'low'" — the
+        //      surviving Int64 receiver-property edge (second E0100
+        //      emitter near hir_to_mir.rs:26514, not the instrumented
+        //      one).
+        //   3. "FPHelper: POSITIVE/NEGATIVE_INFINITY" — extern stdlib
+        //      statics (Math constants) not registered as globals.
+        // Diagnose with RAYZOR_DUMP_STORED_DIAGS=1.
+        if cache_enabled && std::env::var_os("RAYZOR_DUMP_STORED_DIAGS").is_some() {
+            for d in compile_diagnostics
+                .iter()
+                .filter(|d| d.severity == diagnostics::DiagnosticSeverity::Error)
+                .take(8)
+            {
+                eprintln!("[stored-error] {}", d.message);
+            }
+        }
         // Save MIR cache with pre-rendered diagnostic strings
         if cache_enabled {
             // Render diagnostics to strings for cache replay
