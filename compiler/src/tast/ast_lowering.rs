@@ -4122,6 +4122,119 @@ impl<'a> AstLowering<'a> {
         // Push abstract onto class context stack so `this` resolves correctly in method bodies
         self.context.class_context_stack.push(abstract_symbol);
 
+        // Pre-pass: create symbols (with pre-computed signature types) for
+        // every member BEFORE lowering any body, mirroring the class
+        // lowering's method pre-pass at lower_class_declaration. Abstracts
+        // previously lowered members strictly in source order, so a method
+        // body referencing a member declared LATER in the file failed
+        // resolution — e.g. haxe.Int64's `copy()` (line ~43) reads `high`,
+        // a property declared at line ~445 ("Cannot find name 'high'"),
+        // and Int32's operator methods call the `clamp` static declared
+        // below them ("Cannot find name 'clamp'"). These fired as
+        // [IMPORT[...]] errors on every fresh stdlib compile and were
+        // tolerated only by retry/fallback machinery.
+        for field in &abstract_decl.fields {
+            let is_static = field
+                .modifiers
+                .iter()
+                .any(|m| matches!(m, parser::haxe_ast::Modifier::Static));
+            match &field.kind {
+                ClassFieldKind::Function(func) => {
+                    if func.name == "new" {
+                        continue;
+                    }
+                    let method_name = self.context.intern_string(&func.name);
+                    if self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(abstract_scope, method_name)
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    let sym = self
+                        .context
+                        .symbol_table
+                        .create_function_in_scope(method_name, abstract_scope);
+                    if let Some(scope) = self.context.scope_tree.get_scope_mut(abstract_scope) {
+                        scope.add_symbol(sym, method_name);
+                    }
+                    if is_static {
+                        self.context
+                            .symbol_table
+                            .add_symbol_flags(sym, crate::tast::symbols::SymbolFlags::STATIC);
+                    }
+                    let param_types: Vec<TypeId> = func
+                        .params
+                        .iter()
+                        .map(|p| {
+                            if let Some(ref type_hint) = p.type_hint {
+                                self.lower_type(type_hint).unwrap_or_else(|_| {
+                                    self.context.type_table.borrow().dynamic_type()
+                                })
+                            } else {
+                                self.context.type_table.borrow().dynamic_type()
+                            }
+                        })
+                        .collect();
+                    let return_type = if let Some(ref ret_type) = func.return_type {
+                        self.lower_type(ret_type)
+                            .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
+                    } else {
+                        self.context.type_table.borrow().dynamic_type()
+                    };
+                    let function_type = self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_function_type(param_types, return_type);
+                    self.context
+                        .symbol_table
+                        .update_symbol_type(sym, function_type);
+                }
+                ClassFieldKind::Var {
+                    name, type_hint, ..
+                }
+                | ClassFieldKind::Final {
+                    name, type_hint, ..
+                }
+                | ClassFieldKind::Property {
+                    name, type_hint, ..
+                } => {
+                    let member_name = self.context.intern_string(name);
+                    if self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(abstract_scope, member_name)
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    let member_type = if let Some(th) = type_hint {
+                        self.lower_type(th)
+                            .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
+                    } else {
+                        self.context.type_table.borrow().dynamic_type()
+                    };
+                    let sym = self.context.symbol_table.create_variable(member_name);
+                    self.context
+                        .symbol_table
+                        .update_symbol_type(sym, member_type);
+                    if let Some(s) = self.context.symbol_table.get_symbol_mut(sym) {
+                        s.kind = crate::tast::SymbolKind::Field;
+                    }
+                    if is_static {
+                        self.context
+                            .symbol_table
+                            .add_symbol_flags(sym, crate::tast::symbols::SymbolFlags::STATIC);
+                    }
+                    if let Some(scope) = self.context.scope_tree.get_scope_mut(abstract_scope) {
+                        scope.add_symbol(sym, member_name);
+                    }
+                }
+            }
+        }
+
         // Process fields - separate fields, methods, and constructors
         let mut fields = Vec::with_capacity(abstract_decl.fields.len());
         let mut methods = Vec::with_capacity(abstract_decl.fields.len());
