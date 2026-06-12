@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+
 RAYZOR="${RAYZOR:-../../../target/release/rayzor}"
 MODEL_PATH="${RAYZOR_SERVER_MODEL:-${GGUF:-/Users/amaterasu/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct-GGUF/snapshots/b69aef112e9f895e6f98d7ae0949f72ff09aa401/Llama-3.2-1B-Instruct-Q4_K_M.gguf}}"
 PROMPTS="${PROMPTS:-Explain voronoi regions and their connection to delaunay computation.|||Describe vector graph database implementation.|||Give a compact Haxe example of an actor worker.}"
@@ -365,18 +366,24 @@ run_one() {
   local port=$((PORT_BASE + ordinal))
   local log="$TMP_DIR/run-${run_no}-${variant//\//_}.log"
   local client_log="$TMP_DIR/client-${run_no}-${variant//\//_}.log"
-  local cmd=("$RAYZOR" run)
-
-  if [[ "$NO_CACHE" == "true" || "$NO_CACHE" == "1" || "$NO_CACHE" == "yes" ]]; then
-    cmd+=("--no-cache")
+  local cmd
+  if [[ -n "${SERVER_BIN:-}" ]]; then
+    # Prebuilt server binary (e.g. `rayzor aot` output). Tier flags and
+    # --no-cache are JIT-only and don't apply; program args go directly.
+    cmd=("$SERVER_BIN" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
+  else
+    cmd=("$RAYZOR" run)
+    if [[ "$NO_CACHE" == "true" || "$NO_CACHE" == "1" || "$NO_CACHE" == "yes" ]]; then
+      cmd+=("--no-cache")
+    fi
+    cmd+=("--safety-warnings" "off" "Main.hx" "--preset" "$PRESET" "--stats")
+    if [[ "$variant" != "toml" ]]; then
+      cmd+=("--tier-thresholds" "$variant")
+    fi
+    cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
+    cmd+=("--tier-promotion" "$TIER_PROMOTION")
+    cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   fi
-  cmd+=("--safety-warnings" "off" "Main.hx" "--preset" "$PRESET" "--stats")
-  if [[ "$variant" != "toml" ]]; then
-    cmd+=("--tier-thresholds" "$variant")
-  fi
-  cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
-  cmd+=("--tier-promotion" "$TIER_PROMOTION")
-  cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
 
   local env_cmd=("env" "RAYZOR_SERVER_MODEL=$MODEL_PATH")
   if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
