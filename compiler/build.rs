@@ -22,9 +22,17 @@ fn main() {
         .unwrap_or(0);
     println!("cargo:rustc-env=RAYZOR_BUILD_ID={}", build_secs);
 
-    // Re-run this script if any source under src/ir/ changes so the
-    // build-id moves and old caches get invalidated on the next build.
-    println!("cargo:rerun-if-changed=src/ir");
-    println!("cargo:rerun-if-changed=src/tast");
+    // Re-run this script (bumping the build id) whenever ANY compiler
+    // source changes. The previous list covered only src/ir, src/tast,
+    // and the parser — changes to src/codegen, src/compilation.rs,
+    // src/stdlib, haxe-std, etc. kept the OLD build id, so BLADE caches
+    // written by a meaningfully different compiler still validated and
+    // poisoned imports ("can't resolve symbol append" Cranelift panics,
+    // IMPORT[...] field errors). Over-invalidation is the right trade:
+    // one warm-up compile (~6-8s) per compiler rebuild, versus silent
+    // import corruption.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=haxe-std");
     println!("cargo:rerun-if-changed=../parser/src");
+    println!("cargo:rerun-if-changed=../diagnostics/src");
 }
