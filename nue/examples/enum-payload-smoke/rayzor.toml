@@ -1,0 +1,6 @@
+[project]
+name = "enum-payload-smoke"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

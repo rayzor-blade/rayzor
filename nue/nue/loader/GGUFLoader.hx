@@ -95,19 +95,16 @@ class GGUFLoader implements ModelLoader {
         var registryS = 0.0;
         var buildS = 0.0;
         var tokenizerS = 0.0;
-        trace("[lwt] 1");
         var bytes = File.getBytes(path);
         if (profileOn) {
             fileS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 2");
         var reader = new GGUFReader(bytes);
         if (profileOn) {
             readerS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 3");
         var meta = metadataFromReader(reader);
         if (maxCtx > 0 && maxCtx < meta.maxSeqLen) {
             meta.maxSeqLen = maxCtx;
@@ -116,25 +113,21 @@ class GGUFLoader implements ModelLoader {
             metaS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 4");
         var weights = tensorsFromReader(reader);
         if (profileOn) {
             tensorsS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 5");
         var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
         if (profileOn) {
             registryS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 6");
         var model = reg.build(meta, weights);
         if (profileOn) {
             buildS = Sys.time() - phaseStart;
             phaseStart = Sys.time();
         }
-        trace("[lwt] 7");
         var tok = GGUFTokenizer.build(reader);
         if (profileOn) {
             tokenizerS = Sys.time() - phaseStart;
@@ -147,7 +140,6 @@ class GGUFLoader implements ModelLoader {
                 + " tokenizer_s=" + tokenizerS
                 + " total_s=" + (Sys.time() - totalStart));
         }
-        trace("[lwt] 8");
         return { model: model, tokenizer: tok, metadata: meta };
     }
 
