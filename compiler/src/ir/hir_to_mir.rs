@@ -26200,6 +26200,16 @@ impl<'a> HirToMirContext<'a> {
                                 return self.builder.build_load_global(global_id, global_type);
                             }
 
+                            if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {
+                                let recv_kind = self
+                                    .type_table
+                                    .get(receiver_ty)
+                                    .map(|ti| format!("{:?}", ti.kind));
+                                eprintln!(
+                                    "[E0100] field='{}' sym={:?} receiver_ty={:?} kind={:?}",
+                                    field_name_str, field, receiver_ty, recv_kind
+                                );
+                            }
                             self.add_error(
                                 &format!(
                                     "Cannot access field '{}': class not registered or field does not exist",
