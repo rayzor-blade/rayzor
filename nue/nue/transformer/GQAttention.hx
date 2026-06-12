@@ -146,10 +146,20 @@ class GQAttention implements Module {
         //    at `positionOffset` (so the new tokens line up with cache).
         var q = rope.apply(qRaw, positionOffset);
         var k = rope.apply(kRaw, positionOffset);
+        // rope() allocates fresh output tensors — the pre-rotation
+        // projections are dead from here. Without these two frees every
+        // decoded token leaked 2 tensors × 16 layers (part of the known
+        // ~8 MB/token decode-loop leak).
+        qRaw.free();
+        kRaw.free();
 
         // 3) Push the new K/V into the cache. Subsequent reads use the
         //    full active slice (prior tokens + just-added).
         cache.append(k, v);
+        // append() copies rows into the cache's own storage (F32
+        // appendAlong0 or Q8 quantise-on-write) — k and v are dead.
+        k.free();
+        v.free();
 
         // 4-7) Decode-step fast path: fused attention kernel.
         //
@@ -174,6 +184,7 @@ class GQAttention implements Module {
                 var out = oProj.forward(ctxFlat);
                 ctxFlat.free();
                 ctx.free();
+                q.free();
                 return out;
             }
         }
@@ -195,6 +206,7 @@ class GQAttention implements Module {
                 ctx.free();
                 kAll.free();
                 vAll.free();
+                q.free();
                 return out;
             }
             // Fall-through to the unfused path on gate failure.
@@ -261,6 +273,12 @@ class GQAttention implements Module {
         // stays alive; owning free releases the dequant buffer.
         kAll.free();
         vAll.free();
+        // qByHead/kT are views (permute / transposeLast2); freeing them
+        // drops only their own ref, then q's owning ref releases the
+        // rotated-Q storage.
+        qByHead.free();
+        kT.free();
+        q.free();
 
         return out;
     }

@@ -2935,7 +2935,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     // and stays out of the thermally-fragile short-cache regime.
     // Below the gate, single-thread is both faster on cool runs
     // AND more thermally stable.
-    let auto_threads: usize = 6;
+    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let mut t = auto_threads.min(num_q_heads);
     if cache_len < 256 || num_q_heads < 4 {
         t = 1;
@@ -3273,7 +3273,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, thre
     let b_k_stride = b_strides[1];
     let b_n_stride = b_strides[2];
 
-    let auto_threads: usize = 6;
+    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let total_rows = batch * m;
     let mut t = if threads > 0 {
         (threads as usize).min(64)
@@ -3978,7 +3978,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
     let b_col_stride = b_strides[1];
     let f32_contig = dtype == DTYPE_F32 && a_col_stride == 1 && b_col_stride == 1;
 
-    let auto_threads: usize = 6;
+    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let mut t = if threads > 0 {
         (threads as usize).min(64)
     } else {

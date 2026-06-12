@@ -1012,7 +1012,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     // contention dominate; throwing more threads at it doesn't move
     // the wall time. Real per-core win lives in SIMD-tiled inner dot
     // (queued); P-core QoS hint also tested, ~0 effect on M1.
-    let auto_threads: usize = 6;
+    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let mut t = if threads > 0 {
         (threads as usize).min(64)
     } else {
@@ -1309,7 +1309,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     // count so we don't spawn idle workers when the row space is
     // tiny.
     let total_rows = q_n + k_n + v_n;
-    let auto_threads: usize = 6;
+    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let mut t = if threads > 0 {
         (threads as usize).min(64)
     } else {
