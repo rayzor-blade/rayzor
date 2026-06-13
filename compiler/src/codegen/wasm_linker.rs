@@ -820,6 +820,32 @@ impl LinkerCtx {
             }
         }
 
+        // Registry-critical imports must never be silently stubbed: a
+        // return-0 stub turns __vtable_init__ registration into a no-op
+        // and the first interface dispatch then fails far from the cause
+        // (observed as a Haxe throw in ArchRegistry.build when a stale
+        // runtime-wasm predates the registry ABI). Fail loudly instead.
+        let critical: Vec<&str> = self
+            .unresolved_imports
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|n| {
+                n.starts_with("haxe_vtable_")
+                    || n.starts_with("haxe_iface_")
+                    || n.starts_with("haxe_type_register_")
+                    || n.starts_with("haxe_coerce_dynamic_")
+            })
+            .collect();
+        if !critical.is_empty() {
+            return Err(format!(
+                "wasm-linker: {} registry-critical import(s) unresolved ({}). \
+                 The runtime-wasm artifact is older than this compiler — rebuild it: \
+                 cd runtime-wasm && cargo build --release --target wasm32-wasip1-threads",
+                critical.len(),
+                critical.join(", ")
+            ));
+        }
+
         self.total_func_count = next_func_idx;
         Ok(())
     }
