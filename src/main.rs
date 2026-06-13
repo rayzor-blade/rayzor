@@ -789,7 +789,13 @@ fn main() {
             program_args,
         } => {
             if wasm {
-                wasm_cmd::cmd_run_wasm(file, rpkg_files, safety_warnings != "off", program_args)
+                wasm_cmd::cmd_run_wasm(
+                    file,
+                    rpkg_files,
+                    safety_warnings != "off",
+                    no_cache,
+                    program_args,
+                )
             } else {
                 run_file(
                     file,
