@@ -12,7 +12,149 @@
 
 use half::f16;
 
-use super::types::Q6_K_BLOCK_SIZE;
+use super::types::{Q8KBlock, Q6_K_BLOCK_SIZE};
+
+/// Dispatch wrapper: wasm32+simd128 uses the vectorised Q6_K×Q8_K dot,
+/// everything else uses the scalar reference. The dot prequantizes the
+/// activation to Q8_K (`x`) exactly like the Q4_K_M path, so Q6_K matmuls
+/// stop paying the per-column full f32 dequant.
+#[inline]
+#[allow(non_snake_case)]
+pub fn vec_dot_q6_K_q8_K(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        unsafe { vec_dot_q6_K_q8_K_simd128(block_ptr, x) }
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        unsafe { vec_dot_q6_K_q8_K_scalar(block_ptr, x) }
+    }
+}
+
+/// Scalar reference Q6_K×Q8_K dot: dequant the weight block to f32 and dot
+/// against the dequantized activation (`x.d * x.qs`). This is the proven
+/// dequant-then-dot path; it's the wasm non-simd fallback and the test
+/// oracle. (Native does not use this dispatcher — it has its own NEON
+/// `dot_q6_k_q8`.)
+///
+/// # Safety
+/// `block_ptr` must reference a live 210-byte Q6_K super-block.
+#[allow(non_snake_case)]
+pub unsafe fn vec_dot_q6_K_q8_K_scalar(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
+    let mut w = [0.0f32; Q6_K_BLOCK_SIZE];
+    dequant_q6_k_block(block_ptr, &mut w);
+    let mut acc = 0.0f32;
+    for i in 0..Q6_K_BLOCK_SIZE {
+        acc += w[i] * (x.d * (*x.qs.get_unchecked(i) as f32));
+    }
+    acc
+}
+
+/// SIMD128 (wasm) Q6_K×Q8_K dot — port of the native NEON `dot_q6_k_q8`
+/// (sdot.rs) using `i32x4.dot_i16x8` over sign-extended i8 halves (the same
+/// `dot16` the Q4_K_M kernel uses; relaxed_dot is unavailable on wasmtime's
+/// aarch64 backend). The 6-bit weights (0..63) reconstruct from ql nibbles +
+/// qh 2-bit pairs; the −32 bias folds into `32·Σx` via the per-16 bsums.
+/// Bit-exact vs the scalar reference (integer dots are associative; float
+/// accumulation order matches).
+///
+/// # Safety
+/// `block_ptr` must reference a live 210-byte Q6_K super-block.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[allow(non_snake_case)]
+pub unsafe fn vec_dot_q6_K_q8_K_simd128(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
+    use core::arch::wasm32::*;
+
+    #[inline(always)]
+    fn dot16(a: v128, b: v128) -> v128 {
+        let a_lo = i16x8_extend_low_i8x16(a);
+        let a_hi = i16x8_extend_high_i8x16(a);
+        let b_lo = i16x8_extend_low_i8x16(b);
+        let b_hi = i16x8_extend_high_i8x16(b);
+        i32x4_add(i32x4_dot_i16x8(a_lo, b_lo), i32x4_dot_i16x8(a_hi, b_hi))
+    }
+    #[inline(always)]
+    fn hsum(v: v128) -> i32 {
+        i32x4_extract_lane::<0>(v)
+            + i32x4_extract_lane::<1>(v)
+            + i32x4_extract_lane::<2>(v)
+            + i32x4_extract_lane::<3>(v)
+    }
+    #[inline(always)]
+    unsafe fn loadu(p: *const u8) -> v128 {
+        core::ptr::read_unaligned(p as *const v128)
+    }
+
+    let ql_ptr = block_ptr;
+    let qh_ptr = block_ptr.add(128);
+    let scales_ptr = block_ptr.add(192) as *const i8;
+    let d_bits = core::ptr::read_unaligned(block_ptr.add(208) as *const u16);
+    let d = f16::from_bits(d_bits).to_f32();
+    let x_base = x.qs.as_ptr() as *const u8;
+    let mask = u8x16_splat(0x0F);
+    let mask2 = u8x16_splat(0x03);
+
+    let mut sum_term1 = 0.0f32;
+    let mut sum_term2 = 0.0f32;
+    for n in 0..2usize {
+        let ql_off = n * 64;
+        let qh_off = n * 32;
+        let sc_off = n * 8;
+        let out_off = n * 128;
+
+        let ql0 = loadu(ql_ptr.add(ql_off));
+        let ql1 = loadu(ql_ptr.add(ql_off + 16));
+        let ql2 = loadu(ql_ptr.add(ql_off + 32));
+        let ql3 = loadu(ql_ptr.add(ql_off + 48));
+        let qh0 = loadu(qh_ptr.add(qh_off));
+        let qh1 = loadu(qh_ptr.add(qh_off + 16));
+
+        for j in 0..4usize {
+            let (ql_p0, ql_p1) = match j {
+                0 => (v128_and(ql0, mask), v128_and(ql1, mask)),
+                1 => (v128_and(ql2, mask), v128_and(ql3, mask)),
+                2 => (u8x16_shr(ql0, 4), u8x16_shr(ql1, 4)),
+                _ => (u8x16_shr(ql2, 4), u8x16_shr(ql3, 4)),
+            };
+            let (qh_p0, qh_p1) = match j {
+                0 => (v128_and(qh0, mask2), v128_and(qh1, mask2)),
+                1 => (
+                    v128_and(u8x16_shr(qh0, 2), mask2),
+                    v128_and(u8x16_shr(qh1, 2), mask2),
+                ),
+                2 => (
+                    v128_and(u8x16_shr(qh0, 4), mask2),
+                    v128_and(u8x16_shr(qh1, 4), mask2),
+                ),
+                _ => (u8x16_shr(qh0, 6), u8x16_shr(qh1, 6)),
+            };
+            // q = ql_part | (qh_part << 4), range 0..63 (top bit clear → the
+            // i8 sign-extend in dot16 reads it as the positive value).
+            let q_lo = v128_or(ql_p0, u8x16_shl(qh_p0, 4));
+            let q_hi = v128_or(ql_p1, u8x16_shl(qh_p1, 4));
+
+            let x_span = out_off + j * 32;
+            let x_lo = loadu(x_base.add(x_span));
+            let x_hi = loadu(x_base.add(x_span + 16));
+
+            let sdot_lo = hsum(dot16(x_lo, q_lo));
+            let sdot_hi = hsum(dot16(x_hi, q_hi));
+
+            let sc_lo = *scales_ptr.add(sc_off + 2 * j) as f32;
+            let sc_hi = *scales_ptr.add(sc_off + 2 * j + 1) as f32;
+            let d_sc_lo = d * sc_lo;
+            let d_sc_hi = d * sc_hi;
+            sum_term1 += d_sc_lo * sdot_lo as f32;
+            sum_term1 += d_sc_hi * sdot_hi as f32;
+
+            let bsum_lo = x.bsums[x_span / 16] as i32;
+            let bsum_hi = x.bsums[x_span / 16 + 1] as i32;
+            sum_term2 += 32.0 * d_sc_lo * bsum_lo as f32;
+            sum_term2 += 32.0 * d_sc_hi * bsum_hi as f32;
+        }
+    }
+    x.d * (sum_term1 - sum_term2)
+}
 
 /// Dequant a single Q6_K block into 256 f32 values.
 ///

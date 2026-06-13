@@ -19,7 +19,7 @@ use rayzor_runtime_core::quant::matmul::prepare_x_q8k_blocks_into;
 use rayzor_runtime_core::quant::q4_k_m::{
     decode_q4_k_block, dequant_q4_k_block, vec_dot_q4_K_q8_K,
 };
-use rayzor_runtime_core::quant::q6_k::dequant_q6_k_block;
+use rayzor_runtime_core::quant::q6_k::{dequant_q6_k_block, vec_dot_q6_K_q8_K};
 use rayzor_runtime_core::quant::types::{
     Q4KMBlock, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE, Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE,
     QSCHEME_Q4_K_M, QSCHEME_Q6_K,
@@ -367,7 +367,13 @@ unsafe fn qmatmul_chunk_impl(x: i32, qt: i32, y: i32, n_start: i32, n_end: i32) 
         } else {
             x_data.add(bch * x_shape[1])
         };
-        if qtr.scheme == QSCHEME_Q4_K_M && x_strides[1] == 1 {
+        // Fast path: prequant x→Q8_K once per row, then an integer SIMD dot
+        // per block. Both Q4_K_M and Q6_K use 256-elem blocks and the same
+        // Q8_K activation, so Q6_K (attn_v / ffn_down) now gets the same
+        // vectorized treatment instead of a per-column full f32 dequant.
+        let fast_path =
+            (qtr.scheme == QSCHEME_Q4_K_M || qtr.scheme == QSCHEME_Q6_K) && x_strides[1] == 1;
+        if fast_path {
             prepare_x_q8k_blocks_into(x_base, k, &mut x_q8k);
         }
         for n_idx in lo..hi {
@@ -375,9 +381,16 @@ unsafe fn qmatmul_chunk_impl(x: i32, qt: i32, y: i32, n_start: i32, n_end: i32) 
             let mut sum = 0.0f32;
             for blk in 0..blocks_per_row {
                 let bp = row_ptr.add(blk * block_bytes);
-                if qtr.scheme == QSCHEME_Q4_K_M && x_strides[1] == 1 {
-                    let weight = &*(bp as *const Q4KMBlock);
-                    sum += vec_dot_q4_K_q8_K(weight, &x_q8k[blk]);
+                if fast_path {
+                    match qtr.scheme {
+                        QSCHEME_Q4_K_M => {
+                            let weight = &*(bp as *const Q4KMBlock);
+                            sum += vec_dot_q4_K_q8_K(weight, &x_q8k[blk]);
+                        }
+                        _ => {
+                            sum += vec_dot_q6_K_q8_K(bp, &x_q8k[blk]);
+                        }
+                    }
                 } else {
                     match qtr.scheme {
                         QSCHEME_Q4_K_M => {
