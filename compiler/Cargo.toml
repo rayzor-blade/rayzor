@@ -51,10 +51,13 @@ wasm-encoder = "0.245"
 wasmparser = "0.245"  # WASM linker — parse runtime .wasm for merging
 wit-component = "0.245"  # WASI P2 Component wrapping (core module → component)
 
-# WASM runtime — embedded wasmtime for `rayzor run --wasm`. Stable from
-# crates.io to match the cranelift-* upstream switch above.
-wasmtime = { version = "43.0.2", optional = true }
-wasi-common = { version = "43.0.2", package = "wasmtime-wasi", optional = true }
+# WASM runtime — embedded wasmtime for `rayzor run --wasm`. Pinned to
+# bytecodealliance release-46.0.0 (cranelift 0.133) so wasmtime-cranelift
+# shares the patched cranelift and the Cranelift JIT compiles in. With
+# the old crates.io 43.0.2 (cranelift 0.130) the 0.133 patch made
+# wasmtime-cranelift unresolvable → Pulley interpreter → ~50x slowdown.
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0", optional = true }
+wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0", package = "wasmtime-wasi", optional = true }
 
 # wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
 rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }

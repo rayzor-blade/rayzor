@@ -1063,7 +1063,10 @@ unsafe fn expq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64::
     );
 
     // n = round(x * log2(e)); r = x - n*ln2 (split-constant for precision).
-    let n_f = vcvtq_f32_s32(vcvtaq_s32_f32(vmulq_f32(x, vdupq_n_f32(core::f32::consts::LOG2_E))));
+    let n_f = vcvtq_f32_s32(vcvtaq_s32_f32(vmulq_f32(
+        x,
+        vdupq_n_f32(core::f32::consts::LOG2_E),
+    )));
     let mut r = vfmsq_f32(x, n_f, vdupq_n_f32(0.693_359_375)); // x - n*C1
     r = vfmsq_f32(r, n_f, vdupq_n_f32(-2.121_944_4e-4)); // - n*C2
 
