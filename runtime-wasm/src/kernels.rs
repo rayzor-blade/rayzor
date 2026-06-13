@@ -143,7 +143,32 @@ pub unsafe extern "C" fn rayzor_tensor_softmax_inplace_f32(data: i32, n_rows: i3
     let p = data as *mut f32;
     for r in 0..n_rows as usize {
         let row = slice::from_raw_parts_mut(p.add(r * row_len), row_len);
-        softmax::softmax_inplace_f32(row, libm::expf);
+        // Manual numerically-stable softmax. The causal mask writes
+        // f32::NEG_INFINITY into masked cells; guard non-finite exp args so
+        // wasm's libm::expf (which traps on non-finite) matches native
+        // `x.exp()` semantics (exp(-inf)=0).
+        let mut m = f32::NEG_INFINITY;
+        for &x in row.iter() {
+            if x > m {
+                m = x;
+            }
+        }
+        if !m.is_finite() {
+            m = 0.0;
+        }
+        let mut denom = 0.0f32;
+        for v in row.iter_mut() {
+            let d = *v - m;
+            let e = if d.is_finite() { libm::expf(d) } else { 0.0 };
+            *v = e;
+            denom += e;
+        }
+        if denom > 0.0 {
+            let inv = 1.0 / denom;
+            for v in row.iter_mut() {
+                *v *= inv;
+            }
+        }
     }
 }
 

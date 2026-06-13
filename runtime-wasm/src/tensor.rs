@@ -747,7 +747,67 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(a: i32, b: i32, _thread
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_bmm(a: i32, b: i32) -> i32 {
-    rayzor_tensor_matmul(a, b)
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let ar = &*(a as *const Tensor);
+    let br = &*(b as *const Tensor);
+    // 2D inputs are a plain matmul.
+    if ar.ndim == 2 && br.ndim == 2 {
+        return rayzor_tensor_matmul(a, b);
+    }
+    // Batched matmul `a [B, M, K] @ b [B, K, N] -> [B, M, N]`.
+    //
+    // CRITICAL: the transformer callers feed NON-CONTIGUOUS views —
+    // GQAttention's `qByHead = q.permute([1,0,2])` and
+    // `kT = kAllExpanded.transposeLast2()` (and `attn.bmm(vAllExpanded)`).
+    // The old wasm bmm just forwarded to `rayzor_tensor_matmul`, which
+    // rejects `ndim != 2` and returned a null handle → attention scores were
+    // all zeros → the attention sub-layer contributed nothing → the residual
+    // passed the input straight through → degenerate "The best answer is:"
+    // generation regardless of how correct the rest of the pipeline was.
+    // (The native bmm fixed exactly this; mirror its strided walk here.)
+    if ar.ndim != 3 || br.ndim != 3 || ar.dtype != DTYPE_F32 || br.dtype != DTYPE_F32 {
+        return 0;
+    }
+    let a_shape = slice::from_raw_parts(ar.shape, 3);
+    let b_shape = slice::from_raw_parts(br.shape, 3);
+    let a_strides = slice::from_raw_parts(ar.strides, 3);
+    let b_strides = slice::from_raw_parts(br.strides, 3);
+    let batch = a_shape[0];
+    let m = a_shape[1];
+    let k = a_shape[2];
+    let n = b_shape[2];
+    if b_shape[0] != batch || b_shape[1] != k {
+        return 0;
+    }
+    let y_shape = [batch, m, n];
+    let y = alloc_tensor(&y_shape, DTYPE_F32);
+    if y.is_null() {
+        return 0;
+    }
+    let a_data = ar.data as *const f32;
+    let b_data = br.data as *const f32;
+    let y_data = (*y).data as *mut f32;
+    let (asb, asm, ask) = (a_strides[0], a_strides[1], a_strides[2]);
+    let (bsb, bsk, bsn) = (b_strides[0], b_strides[1], b_strides[2]);
+    for bt in 0..batch {
+        let a_boff = bt * asb;
+        let b_boff = bt * bsb;
+        let c_boff = bt * m * n;
+        for i in 0..m {
+            let a_roff = a_boff + i * asm;
+            let c_roff = c_boff + i * n;
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    sum += *a_data.add(a_roff + p * ask) * *b_data.add(b_boff + p * bsk + j * bsn);
+                }
+                *y_data.add(c_roff + j) = sum;
+            }
+        }
+    }
+    y as i32
 }
 
 #[no_mangle]
@@ -1325,13 +1385,38 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i32, shape_ptr: i32, 
         return 0;
     }
     let t = &*(tensor_ptr as *const Tensor);
-    if !t.is_contiguous() {
-        return 0;
-    }
     let new_shape = read_shape(shape_ptr, ndim as usize);
     let new_numel: usize = new_shape.iter().product();
     if new_numel != t.numel {
         return 0;
+    }
+    // Reshape of a NON-CONTIGUOUS tensor must materialise it first. The
+    // transformer feeds `context.permute([1,0,2]).reshape([seq, hidden])`
+    // (a strided view) here; the old code just returned null, so attention's
+    // output projection saw a null context → zero attention contribution →
+    // the residual passed the input straight through → degenerate generation.
+    // Copy the strided source into fresh contiguous storage in row-major
+    // logical order, then reshape that (mirrors the native reshape).
+    if !t.is_contiguous() {
+        let out = alloc_tensor(&new_shape, t.dtype);
+        if out.is_null() {
+            return 0;
+        }
+        let t_shape = slice::from_raw_parts(t.shape, t.ndim);
+        let t_strides = slice::from_raw_parts(t.strides, t.ndim);
+        let out_data = (*out).data;
+        for flat in 0..t.numel {
+            let mut rem = flat;
+            let mut off = 0usize;
+            for d in (0..t.ndim).rev() {
+                let dim = t_shape[d];
+                let idx = rem % dim;
+                rem /= dim;
+                off += idx * t_strides[d];
+            }
+            store_f32_at(out_data, flat, t.dtype, load_f32_at(t.data, off, t.dtype));
+        }
+        return out as i32;
     }
     let new_strides = Tensor::compute_strides(&new_shape);
     let shape = alloc_usize_array(&new_shape);
