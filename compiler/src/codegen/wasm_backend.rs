@@ -1090,6 +1090,45 @@ impl CompileCtx {
         for internal in &self.internals {
             func_section.function(internal.type_idx);
         }
+        // Synthetic `_start` wrapper: every module's `__vtable_init__` /
+        // `__init__` must run before the entry, mirroring the AOT main
+        // wrapper. Without this nothing ever invoked the init hooks on
+        // wasm — the class/interface vtable registries stayed empty, so
+        // every iface-to-iface cast (haxe_iface_fat_ptr_build) returned
+        // null and the first interface method dispatch trapped with
+        // "indirect call type mismatch".
+        // All vtable inits run before all module inits (same order the AOT
+        // main wrapper uses) so __init__ bodies can already go through
+        // interface dispatch.
+        let mut vtable_init_idxs: Vec<u32> = Vec::new();
+        let mut module_init_idxs: Vec<u32> = Vec::new();
+        for internal in &self.internals {
+            if let Some(func) = modules
+                .get(internal.module_idx)
+                .and_then(|m| m.functions.get(&internal.ir_id))
+            {
+                match func.name.as_str() {
+                    "__vtable_init__" => vtable_init_idxs.push(internal.func_idx),
+                    "__init__" => module_init_idxs.push(internal.func_idx),
+                    _ => {}
+                }
+            }
+        }
+        let startup_init_idxs: Vec<u32> = vtable_init_idxs
+            .into_iter()
+            .chain(module_init_idxs)
+            .collect();
+        // The wrapper sits one past the last allocated index. It is never
+        // address-taken, so it needs no table slot and next_func_idx (used
+        // for table sizing) stays untouched.
+        let void_type_idx = self.type_map.get(&(vec![], vec![])).copied();
+        let start_wrapper_idx: Option<u32> = match (void_type_idx, entry_function) {
+            (Some(ty), Some(_)) => {
+                func_section.function(ty);
+                Some(self.next_func_idx)
+            }
+            _ => None,
+        };
         wasm_module.section(&func_section);
 
         // --- Table section (for call_indirect / closures) ---
@@ -1150,6 +1189,7 @@ impl CompileCtx {
         wasm_module.section(&global_section);
 
         // --- Export section ---
+        let mut entry_idx_for_wrapper: Option<u32> = None;
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
         export_section.export("__indirect_function_table", ExportKind::Table, 0);
@@ -1181,7 +1221,12 @@ impl CompileCtx {
                     None
                 });
             if let Some(idx) = idx {
-                export_section.export("_start", ExportKind::Func, idx);
+                if let Some(wrapper) = start_wrapper_idx {
+                    entry_idx_for_wrapper = Some(idx);
+                    export_section.export("_start", ExportKind::Func, wrapper);
+                } else {
+                    export_section.export("_start", ExportKind::Func, idx);
+                }
             }
         }
 
@@ -1435,6 +1480,17 @@ impl CompileCtx {
             let body = FunctionLowerer::lower(self, ir_func)?;
             code_section.function(&body);
         }
+        if let Some(_wrapper) = start_wrapper_idx {
+            let mut func = Function::new(vec![]);
+            for &init_idx in &startup_init_idxs {
+                func.instruction(&Instruction::Call(init_idx));
+            }
+            if let Some(entry_idx) = entry_idx_for_wrapper {
+                func.instruction(&Instruction::Call(entry_idx));
+            }
+            func.instruction(&Instruction::End);
+            code_section.function(&func);
+        }
         wasm_module.section(&code_section);
 
         // --- Data section ---
@@ -1447,6 +1503,36 @@ impl CompileCtx {
             );
         }
         wasm_module.section(&data_section);
+
+        // --- Name section (debug aid) ---
+        // Function names let trap backtraces resolve to Haxe symbols; the
+        // linker remaps and re-emits these into the merged module.
+        {
+            let mut names = wasm_encoder::NameSection::new();
+            let mut fn_names = wasm_encoder::NameMap::new();
+            let mut tagged: Vec<(u32, String)> = Vec::new();
+            for internal in &self.internals {
+                if let Some(func) = modules
+                    .get(internal.module_idx)
+                    .and_then(|m| m.functions.get(&internal.ir_id))
+                {
+                    let label = func
+                        .qualified_name
+                        .clone()
+                        .unwrap_or_else(|| func.name.clone());
+                    tagged.push((internal.func_idx, label));
+                }
+            }
+            if let Some(wrapper) = start_wrapper_idx {
+                tagged.push((wrapper, "__start_wrapper__".to_string()));
+            }
+            tagged.sort_by_key(|(idx, _)| *idx);
+            for (idx, label) in &tagged {
+                fn_names.append(*idx, label);
+            }
+            names.functions(&fn_names);
+            wasm_module.section(&names);
+        }
 
         Ok(wasm_module.finish())
     }
@@ -2708,18 +2794,28 @@ impl<'a> FunctionLowerer<'a> {
                     }
                     _ => (actual_user_params.clone(), actual_results.clone()),
                 };
-                if dest.is_some() && results != actual_results {
+                // The call_indirect type must equal the callee's DEFINED
+                // type. Vtable dispatch thunks are defined from the same
+                // method signature this site's MIR signature carries, so
+                // trusting the signature matches them by construction —
+                // including Void methods (no result). The legacy override
+                // below (force the dest register's type when present)
+                // breaks Void-method dispatch: site expects [I32], thunk
+                // is (). RAYZOR_WASM_LEGACY_CI_RESULTS=1 restores it.
+                let trust_signature = std::env::var_os("RAYZOR_WASM_LEGACY_CI_RESULTS").is_none();
+                if !trust_signature && dest.is_some() && results != actual_results {
                     results = actual_results.clone();
                 }
 
                 let mut params = Vec::with_capacity(user_params.len() + 1);
                 params.push(ValType::I32);
                 params.extend(user_params.iter().copied());
-                let type_idx = self
+                let primary_hit = self
                     .ctx
                     .type_map
                     .get(&(params.clone(), results.clone()))
-                    .copied()
+                    .copied();
+                let type_idx = primary_hit
                     .or_else(|| {
                         let mut actual_params = Vec::with_capacity(actual_user_params.len() + 1);
                         actual_params.push(ValType::I32);
@@ -2730,6 +2826,12 @@ impl<'a> FunctionLowerer<'a> {
                             .copied()
                     })
                     .unwrap_or(0);
+                if std::env::var_os("RAYZOR_WASM_CI_DEBUG").is_some() {
+                    eprintln!(
+                        "[wasm-ci] sig_params={:?} results={:?} actual={:?} primary_hit={:?} type_idx={}",
+                        params, results, actual_user_params, primary_hit, type_idx
+                    );
+                }
 
                 // Stack order for call_indirect is: params..., table_index.
                 // Closure layout is { table_slot: i32, env_ptr: i32 } at offsets 0/8.
@@ -2756,10 +2858,25 @@ impl<'a> FunctionLowerer<'a> {
                     type_index: type_idx,
                     table_index: 0,
                 });
-                if let Some(d) = dest {
-                    self.set_reg(f, *d);
-                } else if !results.is_empty() {
-                    f.instruction(&Instruction::Drop);
+                match (dest, results.first()) {
+                    (Some(d), Some(&res_ty)) => {
+                        // Coerce the declared result to the dest register's
+                        // type when they disagree (e.g. i32 result into an
+                        // f64 register).
+                        let dest_ty = self.reg_wasm_type(*d);
+                        self.emit_type_coerce(f, res_ty, dest_ty);
+                        self.set_reg(f, *d);
+                    }
+                    (Some(d), None) => {
+                        // Void callee but the MIR call kept a (dummy) dest —
+                        // build_call_indirect always mints one. Zero it.
+                        emit_zero(f, self.reg_wasm_type(*d));
+                        self.set_reg(f, *d);
+                    }
+                    (None, Some(_)) => {
+                        f.instruction(&Instruction::Drop);
+                    }
+                    (None, None) => {}
                 }
             }
 

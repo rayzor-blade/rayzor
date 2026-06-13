@@ -227,6 +227,18 @@ pub fn cmd_run_wasm(
 
     eprintln!("Running ({:.1} KB)...", linked_wasm.len() as f64 / 1024.0);
 
+    // Debug aid: dump the linked module for offline disassembly of trap
+    // backtraces (wasmtime reports merged-module function indices).
+    if let Ok(dump_path) = std::env::var("RAYZOR_WASM_DUMP") {
+        if !dump_path.is_empty() {
+            if let Err(e) = std::fs::write(&dump_path, &linked_wasm) {
+                eprintln!("[wasm] RAYZOR_WASM_DUMP write failed: {}", e);
+            } else {
+                eprintln!("[wasm] linked module dumped to {}", dump_path);
+            }
+        }
+    }
+
     // Execute via embedded wasmtime. `program_args` becomes Sys.args() inside
     // the wasm sandbox; the runner registers a haxe_sys_args host stub that
     // returns these as a Haxe Array<String>.
