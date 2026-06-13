@@ -3107,14 +3107,18 @@ impl MirInterpreter {
         signature: &IrFunctionSignature,
     ) -> Result<InterpValue, InterpError> {
         // Convert arguments to native representation (SmallVec disabled - using Vec for stability)
+        // `string_scratch` owns HaxeString FFI headers; it must stay alive
+        // until the native call returns.
+        let mut string_scratch: Vec<Box<[usize; 3]>> = Vec::new();
         let native_args: Vec<NativeValue> = args
             .iter()
             .zip(signature.parameters.iter())
-            .map(|(arg, param)| self.interp_to_native(arg, &param.ty))
+            .map(|(arg, param)| self.interp_to_native(arg, &param.ty, &mut string_scratch))
             .collect::<Result<_, _>>()?;
 
         // Call the function based on arity and return type
         let result = unsafe { self.call_native_fn(ptr, &native_args, &signature.return_type)? };
+        drop(string_scratch);
 
         // Convert result back to InterpValue
         self.native_to_interp(result, &signature.return_type)
@@ -3128,12 +3132,14 @@ impl MirInterpreter {
     ) -> Result<InterpValue, InterpError> {
         // Without signature info, we infer types from arguments and assume i64 return
         // SmallVec disabled - using Vec for stability
+        let mut string_scratch: Vec<Box<[usize; 3]>> = Vec::new();
         let native_args: Vec<NativeValue> = args
             .iter()
-            .map(|arg| self.interp_to_native_inferred(arg))
+            .map(|arg| self.interp_to_native_inferred(arg, &mut string_scratch))
             .collect::<Result<_, _>>()?;
 
         let result = unsafe { self.call_native_fn(ptr, &native_args, &IrType::I64)? };
+        drop(string_scratch);
 
         self.native_to_interp(result, &IrType::I64)
     }
@@ -3148,16 +3154,18 @@ impl MirInterpreter {
     ) -> Result<InterpValue, InterpError> {
         // Convert arguments to native representation using the explicit types
         // SmallVec disabled - using Vec for stability
+        let mut string_scratch: Vec<Box<[usize; 3]>> = Vec::new();
         let native_args: Vec<NativeValue> = args
             .iter()
             .enumerate()
             .map(|(i, arg)| {
                 let ty = param_types.get(i).unwrap_or(&IrType::I64);
-                self.interp_to_native(arg, ty)
+                self.interp_to_native(arg, ty, &mut string_scratch)
             })
             .collect::<Result<_, _>>()?;
 
         let result = unsafe { self.call_native_fn(ptr, &native_args, return_type)? };
+        drop(string_scratch);
 
         self.native_to_interp(result, return_type)
     }
@@ -3215,7 +3223,27 @@ impl MirInterpreter {
     }
 
     /// Convert InterpValue to native representation for FFI
-    fn interp_to_native(&self, val: &InterpValue, ty: &IrType) -> Result<NativeValue, InterpError> {
+    /// Build a HaxeString FFI header `{ptr, len, cap}` for `s` and return its
+    /// stable address. The Box lives in `scratch`, which the caller must keep
+    /// alive until after the native call returns. Runtime string externs take
+    /// `*const HaxeString` (see runtime/src/haxe_string.rs) — passing the raw
+    /// byte pointer instead made the callee read the first 8 CONTENT bytes as
+    /// the data pointer (observed: SIGSEGV at 0x505f524f5a594152 = "RAYZOR_P",
+    /// the start of "RAYZOR_PROFILE_LOAD", in Sys.getEnv under the interpreter
+    /// tier).
+    fn marshal_string_arg(s: &str, scratch: &mut Vec<Box<[usize; 3]>>) -> NativeValue {
+        let header: Box<[usize; 3]> = Box::new([s.as_ptr() as usize, s.len(), s.len()]);
+        let addr = header.as_ref() as *const [usize; 3] as usize;
+        scratch.push(header);
+        NativeValue::Ptr(addr)
+    }
+
+    fn interp_to_native(
+        &self,
+        val: &InterpValue,
+        ty: &IrType,
+        scratch: &mut Vec<Box<[usize; 3]>>,
+    ) -> Result<NativeValue, InterpError> {
         match ty {
             IrType::Void => Ok(NativeValue::Void),
             IrType::Bool => Ok(NativeValue::U8(if val.to_bool()? { 1 } else { 0 })),
@@ -3235,9 +3263,9 @@ impl MirInterpreter {
             IrType::F64 => Ok(NativeValue::F64(val.to_f64()?)),
             IrType::Ptr(_) | IrType::Ref(_) => Ok(NativeValue::Ptr(val.to_usize()?)),
             IrType::String => {
-                // For string FFI, we pass a pointer to the string data
+                // String args cross the FFI as `*const HaxeString` headers.
                 match val {
-                    InterpValue::String(s) => Ok(NativeValue::Ptr(s.as_ptr() as usize)),
+                    InterpValue::String(s) => Ok(Self::marshal_string_arg(s, scratch)),
                     InterpValue::Ptr(p) => Ok(NativeValue::Ptr(*p)),
                     _ => Ok(NativeValue::Ptr(0)),
                 }
@@ -3250,7 +3278,11 @@ impl MirInterpreter {
     }
 
     /// Convert InterpValue to native, inferring type from the value
-    fn interp_to_native_inferred(&self, val: &InterpValue) -> Result<NativeValue, InterpError> {
+    fn interp_to_native_inferred(
+        &self,
+        val: &InterpValue,
+        scratch: &mut Vec<Box<[usize; 3]>>,
+    ) -> Result<NativeValue, InterpError> {
         match val {
             InterpValue::Void => Ok(NativeValue::Void),
             InterpValue::Bool(b) => Ok(NativeValue::U8(if *b { 1 } else { 0 })),
@@ -3266,7 +3298,7 @@ impl MirInterpreter {
             InterpValue::F64(n) => Ok(NativeValue::F64(*n)),
             InterpValue::Ptr(p) => Ok(NativeValue::Ptr(*p)),
             InterpValue::Null => Ok(NativeValue::Ptr(0)),
-            InterpValue::String(s) => Ok(NativeValue::Ptr(s.as_ptr() as usize)),
+            InterpValue::String(s) => Ok(Self::marshal_string_arg(s, scratch)),
             InterpValue::Function(id) => {
                 Ok(NativeValue::I64(NanBoxedValue::from_func_id(id.0).0 as i64))
             }
@@ -3301,6 +3333,27 @@ impl MirInterpreter {
                 NativeValue::Ptr(p) => Ok(InterpValue::Ptr(p)),
                 _ => Ok(InterpValue::Ptr(val.to_i64() as usize)),
             },
+            IrType::String => {
+                // Runtime string externs return `*mut HaxeString` ({ptr, len,
+                // cap}); null means Haxe null. Copy the bytes out so the
+                // interpreter owns its value.
+                let p = val.to_i64() as usize;
+                if p == 0 {
+                    return Ok(InterpValue::Null);
+                }
+                unsafe {
+                    let header = p as *const [usize; 3];
+                    let data = (*header)[0] as *const u8;
+                    let len = (*header)[1];
+                    if data.is_null() {
+                        return Ok(InterpValue::Null);
+                    }
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    Ok(InterpValue::String(
+                        String::from_utf8_lossy(bytes).into_owned(),
+                    ))
+                }
+            }
             _ => Ok(InterpValue::I64(val.to_i64())),
         }
     }
