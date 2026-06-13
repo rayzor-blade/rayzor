@@ -1564,6 +1564,12 @@ struct FunctionLowerer<'a> {
     block_order: Vec<IrBlockId>,
     /// Block ID -> positional index in block_order.
     block_index: BTreeMap<IrBlockId, u32>,
+    /// Local holding the shadow-stack pointer captured at function entry.
+    /// Restored before every return — without this every Alloc/closure/
+    /// struct allocation leaked shadow-stack space permanently (the SP
+    /// global only ever descended), eventually marching into the runtime
+    /// data segments during model load.
+    saved_sp_local: u32,
 }
 
 impl<'a> FunctionLowerer<'a> {
@@ -1581,6 +1587,7 @@ impl<'a> FunctionLowerer<'a> {
             next_local: param_count,
             block_order: Vec::new(),
             block_index: BTreeMap::new(),
+            saved_sp_local: 0,
         };
 
         // Early return for empty-body functions (extern stubs).
@@ -1595,6 +1602,11 @@ impl<'a> FunctionLowerer<'a> {
 
         // Pre-allocate locals for every register used in the function.
         low.allocate_locals();
+
+        // One extra i32 local to save/restore the shadow-stack pointer.
+        low.saved_sp_local = low.next_local;
+        low.next_local += 1;
+        low.local_types.push(ValType::I32);
 
         // Compute block order.
         low.compute_block_order();
@@ -1950,11 +1962,22 @@ impl<'a> FunctionLowerer<'a> {
     // Single-block function (no CFG needed)
     // ------------------------------------------------------------------
 
+    fn emit_sp_save(&self, f: &mut Function) {
+        f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+        f.instruction(&Instruction::LocalSet(self.saved_sp_local));
+    }
+
+    fn emit_sp_restore(&self, f: &mut Function) {
+        f.instruction(&Instruction::LocalGet(self.saved_sp_local));
+        f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
+    }
+
     fn build_single_block(&mut self) -> Result<Function, String> {
         let bid = self.block_order[0];
         let block = self.ir_func.cfg.blocks.get(&bid).unwrap();
 
         let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
+        self.emit_sp_save(&mut f);
 
         self.emit_block_instructions(&mut f, &block.instructions);
 
@@ -1990,6 +2013,7 @@ impl<'a> FunctionLowerer<'a> {
         let blk_local = self.alloc_scratch(ValType::I32);
 
         let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
+        self.emit_sp_save(&mut f);
 
         // Initialize $blk to 0 (entry block).
         f.instruction(&Instruction::I32Const(0));
@@ -2073,6 +2097,7 @@ impl<'a> FunctionLowerer<'a> {
                 } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
                     emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
+                self.emit_sp_restore(f);
                 f.instruction(&Instruction::Return);
             }
             IrTerminator::Unreachable | IrTerminator::NoReturn { .. } => {
@@ -2113,6 +2138,7 @@ impl<'a> FunctionLowerer<'a> {
                 } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
                     emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
+                self.emit_sp_restore(f);
                 f.instruction(&Instruction::Return);
                 true
             }
@@ -2611,10 +2637,34 @@ impl<'a> FunctionLowerer<'a> {
 
             // === PtrAdd ===
             IrInstruction::PtrAdd {
-                dest, ptr, offset, ..
+                dest,
+                ptr,
+                offset,
+                ty,
             } => {
+                // PtrAdd offsets are ELEMENT indices scaled by the pointee
+                // size — Cranelift multiplies by type_size(pointee); the
+                // raw I32Add here silently dropped the scale, so e.g. the
+                // QTensor_fusedQkvMatmul wrapper's Ptr<I64> header stores
+                // landed at byte offsets 0/1/2/3 instead of 0/8/16/24,
+                // corrupting the HaxeArray header (wild pushes → OOB at
+                // prefill). Use the SAME size rule as the GEP arm above so
+                // the two stay consistent on this backend; Ptr<U8> users
+                // (byte offsets) keep scale 1 and are unaffected.
+                let elem_size: i32 = match ty {
+                    IrType::Ptr(inner) => match inner.as_ref() {
+                        IrType::U8 | IrType::I8 => 1,
+                        _ => 8,
+                    },
+                    IrType::U8 | IrType::I8 => 1,
+                    _ => 8,
+                };
                 self.get_reg(f, *ptr);
                 self.get_reg(f, *offset);
+                if elem_size != 1 {
+                    f.instruction(&Instruction::I32Const(elem_size));
+                    f.instruction(&Instruction::I32Mul);
+                }
                 f.instruction(&Instruction::I32Add);
                 self.set_reg(f, *dest);
             }
@@ -3112,6 +3162,7 @@ impl<'a> FunctionLowerer<'a> {
                 } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
                     emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
+                self.emit_sp_restore(f);
                 f.instruction(&Instruction::Return);
             }
 

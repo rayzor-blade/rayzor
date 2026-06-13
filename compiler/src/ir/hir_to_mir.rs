@@ -34442,7 +34442,11 @@ impl<'a> HirToMirContext<'a> {
                 self.deterministic_class_type_id(*symbol_id)
                     .unwrap_or_else(|| {
                         // Fallback for classes without a resolvable name —
-                        // keep the legacy behaviour.
+                        // legacy raw-id behaviour. NOTE: not stable across
+                        // runs/contexts; a location-hash replacement was
+                        // attempted 2026-06-13 but broke clone-identity
+                        // (ids disagreed with another id source) — needs a
+                        // unified fix with resolve_runtime_class_type_id.
                         self.resolve_runtime_class_type_id(type_id, *symbol_id)
                             .as_raw()
                             + 1000
@@ -34492,6 +34496,26 @@ impl<'a> HirToMirContext<'a> {
         // name can't collide. Output lives in the same biased range as
         // class ids.
         let key = format!("{}:{}", kind_tag, qname);
+        Some(Self::fnv1a_class_type_id(&key))
+    }
+
+    /// Deterministic fallback when the symbol has no resolvable name:
+    /// hash the definition location instead. line/column/byte_offset are
+    /// stable across runs (file_id is assignment-order-dependent, so it's
+    /// excluded). The legacy raw-id fallback varied per run — observed as
+    /// per-run `__reflect_ctor_wrap_<N>` names and run-to-run wasm heap
+    /// layout shifts.
+    #[allow(dead_code)]
+    fn location_fallback_type_id(&self, symbol_id: SymbolId, kind_tag: &str) -> Option<u32> {
+        let sym = self.symbol_table.get_symbol(symbol_id)?;
+        let loc = sym.definition_location;
+        if loc.line == 0 && loc.column == 0 && loc.byte_offset == 0 {
+            return None;
+        }
+        let key = format!(
+            "{}@{}:{}:{}:{}",
+            kind_tag, loc.file_id, loc.line, loc.column, loc.byte_offset
+        );
         Some(Self::fnv1a_class_type_id(&key))
     }
 
