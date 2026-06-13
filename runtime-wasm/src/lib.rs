@@ -12,6 +12,7 @@ pub mod gguf_wasm;
 pub mod kernels;
 pub mod qtensor;
 pub mod tensor;
+pub mod type_system;
 
 use core::slice;
 use std::alloc::{alloc, dealloc, realloc, Layout};
@@ -658,6 +659,53 @@ pub extern "C" fn haxe_unbox_float(ptr: i32) -> f64 {
             0.0
         }
     }
+}
+
+/// Safely coerce a Dynamic-typed value to an Int — wasm32 port of the
+/// native `haxe_coerce_dynamic_to_int` heuristic. The value register may
+/// hold either a heap `DynamicValue*` (boxed by `haxe_box_int_ptr` &
+/// friends) or a raw integer that was never boxed; disambiguate by
+/// address plausibility, then by the box's type_id.
+///
+/// Signature note: the user module imports this as `(i32) -> i32` (the
+/// backend derives the import type from the call site's register types),
+/// and the linker requires exact equality — declare i32, not i64.
+#[no_mangle]
+pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: i32) -> i32 {
+    if ptr == 0 {
+        return 0;
+    }
+    let addr = ptr as u32;
+    // DynamicValue is 8 bytes, 4-aligned, heap-allocated. Raw small ints
+    // are typically below the heap base and/or unaligned.
+    if addr >= 0x1000 && (addr & 3) == 0 {
+        unsafe {
+            let (type_id, _) = read_dynamic(ptr);
+            if type_id <= 5 || (type_id > 100 && type_id < u32::MAX - 10) {
+                return haxe_unbox_int(ptr);
+            }
+        }
+    }
+    ptr
+}
+
+/// Safely coerce a Dynamic-typed value to a Float. Same heuristic as
+/// `haxe_coerce_dynamic_to_int`.
+#[no_mangle]
+pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: i32) -> f64 {
+    if ptr == 0 {
+        return 0.0;
+    }
+    let addr = ptr as u32;
+    if addr >= 0x1000 && (addr & 3) == 0 {
+        unsafe {
+            let (type_id, _) = read_dynamic(ptr);
+            if type_id <= 5 || (type_id > 100 && type_id < u32::MAX - 10) {
+                return haxe_unbox_float(ptr);
+            }
+        }
+    }
+    ptr as f64
 }
 
 /// Unbox a Bool from DynamicValue pointer.

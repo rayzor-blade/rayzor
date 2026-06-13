@@ -216,6 +216,9 @@ struct ParsedModule {
     /// For wasm32-wasip1-threads modules this is `__wasm_init_memory`,
     /// which copies passive data segments into linear memory.
     start_func: Option<u32>,
+    /// Function names from the custom "name" section (debug aid),
+    /// keyed by this module's own function index space.
+    func_names: BTreeMap<u32, String>,
 }
 
 impl ParsedModule {
@@ -235,6 +238,7 @@ impl ParsedModule {
         let mut data_segments = Vec::new();
         let mut num_func_imports = 0u32;
         let mut start_func: Option<u32> = None;
+        let mut func_names: BTreeMap<u32, String> = BTreeMap::new();
 
         let parser = Parser::new(0);
         for payload in parser.parse_all(wasm) {
@@ -431,6 +435,23 @@ impl ParsedModule {
                     start_func = Some(func);
                 }
 
+                Payload::CustomSection(reader) if reader.name() == "name" => {
+                    use wasmparser::{Name, NameSectionReader};
+                    let nsr = NameSectionReader::new(wasmparser::BinaryReader::new(
+                        reader.data(),
+                        reader.data_offset(),
+                    ));
+                    for part in nsr {
+                        let Ok(part) = part else { break };
+                        if let Name::Function(map) = part {
+                            for naming in map {
+                                let Ok(naming) = naming else { break };
+                                func_names.insert(naming.index, naming.name.to_string());
+                            }
+                        }
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -449,6 +470,7 @@ impl ParsedModule {
             tables,
             elements,
             start_func,
+            func_names,
         })
     }
 }
@@ -1096,8 +1118,29 @@ impl LinkerCtx {
             // where the closure `fn_idx` points, and dispatched closures
             // run correctly on every thread.
             if !self.user_func_remap.is_empty() {
-                let mut remap_pairs: Vec<(u32, u32)> =
-                    self.user_func_remap.iter().map(|(&b, &m)| (b, m)).collect();
+                // Slots claimed by the runtime's own element entries. The
+                // runtime stores these indices as Rust function-pointer
+                // VALUES (dyn/vtable dispatch); if the user mirror
+                // overwrites them, runtime-internal call_indirect runs the
+                // wrong function — observed as memory corruption inside
+                // GGUF parsing once the mirror contents shifted. The rt
+                // entries win for their declared ranges; mirror entries
+                // for those slots are dropped (they'd only matter for a
+                // closure over a user IMPORT at a colliding pre-link
+                // index, which cannot share the slot either way).
+                let mut rt_claimed: std::collections::BTreeSet<u32> =
+                    std::collections::BTreeSet::new();
+                for (_, offset, func_indices) in &rt.elements {
+                    for k in 0..func_indices.len() as u32 {
+                        rt_claimed.insert(*offset + k);
+                    }
+                }
+                let mut remap_pairs: Vec<(u32, u32)> = self
+                    .user_func_remap
+                    .iter()
+                    .map(|(&b, &m)| (b, m))
+                    .filter(|(b, _)| !rt_claimed.contains(b))
+                    .collect();
                 remap_pairs.sort_by_key(|(b, _)| *b);
                 // Collapse contiguous backend-index runs into one element
                 // segment each — wasmparser/encoder handles many tiny
@@ -1113,8 +1156,6 @@ impl LinkerCtx {
                         expected += 1;
                         i += 1;
                     }
-                    // Skip slots that are already covered by the rt element
-                    // entries above (they win for their declared ranges).
                     elem_section.active(
                         Some(0),
                         &ConstExpr::i32_const(start_slot as i32),
@@ -1245,6 +1286,33 @@ impl LinkerCtx {
             }
         }
         module.section(&data_section);
+
+        // --- Name section (debug aid) ---
+        // Merge function names from both modules, remapped to merged
+        // indices, so wasmtime trap backtraces show Haxe/runtime symbols
+        // instead of `<wasm function N>`.
+        {
+            let mut merged_names: BTreeMap<u32, String> = BTreeMap::new();
+            for (idx, name) in &rt.func_names {
+                if let Some(&merged) = self.rt_func_remap.get(idx) {
+                    merged_names.insert(merged, format!("rt::{}", name));
+                }
+            }
+            for (idx, name) in &user.func_names {
+                if let Some(&merged) = self.user_func_remap.get(idx) {
+                    merged_names.insert(merged, name.clone());
+                }
+            }
+            if !merged_names.is_empty() {
+                let mut names = wasm_encoder::NameSection::new();
+                let mut fn_names = wasm_encoder::NameMap::new();
+                for (idx, name) in &merged_names {
+                    fn_names.append(*idx, name);
+                }
+                names.functions(&fn_names);
+                module.section(&names);
+            }
+        }
 
         Ok(module.finish())
     }

@@ -1802,8 +1802,27 @@ impl<'a> HirToMirContext<'a> {
 
         // Call malloc - returns Ptr(U8)
         let ptr_u8_ty = IrType::Ptr(Box::new(IrType::U8));
-        self.builder
-            .build_call_direct(malloc_id, vec![size_reg], ptr_u8_ty)
+        let obj_ptr =
+            self.builder
+                .build_call_direct(malloc_id, vec![size_reg], ptr_u8_ty.clone())?;
+
+        // Zero-initialize: Haxe guarantees unassigned fields read as null,
+        // but malloc returns dirty memory. Fields a constructor never
+        // assigns (e.g. `public var registry:ArchRegistry;` with an empty
+        // ctor) otherwise hold heap garbage that passes `!= null` checks —
+        // latent on native (fresh pages happen to be zero), observed as an
+        // OOB fault on wasm once startup allocations shifted the heap.
+        // Use i64 GEPs (not PtrAdd) so ScalarReplacement keeps tracking the
+        // allocation — SROA promotes through GEP/Copy/Cast only, and a
+        // PtrAdd use would dangle after the malloc is elided.
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let lanes = size / 8;
+        for lane in 0..lanes {
+            let idx = self.builder.build_const(IrValue::I32(lane as i32))?;
+            let slot = self.builder.build_gep(obj_ptr, vec![idx], IrType::I64)?;
+            self.builder.build_store(slot, zero)?;
+        }
+        Some(obj_ptr)
     }
 
     /// Check if a class symbol has the @:cstruct flag
@@ -9664,8 +9683,7 @@ impl<'a> HirToMirContext<'a> {
                                 .interface_method_names
                                 .get(&iface_sym)
                                 .and_then(|names| names.iter().position(|n| *n == method_name_i));
-                            {
-                                use std::io::Write;
+                            if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
                                 let mn = self
                                     .string_interner
                                     .get(method_name_i)
@@ -9685,21 +9703,10 @@ impl<'a> HirToMirContext<'a> {
                                             .collect::<Vec<_>>()
                                             .join(",")
                                     });
-                                let _ = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/rayzor_diag.log")
-                                    .and_then(|mut f| {
-                                        writeln!(
-                                            f,
-                                            "[disp] mod={} iface={} method={} idx={:?} names={:?}",
-                                            self.builder.module.name,
-                                            iname,
-                                            mn,
-                                            method_index,
-                                            names_list
-                                        )
-                                    });
+                                eprintln!(
+                                    "[disp] mod={} iface={} method={} idx={:?} names={:?}",
+                                    self.builder.module.name, iname, mn, method_index, names_list
+                                );
                             }
 
                             if let Some(idx) = method_index {
@@ -33292,8 +33299,16 @@ impl<'a> HirToMirContext<'a> {
                 .copied()
                 .or_else(|| self.external_function_map.get(method_sym).copied());
             if let Some(func_id) = func_id_opt {
+                // Slots MUST hold dispatch thunks, never raw methods: the
+                // CallIndirect lowering on every backend uses the closure
+                // ABI (env prepended), so a raw `(this, args)` method in a
+                // slot receives `(this=env, args=this, …)` — shifted args.
+                // Natively this was masked by devirtualization; on wasm it
+                // surfaced as iface methods silently reading garbage
+                // (Tokenizer.encode returning [] in llama-chat).
                 let dispatch_func_id = self
                     .ensure_vtable_dispatch_thunk(func_id)
+                    .or_else(|| self.ensure_cross_module_dispatch_thunk(*method_sym, func_id))
                     .unwrap_or(func_id);
                 let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
                 let offset_val = self
@@ -36656,6 +36671,122 @@ impl<'a> HirToMirContext<'a> {
             let result = self
                 .builder
                 .build_call_direct(method_func_id, call_args, ret_ty.clone());
+            self.builder.build_return(result);
+        }
+
+        self.builder.finish_function();
+        self.builder.current_function = saved_current_function;
+        self.builder.current_block = saved_current_block;
+        self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
+
+        self.vtable_dispatch_thunks.insert(method_func_id, thunk_id);
+        Some(thunk_id)
+    }
+
+    /// Cross-module variant of `ensure_vtable_dispatch_thunk`: the method's
+    /// IrFunction lives in another module's IrModule, so its MIR signature
+    /// isn't reachable through `self.builder.module.functions`. Derive the
+    /// signature from the method SYMBOL's function type instead and emit a
+    /// local thunk that CallDirects the cross-module id (resolved by the
+    /// same fixups every other cross-module direct call uses). Reuses any
+    /// already-imported thunk by qualified name first.
+    fn ensure_cross_module_dispatch_thunk(
+        &mut self,
+        method_sym: SymbolId,
+        method_func_id: IrFunctionId,
+    ) -> Option<IrFunctionId> {
+        if let Some(cached) = self.vtable_dispatch_thunks.get(&method_func_id) {
+            return Some(*cached);
+        }
+
+        let symbol = self.symbol_table.get_symbol(method_sym)?;
+        let qname = symbol
+            .qualified_name
+            .or(Some(symbol.name))
+            .and_then(|n| self.string_interner.get(n))
+            .map(|s| s.to_string())?;
+        let sanitized_qname: String = qname
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let thunk_name = format!("__vtable_dispatch_thunk__{}", sanitized_qname);
+
+        // Reuse the thunk another module already emitted for this method.
+        if let Some(&existing) = self.external_function_name_map.get(&thunk_name) {
+            self.vtable_dispatch_thunks.insert(method_func_id, existing);
+            return Some(existing);
+        }
+
+        let (param_type_ids, ret_type_id) = self.resolve_function_type_signature(symbol.type_id)?;
+        let param_ir_types: Vec<IrType> = param_type_ids
+            .iter()
+            .map(|t| self.convert_type(*t))
+            .collect();
+        let ret_ir_type = self.convert_type(ret_type_id);
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8)
+            .param("this".to_string(), ptr_void)
+            .returns(ret_ir_type.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for (i, ty) in param_ir_types.iter().enumerate() {
+            sig_builder = sig_builder.param(format!("p{}", i), ty.clone());
+        }
+        let thunk_sig = sig_builder.build();
+
+        let thunk_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        let saved_strict_move_locals = self.strict_move_locals.clone();
+        self.symbol_map.clear();
+        self.strict_move_locals.clear();
+
+        let restore = |s: &mut Self| {
+            s.builder.finish_function();
+            s.builder.current_function = saved_current_function;
+            s.builder.current_block = saved_current_block;
+        };
+
+        let thunk_id = self
+            .builder
+            .start_function(thunk_symbol, thunk_name, thunk_sig);
+
+        let call_args = {
+            let Some(func) = self.builder.current_function() else {
+                restore(self);
+                self.symbol_map = saved_symbol_map;
+                self.strict_move_locals = saved_strict_move_locals;
+                return None;
+            };
+            // Skip env (param 0); forward this + user params.
+            let mut args = Vec::with_capacity(1 + param_ir_types.len());
+            for i in 0..(1 + param_ir_types.len()) {
+                if let Some(reg) = func.get_param_reg(i + 1) {
+                    args.push(reg);
+                } else {
+                    restore(self);
+                    self.symbol_map = saved_symbol_map;
+                    self.strict_move_locals = saved_strict_move_locals;
+                    return None;
+                }
+            }
+            args
+        };
+
+        if matches!(ret_ir_type, IrType::Void) {
+            self.builder
+                .build_call_direct(method_func_id, call_args, IrType::Void);
+            self.builder.build_return(None);
+        } else {
+            let result =
+                self.builder
+                    .build_call_direct(method_func_id, call_args, ret_ir_type.clone());
             self.builder.build_return(result);
         }
 
