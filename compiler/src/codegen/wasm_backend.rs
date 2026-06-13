@@ -3272,6 +3272,9 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === Throw / Resume / Panic ===
+            // Note: Haxe `throw` is lowered to a direct call to
+            // `rayzor_throw_typed` (which prints + traps), not to this
+            // IrInstruction::Throw, so the message surfaces there.
             IrInstruction::Throw { .. }
             | IrInstruction::Resume { .. }
             | IrInstruction::Panic { .. } => {

@@ -783,6 +783,36 @@ unsafe fn tensor_binary<F: Fn(f32, f32) -> f32>(a: i32, b: i32, f: F) -> i32 {
     }
     let ar = &*(a as *const Tensor);
     let br = &*(b as *const Tensor);
+
+    // Trailing-dim broadcast: `a [..., D] op b [D]` → result shaped like a.
+    // Matches the native runtime's tensor_binop_row_broadcast — the form
+    // used by RMSNorm/LayerNorm gains and dense biases (e.g. RMSNorm's
+    // `norm.mul(weight)` where norm is [seq, hidden] and weight is
+    // [hidden]). Without this the wasm path returned null and every
+    // attention input collapsed to a null activation.
+    if br.ndim == 1 && ar.ndim >= 1 {
+        let a_shape = slice::from_raw_parts(ar.shape, ar.ndim);
+        let last = a_shape[ar.ndim - 1];
+        let b_shape = slice::from_raw_parts(br.shape, 1);
+        if b_shape[0] == last && last != 0 && ar.numel.is_multiple_of(last) {
+            let y = alloc_tensor(a_shape, ar.dtype);
+            if y.is_null() {
+                return 0;
+            }
+            let yr = &*y;
+            let groups = ar.numel / last;
+            for g in 0..groups {
+                let off = g * last;
+                for j in 0..last {
+                    let av = load_f32_at(ar.data, off + j, ar.dtype);
+                    let bv = load_f32_at(br.data, j, br.dtype);
+                    store_f32_at(yr.data, off + j, yr.dtype, f(av, bv));
+                }
+            }
+            return y as i32;
+        }
+    }
+
     if ar.ndim != br.ndim || ar.numel != br.numel {
         return 0;
     }
