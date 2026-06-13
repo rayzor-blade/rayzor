@@ -632,6 +632,7 @@ dependencies = [
  "rayzor-gpu",
  "rayzor-plugin",
  "rayzor-runtime",
+ "rayzor-runtime-core",
  "regex",
  "serde",
  "serde_json",

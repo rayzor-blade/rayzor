@@ -300,6 +300,106 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         wasm_addr(raw) as usize
     }
 
+    /// Host-side parallel quant matmul over a wasm linear-memory region.
+    ///
+    /// The guest (`runtime-wasm` `rayzor_tensor_matmul_qt_t_f32_threaded`)
+    /// allocates `y`, then hands us raw wasm byte-offsets for `x` (F32
+    /// activation `[batch, k]`), the Q4_K_M/Q6_K weight blocks `[n, k]`, and
+    /// `y` (`[batch, n]`). We prequantise each `x` row to Q8_K natively, then
+    /// fan the `n` output columns across the native worker pool — each band
+    /// runs `vec_dot_q*_K_q8_K` (the same kernels the guest uses, but native
+    /// and threaded) and writes a disjoint slice of `y`.
+    ///
+    /// Soundness: the wasm memory is a fixed mmap (`memory_may_move(false)`),
+    /// so `base` is stable for the whole call; the single guest thread is
+    /// blocked in this host import, so no concurrent guest mutation occurs;
+    /// worker bands write disjoint `y` columns and only read-share the weights
+    /// and the prequantised `x`. Pointers cross the `'static + Send + Sync`
+    /// `parallel_rows` boundary as `usize` and are reconstructed inside.
+    ///
+    /// Returns 1 when handled, 0 when the shape/scheme isn't supported (the
+    /// guest then falls back to its sequential path).
+    ///
+    /// # Safety
+    /// `base + *_off` must reference live wasm memory of the implied extents.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn host_parallel_qmatmul(
+        base: usize,
+        x_data_off: usize,
+        x_stride0_elems: usize,
+        batch: usize,
+        k: usize,
+        qt_data_off: usize,
+        scheme: i32,
+        n: usize,
+        y_data_off: usize,
+        guest_threads: i32,
+    ) -> i32 {
+        use rayzor_runtime_core::quant::matmul::prepare_x_q8k_blocks_into;
+        use rayzor_runtime_core::quant::q6_k::vec_dot_q6_K_q8_K;
+        use rayzor_runtime_core::quant::types::{
+            Q4KMBlock, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q6_K_BLOCK_BYTES, QSCHEME_Q4_K_M, QSCHEME_Q6_K,
+        };
+        // Q4_K_M dot: native NEON SDOT (the llama.cpp-ported kernel, the host's
+        // fastest) when the build has dotprod, else the portable scalar
+        // dispatcher. Both take the same `Q8KBlock` activation we prequant
+        // below, so the prequant is identical regardless of path.
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+        use rayzor_runtime_core::quant::q4_k_m::vec_dot_q4_K_q8_K;
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        use rayzor_runtime_core::quant::sdot::dot_q4_k_q8_kblock_llamacpp;
+
+        const BLOCK_SIZE: usize = 256;
+        if k == 0 || n == 0 || batch == 0 || k % BLOCK_SIZE != 0 {
+            return 0;
+        }
+        let block_bytes = match scheme as u8 {
+            QSCHEME_Q4_K_M => Q4_K_M_BLOCK_BYTES,
+            QSCHEME_Q6_K => Q6_K_BLOCK_BYTES,
+            _ => return 0,
+        };
+        let blocks_per_row = k / BLOCK_SIZE;
+        // Mirror native dispatch: positive guest hint wins (clamped), else auto.
+        let threads = if guest_threads > 1 {
+            (guest_threads as usize).min(64)
+        } else {
+            rayzor_runtime::worker_pool::auto_kernel_threads()
+        };
+        let qt_base = base + qt_data_off;
+        let y_base = base + y_data_off;
+
+        let mut x_q8k: Vec<Q8KBlock> = Vec::with_capacity(blocks_per_row);
+        for bch in 0..batch {
+            let x_ptr = (base + x_data_off + bch * x_stride0_elems * 4) as *const f32;
+            prepare_x_q8k_blocks_into(x_ptr, k, &mut x_q8k);
+            let xq_ptr = x_q8k.as_ptr() as usize;
+            let y_row = y_base + bch * n * 4;
+            rayzor_runtime::worker_pool::global().parallel_rows(n, threads, move |lo, hi| {
+                let xq = xq_ptr as *const Q8KBlock;
+                for n_idx in lo..hi {
+                    let row_ptr = (qt_base + n_idx * blocks_per_row * block_bytes) as *const u8;
+                    let mut sum = 0.0f32;
+                    for blk in 0..blocks_per_row {
+                        let bp = unsafe { row_ptr.add(blk * block_bytes) };
+                        let xb = unsafe { &*xq.add(blk) };
+                        sum += if scheme as u8 == QSCHEME_Q4_K_M {
+                            let w = unsafe { &*(bp as *const Q4KMBlock) };
+                            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                            let d = unsafe { dot_q4_k_q8_kblock_llamacpp(w, xb) };
+                            #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+                            let d = vec_dot_q4_K_q8_K(w, xb);
+                            d
+                        } else {
+                            unsafe { vec_dot_q6_K_q8_K(bp, xb) }
+                        };
+                    }
+                    unsafe { *((y_row + n_idx * 4) as *mut f32) = sum };
+                }
+            });
+        }
+        1
+    }
+
     fn looks_like_wasm_ptr(raw: i32) -> bool {
         wasm_addr(raw) > 65536
     }
@@ -1073,11 +1173,19 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         next_thread_id: 1,
         pending_threads: Vec::new(),
         wgpu_ctx: {
-            let ctx = WgpuComputeCtx::new();
-            if ctx.is_some() {
-                eprintln!("[wasm-runner] wgpu compute backend initialized (Metal/Vulkan/DX12)");
+            // wgpu/Metal init spawns driver threads and allocates GPU resources
+            // up front; the quant matmul path runs entirely on the CPU host
+            // worker pool, so RAYZOR_WASM_NO_WGPU=1 skips it (faster startup,
+            // one fewer source of host-side nondeterminism).
+            if std::env::var("RAYZOR_WASM_NO_WGPU").as_deref() == Ok("1") {
+                None
+            } else {
+                let ctx = WgpuComputeCtx::new();
+                if ctx.is_some() {
+                    eprintln!("[wasm-runner] wgpu compute backend initialized (Metal/Vulkan/DX12)");
+                }
+                ctx
             }
-            ctx
         },
         host_alloc_ptr: 0,
         host_alloc_low_bound: 4 * 1024 * 1024, // reserve bottom 4 MiB for app heap
@@ -1158,6 +1266,65 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     }
 
     let mut registered: BTreeSet<String> = BTreeSet::new();
+
+    // -- Register host-side parallel quant matmul --
+    // runtime-wasm's threaded matmul hands us raw wasm byte-offsets and we run
+    // the embarrassingly-parallel output-column loop on the NATIVE worker pool
+    // (native kernels, real OS threads) over the shared wasm memory. This is
+    // the wasm "threading" lever: the single guest thread blocks in this call
+    // while host threads do the matmul. Registered here (and marked done so the
+    // later stub loop won't redefine it) rather than in the tensor-fallback
+    // loop, which is skipped wholesale when runtime-wasm provides the tensors.
+    if rayzor_import_names.contains("rayzor_host_qmatmul_par") {
+        let par_ty = FuncType::new(
+            &engine,
+            std::iter::repeat_n(ValType::I32, 9),
+            std::iter::once(ValType::I32),
+        );
+        linker
+            .func_new(
+                "rayzor",
+                "rayzor_host_qmatmul_par",
+                par_ty,
+                move |mut caller, params, results| {
+                    let x_data_off = val_i32(&params[0]).max(0) as usize;
+                    let x_stride0 = val_i32(&params[1]).max(0) as usize;
+                    let batch = val_i32(&params[2]).max(0) as usize;
+                    let k = val_i32(&params[3]).max(0) as usize;
+                    let qt_data_off = val_i32(&params[4]).max(0) as usize;
+                    let scheme = val_i32(&params[5]);
+                    let n = val_i32(&params[6]).max(0) as usize;
+                    let y_data_off = val_i32(&params[7]).max(0) as usize;
+                    let threads = val_i32(&params[8]);
+                    // Stable mmap base of the shared linear memory.
+                    let base = match caller.data().shared_memory.clone() {
+                        Some(shared) => shared.data().as_ptr() as *const u8 as usize,
+                        None => {
+                            results[0] = Val::I32(0);
+                            return Ok(());
+                        }
+                    };
+                    let handled = unsafe {
+                        host_parallel_qmatmul(
+                            base,
+                            x_data_off,
+                            x_stride0,
+                            batch,
+                            k,
+                            qt_data_off,
+                            scheme,
+                            n,
+                            y_data_off,
+                            threads,
+                        )
+                    };
+                    results[0] = Val::I32(handled);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register rayzor_host_qmatmul_par: {}", e))?;
+        registered.insert("rayzor_host_qmatmul_par".to_string());
+    }
 
     for (name, func_ty) in &rayzor_imports {
         let canon = match canonical_bytes_name(name) {

@@ -28,6 +28,28 @@ use std::alloc::{alloc, dealloc, Layout};
 
 use crate::tensor::{Tensor, DTYPE_F32};
 
+// Host-provided parallel quant matmul. The embedder (`compiler/src/codegen/
+// wasm_runner.rs`) runs the output-column loop on the native worker pool over
+// the shared linear memory while this single guest thread blocks in the call —
+// the wasm "threading" lever. Guest passes raw wasm byte-offsets + dims; host
+// prequantises `x`→Q8_K and fans `n` columns across OS threads. Returns 1 when
+// handled, 0 to fall back to the sequential guest path.
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "rayzor")]
+extern "C" {
+    fn rayzor_host_qmatmul_par(
+        x_data_off: i32,
+        x_stride0: i32,
+        batch: i32,
+        k: i32,
+        qt_data_off: i32,
+        scheme: i32,
+        n: i32,
+        y_data_off: i32,
+        threads: i32,
+    ) -> i32;
+}
+
 #[repr(C)]
 struct HaxeBytes {
     ptr: *mut u8,
@@ -469,9 +491,51 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     x: i32,
     qt: i32,
-    _threads: i32,
+    threads: i32,
 ) -> i32 {
-    rayzor_tensor_matmul_qt_t_f32(x, qt)
+    if x == 0 || qt == 0 {
+        return 0;
+    }
+    let qtr = &*(qt as *const QTensor);
+    let Some((batch, n_out, _k, _block_size, _block_bytes)) = qmatmul_shape(x, qtr) else {
+        return 0;
+    };
+    let y_shape: [usize; 2] = [batch, n_out];
+    let y = crate::tensor::alloc_tensor(&y_shape, DTYPE_F32);
+    if y.is_null() {
+        return 0;
+    }
+    let y = y as i32;
+
+    // Host-parallel fast path: offload the embarrassingly-parallel output-column
+    // loop to native worker threads over the shared linear memory. Wired for the
+    // contiguous Q4_K_M / Q6_K case (the schemes `prepare_x_q8k_blocks_into`
+    // covers); anything else falls through to the sequential guest kernel.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let xr = &*(x as *const Tensor);
+        let x_strides = slice::from_raw_parts(xr.strides, 2);
+        if (qtr.scheme == QSCHEME_Q4_K_M || qtr.scheme == QSCHEME_Q6_K) && x_strides[1] == 1 {
+            let handled = rayzor_host_qmatmul_par(
+                xr.data as usize as i32,
+                x_strides[0] as i32,
+                batch as i32,
+                _k as i32,
+                qtr.data as usize as i32,
+                qtr.scheme as i32,
+                n_out as i32,
+                (*(y as *const Tensor)).data as usize as i32,
+                threads,
+            );
+            if handled != 0 {
+                return y;
+            }
+        }
+    }
+
+    let _ = threads;
+    qmatmul_chunk_impl(x, qt, y, 0, n_out as i32);
+    y
 }
 
 #[no_mangle]
@@ -480,7 +544,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     q_w: i32,
     k_w: i32,
     v_w: i32,
-    _threads: i32,
+    threads: i32,
     out_q: i32,
     out_k: i32,
     out_v: i32,
@@ -488,16 +552,16 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     if out_q == 0 || out_k == 0 || out_v == 0 {
         return 1;
     }
-    let q = rayzor_tensor_matmul_qt_t_f32(x, q_w);
+    let q = rayzor_tensor_matmul_qt_t_f32_threaded(x, q_w, threads);
     if q == 0 {
         return 2;
     }
-    let k = rayzor_tensor_matmul_qt_t_f32(x, k_w);
+    let k = rayzor_tensor_matmul_qt_t_f32_threaded(x, k_w, threads);
     if k == 0 {
         crate::tensor::rayzor_tensor_free(q);
         return 2;
     }
-    let v = rayzor_tensor_matmul_qt_t_f32(x, v_w);
+    let v = rayzor_tensor_matmul_qt_t_f32_threaded(x, v_w, threads);
     if v == 0 {
         crate::tensor::rayzor_tensor_free(q);
         crate::tensor::rayzor_tensor_free(k);
