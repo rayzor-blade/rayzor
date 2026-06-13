@@ -17,7 +17,7 @@
 use core::slice;
 use rayzor_runtime_core::quant::matmul::prepare_x_q8k_blocks_into;
 use rayzor_runtime_core::quant::q4_k_m::{
-    decode_q4_k_block, dequant_q4_k_block, vec_dot_q4_K_q8_K_scalar,
+    decode_q4_k_block, dequant_q4_k_block, vec_dot_q4_K_q8_K,
 };
 use rayzor_runtime_core::quant::q6_k::dequant_q6_k_block;
 use rayzor_runtime_core::quant::types::{
@@ -377,7 +377,7 @@ unsafe fn qmatmul_chunk_impl(x: i32, qt: i32, y: i32, n_start: i32, n_end: i32) 
                 let bp = row_ptr.add(blk * block_bytes);
                 if qtr.scheme == QSCHEME_Q4_K_M && x_strides[1] == 1 {
                     let weight = &*(bp as *const Q4KMBlock);
-                    sum += vec_dot_q4_K_q8_K_scalar(weight, &x_q8k[blk]);
+                    sum += vec_dot_q4_K_q8_K(weight, &x_q8k[blk]);
                 } else {
                     match qtr.scheme {
                         QSCHEME_Q4_K_M => {
