@@ -259,6 +259,93 @@ pub fn vec_dot_q4_K_q8_K_scalar(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     x.d * acc
 }
 
+/// Dispatch wrapper: wasm32+simd128 uses the vectorised kernel, everything
+/// else (native, where the AArch64 SDOT path lives upstream) uses scalar.
+#[inline]
+pub fn vec_dot_q4_K_q8_K(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        vec_dot_q4_K_q8_K_simd128(weight, x)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        vec_dot_q4_K_q8_K_scalar(weight, x)
+    }
+}
+
+/// SIMD128 (wasm) Q4_K_M × Q8_K block dot. Bit-identical to the scalar
+/// reference: the per-sub-block integer dot is summed via `i32x4.dot_i16x8`
+/// + a horizontal add, and integer addition is associative, so `sdot` is
+/// exact; the float accumulation order (sub-blocks 0..8) and the
+/// `sub_scale*sdot - sub_min*bsum` expression form both match the scalar
+/// path verbatim.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
+    use core::arch::wasm32::*;
+
+    // i4×i8 dot of two 16-lane vectors → partial i32x4 (sign-extend both
+    // halves to i16, two `i32x4.dot_i16x8`). Nibbles are 0..15 so the
+    // sign-extend is a no-op on their value.
+    #[inline(always)]
+    fn dot16(a: v128, b: v128) -> v128 {
+        let a_lo = i16x8_extend_low_i8x16(a);
+        let a_hi = i16x8_extend_high_i8x16(a);
+        let b_lo = i16x8_extend_low_i8x16(b);
+        let b_hi = i16x8_extend_high_i8x16(b);
+        i32x4_add(i32x4_dot_i16x8(a_lo, b_lo), i32x4_dot_i16x8(a_hi, b_hi))
+    }
+    #[inline(always)]
+    fn hsum(v: v128) -> i32 {
+        i32x4_extract_lane::<0>(v)
+            + i32x4_extract_lane::<1>(v)
+            + i32x4_extract_lane::<2>(v)
+            + i32x4_extract_lane::<3>(v)
+    }
+
+    let d = f16::from_bits(weight.d).to_f32();
+    let dmin = f16::from_bits(weight.dmin).to_f32();
+    let header = weight.scales;
+    let mask = u8x16_splat(0x0F);
+
+    // Raw pointers: Q4KMBlock is repr(packed) so `&weight.qs` is illegal;
+    // wasm v128 loads tolerate unaligned addresses.
+    let w_base = core::ptr::addr_of!(weight.qs) as *const u8;
+    let x_base = x.qs.as_ptr();
+
+    let mut acc = 0.0f32;
+    for p in 0..4usize {
+        let s_lo = 2 * p; // low-nibble sub-block
+        let s_hi = 2 * p + 1; // high-nibble sub-block
+        let mut acc_lo = i32x4_splat(0);
+        let mut acc_hi = i32x4_splat(0);
+        for h in 0..2usize {
+            // SAFETY: offsets stay within qs (128 bytes) / x.qs (256 bytes).
+            let w = unsafe { v128_load(w_base.add(p * 32 + h * 16) as *const v128) };
+            let low = v128_and(w, mask); // 0..15
+            let high = u8x16_shr(w, 4); // logical >> 4 → 0..15
+            let xl = unsafe { v128_load(x_base.add(s_lo * 32 + h * 16) as *const v128) };
+            let xh = unsafe { v128_load(x_base.add(s_hi * 32 + h * 16) as *const v128) };
+            acc_lo = i32x4_add(acc_lo, dot16(low, xl));
+            acc_hi = i32x4_add(acc_hi, dot16(high, xh));
+        }
+        let sdot_lo = hsum(acc_lo);
+        let sdot_hi = hsum(acc_hi);
+
+        let (sc6_lo, mn6_lo) = q4_k_get_scale_min(s_lo, &header);
+        let sub_scale_lo = d * sc6_lo as f32;
+        let sub_min_lo = dmin * mn6_lo as f32;
+        let bsum_lo = x.bsums[2 * s_lo] as i32 + x.bsums[2 * s_lo + 1] as i32;
+        acc += sub_scale_lo * (sdot_lo as f32) - sub_min_lo * (bsum_lo as f32);
+
+        let (sc6_hi, mn6_hi) = q4_k_get_scale_min(s_hi, &header);
+        let sub_scale_hi = d * sc6_hi as f32;
+        let sub_min_hi = dmin * mn6_hi as f32;
+        let bsum_hi = x.bsums[2 * s_hi] as i32 + x.bsums[2 * s_hi + 1] as i32;
+        acc += sub_scale_hi * (sdot_hi as f32) - sub_min_hi * (bsum_hi as f32);
+    }
+    x.d * acc
+}
+
 /// Encode 256 f32 weights into a single Q4_K_M super-block.
 ///
 /// Naive quantisation strategy — per sub-block (8 sub-blocks of 32), pick
