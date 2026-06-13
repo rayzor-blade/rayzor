@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::compile_helpers::compile_haxe_to_mir_with_defines;
+use crate::compile_helpers::{
+    compile_haxe_to_mir_with_defines, compile_haxe_to_mir_with_defines_and_cache,
+};
 
 struct WasmCompileInputs {
     compiler_plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
@@ -179,6 +181,7 @@ pub fn cmd_run_wasm(
     file: Option<PathBuf>,
     rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
+    no_cache: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
     let (file, project) = resolve_wasm_entry(file, "run --wasm")?;
@@ -191,14 +194,18 @@ pub fn cmd_run_wasm(
     let define_strings = wasm_defines(project.as_ref());
     let define_refs: Vec<&str> = define_strings.iter().map(String::as_str).collect();
 
-    // Compile Haxe → MIR → WASM
-    let mir_result = compile_haxe_to_mir_with_defines(
+    // Compile Haxe → MIR → WASM. `--no-cache` disables the BLADE MIR cache;
+    // the cache dir is also target-discriminated (see CompilationConfig::
+    // cache_discriminator) so native and wasm artifacts never collide.
+    let mir_result = compile_haxe_to_mir_with_defines_and_cache(
         &source,
         file.to_str().unwrap_or("unknown"),
         compile_inputs.compiler_plugins,
         &compile_inputs.source_dirs,
         safety_warnings,
         &define_refs,
+        !no_cache,
+        None,
     )?;
 
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;

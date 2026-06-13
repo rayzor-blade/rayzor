@@ -407,21 +407,51 @@ impl CompilationConfig {
         format!("{}-{}", arch, os)
     }
 
-    /// Get or create the cache directory
-    pub fn get_cache_dir(&self) -> PathBuf {
-        if let Some(ref cache_dir) = self.cache_dir {
-            return cache_dir.clone();
+    /// Target discriminator for cache paths.
+    ///
+    /// The same `.hx` source lowers to DIFFERENT MIR depending on
+    /// `extra_defines` (`#if wasm`, host-import vs native-runtime bindings,
+    /// etc.). Keying the cache only by source path made native and wasm builds
+    /// of the same file share one `.blade` slot — running native then wasm (or
+    /// vice versa) served the wrong-target MIR until `.rayzor` was deleted by
+    /// hand. Folding the sorted defines into the cache directory gives native
+    /// and wasm fully separate cache trees.
+    pub fn cache_discriminator(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        if self.extra_defines.is_empty() {
+            return "native".to_string();
         }
+        let mut defines = self.extra_defines.clone();
+        defines.sort();
+        let tag = if defines.iter().any(|d| d == "wasm") {
+            "wasm"
+        } else {
+            "native"
+        };
+        let mut hasher = DefaultHasher::new();
+        defines.hash(&mut hasher);
+        format!("{}-{:08x}", tag, hasher.finish() as u32)
+    }
 
-        // Default: .rayzor/blade/cache (separate from Rust target folder)
-        let default_cache = PathBuf::from(".rayzor/blade/cache");
+    /// Get or create the cache directory (target-discriminated — see
+    /// [`cache_discriminator`]).
+    pub fn get_cache_dir(&self) -> PathBuf {
+        // Base is `.rayzor/blade/cache` (separate from the Rust target folder),
+        // or an explicit `--cache-dir`. Either way the per-target subdir keeps
+        // native and wasm artifacts from colliding.
+        let base = self
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".rayzor/blade/cache"));
+        let dir = base.join(self.cache_discriminator());
 
         // Try to create it if it doesn't exist
-        if !default_cache.exists() {
-            let _ = std::fs::create_dir_all(&default_cache);
+        if !dir.exists() {
+            let _ = std::fs::create_dir_all(&dir);
         }
 
-        default_cache
+        dir
     }
 
     /// Get the target directory for the given profile
