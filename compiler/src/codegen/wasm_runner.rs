@@ -1296,6 +1296,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     let n = val_i32(&params[6]).max(0) as usize;
                     let y_data_off = val_i32(&params[7]).max(0) as usize;
                     let threads = val_i32(&params[8]);
+                    // Diagnostic: RAYZOR_WASM_NO_HOST_MATMUL=1 forces the guest
+                    // to fall back to its sequential in-wasm kernel (isolates
+                    // host-path correctness/perf from the guest path).
+                    if std::env::var("RAYZOR_WASM_NO_HOST_MATMUL").as_deref() == Ok("1") {
+                        results[0] = Val::I32(0);
+                        return Ok(());
+                    }
                     // Stable mmap base of the shared linear memory.
                     let base = match caller.data().shared_memory.clone() {
                         Some(shared) => shared.data().as_ptr() as *const u8 as usize,
