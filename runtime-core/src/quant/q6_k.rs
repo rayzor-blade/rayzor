@@ -18,9 +18,12 @@ use super::types::{Q8KBlock, Q6_K_BLOCK_SIZE};
 /// everything else uses the scalar reference. The dot prequantizes the
 /// activation to Q8_K (`x`) exactly like the Q4_K_M path, so Q6_K matmuls
 /// stop paying the per-column full f32 dequant.
+///
+/// # Safety
+/// `block_ptr` must reference a live 210-byte Q6_K super-block.
 #[inline]
 #[allow(non_snake_case)]
-pub fn vec_dot_q6_K_q8_K(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
+pub unsafe fn vec_dot_q6_K_q8_K(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
         unsafe { vec_dot_q6_K_q8_K_simd128(block_ptr, x) }
