@@ -382,13 +382,16 @@ unsafe fn qmatmul_chunk_impl(x: i32, qt: i32, y: i32, n_start: i32, n_end: i32) 
             for blk in 0..blocks_per_row {
                 let bp = row_ptr.add(blk * block_bytes);
                 if fast_path {
+                    // blk < blocks_per_row == x_q8k.len() (prepared above);
+                    // skip the per-block bounds check on the hot path.
+                    let xb = x_q8k.get_unchecked(blk);
                     match qtr.scheme {
                         QSCHEME_Q4_K_M => {
                             let weight = &*(bp as *const Q4KMBlock);
-                            sum += vec_dot_q4_K_q8_K(weight, &x_q8k[blk]);
+                            sum += vec_dot_q4_K_q8_K(weight, xb);
                         }
                         _ => {
-                            sum += vec_dot_q6_K_q8_K(bp, &x_q8k[blk]);
+                            sum += vec_dot_q6_K_q8_K(bp, xb);
                         }
                     }
                 } else {
