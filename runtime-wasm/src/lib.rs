@@ -29,6 +29,52 @@ extern "C" {
 }
 
 /// Write bytes to a WASI file descriptor.
+/// Debug marker to stderr (fd 2). Kept for wasm kernel bring-up; no
+/// call sites in normal builds.
+#[allow(dead_code)]
+pub fn rt_dbg(tag: &str) {
+    unsafe {
+        wasi_write(2, tag.as_ptr(), tag.len());
+        let nl: u8 = b'\n';
+        wasi_write(2, &nl as *const u8, 1);
+    }
+}
+
+/// Debug: tag plus i64 values, to stderr. Kept for bring-up.
+#[allow(dead_code)]
+pub fn rt_dbg_n(tag: &str, vals: &[i64]) {
+    unsafe {
+        wasi_write(2, tag.as_ptr(), tag.len());
+        for &v in vals {
+            let sp: u8 = b' ';
+            wasi_write(2, &sp as *const u8, 1);
+            // minimal i64 -> decimal
+            let mut buf = [0u8; 24];
+            let mut n = v;
+            let neg = n < 0;
+            let mut i = buf.len();
+            if n == 0 {
+                i -= 1;
+                buf[i] = b'0';
+            } else {
+                while n != 0 {
+                    i -= 1;
+                    let d = (n % 10).abs() as u8;
+                    buf[i] = b'0' + d;
+                    n /= 10;
+                }
+                if neg {
+                    i -= 1;
+                    buf[i] = b'-';
+                }
+            }
+            wasi_write(2, buf.as_ptr().add(i), buf.len() - i);
+        }
+        let nl: u8 = b'\n';
+        wasi_write(2, &nl as *const u8, 1);
+    }
+}
+
 unsafe fn wasi_write(fd: i32, data: *const u8, len: usize) {
     if data.is_null() || len == 0 {
         return;
@@ -1043,9 +1089,25 @@ pub extern "C" fn rayzor_update_call_frame_location(_line: i32, _col: i32) {
     // no-op in WASM
 }
 
-/// Throw a typed exception. In WASM, this traps (unreachable).
+/// Throw a typed exception. In WASM there is no unwinding, so this
+/// prints the exception (when it's a String — type_id 5) and traps.
+/// Printing first turns the otherwise-anonymous `unreachable` into a
+/// readable "uncaught exception: <message>" diagnostic.
 #[no_mangle]
-pub extern "C" fn rayzor_throw_typed(_exception_value: i32, _type_id: u32) {
+pub extern "C" fn rayzor_throw_typed(exception_value: i32, type_id: u32) {
+    unsafe {
+        let prefix = b"uncaught exception: ";
+        wasi_write(1, prefix.as_ptr(), prefix.len());
+        if type_id == 5 && exception_value != 0 {
+            // String exception: value is a HaxeString {ptr,len,cap}.
+            let (data_ptr, len, _) = read_haxe_string(exception_value);
+            if data_ptr != 0 && len > 0 {
+                wasi_write(1, data_ptr as *const u8, len as usize);
+            }
+        }
+        let newline: u8 = b'\n';
+        wasi_write(1, &newline as *const u8, 1);
+    }
     #[cfg(target_arch = "wasm32")]
     {
         core::arch::wasm32::unreachable();

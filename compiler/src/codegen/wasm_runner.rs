@@ -1478,13 +1478,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
+                            // pos/len/val are raw primitives — do NOT unbox
+                            // (see haxe_bytes_sub note).
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let raw_pos = val_i32(&params[1]);
-                            let raw_len = val_i32(&params[2]);
-                            let raw_val = val_i32(&params[3]);
-                            let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
-                            let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
-                            let val = unbox_int_from_memory(&mut caller, raw_val) as u8;
+                            let pos = val_i32(&params[1]) as usize;
+                            let len = val_i32(&params[2]) as usize;
+                            let val = val_i32(&params[3]) as u8;
                             fill_bytes_slice(&mut caller, h, pos, len, val);
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
@@ -1503,15 +1502,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
+                            // positions/len are raw primitives — do NOT unbox
+                            // (see haxe_bytes_sub note).
                             let dest_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let raw_dest_pos = val_i32(&params[1]);
+                            let dest_pos = val_i32(&params[1]) as usize;
                             let src_h = unbox_int_from_memory(&mut caller, val_i32(&params[2]));
-                            let raw_src_pos = val_i32(&params[3]);
-                            let raw_len = val_i32(&params[4]);
-                            let dest_pos =
-                                unbox_int_from_memory(&mut caller, raw_dest_pos) as usize;
-                            let src_pos = unbox_int_from_memory(&mut caller, raw_src_pos) as usize;
-                            let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
+                            let src_pos = val_i32(&params[3]) as usize;
+                            let len = val_i32(&params[4]) as usize;
                             let src_bytes = read_bytes_slice(&mut caller, src_h, src_pos, len);
                             write_bytes_slice(&mut caller, dest_h, dest_pos, &src_bytes);
                             if !results.is_empty() {
@@ -1649,11 +1646,18 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
+                            // pos/len are raw primitive integers (file offsets /
+                            // lengths), NEVER boxed Dynamics. Running them through
+                            // unbox_int_from_memory mis-derefs large 4-aligned
+                            // offsets that happen to point at bytes resembling a
+                            // DynamicValue header, reading a tensor NAME from the
+                            // wrong place during GGUF load — the tensor then
+                            // registers under a corrupt key and surfaces later as
+                            // a heap-layout-dependent "missing weight 'blk.N...'"
+                            // roulette. Same rule as haxe_bytes_sub_base_u64lh.
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let raw_pos = val_i32(&params[1]);
-                            let raw_len = val_i32(&params[2]);
-                            let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
-                            let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
+                            let pos = val_i32(&params[1]) as usize;
+                            let len = val_i32(&params[2]) as usize;
                             // wasm-memory backed source: no copy, just a new
                             // header pointing at src.data + pos.
                             if looks_like_wasm_ptr(h) {
