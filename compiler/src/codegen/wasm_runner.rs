@@ -1009,6 +1009,14 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     // -- Engine & module setup --
     let mut config = Config::new();
+    // Force the Cranelift JIT. wasmtime's default Strategy::Auto can pick
+    // the Pulley bytecode interpreter (~50x slower) when both are compiled
+    // in; we always want the optimizing JIT for the heavy quant matmuls.
+    config.strategy(wasmtime::Strategy::Cranelift);
+    config.cranelift_opt_level(wasmtime::OptLevel::Speed);
+    if std::env::var_os("RAYZOR_WASM_ENGINE_DEBUG").is_some() {
+        eprintln!("[wasm-runner] strategy=Cranelift opt=Speed");
+    }
     config.wasm_simd(true);
     // Enable threads + bulk-memory + shared-memory for the shared-memory
     // runtime build. Without these wasmtime rejects the module during
@@ -1018,9 +1026,26 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     config.wasm_threads(true);
     config.wasm_bulk_memory(true);
     config.shared_memory(true);
+    // Reserve the full 32-bit address space (+ guard) so linear-memory
+    // accesses are bounds-checked by the guard page rather than an
+    // explicit compare+branch on every load. The quant matmul is
+    // memory-bound (billions of loads/token); without elision those
+    // per-load checks dominate and the engine choice (JIT vs interpreter)
+    // becomes irrelevant. 4 GiB reservation + 32 MiB guard, memory pinned.
+    config.memory_reservation(1 << 32); // 4 GiB
+    config.memory_guard_size(1 << 25); // 32 MiB
+    config.memory_may_move(false);
     let engine = Engine::new(&config).map_err(|e| format!("Engine config failed: {}", e))?;
+    let _compile_t0 = std::time::Instant::now();
     let module =
         Module::new(&engine, wasm_bytes).map_err(|e| format!("WASM compilation failed: {}", e))?;
+    if std::env::var_os("RAYZOR_WASM_ENGINE_DEBUG").is_some() {
+        eprintln!(
+            "[wasm-runner] module compiled in {:.3}s ({} KB) — long compile = Cranelift JIT, instant = interpreter",
+            _compile_t0.elapsed().as_secs_f64(),
+            wasm_bytes.len() / 1024
+        );
+    }
 
     // -- WASI context --
     let mut builder = wasi_common::WasiCtxBuilder::new();

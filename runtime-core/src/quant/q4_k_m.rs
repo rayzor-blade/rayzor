@@ -307,10 +307,20 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     let header = weight.scales;
     let mask = u8x16_splat(0x0F);
 
-    // Raw pointers: Q4KMBlock is repr(packed) so `&weight.qs` is illegal;
-    // wasm v128 loads tolerate unaligned addresses.
+    // Raw pointers. Both bases can be under-aligned for v128: Q4KMBlock is
+    // repr(packed), and Q8KBlock.qs sits at offset 4 (after the f32 `d`) so
+    // it is only 4-aligned. `v128_load` is `*m` — it ASSUMES 16-byte
+    // alignment, which is UB on these pointers; opt-level >= 2 exploits the
+    // assumption and traps (opt="s" happened to mask it). Use
+    // `read_unaligned`, which lowers to the same wasm `v128.load` (wasm
+    // never traps on misalignment — the align is only a hint) but carries
+    // no alignment precondition.
     let w_base = core::ptr::addr_of!(weight.qs) as *const u8;
-    let x_base = x.qs.as_ptr();
+    let x_base = x.qs.as_ptr() as *const u8;
+    #[inline(always)]
+    unsafe fn loadu(p: *const u8) -> v128 {
+        core::ptr::read_unaligned(p as *const v128)
+    }
 
     let mut acc = 0.0f32;
     for p in 0..4usize {
@@ -320,11 +330,11 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         let mut acc_hi = i32x4_splat(0);
         for h in 0..2usize {
             // SAFETY: offsets stay within qs (128 bytes) / x.qs (256 bytes).
-            let w = unsafe { v128_load(w_base.add(p * 32 + h * 16) as *const v128) };
+            let w = unsafe { loadu(w_base.add(p * 32 + h * 16)) };
             let low = v128_and(w, mask); // 0..15
             let high = u8x16_shr(w, 4); // logical >> 4 → 0..15
-            let xl = unsafe { v128_load(x_base.add(s_lo * 32 + h * 16) as *const v128) };
-            let xh = unsafe { v128_load(x_base.add(s_hi * 32 + h * 16) as *const v128) };
+            let xl = unsafe { loadu(x_base.add(s_lo * 32 + h * 16)) };
+            let xh = unsafe { loadu(x_base.add(s_hi * 32 + h * 16)) };
             acc_lo = i32x4_add(acc_lo, dot16(low, xl));
             acc_hi = i32x4_add(acc_hi, dot16(high, xh));
         }

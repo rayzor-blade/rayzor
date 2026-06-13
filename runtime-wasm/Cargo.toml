@@ -16,6 +16,12 @@ libm = "0.2"  # Pure-Rust math functions (sin, cos, sqrt, etc.) for wasm32
 rayzor-runtime-core = { path = "../runtime-core" }
 
 [profile.release]
-opt-level = "s"      # Optimize for size (WASM binaries should be small)
+# opt-level=3 (speed), NOT "s" (size): the quant matmul / tensor kernels
+# are compute-bound; size optimization disables loop vectorization,
+# unrolling, and aggressive inlining, which made the wasm matmul ~10x
+# slower than necessary (pure-compute Haxe→wasm was only ~4x vs native,
+# but runtime-wasm Rust at "s" was far worse). Inference speed >> binary
+# size here. Flip back to "s" only if a size-constrained deploy needs it.
+opt-level = 3
 lto = true
 strip = true

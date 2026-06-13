@@ -86,7 +86,16 @@ pub unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
         let mut sum: i32 = 0;
         for j in 0..16 {
             let v = *x.add(s16 * 16 + j) * inv_scale;
-            let q = roundf(v).clamp(-128.0, 127.0) as i8;
+            // NO explicit clamp: the absmax scale already bounds
+            // roundf(v) to [-127,127], and Rust's `as i8` is itself
+            // saturating (NaN→0, out-of-range→clamp). A defensive
+            // `.clamp(-128,127)` here is what BROKE wasm at opt>=2: it let
+            // LLVM's vectorizer prove the range and downgrade the saturating
+            // `fptosi.sat` to a plain `fptosi`, which is UB on the NaN lane
+            // (vectorization evaluates all lanes, so a masked-out NaN still
+            // traps via the planted `unreachable`). Bare `as i8` keeps the
+            // total saturating lowering. Bit-identical for in-range inputs.
+            let q = roundf(v) as i8;
             block.quants[s16 * 16 + j] = q;
             sum += q as i32;
         }
@@ -244,7 +253,10 @@ fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
         for s in 0..16 {
             let mut sum: i32 = 0;
             for j in 0..16 {
-                let q = roundf(src[s * 16 + j] * inv_d).clamp(-128.0, 127.0) as i8;
+                // No defensive clamp — see quantize_x_block_q8: the clamp
+                // lets LLVM downgrade the saturating cast to a UB fptosi that
+                // traps when vectorized for wasm. Bare saturating `as i8`.
+                let q = roundf(src[s * 16 + j] * inv_d) as i8;
                 qs[s * 16 + j] = q;
                 sum += q as i32;
             }
@@ -288,7 +300,10 @@ mod q8k_neon_tests {
         for s in 0..16 {
             let mut sum: i32 = 0;
             for j in 0..16 {
-                let q = roundf(src[s * 16 + j] * inv_d).clamp(-128.0, 127.0) as i8;
+                // No defensive clamp — see quantize_x_block_q8: the clamp
+                // lets LLVM downgrade the saturating cast to a UB fptosi that
+                // traps when vectorized for wasm. Bare saturating `as i8`.
+                let q = roundf(src[s * 16 + j] * inv_d) as i8;
                 qs[s * 16 + j] = q;
                 sum += q as i32;
             }

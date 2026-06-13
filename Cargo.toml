@@ -64,17 +64,19 @@ lto = "thin"
 [profile.release.package.compiler]
 opt-level = 2
 
-# Cranelift 0.133.0 isn't on crates.io yet — sourced from the
-# `fix/cranelift-object-darwin-platform` branch of darmie/wasmtime
-# (carries the macOS-platform fix needed by cranelift-object alongside
-# the 0.133 codegen). Replace crates-io entries the resolver picks up
-# via the `0.133` constraint in compiler/Cargo.toml. Once a tagged
-# 0.133 release lands on crates.io, drop this block.
+# Cranelift 0.133.0 isn't on crates.io yet — sourced from upstream
+# bytecodealliance/wasmtime `release-46.0.0` (the macOS cranelift-object
+# fix is merged upstream; this branch carries the 0.133 codegen that
+# rayzor's native backend targets). wasmtime + wasmtime-wasi are pinned
+# to the SAME branch in compiler/Cargo.toml so wasmtime-cranelift uses
+# this exact cranelift — otherwise the resolver drops the JIT compiler
+# and wasmtime silently falls back to the Pulley interpreter (~50x
+# slower). Drop this block once 0.133 lands on crates.io.
 [patch.crates-io]
-cranelift = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-codegen = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-frontend = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-module = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-jit = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-native = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
-cranelift-object = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
