@@ -118,7 +118,7 @@ class GenerationLoop {
         // per token and `decodeBuffer`-ing the accumulation keeps the output
         // byte-identical (byteDecode still runs on the full buffer, so multi-
         // byte codepoints that straddle a token boundary decode correctly).
-        var rawPieces = new StringBuf();
+        var rawPieces = "";
         var step = 0;
         var _decodeStart = _profileOn ? Sys.time() : 0.0;
         while (true) {
@@ -128,7 +128,7 @@ class GenerationLoop {
             var _stepStart = _profileOn ? Sys.time() : 0.0;
             var _stepIndex = _pCount;
 
-            rawPieces.add(tokenizer.decodePiece(nextId));
+            rawPieces += tokenizer.decodePiece(nextId);
             ids.push(nextId);
 
             // Stream the token through the callback. `partial` is the full
@@ -136,7 +136,7 @@ class GenerationLoop {
             // byte-alphabet pieces (no per-token re-decode of the whole list).
             if (onToken != null) {
                 var _t0 = _profileOn ? Sys.time() : 0.0;
-                var partial = tokenizer.decodeBuffer(rawPieces.toString());
+                var partial = tokenizer.decodeBuffer(rawPieces);
                 if (_profileOn) _pDecodeStr += Sys.time() - _t0;
                 if (!onToken(nextId, partial)) break;
             }
@@ -240,7 +240,7 @@ class GenerationLoop {
         }
 
         logits.free();
-        return prompt + tokenizer.decodeBuffer(rawPieces.toString());
+        return prompt + tokenizer.decodeBuffer(rawPieces);
     }
 
     /**
