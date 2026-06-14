@@ -13,10 +13,142 @@
 //! published ABI surface, so a host-side signature drift surfaces as
 //! a compile error here instead of a silent SIGSEGV at dispatch.
 
+// On wasm this cdylib is a PIC side-module linked into the rayzor wasm runtime
+// that resolves ONLY core+alloc (no libc/wasi) — so it must be no_std there.
+// The NATIVE build (the dlopen'd `.dylib` the host loads via [build]
+// native-libs) keeps std. `cfg_attr` flips no_std on for wasm32 only.
+#![cfg_attr(target_arch = "wasm32", no_std)]
 #![allow(clippy::missing_safety_doc)]
+
+#[cfg(target_arch = "wasm32")]
+#[macro_use]
+extern crate alloc;
+#[cfg(target_arch = "wasm32")]
+use alloc::vec::Vec;
 
 use half::f16;
 use rayzor_plugin::{declare_native_methods, dtype, NativeMethodDesc, Tensor};
+
+// ============================================================================
+// no_std wasm runtime glue: a global allocator forwarding to the host's
+// malloc/free, a panic handler, and a libm-backed float shim. All cfg'd to
+// wasm32 — native keeps std's allocator/panic/float methods untouched.
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_rt {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::mem::size_of;
+
+    // The same host malloc/free the cache storage uses (see the crate-root
+    // extern block). The wasm-linker aliases `malloc`->`rayzor_malloc`, so
+    // this allocator shares the merged module's single dlmalloc heap — there
+    // is no separate plugin heap to collide with the runtime's.
+    extern "C" {
+        fn malloc(size: usize) -> *mut u8;
+        fn free(ptr: *mut u8);
+    }
+
+    /// Global allocator over the host's `malloc`/`free`. dlmalloc guarantees
+    /// 8-byte alignment on wasm32; larger alignments (rare — this crate only
+    /// allocates `Vec<f32>` and a small boxed slice) are satisfied by
+    /// over-allocating and stashing the base pointer in the word just below
+    /// the returned aligned pointer.
+    pub struct HostAlloc;
+
+    const MIN_ALIGN: usize = 8;
+
+    unsafe impl GlobalAlloc for HostAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let align = layout.align();
+            if align <= MIN_ALIGN {
+                malloc(layout.size())
+            } else {
+                let total = layout.size() + align + size_of::<usize>();
+                let base = malloc(total);
+                if base.is_null() {
+                    return base;
+                }
+                let raw = base as usize;
+                let aligned = (raw + size_of::<usize>() + align - 1) & !(align - 1);
+                let ptr = aligned as *mut u8;
+                *(ptr.sub(size_of::<usize>()) as *mut usize) = raw;
+                ptr
+            }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if layout.align() <= MIN_ALIGN {
+                free(ptr);
+            } else {
+                let base = *(ptr.sub(size_of::<usize>()) as *const usize);
+                free(base as *mut u8);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static GLOBAL: wasm_rt::HostAlloc = wasm_rt::HostAlloc;
+
+#[cfg(target_arch = "wasm32")]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    core::arch::wasm32::unreachable()
+}
+
+/// f32 transcendentals: libm on wasm (no std float methods under no_std),
+/// the inherent methods on native.
+mod fmath {
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn exp(x: f32) -> f32 {
+        libm::expf(x)
+    }
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn abs(x: f32) -> f32 {
+        libm::fabsf(x)
+    }
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn round(x: f32) -> f32 {
+        libm::roundf(x)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
+    pub fn exp(x: f32) -> f32 {
+        x.exp()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
+    pub fn abs(x: f32) -> f32 {
+        x.abs()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
+    pub fn round(x: f32) -> f32 {
+        x.round()
+    }
+    // f32::clamp is std-only under no_std, so wasm inlines the comparison;
+    // native uses the inherent method (keeps clippy's manual_clamp lint happy).
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+        if x < lo {
+            lo
+        } else if x > hi {
+            hi
+        } else {
+            x
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
+    pub fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+        x.clamp(lo, hi)
+    }
+}
 
 // ============================================================================
 // ABI handshake — host calls this at dlopen and refuses to bind any
@@ -54,8 +186,14 @@ pub unsafe extern "C" fn plugin_describe(out_count: *mut usize) -> *const Native
 
 // ============================================================================
 // Runtime symbol table — JIT linkage entry point.
+//
+// Native-only: this hands the host raw fn-pointers for dlopen/JIT linkage. On
+// wasm the kernels are real module exports resolved by the wasm-linker (no
+// fn-ptr table), so the whole block is gated out — which also keeps `Box` and
+// the fn-ptr casts out of the no_std side-module.
 // ============================================================================
 
+#[cfg(not(target_arch = "wasm32"))]
 #[repr(C)]
 pub struct SymbolEntry {
     pub name_ptr: *const u8,
@@ -63,6 +201,7 @@ pub struct SymbolEntry {
     pub fn_ptr: *const core::ffi::c_void,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 macro_rules! entry {
     ($name:expr, $fn:ident) => {
         SymbolEntry {
@@ -73,6 +212,7 @@ macro_rules! entry {
     };
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
 pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntry {
     let entries = Box::new([
@@ -126,7 +266,7 @@ extern "C" {
 unsafe fn quantize_q8_0_block(src: *const f32, dst: *mut u8) {
     let mut max_abs = 0.0f32;
     for i in 0..Q8_0_BLOCK_SIZE {
-        let v = (*src.add(i)).abs();
+        let v = fmath::abs(*src.add(i));
         if v > max_abs {
             max_abs = v;
         }
@@ -139,8 +279,8 @@ unsafe fn quantize_q8_0_block(src: *const f32, dst: *mut u8) {
 
     let q_ptr = dst.add(2) as *mut i8;
     for i in 0..Q8_0_BLOCK_SIZE {
-        let q = ((*src.add(i)) * inv_scale).round().clamp(-128.0, 127.0) as i8;
-        *q_ptr.add(i) = q;
+        let r = fmath::clamp(fmath::round((*src.add(i)) * inv_scale), -128.0, 127.0);
+        *q_ptr.add(i) = r as i8;
     }
 }
 
@@ -509,7 +649,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_q8(
             let row = &mut group_scores[gi * cache_len..(gi + 1) * cache_len];
             let mut denom = 0.0f32;
             for s in row.iter_mut() {
-                let e = (*s - max_g).exp();
+                let e = fmath::exp(*s - max_g);
                 *s = e;
                 denom += e;
             }

@@ -18,4 +18,13 @@ crate-type = ["cdylib", "rlib"]
 # layout, alloc_tensor signature, etc.) from sneaking into plugin
 # space and silently breaking on host changes.
 rayzor-plugin = { path = "../plugin" }
-half = "2"
+# default-features=false drops half's `std` feature so the crate links no_std
+# on wasm. Native is unaffected — we only use f16's pure bit conversions
+# (from_f32/to_bits/from_bits/to_f32), none of which need std.
+half = { version = "2", default-features = false }
+
+# wasm-only: the no_std build has no std float methods, so the transcendentals
+# in the Q8 kernels (.exp/.abs/.round) route through libm. Native keeps the
+# inherent f32 methods (see the `fmath` shim in lib.rs).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+libm = "0.2"
