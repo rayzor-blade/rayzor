@@ -111,7 +111,14 @@ class GenerationLoop {
         if (_profileOn) _pPrefillSample = Sys.time() - _tPrefill;
         if (lr0 != logits) lr0.free();
 
-        var generated:Array<Int> = [];
+        // Accumulate the decoded byte-alphabet pieces incrementally. Re-
+        // decoding the whole id list per token (`tokenizer.decode(generated)`)
+        // is O(N²) per call → O(N³) over a generation, and that allocation
+        // churn is the dominant pressure on long streams. Appending one piece
+        // per token and `decodeBuffer`-ing the accumulation keeps the output
+        // byte-identical (byteDecode still runs on the full buffer, so multi-
+        // byte codepoints that straddle a token boundary decode correctly).
+        var rawPieces = new StringBuf();
         var step = 0;
         var _decodeStart = _profileOn ? Sys.time() : 0.0;
         while (true) {
@@ -121,16 +128,15 @@ class GenerationLoop {
             var _stepStart = _profileOn ? Sys.time() : 0.0;
             var _stepIndex = _pCount;
 
-            generated.push(nextId);
+            rawPieces.add(tokenizer.decodePiece(nextId));
             ids.push(nextId);
 
-            // Stream the token through the callback. Build the
-            // partial text by decoding the freshly generated tail
-            // only — decoding the entire ids array per token would
-            // be O(N²) over generation length.
+            // Stream the token through the callback. `partial` is the full
+            // decoded text so far, built from the incrementally-accumulated
+            // byte-alphabet pieces (no per-token re-decode of the whole list).
             if (onToken != null) {
                 var _t0 = _profileOn ? Sys.time() : 0.0;
-                var partial = tokenizer.decode(generated);
+                var partial = tokenizer.decodeBuffer(rawPieces.toString());
                 if (_profileOn) _pDecodeStr += Sys.time() - _t0;
                 if (!onToken(nextId, partial)) break;
             }
@@ -234,7 +240,7 @@ class GenerationLoop {
         }
 
         logits.free();
-        return prompt + tokenizer.decode(generated);
+        return prompt + tokenizer.decodeBuffer(rawPieces.toString());
     }
 
     /**

@@ -21,6 +21,21 @@ interface Tokenizer {
     /** Decode a sequence of token IDs back to a UTF-8 string. */
     function decode(ids:Array<Int>):String;
 
+    /**
+     * The raw piece for a single token id, BEFORE any byte-level → UTF-8
+     * translation. For O(N) streaming decode, append each token's piece to
+     * a `StringBuf` and finish with `decodeBuffer` — avoids the O(N²)-per-
+     * call re-decode of the whole id list.
+     */
+    function decodePiece(id:Int):String;
+
+    /**
+     * Finish a decode from accumulated `decodePiece` output: applies any
+     * byte-level → UTF-8 translation. Must run on the full accumulation (a
+     * multi-byte codepoint can straddle a token boundary).
+     */
+    function decodeBuffer(raw:String):String;
+
     /** Number of tokens in the vocabulary. */
     function vocabSize():Int;
 

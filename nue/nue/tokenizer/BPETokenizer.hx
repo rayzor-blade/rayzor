@@ -233,6 +233,30 @@ class BPETokenizer implements Tokenizer {
         return out;
     }
 
+    /**
+     * The raw byte-alphabet piece for a single token id (the per-token
+     * string BEFORE `byteDecode`), or "" for an out-of-range id.
+     *
+     * Pairs with `decodeBuffer` for O(N) streaming decode: append each new
+     * token's piece to a `StringBuf`, then `decodeBuffer(buf.toString())`.
+     * `decode(ids)` would re-concatenate the whole id list every call,
+     * which is O(N²) per call (O(N³) over a generation) — the dominant
+     * allocation churn on long streams.
+     */
+    public inline function decodePiece(id:Int):String {
+        return (id >= 0 && id < vocab.size()) ? vocab.get(id) : "";
+    }
+
+    /**
+     * Finish a decode from accumulated byte-alphabet pieces: applies the
+     * byte-level → UTF-8 translation when `byteLevel`, else returns as-is.
+     * Must run on the FULL accumulated buffer (a multi-byte UTF-8 codepoint
+     * can straddle a token boundary), so callers pass `buf.toString()`.
+     */
+    public function decodeBuffer(raw:String):String {
+        return byteLevel ? byteDecode(raw) : raw;
+    }
+
     // ------------------------------------------------------------------
     // GPT-2 / Llama-3 byte alphabet
     // ------------------------------------------------------------------
