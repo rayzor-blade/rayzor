@@ -756,11 +756,24 @@ impl CompilationUnit {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
-        "rayzor-blade-source-v2".hash(&mut hasher);
+        "rayzor-blade-source-v3".hash(&mut hasher);
         source.hash(&mut hasher);
         let mut defines = self.config.extra_defines.clone();
         defines.sort();
         defines.hash(&mut hasher);
+        // Fold in a content hash of the TRANSITIVE import set. The cache key was
+        // previously the entry file's own bytes + defines only, so editing a
+        // DEPENDENCY (a `.hx` imported by this entry, directly or transitively)
+        // left the key unchanged: the stale MIR — e.g. an interface vtable from
+        // before a method was added — validated as current and was reused,
+        // segfaulting at load. `compute_import_set_hash` walks the import graph
+        // and hashes each resolvable file's bytes; it is intentionally
+        // permissive (imports it can't resolve simply don't contribute).
+        let import_hash = crate::ir::blade::compute_import_set_hash(
+            source,
+            self.namespace_resolver.get_source_paths(),
+        );
+        import_hash.hash(&mut hasher);
         hasher.finish()
     }
 
