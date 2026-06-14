@@ -258,21 +258,48 @@ pub extern "C" fn haxe_string_char_code_at(s: i32, idx: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn haxe_string_concat_sret(out: i32, a: i32, b: i32) {
     unsafe {
-        let (a_ptr, a_len) = if a == 0 {
-            (ptr::null::<u8>(), 0u32)
+        let (a_ptr, a_len, a_cap) = if a == 0 {
+            (ptr::null::<u8>(), 0u32, 0u32)
         } else {
-            let (p, l, _) = read_haxe_string(a);
-            (p as *const u8, l)
+            let (p, l, c) = read_haxe_string(a);
+            (p as *const u8, l, c)
         };
 
-        let (b_ptr, b_len) = if b == 0 {
-            (ptr::null::<u8>(), 0u32)
+        let (b_ptr, b_len, b_cap) = if b == 0 {
+            (ptr::null::<u8>(), 0u32, 0u32)
         } else {
-            let (p, l, _) = read_haxe_string(b);
-            (p as *const u8, l)
+            let (p, l, c) = read_haxe_string(b);
+            (p as *const u8, l, c)
         };
 
         let total_len = a_len + b_len;
+
+        // Diagnostic + guard for the long-temp>0-gen heap corruption: a clobbered
+        // HaxeString header drives an insane total_len here. Dump BOTH headers
+        // (struct-ptr, data-ptr, len, cap) so the garbage values fingerprint the
+        // overwrite source, then degrade to empty instead of allocating ~2GB.
+        if total_len > 256 * 1024 * 1024 {
+            rt_dbg_n(
+                "STRCONCAT_OVF a aData aLen aCap | b bData bLen bCap:",
+                &[
+                    a as i64,
+                    a_ptr as i64,
+                    a_len as i64,
+                    a_cap as i64,
+                    b as i64,
+                    b_ptr as i64,
+                    b_len as i64,
+                    b_cap as i64,
+                ],
+            );
+            let d = alloc_string_data(STRING_INITIAL_CAP);
+            if !d.is_null() {
+                *d = 0;
+                write_haxe_string(out, d as u32, 0, STRING_INITIAL_CAP);
+            }
+            return;
+        }
+
         let cap = total_len.max(STRING_INITIAL_CAP) + 1;
         let data = alloc_string_data(cap);
         if data.is_null() {
