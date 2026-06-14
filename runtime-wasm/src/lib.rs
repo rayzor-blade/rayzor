@@ -170,6 +170,21 @@ const STRING_INITIAL_CAP: u32 = 32;
 
 /// Allocate string data buffer, returns pointer to data.
 unsafe fn alloc_string_data(cap: u32) -> *mut u8 {
+    // Defensive ceiling. A corrupted HaxeString header (its length field
+    // clobbered by a heap buffer overflow elsewhere — observed on long
+    // temperature-sampled wasm generations, where the corrupted length flows
+    // into `haxe_string_concat_sret`'s `total_len`) drives a multi-GB `cap`
+    // here. On wasm32 that grows linear memory toward the 4 GiB cap and traps
+    // with an out-of-bounds access (linear memory never shrinks, so it's also
+    // unrecoverable). No legitimate single string in this runtime approaches
+    // 256 MiB, so reject larger allocations and hand back null — every caller
+    // already treats null as an allocation failure and degrades to an empty
+    // string rather than crashing. This contains the symptom; the underlying
+    // overflow (the writer that clobbers the header) is a separate fix.
+    const SANE_STRING_CAP_MAX: u32 = 256 * 1024 * 1024;
+    if cap > SANE_STRING_CAP_MAX {
+        return core::ptr::null_mut();
+    }
     let layout = Layout::from_size_align_unchecked(cap as usize, 1);
     alloc(layout)
 }
