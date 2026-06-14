@@ -3,6 +3,261 @@
 //! Used by `rayzor run --wasm` to run WASM programs without an external
 //! wasmtime installation. Provides WASI P1 imports for stdout, filesystem,
 //! environment, and clocks, plus host implementations for haxe.io.Bytes.
+//!
+//! Capability side-modules (e.g. the nue Q8 KV cache) load via the standard
+//! wasm dynamic-linking ABI (dylink.0 + GOT): the runner instantiates a PIC
+//! side-module into the same Store, assigns it `__memory_base`/`__table_base`,
+//! resolves its GOT, and trampolines the guest's capability imports to it. See
+//! `parse_side_dylink` + the side-module load block in `run_wasm_with_args`.
+
+/// GOT resolution data parsed statically from a PIC dylink.0 side-module.
+///
+/// `GOT.func.<sym>` / `GOT.mem.<sym>` are imported globals (module
+/// `"GOT.func"`/`"GOT.mem"`, name = the mangled symbol). The side also exports
+/// each referenced function (so symbol → func index → table slot) and
+/// re-exports each GOT.mem data symbol as a global whose const init is the
+/// symbol's byte offset within the side's data image. The loader fills the
+/// imported GOT globals with `__table_base + slot` / `__memory_base + offset`.
+#[cfg(feature = "wasm-runtime")]
+#[derive(Default)]
+struct SideDylink {
+    /// GOT.func symbol → table slot (relative to `__table_base`).
+    got_func_slot: std::collections::HashMap<String, i32>,
+    /// GOT.mem symbol → byte offset in the data image (relative to `__memory_base`).
+    got_mem_offset: std::collections::HashMap<String, i32>,
+}
+
+#[cfg(feature = "wasm-runtime")]
+fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
+    use std::collections::HashMap;
+    use wasmparser::{ElementItems, ElementKind, ExternalKind, Operator, Parser, Payload, TypeRef};
+
+    let mut got_func_syms: Vec<String> = Vec::new();
+    let mut got_mem_syms: Vec<String> = Vec::new();
+    let mut num_imported_globals: u32 = 0;
+    let mut export_func_idx: HashMap<String, u32> = HashMap::new();
+    let mut export_global_idx: HashMap<String, u32> = HashMap::new();
+    // full global index → i32 const init value (defined globals only).
+    let mut global_const: HashMap<u32, i32> = HashMap::new();
+    // func index → table slot (from active element segments; base = __table_base = 0).
+    let mut func_slot: HashMap<u32, i32> = HashMap::new();
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.map_err(|e| format!("side dylink parse: {e}"))? {
+            Payload::ImportSection(reader) => {
+                for group in reader {
+                    let group = group.map_err(|e| format!("side import group: {e}"))?;
+                    for item in group {
+                        let (_off, imp) = item.map_err(|e| format!("side import: {e}"))?;
+                        if matches!(imp.ty, TypeRef::Global(_)) {
+                            match imp.module {
+                                "GOT.func" => got_func_syms.push(imp.name.to_string()),
+                                "GOT.mem" => got_mem_syms.push(imp.name.to_string()),
+                                _ => {}
+                            }
+                            num_imported_globals += 1;
+                        }
+                    }
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for exp in reader {
+                    let exp = exp.map_err(|e| format!("side export: {e}"))?;
+                    match exp.kind {
+                        ExternalKind::Func => {
+                            export_func_idx.insert(exp.name.to_string(), exp.index);
+                        }
+                        ExternalKind::Global => {
+                            export_global_idx.insert(exp.name.to_string(), exp.index);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Payload::GlobalSection(reader) => {
+                for (i, g) in reader.into_iter().enumerate() {
+                    let g = g.map_err(|e| format!("side global: {e}"))?;
+                    // Init is `i32.const off` or `global.get __memory_base; i32.const off; i32.add`;
+                    // the i32.const operand is the in-image offset either way.
+                    let mut ops = g.init_expr.get_operators_reader();
+                    let mut off: i32 = 0;
+                    while let Ok(op) = ops.read() {
+                        match op {
+                            Operator::I32Const { value } => off = value,
+                            Operator::End => break,
+                            _ => {}
+                        }
+                    }
+                    global_const.insert(num_imported_globals + i as u32, off);
+                }
+            }
+            Payload::ElementSection(reader) => {
+                for elem in reader {
+                    let elem = elem.map_err(|e| format!("side elem: {e}"))?;
+                    if let ElementKind::Active { offset_expr, .. } = elem.kind {
+                        // Offset is `global.get __table_base` (base 0) or an i32.const.
+                        let mut base: i32 = 0;
+                        let mut ops = offset_expr.get_operators_reader();
+                        while let Ok(op) = ops.read() {
+                            match op {
+                                Operator::I32Const { value } => base = value,
+                                Operator::End => break,
+                                _ => {}
+                            }
+                        }
+                        match elem.items {
+                            // `(elem ... func $a $b ...)` shorthand.
+                            ElementItems::Functions(funcs) => {
+                                let mut slot = base;
+                                for f in funcs {
+                                    let f = f.map_err(|e| format!("side elem item: {e}"))?;
+                                    func_slot.insert(f, slot);
+                                    slot += 1;
+                                }
+                            }
+                            // PIC modules emit `(elem ... funcref (ref.func $a) ...)`.
+                            ElementItems::Expressions(_ty, exprs) => {
+                                let mut slot = base;
+                                for ex in exprs {
+                                    let ex = ex.map_err(|e| format!("side elem expr: {e}"))?;
+                                    let mut ops = ex.get_operators_reader();
+                                    while let Ok(op) = ops.read() {
+                                        match op {
+                                            Operator::RefFunc { function_index } => {
+                                                func_slot.insert(function_index, slot);
+                                            }
+                                            Operator::End => break,
+                                            _ => {}
+                                        }
+                                    }
+                                    slot += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // GOT.func entries that resolve to a table slot get it; the rest are dead
+    // fn-pointers (core::fmt/Debug machinery whose addresses are only stored in
+    // unreachable vtables — LLVM emits the GOT entry but never table-places the
+    // func). Default those to slot 0: __wasm_apply_data_relocs writes the value
+    // into dead .data, never dereferenced. `unresolved_func` counts them so a
+    // surprising trap can be traced back here.
+    let mut got_func_slot = HashMap::new();
+    let mut unresolved_func = 0usize;
+    for sym in got_func_syms {
+        let slot = export_func_idx
+            .get(&sym)
+            .and_then(|fidx| func_slot.get(fidx))
+            .copied();
+        if slot.is_none() {
+            unresolved_func += 1;
+        }
+        got_func_slot.insert(sym, slot.unwrap_or(0));
+    }
+    let mut got_mem_offset = HashMap::new();
+    let mut unresolved_mem = 0usize;
+    for sym in got_mem_syms {
+        let off = export_global_idx
+            .get(&sym)
+            .and_then(|gidx| global_const.get(gidx))
+            .copied();
+        if off.is_none() {
+            unresolved_mem += 1;
+        }
+        got_mem_offset.insert(sym, off.unwrap_or(0));
+    }
+    if unresolved_func > 0 || unresolved_mem > 0 {
+        eprintln!(
+            "[dylink] {unresolved_func}/{} GOT.func + {unresolved_mem}/{} GOT.mem unresolved (defaulted to 0 — dead fn-ptrs/data)",
+            got_func_slot.len(),
+            got_mem_offset.len()
+        );
+    }
+
+    Ok(SideDylink {
+        got_func_slot,
+        got_mem_offset,
+    })
+}
+
+#[cfg(all(test, feature = "wasm-runtime"))]
+mod dylink_tests {
+    #[test]
+    fn parses_q8_side_module_got() {
+        // Validates the dylink.0 GOT parser against the real nue-plugins PIC
+        // side-module. Skips if the artifact isn't built (build it with
+        // nue-plugins' wasm32-wasip1-threads-pic recipe).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm"
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skip: side-module not built at {path}");
+            return;
+        };
+        let d = super::parse_side_dylink(&bytes).expect("parse side dylink");
+        // 24 GOT.func + 12 GOT.mem expected from the current build.
+        assert!(
+            !d.got_func_slot.is_empty(),
+            "expected GOT.func entries, got none"
+        );
+        assert!(
+            !d.got_mem_offset.is_empty(),
+            "expected GOT.mem entries, got none"
+        );
+        // Slots must be within the table (size 53); offsets within the data
+        // image (size 49440).
+        for (sym, &slot) in &d.got_func_slot {
+            assert!(
+                (0..53).contains(&slot),
+                "GOT.func {sym} slot {slot} out of table"
+            );
+        }
+        for (sym, &off) in &d.got_mem_offset {
+            assert!(
+                (0..49440).contains(&off),
+                "GOT.mem {sym} offset {off} out of data image"
+            );
+        }
+        eprintln!(
+            "parsed {} GOT.func + {} GOT.mem; sample slot={:?} off={:?}",
+            d.got_func_slot.len(),
+            d.got_mem_offset.len(),
+            d.got_func_slot.values().next(),
+            d.got_mem_offset.values().next()
+        );
+    }
+}
+
+/// Locate the nue Q8 capability PIC side-module (phase 1: a direct `.wasm`
+/// path). `RAYZOR_Q8_SIDE_MODULE` overrides; otherwise the default build
+/// location relative to the workspace/cwd. (Phase 2 sources this from an
+/// `.rpkg`; phase 3 async-fetches it in the browser.)
+#[cfg(feature = "wasm-runtime")]
+fn find_wasm_side_module() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(p) = std::env::var_os("RAYZOR_Q8_SIDE_MODULE") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    for c in [
+        "target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm",
+        "../target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm",
+    ] {
+        let p = PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
 
 #[cfg(feature = "wasm-runtime")]
 pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
@@ -65,6 +320,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         /// emits all calls through the i64-stride MIR slot.
         stringmap_handles: BTreeMap<i32, BTreeMap<String, i64>>,
         next_stringmap_id: i32,
+        /// The dynamically-loaded capability side-module (e.g. the nue Q8 KV
+        /// cache), instantiated into this same Store via the dylink.0 ABI.
+        /// `None` until the side-module load block runs (or if no capability
+        /// imports are present). The Q8 host trampolines dispatch to it.
+        /// `Instance` is a `Copy` handle, valid for the life of the Store.
+        side_instance: Option<wasmtime::Instance>,
     }
 
     struct ThreadState {
@@ -1205,6 +1466,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         program_args: program_args.to_vec(),
         stringmap_handles: BTreeMap::new(),
         next_stringmap_id: 1,
+        side_instance: None,
     };
     let mut store = Store::new(&engine, state);
 
@@ -1343,6 +1605,68 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             )
             .map_err(|e| format!("Failed to register rayzor_host_qmatmul_par: {}", e))?;
         registered.insert("rayzor_host_qmatmul_par".to_string());
+    }
+
+    // -- Q8 KV-cache capability trampolines (dylink.0 side-module) --
+    // These guest imports are EXPORTED by the nue-plugins PIC side-module that
+    // the side-module load block (after main instantiation) links into this
+    // Store. Registering real trampolines here — and marking them `registered`
+    // — bypasses the return-0 fallback stub loop at the end, so the guest's Q8
+    // calls dispatch into the side instance instead of silently returning null.
+    // If no side-module is loaded at run time (capability absent), the
+    // trampoline returns 0 and the Haxe side falls back to the F32 KV cache.
+    const Q8_SIDE_FNS: &[&str] = &[
+        "rayzor_kv_cache_q8_alloc",
+        "rayzor_kv_cache_q8_append",
+        "rayzor_kv_cache_q8_dequant_view",
+        "rayzor_kv_cache_q8_free",
+        "rayzor_tensor_flash_attn_decode_q8",
+    ];
+    for fname in Q8_SIDE_FNS {
+        let func_ty = match rayzor_imports.iter().find(|(n, _)| n == fname) {
+            Some((_, ft)) => ft.clone(),
+            None => continue, // guest doesn't reference this capability
+        };
+        let ret_types: Vec<ValType> = func_ty.results().collect();
+        let name_owned = fname.to_string();
+        linker
+            .func_new(
+                "rayzor",
+                fname,
+                func_ty,
+                move |mut caller, params, results| {
+                    // Copy the side Instance out of WasmState (16-byte handle)
+                    // to drop the &WasmState borrow before taking &mut caller.
+                    let side = match caller.data().side_instance {
+                        Some(s) => s,
+                        None => {
+                            for (r, t) in results.iter_mut().zip(&ret_types) {
+                                *r = match t {
+                                    ValType::I64 => Val::I64(0),
+                                    ValType::F32 => Val::F32(0),
+                                    ValType::F64 => Val::F64(0),
+                                    _ => Val::I32(0),
+                                };
+                            }
+                            return Ok(());
+                        }
+                    };
+                    let f = side.get_func(&mut caller, &name_owned).ok_or_else(|| {
+                        wasmtime::Error::msg(format!("side export {name_owned} missing"))
+                    })?;
+                    let args: Vec<Val> = params.to_vec();
+                    let mut out = vec![Val::I64(0); results.len()];
+                    f.call(&mut caller, &args, &mut out).map_err(|e| {
+                        wasmtime::Error::msg(format!("side {name_owned} call: {e}"))
+                    })?;
+                    for (r, o) in results.iter_mut().zip(out) {
+                        *r = o;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register Q8 trampoline {fname}: {e}"))?;
+        registered.insert(fname.to_string());
     }
 
     for (name, func_ty) in &rayzor_imports {
@@ -4628,6 +4952,247 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let mem_size = exported.or(shared_size).unwrap_or(512 * 65536);
         // Reserve top 16 bytes for padding; bump allocator grows downward.
         store.data_mut().host_alloc_ptr = mem_size - 16;
+    }
+
+    // -- Load the Q8 capability side-module (standard dylink.0 dynamic linking) --
+    // If the guest imports the Q8 KV cache and a PIC side-module is available,
+    // instantiate it into THIS Store and wire its env/GOT imports per the wasm
+    // dynamic-linking ABI, so the Q8 trampolines (registered earlier) dispatch
+    // into it. Absent capability/side-module => skip; the guest falls back to
+    // the F32 cache via the trampoline's None path. (Phase 1: native, direct
+    // .wasm. Eager load — lazy/async is the browser phase.)
+    if rayzor_import_names.contains("rayzor_kv_cache_q8_alloc") {
+        match find_wasm_side_module() {
+            None => eprintln!(
+                "[wasm-runner] Q8 imports present but no side-module found; using F32 KV cache"
+            ),
+            Some(side_path) => {
+                let loaded: Result<Instance, String> = (|| {
+                    let side_bytes = std::fs::read(&side_path)
+                        .map_err(|e| format!("read side module {}: {e}", side_path.display()))?;
+                    let side_module = Module::new(&engine, &side_bytes)
+                        .map_err(|e| format!("compile side module: {e}"))?;
+                    let dylink = parse_side_dylink(&side_bytes)?;
+
+                    // Reserve the side's data image + a private shadow stack from
+                    // the runtime heap. rayzor_malloc OWNS it permanently, so the
+                    // app heap can't grow into and stomp it (a host_alloc top-carve
+                    // could, since rayzor_malloc grows up unbounded). 49440 data
+                    // (16-aligned, per dylink mem_p2align=4) + 64 KiB stack.
+                    const SIDE_MEM: u32 = (49440 + 15) & !15;
+                    const SIDE_STACK: u32 = 64 * 1024;
+                    let rmalloc = instance
+                        .get_typed_func::<i32, i32>(&mut store, "rayzor_malloc")
+                        .map_err(|e| format!("main has no rayzor_malloc: {e}"))?;
+                    let region = rmalloc
+                        .call(&mut store, (SIDE_MEM + SIDE_STACK) as i32)
+                        .map_err(|e| format!("rayzor_malloc for side region: {e}"))?;
+                    if region <= 0 {
+                        return Err("rayzor_malloc returned null for side region".into());
+                    }
+                    let mem_base = region as u32;
+                    // Shadow stack lives above the data image; SP starts at the top
+                    // and the side's PIC prologue grows it down.
+                    let stack_top = mem_base + SIDE_MEM + SIDE_STACK;
+
+                    // Base/stack globals — mutability taken from the side's import
+                    // declaration (bases Const, SP Var) or Instance::new rejects them.
+                    let import_global_mut = |name: &str| -> Mutability {
+                        side_module
+                            .imports()
+                            .find(|i| i.module() == "env" && i.name() == name)
+                            .and_then(|i| match i.ty() {
+                                ExternType::Global(g) => Some(g.mutability()),
+                                _ => None,
+                            })
+                            .unwrap_or(Mutability::Const)
+                    };
+                    let mem_base_g = Global::new(
+                        &mut store,
+                        GlobalType::new(ValType::I32, import_global_mut("__memory_base")),
+                        Val::I32(mem_base as i32),
+                    )
+                    .map_err(|e| format!("__memory_base global: {e}"))?;
+                    let table_base_g = Global::new(
+                        &mut store,
+                        GlobalType::new(ValType::I32, import_global_mut("__table_base")),
+                        Val::I32(0),
+                    )
+                    .map_err(|e| format!("__table_base global: {e}"))?;
+                    let sp_g = Global::new(
+                        &mut store,
+                        GlobalType::new(ValType::I32, import_global_mut("__stack_pointer")),
+                        Val::I32(stack_top as i32),
+                    )
+                    .map_err(|e| format!("__stack_pointer global: {e}"))?;
+
+                    // GOT globals. GOT.func.X = __table_base(0)+slot; GOT.mem.X =
+                    // __memory_base+offset. All Var.
+                    let mut got_globals: std::collections::HashMap<String, Global> =
+                        std::collections::HashMap::new();
+                    for (sym, &slot) in &dylink.got_func_slot {
+                        let g = Global::new(
+                            &mut store,
+                            GlobalType::new(ValType::I32, Mutability::Var),
+                            Val::I32(slot),
+                        )
+                        .map_err(|e| format!("GOT.func {sym} global: {e}"))?;
+                        got_globals.insert(format!("GOT.func\u{0}{sym}"), g);
+                    }
+                    for (sym, &off) in &dylink.got_mem_offset {
+                        let g = Global::new(
+                            &mut store,
+                            GlobalType::new(ValType::I32, Mutability::Var),
+                            Val::I32(mem_base as i32 + off),
+                        )
+                        .map_err(|e| format!("GOT.mem {sym} global: {e}"))?;
+                        got_globals.insert(format!("GOT.mem\u{0}{sym}"), g);
+                    }
+
+                    // Private 53-slot funcref table (runtime-wasm exports none).
+                    let side_table = Table::new(
+                        &mut store,
+                        TableType::new(RefType::FUNCREF, 53, None),
+                        Ref::Func(None),
+                    )
+                    .map_err(|e| format!("side table: {e}"))?;
+
+                    // Host shims for the libc symbols nothing provides (libcore-emitted).
+                    let calloc = Func::wrap(
+                        &mut store,
+                        |mut caller: Caller<'_, WasmState>, n: i32, sz: i32| -> i32 {
+                            let total = (n as i64 * sz as i64).max(0) as u32;
+                            match runtime_malloc(&mut caller, total) {
+                                Some(p) => {
+                                    let zeros = vec![0u8; total as usize];
+                                    write_wasm_mem(&mut caller, p, &zeros);
+                                    p as i32
+                                }
+                                None => 0,
+                            }
+                        },
+                    );
+                    let strlen = Func::wrap(
+                        &mut store,
+                        |mut caller: Caller<'_, WasmState>, p: i32| -> i32 {
+                            let mut len = 0u32;
+                            while let Some(b) =
+                                read_wasm_mem(&mut caller, (p as u32 + len) as usize, 1)
+                            {
+                                if b[0] == 0 {
+                                    break;
+                                }
+                                len += 1;
+                            }
+                            len as i32
+                        },
+                    );
+                    let memcmp = Func::wrap(
+                        &mut store,
+                        |mut caller: Caller<'_, WasmState>, a: i32, b: i32, n: i32| -> i32 {
+                            let n = n.max(0) as usize;
+                            let av = read_wasm_mem(&mut caller, a as usize, n).unwrap_or_default();
+                            let bv = read_wasm_mem(&mut caller, b as usize, n).unwrap_or_default();
+                            for i in 0..n.min(av.len()).min(bv.len()) {
+                                if av[i] != bv[i] {
+                                    return av[i] as i32 - bv[i] as i32;
+                                }
+                            }
+                            0
+                        },
+                    );
+
+                    // Pre-resolve main exports the side imports (Copy handles, so the
+                    // import map below needs no &mut store).
+                    let shared = store
+                        .data()
+                        .shared_memory
+                        .clone()
+                        .ok_or("no shared memory for side module")?;
+                    let main_malloc = instance
+                        .get_func(&mut store, "rayzor_malloc")
+                        .ok_or("main missing rayzor_malloc")?;
+                    let main_free = instance
+                        .get_func(&mut store, "rayzor_free")
+                        .ok_or("main missing rayzor_free")?;
+                    let mut tensor_funcs: std::collections::HashMap<String, Func> =
+                        std::collections::HashMap::new();
+                    for t in [
+                        "rayzor_plugin_tensor_dtype",
+                        "rayzor_plugin_tensor_is_contiguous",
+                        "rayzor_plugin_tensor_ndim",
+                        "rayzor_plugin_tensor_shape",
+                        "rayzor_plugin_tensor_data",
+                        "rayzor_plugin_tensor_alloc_zeros",
+                    ] {
+                        let f = instance
+                            .get_func(&mut store, t)
+                            .ok_or_else(|| format!("main missing {t}"))?;
+                        tensor_funcs.insert(t.to_string(), f);
+                    }
+
+                    // Positional import Vec in the side's DECLARED order (Instance::new
+                    // matches by index, not name — wrong order = silent corruption).
+                    let mut imports: Vec<Extern> = Vec::new();
+                    for imp in side_module.imports() {
+                        let ext: Extern = match (imp.module(), imp.name()) {
+                            ("env", "memory") => shared.clone().into(),
+                            ("env", "__indirect_function_table") => side_table.into(),
+                            ("env", "__stack_pointer") => sp_g.into(),
+                            ("env", "__memory_base") => mem_base_g.into(),
+                            ("env", "__table_base") => table_base_g.into(),
+                            ("env", "malloc") => main_malloc.into(),
+                            ("env", "free") => main_free.into(),
+                            ("env", "calloc") => calloc.into(),
+                            ("env", "strlen") => strlen.into(),
+                            ("env", "memcmp") => memcmp.into(),
+                            ("env", n) if n.starts_with("rayzor_plugin_tensor_") => tensor_funcs
+                                .get(n)
+                                .copied()
+                                .ok_or_else(|| format!("no tensor fn {n}"))?
+                                .into(),
+                            ("GOT.func", sym) => (*got_globals
+                                .get(&format!("GOT.func\u{0}{sym}"))
+                                .ok_or_else(|| format!("unresolved GOT.func {sym}"))?)
+                            .into(),
+                            ("GOT.mem", sym) => {
+                                (*got_globals
+                                    .get(&format!("GOT.mem\u{0}{sym}"))
+                                    .ok_or_else(|| format!("unresolved GOT.mem {sym}"))?)
+                                .into()
+                            }
+                            (m, n) => return Err(format!("unhandled side import {m}::{n}")),
+                        };
+                        imports.push(ext);
+                    }
+
+                    let side = Instance::new(&mut store, &side_module, &imports)
+                        .map_err(|e| format!("instantiate side module: {e}"))?;
+                    // Apply data relocations (patches GOT-relative pointers into the
+                    // side's .data using the base/GOT globals). No __wasm_call_ctors
+                    // in this module.
+                    if let Ok(f) =
+                        side.get_typed_func::<(), ()>(&mut store, "__wasm_apply_data_relocs")
+                    {
+                        f.call(&mut store, ())
+                            .map_err(|e| format!("__wasm_apply_data_relocs: {e}"))?;
+                    }
+                    Ok(side)
+                })();
+                match loaded {
+                    Ok(side) => {
+                        store.data_mut().side_instance = Some(side);
+                        eprintln!(
+                            "[wasm-runner] linked Q8 capability side-module ({})",
+                            side_path.display()
+                        );
+                    }
+                    Err(e) => eprintln!(
+                        "[wasm-runner] WARNING: Q8 side-module load failed ({e}); F32 KV cache fallback"
+                    ),
+                }
+            }
+        }
     }
 
     let start = instance
