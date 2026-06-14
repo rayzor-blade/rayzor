@@ -663,7 +663,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
         use rayzor_runtime_core::quant::q4_k_m::vec_dot_q4_K_q8_K;
         #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-        use rayzor_runtime_core::quant::sdot::dot_q4_k_q8_kblock_llamacpp;
+        use rayzor_runtime_core::quant::sdot::dot_q4_k_q8_kblock_fast;
 
         const BLOCK_SIZE: usize = 256;
         if k == 0 || n == 0 || batch == 0 || k % BLOCK_SIZE != 0 {
@@ -713,7 +713,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         sum += if scheme as u8 == QSCHEME_Q4_K_M {
                             let w = unsafe { &*(bp as *const Q4KMBlock) };
                             #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-                            let d = unsafe { dot_q4_k_q8_kblock_llamacpp(w, xb) };
+                            let d = unsafe { dot_q4_k_q8_kblock_fast(w, xb) };
                             #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
                             let d = vec_dot_q4_K_q8_K(w, xb);
                             d

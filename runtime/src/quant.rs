@@ -236,12 +236,12 @@ fn sdot_enabled() -> bool {
 // `rayzor_runtime_core::quant::{types, q8_k}` and are re-imported above.
 //
 // The SDOT inner kernels (`dot_q4_k_q8`, `dot_q4_k_q8_kblock`,
-// `dot_q4_k_q8_kblock_llamacpp`, `dot_q4_k_q8_kblock_2`, `dot_q6_k_q8`)
+// `dot_q4_k_q8_kblock_fast`, `dot_q4_k_q8_kblock_2`, `dot_q6_k_q8`)
 // migrated to `rayzor_runtime_core::quant::sdot` in Step 4. They stay behind
 // the `cfg(all(target_arch = "aarch64", target_feature = "dotprod"))` gate.
 #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
 use rayzor_runtime_core::quant::sdot::{
-    dot_q4_k_q8, dot_q4_k_q8_kblock, dot_q4_k_q8_kblock_2, dot_q4_k_q8_kblock_llamacpp, dot_q6_k_q8,
+    dot_q4_k_q8, dot_q4_k_q8_kblock, dot_q4_k_q8_kblock_2, dot_q4_k_q8_kblock_fast, dot_q6_k_q8,
 };
 
 // ============================================================================
@@ -1570,7 +1570,7 @@ fn sdot_enabled_runtime() -> bool {
 /// `std::env::var` in the per-chunk matmul workers — ~490 environment
 /// lock acquisitions per decoded token across the fork-join fan-out.
 #[inline]
-fn llamacpp_kernel_enabled() -> bool {
+fn fast_kernel_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -1802,15 +1802,15 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
     // RAYZOR_LEGACY_KERNEL=1 to fall back to the 2-block paired path
     // for A/B or in case of numerical regression on a specific workload.
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_llamacpp = llamacpp_kernel_enabled();
+    let use_fast = fast_kernel_enabled();
     #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-    let use_llamacpp = false;
+    let use_fast = false;
 
     for n_idx in lo..hi {
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
         let mut sum = 0.0f32;
 
-        if use_llamacpp {
+        if use_fast {
             // Fastest path: llama.cpp-pattern single-block kernel in a
             // simple loop. The 2-block pairing win (~7% kernel-level
             // from acb80e5) is dominated by the 2.12x kernel speedup,
@@ -1818,7 +1818,7 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
             #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
             for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
                 let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
-                sum += dot_q4_k_q8_kblock_llamacpp(weight, x_block);
+                sum += dot_q4_k_q8_kblock_fast(weight, x_block);
             }
         } else if use_pairs {
             // Legacy path: 2-block paired SDOT (acb80e5). Keep behind
@@ -1891,9 +1891,9 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_llamacpp = llamacpp_kernel_enabled();
+    let use_fast = fast_kernel_enabled();
     #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-    let use_llamacpp = false;
+    let use_fast = false;
 
     for n_idx in lo..hi {
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
@@ -1901,11 +1901,11 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
             let x_blocks = &x_q8k[b * blocks_per_row..(b + 1) * blocks_per_row];
             let mut sum = 0.0f32;
 
-            if use_llamacpp {
+            if use_fast {
                 #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
                 for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
                     let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
-                    sum += dot_q4_k_q8_kblock_llamacpp(weight, x_block);
+                    sum += dot_q4_k_q8_kblock_fast(weight, x_block);
                 }
             } else {
                 for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
