@@ -42,6 +42,13 @@
 //! //    or hand-roll if needed.
 //! ```
 
+// On wasm this crate is statically linked into the rayzor wasm runtime as
+// part of a PIC side-module that links ONLY core (no alloc/libc/wasi), so it
+// must be no_std there. The NATIVE build (compiler dep + dlopen'd dylib) keeps
+// std. The only heap users here — the host-side `RuntimePlugin`/`PluginRegistry`
+// abstractions — are gated to non-wasm (they're never used in the side-module),
+// so the wasm build needs no `alloc` and pulls in no `core::fmt`.
+#![cfg_attr(target_arch = "wasm32", no_std)]
 #![allow(clippy::missing_safety_doc)]
 
 // ============================================================================
@@ -261,6 +268,10 @@ impl Tensor {
 /// cdylibs don't implement this — they expose the `plugin_init` /
 /// `plugin_describe` C exports and the host wraps them. This
 /// trait is the host's internal representation.
+///
+/// Host-only: never used inside a wasm side-module, and gating it out
+/// keeps the no_std wasm build free of `alloc`/`core::fmt`.
+#[cfg(not(target_arch = "wasm32"))]
 pub trait RuntimePlugin: Send + Sync {
     fn name(&self) -> &str;
     fn runtime_symbols(&self) -> Vec<(&'static str, *const u8)>;
@@ -272,10 +283,12 @@ pub trait RuntimePlugin: Send + Sync {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PluginRegistry {
     plugins: Vec<Box<dyn RuntimePlugin>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PluginRegistry {
     pub fn new() -> Self {
         Self {
@@ -313,6 +326,7 @@ impl PluginRegistry {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for PluginRegistry {
     fn default() -> Self {
         Self::new()
