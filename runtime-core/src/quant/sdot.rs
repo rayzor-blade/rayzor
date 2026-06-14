@@ -9,7 +9,7 @@
 //! in `rayzor-runtime` and decides whether to call into here.
 //!
 //! Performance wins migrated from runtime/src/quant.rs:
-//!   - commit c5ab136 — `dot_q4_k_q8_kblock_llamacpp` (+15.4% real decode,
+//!   - commit c5ab136 — `dot_q4_k_q8_kblock_fast` (+15.4% real decode,
 //!     2.12x kernel microbench, llama.cpp NEON pattern port)
 //!   - commit acb80e5 — `dot_q4_k_q8_kblock_2` (+3.04% Voronoi N=300,
 //!     two-block paired SDOT with 8 in-flight accumulators)
@@ -284,7 +284,7 @@ pub unsafe fn dot_q4_k_q8_kblock(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
 /// the caller must runtime-gate this call.
 #[inline]
 #[target_feature(enable = "dotprod")]
-pub unsafe fn dot_q4_k_q8_kblock_llamacpp(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
+pub unsafe fn dot_q4_k_q8_kblock_fast(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     let q4_block_ptr = weight as *const Q4KMBlock as *const u8;
 
     let d_bits = core::ptr::read_unaligned(q4_block_ptr as *const u16);
