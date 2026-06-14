@@ -368,20 +368,32 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let qt_base = base + qt_data_off;
         let y_base = base + y_data_off;
 
-        let mut x_q8k: Vec<Q8KBlock> = Vec::with_capacity(blocks_per_row);
+        // Pre-quantise ALL batch rows once, then a SINGLE parallel_rows over
+        // the output columns whose worker dots each weight row against every
+        // batch row (mirrors the native batched kernel
+        // qmatmul_chunk_impl_sdot_q4km_batch). For batch>1 (prompt prefill)
+        // this collapses `batch` separate worker-pool fan-outs per matmul into
+        // one, amortising dispatch/join overhead across the whole prompt — the
+        // reason native prefill is faster per-token than its decode. batch==1
+        // (decode) is unchanged.
+        let mut x_q8k_all: Vec<Q8KBlock> = Vec::with_capacity(batch * blocks_per_row);
+        let mut tmp: Vec<Q8KBlock> = Vec::with_capacity(blocks_per_row);
         for bch in 0..batch {
             let x_ptr = (base + x_data_off + bch * x_stride0_elems * 4) as *const f32;
-            prepare_x_q8k_blocks_into(x_ptr, k, &mut x_q8k);
-            let xq_ptr = x_q8k.as_ptr() as usize;
-            let y_row = y_base + bch * n * 4;
-            rayzor_runtime::worker_pool::global().parallel_rows(n, threads, move |lo, hi| {
-                let xq = xq_ptr as *const Q8KBlock;
-                for n_idx in lo..hi {
-                    let row_ptr = (qt_base + n_idx * blocks_per_row * block_bytes) as *const u8;
+            prepare_x_q8k_blocks_into(x_ptr, k, &mut tmp);
+            x_q8k_all.extend_from_slice(&tmp[..blocks_per_row]);
+        }
+        let xq_ptr = x_q8k_all.as_ptr() as usize;
+        rayzor_runtime::worker_pool::global().parallel_rows(n, threads, move |lo, hi| {
+            let xq = xq_ptr as *const Q8KBlock;
+            for n_idx in lo..hi {
+                let row_ptr = (qt_base + n_idx * blocks_per_row * block_bytes) as *const u8;
+                for bch in 0..batch {
+                    let xq_row = unsafe { xq.add(bch * blocks_per_row) };
                     let mut sum = 0.0f32;
                     for blk in 0..blocks_per_row {
                         let bp = unsafe { row_ptr.add(blk * block_bytes) };
-                        let xb = unsafe { &*xq.add(blk) };
+                        let xb = unsafe { &*xq_row.add(blk) };
                         sum += if scheme as u8 == QSCHEME_Q4_K_M {
                             let w = unsafe { &*(bp as *const Q4KMBlock) };
                             #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
@@ -393,10 +405,10 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             unsafe { vec_dot_q6_K_q8_K(bp, xb) }
                         };
                     }
-                    unsafe { *((y_row + n_idx * 4) as *mut f32) = sum };
+                    unsafe { *((y_base + bch * n * 4 + n_idx * 4) as *mut f32) = sum };
                 }
-            });
-        }
+            }
+        });
         1
     }
 
