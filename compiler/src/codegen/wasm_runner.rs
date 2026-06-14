@@ -21,10 +21,47 @@
 #[cfg(feature = "wasm-runtime")]
 #[derive(Default)]
 struct SideDylink {
+    /// Size in bytes of the side's data image (from the `dylink.0` mem-info).
+    /// The loader reserves this much for `__memory_base`.
+    mem_size: u32,
     /// GOT.func symbol → table slot (relative to `__table_base`).
     got_func_slot: std::collections::HashMap<String, i32>,
     /// GOT.mem symbol → byte offset in the data image (relative to `__memory_base`).
     got_mem_offset: std::collections::HashMap<String, i32>,
+}
+
+/// Coerce a wasm value to a target ValType at the trampoline ABI boundary.
+/// The guest emits Haxe `Int` (i32) for the Q8 capability args while the side
+/// module's exports use `i64` (the manifest's `I64`), and the i64 handle it
+/// returns is narrowed back to the guest's i32 `Ptr`. Pointers/handles live in
+/// 32-bit wasm linear memory so the i64↔i32 narrowing is lossless here.
+#[cfg(feature = "wasm-runtime")]
+fn coerce_val(v: &wasmtime::Val, target: &wasmtime::ValType) -> wasmtime::Val {
+    use wasmtime::{Val, ValType};
+    match (v, target) {
+        (Val::I32(x), ValType::I64) => Val::I64(*x as i64),
+        (Val::I64(x), ValType::I32) => Val::I32(*x as i32),
+        (Val::F32(x), ValType::F64) => Val::F64((f32::from_bits(*x) as f64).to_bits()),
+        (Val::F64(x), ValType::F32) => Val::F32((f64::from_bits(*x) as f32).to_bits()),
+        (other, _) => other.clone(),
+    }
+}
+
+/// Read an unsigned LEB128 from `buf` at `*pos`, advancing `*pos`.
+#[cfg(feature = "wasm-runtime")]
+fn read_uleb32(buf: &[u8], pos: &mut usize) -> u32 {
+    let mut result: u32 = 0;
+    let mut shift = 0;
+    while *pos < buf.len() {
+        let b = buf[*pos];
+        *pos += 1;
+        result |= ((b & 0x7f) as u32) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    result
 }
 
 #[cfg(feature = "wasm-runtime")]
@@ -32,6 +69,7 @@ fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
     use std::collections::HashMap;
     use wasmparser::{ElementItems, ElementKind, ExternalKind, Operator, Parser, Payload, TypeRef};
 
+    let mut mem_size: u32 = 0;
     let mut got_func_syms: Vec<String> = Vec::new();
     let mut got_mem_syms: Vec<String> = Vec::new();
     let mut num_imported_globals: u32 = 0;
@@ -58,6 +96,22 @@ fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
                             num_imported_globals += 1;
                         }
                     }
+                }
+            }
+            Payload::CustomSection(c) if c.name() == "dylink.0" => {
+                // Subsections: <id:u8> <size:uleb> <payload>. mem-info (id 1)
+                // payload = mem_size, mem_align, table_size, table_align (uleb).
+                let d = c.data();
+                let mut p = 0usize;
+                while p < d.len() {
+                    let id = d[p];
+                    p += 1;
+                    let size = read_uleb32(d, &mut p) as usize;
+                    let sub_end = (p + size).min(d.len());
+                    if id == 1 {
+                        mem_size = read_uleb32(d, &mut p);
+                    }
+                    p = sub_end;
                 }
             }
             Payload::ExportSection(reader) => {
@@ -180,6 +234,7 @@ fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
     }
 
     Ok(SideDylink {
+        mem_size,
         got_func_slot,
         got_mem_offset,
     })
@@ -1654,13 +1709,35 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     let f = side.get_func(&mut caller, &name_owned).ok_or_else(|| {
                         wasmtime::Error::msg(format!("side export {name_owned} missing"))
                     })?;
-                    let args: Vec<Val> = params.to_vec();
-                    let mut out = vec![Val::I64(0); results.len()];
+                    // Marshal across the ABI boundary: the guest passes Haxe Int
+                    // (i32) but the side export takes i64; coerce each arg to the
+                    // side's param type and each result back to the guest's.
+                    let side_ty = f.ty(&caller);
+                    let side_params: Vec<ValType> = side_ty.params().collect();
+                    let side_results: Vec<ValType> = side_ty.results().collect();
+                    drop(side_ty);
+                    let args: Vec<Val> = params
+                        .iter()
+                        .zip(&side_params)
+                        .map(|(p, t)| coerce_val(p, t))
+                        .collect();
+                    let mut out: Vec<Val> = side_results
+                        .iter()
+                        .map(|t| match t {
+                            ValType::I64 => Val::I64(0),
+                            ValType::F32 => Val::F32(0),
+                            ValType::F64 => Val::F64(0),
+                            _ => Val::I32(0),
+                        })
+                        .collect();
                     f.call(&mut caller, &args, &mut out).map_err(|e| {
                         wasmtime::Error::msg(format!("side {name_owned} call: {e}"))
                     })?;
-                    for (r, o) in results.iter_mut().zip(out) {
-                        *r = o;
+                    if std::env::var_os("RAYZOR_Q8_TRACE").is_some() {
+                        eprintln!("[q8-tramp] {name_owned} args={args:?} -> {out:?}");
+                    }
+                    for (r, (o, gt)) in results.iter_mut().zip(out.iter().zip(&ret_types)) {
+                        *r = coerce_val(o, gt);
                     }
                     Ok(())
                 },
@@ -4977,15 +5054,16 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     // Reserve the side's data image + a private shadow stack from
                     // the runtime heap. rayzor_malloc OWNS it permanently, so the
                     // app heap can't grow into and stomp it (a host_alloc top-carve
-                    // could, since rayzor_malloc grows up unbounded). 49440 data
-                    // (16-aligned, per dylink mem_p2align=4) + 64 KiB stack.
-                    const SIDE_MEM: u32 = (49440 + 15) & !15;
+                    // could, since rayzor_malloc grows up unbounded). Data size is
+                    // the dylink.0 mem_size (16-aligned, per mem_p2align=4) — read
+                    // dynamically so it tracks the side-module across rebuilds.
+                    let side_mem = (dylink.mem_size + 15) & !15;
                     const SIDE_STACK: u32 = 64 * 1024;
                     let rmalloc = instance
                         .get_typed_func::<i32, i32>(&mut store, "rayzor_malloc")
                         .map_err(|e| format!("main has no rayzor_malloc: {e}"))?;
                     let region = rmalloc
-                        .call(&mut store, (SIDE_MEM + SIDE_STACK) as i32)
+                        .call(&mut store, (side_mem + SIDE_STACK) as i32)
                         .map_err(|e| format!("rayzor_malloc for side region: {e}"))?;
                     if region <= 0 {
                         return Err("rayzor_malloc returned null for side region".into());
@@ -4993,7 +5071,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     let mem_base = region as u32;
                     // Shadow stack lives above the data image; SP starts at the top
                     // and the side's PIC prologue grows it down.
-                    let stack_top = mem_base + SIDE_MEM + SIDE_STACK;
+                    let stack_top = mem_base + side_mem + SIDE_STACK;
 
                     // Base/stack globals — mutability taken from the side's import
                     // declaration (bases Const, SP Var) or Instance::new rejects them.
@@ -5049,27 +5127,71 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         got_globals.insert(format!("GOT.mem\u{0}{sym}"), g);
                     }
 
-                    // Private 53-slot funcref table (runtime-wasm exports none).
+                    // Private funcref table (runtime-wasm exports none). Size is
+                    // read from the side's import declaration (the elem segment
+                    // fills it at __table_base) rather than hard-coded — it tracks
+                    // the side-module's GOT/table footprint across rebuilds.
+                    let table_min = side_module
+                        .imports()
+                        .find(|i| i.module() == "env" && i.name() == "__indirect_function_table")
+                        .and_then(|i| match i.ty() {
+                            ExternType::Table(t) => Some(t.minimum()),
+                            _ => None,
+                        })
+                        .unwrap_or(64);
                     let side_table = Table::new(
                         &mut store,
-                        TableType::new(RefType::FUNCREF, 53, None),
+                        TableType::new(RefType::FUNCREF, table_min as u32, None),
                         Ref::Func(None),
                     )
                     .map_err(|e| format!("side table: {e}"))?;
 
-                    // Host shims for the libc symbols nothing provides (libcore-emitted).
+                    // Pre-resolve main exports the side imports (Copy handles, so the
+                    // import map below needs no &mut store).
+                    let shared = store
+                        .data()
+                        .shared_memory
+                        .clone()
+                        .ok_or("no shared memory for side module")?;
+                    let main_malloc = instance
+                        .get_func(&mut store, "rayzor_malloc")
+                        .ok_or("main missing rayzor_malloc")?;
+                    let main_free = instance
+                        .get_func(&mut store, "rayzor_free")
+                        .ok_or("main missing rayzor_free")?;
+
+                    // Host shims for the libc symbols nothing provides. malloc/calloc
+                    // MUST route to MAIN's rayzor_malloc (the shared runtime heap), not
+                    // runtime_malloc(), which resolves rayzor_malloc off the *caller's*
+                    // exports — and the caller here is the side module, which exports
+                    // none. (Critically, LLVM lowers the side's `malloc(n) + memset(0)`
+                    // in the Q8 cache alloc to a single `calloc(1, n)` call, so calloc
+                    // must allocate from the same heap or the cache handle comes back
+                    // null and the guest silently falls back to F32.)
+                    let malloc_shim = Func::wrap(
+                        &mut store,
+                        move |mut caller: Caller<'_, WasmState>, n: i32| -> i32 {
+                            main_malloc
+                                .typed::<i32, i32>(&caller)
+                                .ok()
+                                .and_then(|f| f.call(&mut caller, n.max(0)).ok())
+                                .unwrap_or(0)
+                        },
+                    );
                     let calloc = Func::wrap(
                         &mut store,
-                        |mut caller: Caller<'_, WasmState>, n: i32, sz: i32| -> i32 {
-                            let total = (n as i64 * sz as i64).max(0) as u32;
-                            match runtime_malloc(&mut caller, total) {
-                                Some(p) => {
-                                    let zeros = vec![0u8; total as usize];
-                                    write_wasm_mem(&mut caller, p, &zeros);
-                                    p as i32
-                                }
-                                None => 0,
+                        move |mut caller: Caller<'_, WasmState>, nmemb: i32, size: i32| -> i32 {
+                            let total = (nmemb as i64 * size as i64).max(0) as i32;
+                            let p = main_malloc
+                                .typed::<i32, i32>(&caller)
+                                .ok()
+                                .and_then(|f| f.call(&mut caller, total).ok())
+                                .unwrap_or(0);
+                            if p != 0 {
+                                let zeros = vec![0u8; total as usize];
+                                write_wasm_mem(&mut caller, p as u32, &zeros);
                             }
+                            p
                         },
                     );
                     let strlen = Func::wrap(
@@ -5101,20 +5223,6 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             0
                         },
                     );
-
-                    // Pre-resolve main exports the side imports (Copy handles, so the
-                    // import map below needs no &mut store).
-                    let shared = store
-                        .data()
-                        .shared_memory
-                        .clone()
-                        .ok_or("no shared memory for side module")?;
-                    let main_malloc = instance
-                        .get_func(&mut store, "rayzor_malloc")
-                        .ok_or("main missing rayzor_malloc")?;
-                    let main_free = instance
-                        .get_func(&mut store, "rayzor_free")
-                        .ok_or("main missing rayzor_free")?;
                     let mut tensor_funcs: std::collections::HashMap<String, Func> =
                         std::collections::HashMap::new();
                     for t in [
@@ -5141,7 +5249,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             ("env", "__stack_pointer") => sp_g.into(),
                             ("env", "__memory_base") => mem_base_g.into(),
                             ("env", "__table_base") => table_base_g.into(),
-                            ("env", "malloc") => main_malloc.into(),
+                            ("env", "malloc") => malloc_shim.into(),
                             ("env", "free") => main_free.into(),
                             ("env", "calloc") => calloc.into(),
                             ("env", "strlen") => strlen.into(),

@@ -1051,10 +1051,23 @@ impl LinkerCtx {
         // particular, `rayzor_malloc` backs the shared-memory sync/result
         // slot allocator — without it rayzor_threads.js falls back to
         // fixed addresses that collide with dlmalloc's heap and corrupt
-        // state. Extend this list as more runtime entry points are needed
-        // from JS.
-        const RUNTIME_EXPORT_WHITELIST: &[&str] =
-            &["rayzor_malloc", "rayzor_free", "rayzor_realloc"];
+        // state. The `rayzor_plugin_tensor_*` accessors are the dylink.0
+        // side-module composition seam: a dynamically-loaded capability
+        // (e.g. the nue Q8 KV cache) imports them from the main module, so
+        // the merged module must re-export them for the embedder to wire up
+        // (`Instance::get_func`). Extend this list as more runtime entry
+        // points are needed from JS or from side-modules.
+        const RUNTIME_EXPORT_WHITELIST: &[&str] = &[
+            "rayzor_malloc",
+            "rayzor_free",
+            "rayzor_realloc",
+            "rayzor_plugin_tensor_alloc_zeros",
+            "rayzor_plugin_tensor_data",
+            "rayzor_plugin_tensor_dtype",
+            "rayzor_plugin_tensor_ndim",
+            "rayzor_plugin_tensor_shape",
+            "rayzor_plugin_tensor_is_contiguous",
+        ];
         for export in &rt.exports {
             if export.kind != ExportItemKind::Func {
                 continue;
