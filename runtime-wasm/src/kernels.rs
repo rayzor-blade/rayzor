@@ -4,7 +4,7 @@
 
 use core::slice;
 use rayzor_runtime_core::tensor::topk::recent_contains;
-use rayzor_runtime_core::tensor::{flash_attn, rms_norm, rope, softmax};
+use rayzor_runtime_core::tensor::{flash_attn, rms_norm, rope};
 
 use crate::tensor::{load_f32_at, store_f32_at, Tensor, DTYPE_F16, DTYPE_F32};
 
