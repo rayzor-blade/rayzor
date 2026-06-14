@@ -1067,6 +1067,74 @@ pub unsafe extern "C" fn rayzor_tensor_scale(t: i32, factor: f64) -> i32 {
     tensor_unary(t, |x| x * factor as f32)
 }
 
+// ============================================================================
+// rayzor_plugin_* ABI — the composition seam for wasm plugin COMPONENTS.
+//
+// A plugin component (e.g. nue-plugins' Q8 KV cache + flash kernel) is built
+// as wasm that IMPORTS these `rayzor_plugin_tensor_*` symbols to touch tensors
+// without knowing the `Tensor` struct layout. On native the host process
+// exports them (-export_dynamic); in wasm, runtime-wasm — which owns `Tensor`
+// — provides them here and the wasm-linker resolves the plugin's imports
+// against these exports. This is what lets the SAME plugin (Q8 cache, etc.)
+// load as a portable component on both targets instead of being a native-only
+// dylib. `TensorHandle` is the `Tensor` pointer as i64 (32-bit on wasm,
+// zero-extended; `as usize` recovers it on either width).
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
+    shape_ptr: *const usize,
+    ndim: usize,
+    dtype: u8,
+) -> i64 {
+    if shape_ptr.is_null() && ndim != 0 {
+        return 0;
+    }
+    let shape = slice::from_raw_parts(shape_ptr, ndim);
+    let t = alloc_tensor(shape, dtype);
+    t as usize as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
+    if t == 0 {
+        return core::ptr::null_mut();
+    }
+    (*(t as usize as *const Tensor)).data
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
+    if t == 0 {
+        return 0;
+    }
+    (*(t as usize as *const Tensor)).dtype
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
+    if t == 0 {
+        return 0;
+    }
+    (*(t as usize as *const Tensor)).ndim as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
+    if t == 0 {
+        return core::ptr::null();
+    }
+    (*(t as usize as *const Tensor)).shape as *const usize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
+    if t == 0 {
+        return 0;
+    }
+    u8::from((*(t as usize as *const Tensor)).is_contiguous())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t: i32, position_offset: i32) -> i32 {
     if t == 0 {
