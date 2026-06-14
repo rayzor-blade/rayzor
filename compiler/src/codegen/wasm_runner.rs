@@ -1616,14 +1616,23 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                 "rayzor_host_qmatmul_par",
                 par_ty,
                 move |mut caller, params, results| {
-                    let x_data_off = val_i32(&params[0]).max(0) as usize;
+                    // ADDRESS params are wasm linear-memory offsets: UNSIGNED
+                    // u32 spanning the full 0..4GiB range. Zero-extend (`as u32
+                    // as usize`) — NOT `.max(0)`. `.max(0)` clamps any offset
+                    // with the high bit set (a tensor allocated above 2GiB) to
+                    // 0, which would make the host fan its f32 results out to
+                    // `base + 0..` and smash the low static data segment. Latent
+                    // today (the 1B model peaks under 2GiB so no tensor is
+                    // allocated that high), but a real defect for larger models
+                    // or contexts that push the wasm heap break past 2GiB.
+                    let x_data_off = val_i32(&params[0]) as u32 as usize;
                     let x_stride0 = val_i32(&params[1]).max(0) as usize;
                     let batch = val_i32(&params[2]).max(0) as usize;
                     let k = val_i32(&params[3]).max(0) as usize;
-                    let qt_data_off = val_i32(&params[4]).max(0) as usize;
+                    let qt_data_off = val_i32(&params[4]) as u32 as usize;
                     let scheme = val_i32(&params[5]);
                     let n = val_i32(&params[6]).max(0) as usize;
-                    let y_data_off = val_i32(&params[7]).max(0) as usize;
+                    let y_data_off = val_i32(&params[7]) as u32 as usize;
                     let threads = val_i32(&params[8]);
                     // Diagnostic: RAYZOR_WASM_NO_HOST_MATMUL=1 forces the guest
                     // to fall back to its sequential in-wasm kernel (isolates
