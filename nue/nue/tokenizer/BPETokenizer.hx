@@ -243,7 +243,7 @@ class BPETokenizer implements Tokenizer {
      * which is O(N²) per call (O(N³) over a generation) — the dominant
      * allocation churn on long streams.
      */
-    public inline function decodePiece(id:Int):String {
+    public function decodePiece(id:Int):String {
         return (id >= 0 && id < vocab.size()) ? vocab.get(id) : "";
     }
 
