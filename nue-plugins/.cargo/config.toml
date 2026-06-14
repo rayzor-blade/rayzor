@@ -1,0 +1,36 @@
+# WASM-component build config for nue-plugins.
+#
+# This config only takes effect when building from inside this crate dir
+# (`cd nue-plugins && cargo build --release --target wasm32-wasip1-threads`),
+# mirroring how runtime-wasm is built. It does NOT affect the native dylib
+# build (`cargo build -p nue-plugins`) — that uses the host target and the
+# workspace config.
+#
+# The plugin is a portable wasm CAPABILITY (the Q8 KV cache + flash-attn-Q8
+# kernels for `nue.transformer.KvCacheQ8`), not a self-contained program. It
+# is meant to be merged by the rayzor wasm-linker against:
+#   - runtime-wasm's exports — the 6 `rayzor_plugin_tensor_*` accessors (the
+#     composition seam, provided since 8c6c473) + shared `env.memory`.
+#   - the guest's `rayzor_kv_cache_q8_*` / `rayzor_tensor_flash_attn_decode_q8`
+#     imports — resolved against this module's exports.
+#
+# So the unresolved `rayzor_plugin_tensor_*` symbols must stay as IMPORTS for
+# the linker to wire up later, hence `--allow-undefined`. Without it rust-lld
+# tries a final link and fails on those symbols.
+#
+# Target features match runtime-wasm so the two modules share the same
+# atomics/SIMD ABI (the on-wasm NEON paths are cfg'd to aarch64 and fall back
+# to scalar; simd128 lets LLVM autovectorize them).
+#
+# NOTE: a clean merge is still BLOCKED — this linked module hard-codes its
+# stack at 1 MiB + data above it, colliding 1:1 with runtime-wasm's identical
+# layout. Resolving that needs either a PIC side-module (`__memory_base`/GOT
+# — blocked here by the threads target forcing `--export-memory`, which the
+# `-shared` ABI forbids) or a hand-coordinated `--global-base` + reserved
+# heap hole. See the `perf_wasm_*`/component memory notes.
+[target.wasm32-wasip1-threads]
+runner = ["wasmtime", "-S", "threads", "-W", "threads", "-W", "shared-memory"]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128,+relaxed-simd",
+    "-C", "link-arg=--allow-undefined",
+]
