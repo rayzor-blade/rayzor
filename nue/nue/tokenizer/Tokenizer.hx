@@ -36,6 +36,19 @@ interface Tokenizer {
      */
     function decodeBuffer(raw:String):String;
 
+    /**
+     * O(1)/token streaming decode. `carryHolder` is a single-element array
+     * holding the trailing bytes of an output codepoint that straddled the
+     * previous token boundary — initialise it to `[haxe.io.Bytes.alloc(0)]`;
+     * the method reads `carryHolder[0]` and writes the new carry back. Returns
+     * the newly decoded text (DELTA) for this token. Concatenating every delta
+     * (then a final `carryHolder[0].toString()` flush) equals `decodeBuffer` of
+     * the whole stream — without the O(N²) growing-buffer re-decode. (A holder
+     * array rather than a returned struct because wasm codegen drops a String
+     * field from a returned anon struct.)
+     */
+    function decodeStreamStep(carryHolder:Array<haxe.io.Bytes>, id:Int):String;
+
     /** Number of tokens in the vocabulary. */
     function vocabSize():Int;
 

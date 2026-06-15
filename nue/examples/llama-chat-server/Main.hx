@@ -267,15 +267,12 @@ class Main {
             trace("[request] id=" + reqNo + " prompt_len=" + promptLen
                 + " model_prompt_len=" + modelPrompt.length);
 
-            var prevLen = [0];
             var nTokens = [0];
             var socketOutput = [conn != null ? conn.output : null];
             var started = Sys.time();
             var output:String;
             if (stream) {
-                output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
-                    var delta = partial.substring(prevLen[0], partial.length);
-                    prevLen[0] = partial.length;
+                output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
                     Sys.print(delta);
                     var out = socketOutput[0];
                     if (out != null) {

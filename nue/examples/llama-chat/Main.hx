@@ -338,23 +338,16 @@ class Main {
         var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
 
         trace("[gen] streaming...");
-        // Live print: emit the partial-text delta each step so the
-        // user sees tokens appear in real time. The callback's
-        // `partial` is the full decoded tail so far, not just the
-        // newest piece, so we track the previous length and slice.
+        // Live print: the callback receives each token's DELTA directly
+        // (GenerationLoop streams deltas, not the cumulative text), so we
+        // just print it as tokens appear.
         //
-        // Counters live in single-element arrays because Rayzor
-        // closures capture primitives by value — `prevLen++` inside
-        // the closure wouldn't be visible to the outer scope (every
-        // tick would see `prevLen = 0` and print the full partial,
-        // producing the "TheThe corrected" duplicated-prefix effect).
-        // Arrays are heap objects and capture by reference.
-        var prevLen = [0];
+        // The counter lives in a single-element array because Rayzor closures
+        // capture primitives by value — `nTokens++` inside the closure wouldn't
+        // be visible to the outer scope. Arrays capture by reference.
         var nTokens = [0];
         var startedAt = Sys.time();
-        var output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
-            var delta = partial.substr(prevLen[0]);
-            prevLen[0] = partial.length;
+        var output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
             Sys.print(delta);
             nTokens[0] = nTokens[0] + 1;
             return true;
