@@ -120,6 +120,42 @@ to exhaustion. What remains, ranked by evidence:
 5. **Decode-loop alloc churn**: ~490 frees/token remain after the GQA fixes;
    bounded at 0.5-2.3% of wall by the arena measurement — cleanup value,
    not a throughput lever.
+6. **Prefix-cache KV reuse (RadixAttention-lite)** — a TTFT lever for
+   multi-turn / shared-prefix serving, *not* a decode-tok/s lever, and it
+   does NOT pay off until the reuse workload exists. Today every
+   `generate()` calls `model.resetCache()` (GenerationLoop.hx) and the chat
+   server is strictly sequential with a fresh loop + re-tokenised template
+   per request — no multi-turn, no persistent session, no batching, and the
+   system prompt (the obvious shared prefix) is disabled on the 1B for
+   precision drift. So a prefix cache would cache a prefix and immediately
+   throw it away. **Sequence: build the workload, then the cache.**
+   - **Stage 0 — session state** in `llama-chat-server` so a conversation's
+     turns accumulate (system+history reused turn to turn). ~1-2 days, pure
+     Haxe app layer. This is the actual precondition.
+   - **Stage 1 — radix-lite** (~3-6 days): make `resetCache()` optional +
+     add a `startPosition` to `forwardIds` (threaded through
+     `GQAttention.forward → KVCache` so a turn prefills only its divergent
+     suffix while reused rows stay) + a per-session longest-token-prefix
+     compare (the "radix walk" degenerates to one prefix-compare for
+     single-session multi-turn). Rides the EXISTING contiguous KV, the
+     EXISTING zero-copy `slice` view, the EXISTING absolute RoPE (already
+     position-offset driven, RoPE.hx), and the **UNCHANGED** flash kernel.
+     Win = skip a full prompt-length re-prefill per turn (e.g. ~2000-token
+     history → first token near-instant). Works on **both native and wasm**
+     (wasm rides the same runtime-core kernel; persisting one session's KV
+     is ~9 MB Q8 — trivial).
+   - **Do NOT build vLLM PagedAttention.** Its payoff (KV fragmentation +
+     dynamic batching across many concurrent in-flight sequences) targets a
+     regime nue's sequential server cannot express; it needs a block-table
+     allocator + a gather-capable kernel rewrite replicated across native
+     F32/Q8 and wasm/host-Q8 (the flash kernel HARD-REJECTS non-canonical
+     strides), and on wasm it *worsens* the 2 GiB linear-memory pressure the
+     reclamation work just contained (more cached prefixes = more resident
+     KV near the 2^31 wall). Revisit only if concurrent batched serving is
+     built. Correctness traps for the lite path: RoPE absolute-position
+     alignment (reused prefix valid only if the suffix decodes at the SAME
+     positions) and a complete invalidation key (token-ids + model +
+     positions, not text).
 
 ### Decode vs prefill split
 
