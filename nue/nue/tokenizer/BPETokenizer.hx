@@ -52,6 +52,12 @@ class BPETokenizer implements Tokenizer {
     /** Byte-level tokenizers map raw bytes through a printable alias
         table — required for GPT-2/Llama 3 style vocabs. */
     public var byteLevel:Bool;
+    /** Lazily-built byte→Unicode reverse map, cached per instance. Built
+        once (vs the per-call rebuild `byteDecode` did) so streaming decode
+        is O(1)/token. Instance field — NOT `static var` — to dodge the JIT
+        static-initialiser SIGILL that blocks a static cache here (see
+        `byteEncoderTable`'s note). */
+    var _byteDecoderCache:Array<Int> = null;
 
     public function new(vocab:Vocab, merges:Array<MergeRule>, byteLevel:Bool) {
         this.vocab = vocab;
@@ -254,7 +260,7 @@ class BPETokenizer implements Tokenizer {
      * can straddle a token boundary), so callers pass `buf.toString()`.
      */
     public function decodeBuffer(raw:String):String {
-        return byteLevel ? byteDecode(raw) : raw;
+        return byteLevel ? byteDecodeToBytes(raw, byteDecoderArrayCached()).toString() : raw;
     }
 
     // ------------------------------------------------------------------
@@ -295,8 +301,84 @@ class BPETokenizer implements Tokenizer {
      * before the reverse lookup.
      */
     static function byteDecode(s:String):String {
-        if (s == null || s.length == 0) return "";
-        var rev = byteDecoderArray();
+        return byteDecodeToBytes(s, byteDecoderArray()).toString();
+    }
+
+    /** Instance reverse-map accessor, built once and cached (the per-call
+        rebuild was a constant ~256-string/token churn). */
+    function byteDecoderArrayCached():Array<Int> {
+        if (_byteDecoderCache == null) _byteDecoderCache = byteDecoderArray();
+        return _byteDecoderCache;
+    }
+
+    /** Byte index of the end of the last COMPLETE UTF-8 codepoint in `b`.
+        Trailing bytes of an incomplete codepoint (one whose continuation
+        bytes haven't arrived yet) are excluded — they're the carry. Matches
+        `byteDecodeToBytes`'s `i + need <= n` completeness test. */
+    static function lastCompleteUtf8(b:haxe.io.Bytes):Int {
+        var n = b.length;
+        var i = 0;
+        var lastComplete = 0;
+        while (i < n) {
+            var b0 = b.get(i);
+            var need = (b0 < 0x80) ? 1
+                : ((b0 & 0xE0) == 0xC0) ? 2
+                : ((b0 & 0xF0) == 0xE0) ? 3
+                : ((b0 & 0xF8) == 0xF0) ? 4
+                : 1;
+            if (i + need <= n) {
+                i += need;
+                lastComplete = i;
+            } else {
+                break;
+            }
+        }
+        return lastComplete;
+    }
+
+    /** Streaming decode. Given the incomplete-output-byte carry from the
+        previous step (an output UTF-8 codepoint whose bytes straddle a token
+        boundary, held in `carryHolder[0]`) and a new token `id`, returns the
+        newly-completed decoded text (delta) and writes the new carry back.
+        O(|piece|) per token, O(N) over a generation — no growing re-decode,
+        unlike the old `rawPieces += piece` + full re-decode (O(N²) on wasm,
+        where StringBuf has no amortised append). Concatenating every delta
+        (+ a final `carryHolder[0].toString()` flush) reproduces `decodeBuffer`
+        of the whole stream byte-for-byte. */
+    public function decodeStreamStep(carryHolder:Array<haxe.io.Bytes>, id:Int):String {
+        var carry = carryHolder[0];
+        var piece = (id >= 0 && id < vocab.size()) ? vocab.get(id) : "";
+        var pieceBytes = byteLevel
+            ? byteDecodeToBytes(piece, byteDecoderArrayCached())
+            : haxe.io.Bytes.ofString(piece);
+        var cn = (carry != null) ? carry.length : 0;
+        var pbLen = pieceBytes.length;
+        // Build `combined = carry ++ pieceBytes` with explicit get/set (NOT
+        // blit: rayzor.Bytes.blit's direction differs native-vs-wasm). Buffers
+        // are tiny (carry <= 3, piece a few bytes), so the loop cost is trivial.
+        var combined = haxe.io.Bytes.alloc(cn + pbLen);
+        for (i in 0...cn) combined.set(i, carry.get(i));
+        for (i in 0...pbLen) combined.set(cn + i, pieceBytes.get(i));
+        var k = byteLevel ? lastCompleteUtf8(combined) : combined.length;
+        var delta = (k > 0) ? combined.sub(0, k).toString() : "";
+        // Carry the trailing incomplete-codepoint bytes (always <= 3, bounded
+        // by lastCompleteUtf8) as an OWNED COPY rather than a `sub` view into
+        // `combined`: the holder array outlives this call, and an owned copy
+        // can't dangle if Bytes reclamation ever frees `combined`. Returned via
+        // the holder, not a struct field (wasm codegen drops a String field
+        // from a returned anon struct).
+        var tailLen = combined.length - k;
+        var tail = haxe.io.Bytes.alloc(tailLen);
+        for (i in 0...tailLen) tail.set(i, combined.get(k + i));
+        carryHolder[0] = tail;
+        return delta;
+    }
+
+    /** Core of `byteDecode`: byte-alphabet string → raw output BYTES, with a
+        prebuilt reverse map. Returning Bytes (not String) lets the streaming
+        path split at a UTF-8 codepoint boundary. */
+    static function byteDecodeToBytes(s:String, rev:Array<Int>):haxe.io.Bytes {
+        if (s == null || s.length == 0) return haxe.io.Bytes.alloc(0);
         var n = s.length;
         // Worst case: each codepoint is a 4-byte UTF-8 unknown that
         // we pass through as raw codepoint bytes.
@@ -359,7 +441,7 @@ class BPETokenizer implements Tokenizer {
             }
             i += consumed;
         }
-        return buf.sub(0, pos).toString();
+        return buf.sub(0, pos);
     }
 
     /**

@@ -55,9 +55,10 @@ class GenerationLoop {
 
     /**
      * Generate text starting from `prompt`. Returns the full string
-     * (prompt + generated tail). `onToken` is invoked once per new
-     * token with the generated ID and the cumulative text so far —
-     * returning `false` from it aborts before the EOS / token limit.
+     * (prompt + generated tail). `onToken` is invoked once per new token
+     * with the generated ID and that token's DELTA (the newly decoded text
+     * for this token, not the cumulative text) — concatenating the deltas
+     * reproduces the tail. Returning `false` aborts before the EOS / limit.
      */
     public function generate(prompt:String, onToken:Int->String->Bool):String {
         // Per-phase decode timing, env-gated. When `RAYZOR_PROFILE_DECODE`
@@ -111,14 +112,17 @@ class GenerationLoop {
         if (_profileOn) _pPrefillSample = Sys.time() - _tPrefill;
         if (lr0 != logits) lr0.free();
 
-        // Accumulate the decoded byte-alphabet pieces incrementally. Re-
-        // decoding the whole id list per token (`tokenizer.decode(generated)`)
-        // is O(N²) per call → O(N³) over a generation, and that allocation
-        // churn is the dominant pressure on long streams. Appending one piece
-        // per token and `decodeBuffer`-ing the accumulation keeps the output
-        // byte-identical (byteDecode still runs on the full buffer, so multi-
-        // byte codepoints that straddle a token boundary decode correctly).
-        var rawPieces = "";
+        // Streaming decode: O(|piece|) per token, O(N) over a generation. The
+        // earlier approach kept a growing `rawPieces` String and re-
+        // `decodeBuffer`'d the WHOLE buffer every token — O(N²) (on wasm
+        // `StringBuf` has no amortised append), the dominant per-token heap
+        // leak that capped long generations at ~2 GiB / the 2^31 corruption
+        // boundary. Instead carry
+        // only the bytes of an output codepoint that straddles a token
+        // boundary, emit per-token DELTAS, and accumulate decoded parts in an
+        // Array (O(1) push, join once for the return value).
+        var parts:Array<String> = [];
+        var carryHolder = [haxe.io.Bytes.alloc(0)];
         var step = 0;
         var _decodeStart = _profileOn ? Sys.time() : 0.0;
         while (true) {
@@ -128,17 +132,15 @@ class GenerationLoop {
             var _stepStart = _profileOn ? Sys.time() : 0.0;
             var _stepIndex = _pCount;
 
-            rawPieces += tokenizer.decodePiece(nextId);
+            var _t0 = _profileOn ? Sys.time() : 0.0;
+            var delta = tokenizer.decodeStreamStep(carryHolder, nextId);
+            if (_profileOn) _pDecodeStr += Sys.time() - _t0;
+            parts.push(delta);
             ids.push(nextId);
 
-            // Stream the token through the callback. `partial` is the full
-            // decoded text so far, built from the incrementally-accumulated
-            // byte-alphabet pieces (no per-token re-decode of the whole list).
+            // Stream the per-token delta through the callback.
             if (onToken != null) {
-                var _t0 = _profileOn ? Sys.time() : 0.0;
-                var partial = tokenizer.decodeBuffer(rawPieces);
-                if (_profileOn) _pDecodeStr += Sys.time() - _t0;
-                if (!onToken(nextId, partial)) break;
+                if (!onToken(nextId, delta)) break;
             }
 
             step++;
@@ -240,7 +242,11 @@ class GenerationLoop {
         }
 
         logits.free();
-        return prompt + tokenizer.decodeBuffer(rawPieces);
+        // Full text = prompt + every emitted delta + any incomplete trailing
+        // codepoint still in the carry (flushed leniently, matching what a
+        // whole-buffer decodeBuffer would have produced at the end).
+        var tail = (carryHolder[0].length > 0) ? carryHolder[0].toString() : "";
+        return prompt + parts.join("") + tail;
     }
 
     /**
