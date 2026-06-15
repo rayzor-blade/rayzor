@@ -48,10 +48,13 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     // does O(cache_len) work (Q·Kᵀ → softmax → ·V over the KV cache). The
     // q_head outputs are disjoint (`out_data[q_head*head_dim..]`), so split the
     // heads into bands across the same persistent worker pool the matmul uses
-    // (`rayzor_thread_spawn`). Each worker gets its OWN `scores` scratch (the
-    // only mutable per-head state), pre-allocated here so the workers stay
-    // allocation-free. Sequential below a threshold where the spawn/join tax
-    // would outweigh the (small) short-context attention work.
+    // (`rayzor_thread_spawn`). Each worker allocates its OWN `scores` scratch
+    // inside `flash_band` (worker malloc is TLS-safe) — workers must NOT share a
+    // single pre-allocated scratch buffer: even with disjoint slices, concurrent
+    // writes into one buffer corrupted the heap here (a wild float-as-pointer
+    // trap ~330 tokens in). Per-worker scratch removes all shared writable state.
+    // Sequential below a threshold where the spawn/join tax would outweigh the
+    // (small) short-context attention work.
     #[cfg(target_arch = "wasm32")]
     {
         let env_n = crate::qtensor::guest_threads_override();
@@ -59,9 +62,6 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
         if nthreads > 1 && n_q_heads >= 2 && cache_len >= 256 {
             let nbands = nthreads.min(n_q_heads);
             let band = n_q_heads.div_ceil(nbands);
-            // Per-worker scratch: `nbands` contiguous `cache_len`-wide slices.
-            let mut scratch: std::vec::Vec<f32> = std::vec![0.0; nbands * cache_len];
-            let scratch_base = scratch.as_mut_ptr();
             let fn_idx = rayzor_flash_band_worker as *const () as usize as i32;
             let mut handles: std::vec::Vec<i32> = std::vec::Vec::new();
             let mut works: std::vec::Vec<*mut FlashWork> = std::vec::Vec::new();
@@ -81,7 +81,6 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
                     cache_len,
                     kv_row_stride,
                     scale,
-                    scores: scratch_base.add(t * cache_len) as i32,
                     qh_lo: lo,
                     qh_hi: hi,
                 }));
@@ -93,7 +92,6 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
                     handles.push(h);
                 }
             }
-            // Join before `scratch` (each worker's scores buffer) drops.
             for h in handles {
                 rayzor_thread_join_void(h);
             }
@@ -123,8 +121,7 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     }
 }
 
-/// Per-band flash job: dot q_heads `qh_lo..qh_hi` against the KV cache, using
-/// this worker's private `scores` scratch (`cache_len` wide).
+/// Per-band flash job: dot q_heads `qh_lo..qh_hi` against the KV cache.
 #[cfg(target_arch = "wasm32")]
 #[repr(C)]
 struct FlashWork {
@@ -137,14 +134,16 @@ struct FlashWork {
     cache_len: usize,
     kv_row_stride: usize,
     scale: f32,
-    scores: i32,
     qh_lo: usize,
     qh_hi: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
 unsafe fn flash_band(w: &FlashWork) {
-    let scores = slice::from_raw_parts_mut(w.scores as *mut f32, w.cache_len);
+    // Each worker owns its `scores` scratch — see the entry's note on why a
+    // shared buffer (even with disjoint slices) is unsafe across workers here.
+    let mut scores_vec: std::vec::Vec<f32> = std::vec![0.0; w.cache_len];
+    let scores = scores_vec.as_mut_slice();
     for q_head in w.qh_lo..w.qh_hi {
         flash_attn::flash_attn_decode_one_qhead(
             q_head,
