@@ -7,6 +7,11 @@ description = "Rayzor runtime for WebAssembly — pure Rust, no platform deps"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Opt-in tracking global allocator: prints net live-heap high-water marks to
+# stderr so a long generation's per-token leak is measurable. Zero cost off.
+alloc-track = []
+
 [dependencies]
 half = "2"
 libm = "0.2"  # Pure-Rust math functions (sin, cos, sqrt, etc.) for wasm32
