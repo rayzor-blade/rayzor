@@ -36,6 +36,19 @@ extern class Bytes {
     public var length(default, null): Int;
 
     /**
+        Release this buffer's backing memory. Only valid on an OWNER buffer
+        (one returned by `alloc` / `File.getBytes`), never on a `sub` /
+        `subWithBase` VIEW — views share the owner's data, so freeing a view
+        leaves the owner dangling. The buffer must not be read after `free`.
+
+        On wasm this reclaims the bytes immediately (the backend emits no
+        scope-exit drop), which matters for large one-shot buffers like a
+        GGUF file held only long enough to copy weights out of it.
+    **/
+    @:native("haxe_bytes_free")
+    public function free(): Void;
+
+    /**
         Allocates a new byte buffer of the given size.
         All bytes are initialized to 0.
 
