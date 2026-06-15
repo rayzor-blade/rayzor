@@ -483,7 +483,7 @@ unsafe fn qmatmul_band_dot(
 /// Reading env per matmul call (hundreds per token) would allocate + syscall;
 /// cache it. WASI passes host env through `inherit_env`.
 #[cfg(target_arch = "wasm32")]
-fn guest_threads_override() -> usize {
+pub(crate) fn guest_threads_override() -> usize {
     use std::sync::OnceLock;
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
