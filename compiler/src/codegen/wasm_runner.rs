@@ -342,16 +342,19 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         /// Tensor handle table: handle_id → TensorState
         tensor_handles: BTreeMap<i32, TensorState>,
         next_tensor_id: i32,
-        /// Thread handle table. Wasmtime instances are !Send so real OS threads
-        /// aren't possible without shared memory; we execute spawn() closures
-        /// synchronously on the current call and cache the result, matching the
-        /// browser fallback when no Web Worker pool is available.
+        /// Thread handle table: handle id → the completion slot a worker fills.
+        /// Real OS threads run guest closures on their own Store+Instance
+        /// (sharing `shared_memory`) — see `worker_pool`.
         thread_handles: BTreeMap<i32, ThreadState>,
         next_thread_id: i32,
-        /// Queue of pending thread spawn requests that will run synchronously on
-        /// the next join/is_finished call. The closure has already had its fn_idx
-        /// and env_ptr extracted from the closure struct.
-        pending_threads: Vec<PendingThread>,
+        /// Persistent pool of worker threads. Each owns one Store+Instance of
+        /// the module (instantiated once, sharing `shared_memory`) plus one
+        /// private stack, then runs dispatched closures in a loop. Built lazily
+        /// on the first `rayzor_thread_spawn`. Amortizing the (expensive)
+        /// per-thread instantiation across every spawn is critical for the
+        /// in-guest parallel matmul, which spawns N bands per call and hundreds
+        /// of calls per token.
+        worker_pool: Option<WorkerPool>,
         /// wgpu device + queue for native GPU compute (Metal/Vulkan/DX12)
         wgpu_ctx: Option<WgpuComputeCtx>,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
@@ -381,17 +384,42 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         /// imports are present). The Q8 host trampolines dispatch to it.
         /// `Instance` is a `Copy` handle, valid for the life of the Store.
         side_instance: Option<wasmtime::Instance>,
+        /// Engine + compiled module, cloned into worker threads so a real
+        /// `rayzor_thread_spawn` can instantiate the module on its own Store
+        /// (sharing `shared_memory`) and run the closure in parallel. Both are
+        /// `Arc`-backed (`Clone` + `Send` + `Sync`).
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    }
+
+    /// A spawned closure's completion slot. The dispatching (main) thread holds
+    /// an `Arc` via `ThreadState`; the worker fills `done` and notifies `cv`.
+    struct JobSlot {
+        done: std::sync::Mutex<Option<i64>>,
+        cv: std::sync::Condvar,
+    }
+
+    /// A unit of work dispatched to a pool worker: call indirect-table entry
+    /// `fn_idx` with `env_ptr`, then publish the result into `slot`.
+    struct Job {
+        fn_idx: u32,
+        env_ptr: i32,
+        slot: std::sync::Arc<JobSlot>,
+    }
+
+    /// Persistent worker threads, each owning its own module instance + stack.
+    struct WorkerPool {
+        senders: Vec<std::sync::mpsc::Sender<Job>>,
+        /// Round-robin dispatch cursor (mutated only on the main thread).
+        next: usize,
     }
 
     struct ThreadState {
-        done: bool,
-        result: i64,
-    }
-
-    struct PendingThread {
-        thread_id: i32,
-        fn_idx: u32,
-        env_ptr: i32,
+        /// Completion slot the worker fills with the closure's return value.
+        slot: std::sync::Arc<JobSlot>,
+        /// Cached result after the first join, so repeated joins/is_finished
+        /// calls keep working.
+        result: Option<i64>,
     }
 
     /// wgpu device + queue + compiled compute pipelines.
@@ -826,55 +854,151 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         raw
     }
 
-    /// Drain the pending_threads queue by invoking each closure synchronously
-    /// via the indirect function table. The closure signature is
-    /// `(env_ptr: i32) -> i64`, matching the Haxe lambda ABI in WASM.
-    fn run_pending_threads(caller: &mut Caller<'_, WasmState>) -> wasmtime::Result<()> {
-        loop {
-            let pending = caller.data_mut().pending_threads.pop();
-            let Some(task) = pending else { break };
-            let table = match caller.get_export("__indirect_function_table") {
-                Some(wasmtime::Extern::Table(t)) => t,
-                _ => {
-                    if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
-                        state.done = true;
-                        state.result = 0;
+    /// Block until a dispatched closure (via `rayzor_thread_spawn`) completes,
+    /// caching its result so repeated join/is_finished calls keep working.
+    fn join_worker(state: &mut WasmState, h: i32) -> i64 {
+        // Clone the Arc and drop the borrow before blocking, so the wait does
+        // not hold `state`.
+        let slot = match state.thread_handles.get(&h) {
+            Some(ts) => {
+                if let Some(r) = ts.result {
+                    return r;
+                }
+                ts.slot.clone()
+            }
+            None => return 0,
+        };
+        let r = {
+            let mut g = slot.done.lock().unwrap();
+            while g.is_none() {
+                g = slot.cv.wait(g).unwrap();
+            }
+            g.unwrap()
+        };
+        if let Some(ts) = state.thread_handles.get_mut(&h) {
+            ts.result = Some(r);
+        }
+        r
+    }
+
+    /// Non-blocking: has the dispatched closure finished?
+    fn worker_finished(state: &mut WasmState, h: i32) -> i32 {
+        match state.thread_handles.get(&h) {
+            Some(ts) if ts.result.is_some() => 1,
+            Some(ts) => match ts.slot.done.try_lock() {
+                Ok(g) if g.is_some() => 1,
+                // Unfilled, or momentarily locked while the worker publishes —
+                // report "not finished" and let the caller poll again.
+                _ => 0,
+            },
+            None => 0,
+        }
+    }
+
+    /// Publish a job's result and wake any joiner.
+    fn publish(slot: &std::sync::Arc<JobSlot>, r: i64) {
+        *slot.done.lock().unwrap() = Some(r);
+        slot.cv.notify_all();
+    }
+
+    /// One pool worker: instantiate the module once (sharing `shared` memory),
+    /// reserve a private stack, then run dispatched closures until the channel
+    /// closes. Instantiation and stack reservation happen exactly once — the
+    /// whole point of the pool — so per-spawn cost is just an indirect call.
+    fn worker_main(
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+        shared: wasmtime::SharedMemory,
+        rx: std::sync::mpsc::Receiver<Job>,
+        worker_id: usize,
+    ) {
+        let mut store = Store::new(&engine, ());
+        let mut linker: Linker<()> = Linker::new(&engine);
+        if linker.define(&mut store, "env", "memory", shared).is_err() {
+            eprintln!("[wasm-worker {worker_id}] failed to define shared memory");
+            return;
+        }
+        // Workers only run pure-compute closures (e.g. matmul row-bands); stub
+        // every other import so an unexpected call traps loudly rather than
+        // corrupting shared state.
+        let _ = linker.define_unknown_imports_as_traps(&module);
+        let inst = match linker.instantiate(&mut store, &module) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("[wasm-worker {worker_id}] instantiate failed: {e}");
+                return;
+            }
+        };
+        // Reserve a private 1 MiB stack and point this instance's
+        // __stack_pointer at its top (stacks grow down). Reused across all jobs
+        // since a worker runs them serially.
+        const STACK_SIZE: i32 = 1 << 20;
+        if let Some(wasmtime::Extern::Func(f)) = inst.get_export(&mut store, "rayzor_malloc") {
+            if let Ok(t) = f.typed::<i32, i32>(&store) {
+                if let Ok(base) = t.call(&mut store, STACK_SIZE) {
+                    if let Some(wasmtime::Extern::Global(g)) =
+                        inst.get_export(&mut store, "__stack_pointer")
+                    {
+                        let _ = g.set(&mut store, wasmtime::Val::I32(base + STACK_SIZE));
                     }
+                }
+            }
+        }
+        let table = match inst.get_export(&mut store, "__indirect_function_table") {
+            Some(wasmtime::Extern::Table(t)) => t,
+            _ => {
+                eprintln!("[wasm-worker {worker_id}] no __indirect_function_table");
+                return;
+            }
+        };
+        // Job loop: blocks until a job arrives; exits when all senders drop.
+        for job in rx {
+            let func = match table.get(&mut store, job.fn_idx as u64) {
+                Some(wasmtime::Ref::Func(Some(f))) => f,
+                _ => {
+                    eprintln!(
+                        "[wasm-worker {worker_id}] fn_idx {} not callable",
+                        job.fn_idx
+                    );
+                    publish(&job.slot, 0);
                     continue;
                 }
             };
-            let func_ref = table
-                .get(&mut *caller, task.fn_idx as u64)
-                .and_then(|v| match v {
-                    wasmtime::Ref::Func(Some(f)) => Some(f),
-                    _ => None,
-                });
-            let Some(func) = func_ref else {
-                if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
-                    state.done = true;
-                    state.result = 0;
-                }
-                continue;
-            };
-            // Probe signatures in order of most-common (i32 -> i64 for boxed
-            // Haxe returns, then i32 -> i32 for primitive returns, then the
-            // no-return form).
-            let result = if let Ok(typed) = func.typed::<i32, i64>(&*caller) {
-                typed.call(&mut *caller, task.env_ptr).unwrap_or(0)
-            } else if let Ok(typed) = func.typed::<i32, i32>(&*caller) {
-                typed.call(&mut *caller, task.env_ptr).unwrap_or(0) as i64
-            } else if let Ok(typed) = func.typed::<i32, ()>(&*caller) {
-                let _ = typed.call(&mut *caller, task.env_ptr);
+            let r = if let Ok(t) = func.typed::<i32, i64>(&store) {
+                t.call(&mut store, job.env_ptr).unwrap_or(0)
+            } else if let Ok(t) = func.typed::<i32, i32>(&store) {
+                t.call(&mut store, job.env_ptr)
+                    .map(|r| r as i64)
+                    .unwrap_or(0)
+            } else if let Ok(t) = func.typed::<i32, ()>(&store) {
+                let _ = t.call(&mut store, job.env_ptr);
                 0
             } else {
                 0
             };
-            if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
-                state.done = true;
-                state.result = result;
-            }
+            publish(&job.slot, r);
         }
-        Ok(())
+    }
+
+    /// Build a pool of `n` worker threads sharing `shared` memory.
+    fn build_worker_pool(
+        n: usize,
+        engine: &wasmtime::Engine,
+        module: &wasmtime::Module,
+        shared: &wasmtime::SharedMemory,
+    ) -> WorkerPool {
+        let mut senders = Vec::with_capacity(n);
+        for worker_id in 0..n {
+            let (tx, rx) = std::sync::mpsc::channel::<Job>();
+            senders.push(tx);
+            let engine = engine.clone();
+            let module = module.clone();
+            let shared = shared.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("rayzor-wasm-worker-{worker_id}"))
+                .spawn(move || worker_main(engine, module, shared, rx, worker_id));
+        }
+        WorkerPool { senders, next: 0 }
     }
 
     fn unbox_f64_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> f64 {
@@ -1499,7 +1623,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         next_tensor_id: 1,
         thread_handles: BTreeMap::new(),
         next_thread_id: 1,
-        pending_threads: Vec::new(),
+        worker_pool: None,
         wgpu_ctx: {
             // wgpu/Metal init spawns driver threads and allocates GPU resources
             // up front; the quant matmul path runs entirely on the CPU host
@@ -1522,6 +1646,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         stringmap_handles: BTreeMap::new(),
         next_stringmap_id: 1,
         side_instance: None,
+        engine: engine.clone(),
+        module: module.clone(),
     };
     let mut store = Store::new(&engine, state);
 
@@ -3396,15 +3522,19 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     // -- Register Thread host functions --
     //
-    // Wasmtime Store is !Send, so real OS threads aren't possible without
-    // shared memory. Instead, spawn() queues a pending task that runs
-    // synchronously the next time the main thread calls join() or
-    // is_finished(). This matches the browser fallback in rayzor_threads.js
-    // when no Web Worker pool is available.
+    // spawn() dispatches the closure to a persistent pool of real OS threads,
+    // each running its own Store+Instance of the module over the one shared
+    // linear memory (built lazily on first spawn — see `build_worker_pool`).
+    // join() blocks on the closure's completion slot; the boxing variant matches
+    // the native Thread<T>.join() contract, join_void() is the barrier-only path
+    // the in-guest parallel matmul uses. This mirrors the browser's Web Worker
+    // pool (rayzor_worker.js), where each worker is likewise its own instance
+    // sharing `env.memory`.
     fn canonical_thread_name(name: &str) -> Option<&str> {
         match name {
             "rayzor_thread_spawn" => Some("rayzor_thread_spawn"),
             "rayzor_thread_join" => Some("rayzor_thread_join"),
+            "rayzor_thread_join_void" => Some("rayzor_thread_join_void"),
             "rayzor_thread_is_finished" => Some("rayzor_thread_is_finished"),
             "rayzor_thread_yield_now" => Some("rayzor_thread_yield_now"),
             "rayzor_thread_sleep" => Some("rayzor_thread_sleep"),
@@ -3438,24 +3568,71 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let fn_idx = val_i32(&params[0]) as u32;
                             let env_ptr = val_i32(&params[1]);
+
+                            // Lazily build the persistent worker pool on the
+                            // first spawn. Each worker instantiates the module
+                            // once (sharing this linear memory) and reserves its
+                            // own stack, so dispatch is just a channel send + an
+                            // indirect call — no per-spawn instantiation.
+                            if caller.data().worker_pool.is_none() {
+                                let engine = caller.data().engine.clone();
+                                let module = caller.data().module.clone();
+                                if let Some(shared) = caller.data().shared_memory.clone() {
+                                    // Size the pool to the host's parallelism (so
+                                    // the in-guest matmul's bands each land on a
+                                    // distinct worker), capped to keep memory and
+                                    // scheduling overhead bounded.
+                                    let n = std::thread::available_parallelism()
+                                        .map(|p| p.get())
+                                        .unwrap_or(4)
+                                        .clamp(2, 8);
+                                    let pool = build_worker_pool(n, &engine, &module, &shared);
+                                    caller.data_mut().worker_pool = Some(pool);
+                                }
+                            }
+
                             let id = {
                                 let s = caller.data_mut();
                                 let id = s.next_thread_id;
                                 s.next_thread_id += 1;
-                                s.thread_handles.insert(
-                                    id,
-                                    ThreadState {
-                                        done: false,
-                                        result: 0,
-                                    },
-                                );
-                                s.pending_threads.push(PendingThread {
-                                    thread_id: id,
-                                    fn_idx,
-                                    env_ptr,
-                                });
                                 id
                             };
+
+                            // Dispatch the closure to the next pool worker
+                            // (round-robin) and record its completion slot.
+                            let slot = std::sync::Arc::new(JobSlot {
+                                done: std::sync::Mutex::new(None),
+                                cv: std::sync::Condvar::new(),
+                            });
+                            let dispatched =
+                                if let Some(pool) = caller.data_mut().worker_pool.as_mut() {
+                                    let w = pool.next;
+                                    pool.next = (pool.next + 1) % pool.senders.len();
+                                    pool.senders[w]
+                                        .send(Job {
+                                            fn_idx,
+                                            env_ptr,
+                                            slot: slot.clone(),
+                                        })
+                                        .is_ok()
+                                } else {
+                                    false
+                                };
+                            if !dispatched {
+                                // No pool (no shared memory, or a closed worker):
+                                // the closure can't run, so resolve to 0 rather
+                                // than leave a joiner blocked forever.
+                                eprintln!(
+                                    "[wasm-runner] rayzor_thread_spawn: no worker pool; \
+                                     closure not run"
+                                );
+                                publish(&slot, 0);
+                            }
+
+                            caller
+                                .data_mut()
+                                .thread_handles
+                                .insert(id, ThreadState { slot, result: None });
                             results[0] = ret_int(id, &rt);
                             Ok(())
                         },
@@ -3476,22 +3653,29 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = val_i32(&params[0]);
-                            run_pending_threads(&mut caller)?;
-                            let result = caller
-                                .data()
-                                .thread_handles
-                                .get(&h)
-                                .map(|t| t.result)
-                                .unwrap_or(0);
-                            eprintln!(
-                                "[wasm-runner] thread_join h={} result={} host_alloc_ptr={:#x}",
-                                h,
-                                result,
-                                caller.data().host_alloc_ptr
-                            );
+                            let result = join_worker(caller.data_mut(), h);
                             let boxed = box_int_in_wasm(&mut caller, result as i32);
-                            eprintln!("[wasm-runner] thread_join boxed at {:#x}", boxed);
                             results[0] = ret_int(boxed, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // join_void(handle) -> void
+            // Blocks on the worker like rayzor_thread_join but discards its
+            // result without boxing — used by the in-guest parallel matmul,
+            // whose band workers return 0. Avoids the per-join box leak (the
+            // matmul never unboxes a result), keeping long decodes flat.
+            "rayzor_thread_join_void" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, _results| {
+                            let h = val_i32(&params[0]);
+                            let _ = join_worker(caller.data_mut(), h);
                             Ok(())
                         },
                     )
@@ -3508,13 +3692,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = val_i32(&params[0]);
-                            run_pending_threads(&mut caller)?;
-                            let done = caller
-                                .data()
-                                .thread_handles
-                                .get(&h)
-                                .map(|t| if t.done { 1 } else { 0 })
-                                .unwrap_or(0);
+                            let done = worker_finished(caller.data_mut(), h);
                             results[0] = ret_int(done, &rt);
                             Ok(())
                         },

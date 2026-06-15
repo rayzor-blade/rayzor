@@ -1046,6 +1046,14 @@ impl LinkerCtx {
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
         export_section.export("__indirect_function_table", ExportKind::Table, 0);
+        // Export the runtime's `__stack_pointer` (runtime global 0) so worker
+        // threads spawned by `rayzor_thread_spawn` can point each instance's
+        // stack at a private region — otherwise concurrent workers clobber
+        // each other's stacks. Each worker instance gets its own copy of this
+        // mutable global, so setting it per-worker is safe.
+        if let Some(&sp_idx) = self.rt_global_remap.get(&0) {
+            export_section.export("__stack_pointer", ExportKind::Global, sp_idx);
+        }
         // Forward a small whitelist of runtime exports so the JS harness
         // and thread runtime can call into the WASM module directly. In
         // particular, `rayzor_malloc` backs the shared-memory sync/result
@@ -2158,10 +2166,45 @@ fn translate_operator<'a>(
             lane: *lane,
         },
 
+        // ----- SIMD relaxed (relaxed-simd proposal) -----
+        // All operands are on the stack (no immediates), so each is a direct
+        // 1:1 re-encode. These MUST stay above the catch-all below: without
+        // them, the catch-all silently rewrote `i32x4.relaxed_dot_i8x16_i7x16_add_s`
+        // (the Q4_K guest matmul kernel) to `unreachable`, trapping any function
+        // that called it with no diagnostic.
+        Op::I8x16RelaxedSwizzle => Instruction::I8x16RelaxedSwizzle,
+        Op::I32x4RelaxedTruncF32x4S => Instruction::I32x4RelaxedTruncF32x4S,
+        Op::I32x4RelaxedTruncF32x4U => Instruction::I32x4RelaxedTruncF32x4U,
+        Op::I32x4RelaxedTruncF64x2SZero => Instruction::I32x4RelaxedTruncF64x2SZero,
+        Op::I32x4RelaxedTruncF64x2UZero => Instruction::I32x4RelaxedTruncF64x2UZero,
+        Op::F32x4RelaxedMadd => Instruction::F32x4RelaxedMadd,
+        Op::F32x4RelaxedNmadd => Instruction::F32x4RelaxedNmadd,
+        Op::F64x2RelaxedMadd => Instruction::F64x2RelaxedMadd,
+        Op::F64x2RelaxedNmadd => Instruction::F64x2RelaxedNmadd,
+        Op::I8x16RelaxedLaneselect => Instruction::I8x16RelaxedLaneselect,
+        Op::I16x8RelaxedLaneselect => Instruction::I16x8RelaxedLaneselect,
+        Op::I32x4RelaxedLaneselect => Instruction::I32x4RelaxedLaneselect,
+        Op::I64x2RelaxedLaneselect => Instruction::I64x2RelaxedLaneselect,
+        Op::F32x4RelaxedMin => Instruction::F32x4RelaxedMin,
+        Op::F32x4RelaxedMax => Instruction::F32x4RelaxedMax,
+        Op::F64x2RelaxedMin => Instruction::F64x2RelaxedMin,
+        Op::F64x2RelaxedMax => Instruction::F64x2RelaxedMax,
+        Op::I16x8RelaxedQ15mulrS => Instruction::I16x8RelaxedQ15mulrS,
+        Op::I16x8RelaxedDotI8x16I7x16S => Instruction::I16x8RelaxedDotI8x16I7x16S,
+        Op::I32x4RelaxedDotI8x16I7x16AddS => Instruction::I32x4RelaxedDotI8x16I7x16AddS,
+
         // ----- Catch-all for any unhandled operator -----
-        // The Operator enum is #[non_exhaustive] with 627+ variants.
-        // Operators we haven't explicitly mapped will trap at runtime if hit.
-        _ => Instruction::Unreachable,
+        // The Operator enum is #[non_exhaustive] with 627+ variants. We still
+        // emit `unreachable` for ops we don't map, but LOUDLY: the previous
+        // silent rewrite turned valid opcodes (e.g. relaxed_dot) into runtime
+        // traps with zero diagnostics. A warning here surfaces the next gap.
+        other => {
+            eprintln!(
+                "[wasm-linker] WARNING: unhandled operator {other:?} -> emitting \
+                 `unreachable`; any function using it will trap at runtime"
+            );
+            Instruction::Unreachable
+        }
     }
 }
 
