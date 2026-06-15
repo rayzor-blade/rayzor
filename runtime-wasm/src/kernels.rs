@@ -44,64 +44,14 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     let cache_len = cache_len as usize;
     let kv_row_stride = kv_row_stride as usize;
 
-    // Attention is the per-token cost that GROWS with context: each q_head
-    // does O(cache_len) work (Q·Kᵀ → softmax → ·V over the KV cache). The
-    // q_head outputs are disjoint (`out_data[q_head*head_dim..]`), so split the
-    // heads into bands across the same persistent worker pool the matmul uses
-    // (`rayzor_thread_spawn`). Each worker allocates its OWN `scores` scratch
-    // inside `flash_band` (worker malloc is TLS-safe) — workers must NOT share a
-    // single pre-allocated scratch buffer: even with disjoint slices, concurrent
-    // writes into one buffer corrupted the heap here (a wild float-as-pointer
-    // trap ~330 tokens in). Per-worker scratch removes all shared writable state.
-    // Sequential below a threshold where the spawn/join tax would outweigh the
-    // (small) short-context attention work.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let env_n = crate::qtensor::guest_threads_override();
-        let nthreads = if env_n > 0 { env_n.min(8) } else { 6 };
-        if nthreads > 1 && n_q_heads >= 2 && cache_len >= 256 {
-            let nbands = nthreads.min(n_q_heads);
-            let band = n_q_heads.div_ceil(nbands);
-            let fn_idx = rayzor_flash_band_worker as *const () as usize as i32;
-            let mut handles: std::vec::Vec<i32> = std::vec::Vec::new();
-            let mut works: std::vec::Vec<*mut FlashWork> = std::vec::Vec::new();
-            for t in 0..nbands {
-                let lo = (t * band).min(n_q_heads);
-                let hi = ((t + 1) * band).min(n_q_heads);
-                if lo >= hi {
-                    break;
-                }
-                let work = std::boxed::Box::into_raw(std::boxed::Box::new(FlashWork {
-                    q_data,
-                    k_data,
-                    v_data,
-                    out_data,
-                    group,
-                    head_dim,
-                    cache_len,
-                    kv_row_stride,
-                    scale,
-                    qh_lo: lo,
-                    qh_hi: hi,
-                }));
-                works.push(work);
-                let h = rayzor_thread_spawn(fn_idx, work as usize as i32);
-                if h == 0 {
-                    flash_band(&*work);
-                } else {
-                    handles.push(h);
-                }
-            }
-            for h in handles {
-                rayzor_thread_join_void(h);
-            }
-            for w in works {
-                drop(std::boxed::Box::from_raw(w));
-            }
-            return;
-        }
-    }
-
+    // NOTE: q-head parallelization across the worker pool was REVERTED — it
+    // produced non-deterministic output at cache_len>=256 (diverged run-to-run
+    // and from the sequential path, degenerating long generations). The pool's
+    // worker threads lack proper per-thread TLS, so concurrent guest memory ops
+    // there (worker malloc, and even disjoint shared-buffer writes) are unsafe;
+    // the matmul survives only because its workers are allocation-free pure
+    // SIMD with no per-thread state. Revisit attention parallelization once the
+    // pool workers run the full thread-start (TLS) setup. Sequential is correct.
     let mut scores: std::vec::Vec<f32> = std::vec![0.0; cache_len];
     for q_head in 0..n_q_heads {
         flash_attn::flash_attn_decode_one_qhead(
@@ -119,62 +69,6 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
             libm::expf,
         );
     }
-}
-
-/// Per-band flash job: dot q_heads `qh_lo..qh_hi` against the KV cache.
-#[cfg(target_arch = "wasm32")]
-#[repr(C)]
-struct FlashWork {
-    q_data: i32,
-    k_data: i32,
-    v_data: i32,
-    out_data: i32,
-    group: usize,
-    head_dim: usize,
-    cache_len: usize,
-    kv_row_stride: usize,
-    scale: f32,
-    qh_lo: usize,
-    qh_hi: usize,
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn flash_band(w: &FlashWork) {
-    // Each worker owns its `scores` scratch — see the entry's note on why a
-    // shared buffer (even with disjoint slices) is unsafe across workers here.
-    let mut scores_vec: std::vec::Vec<f32> = std::vec![0.0; w.cache_len];
-    let scores = scores_vec.as_mut_slice();
-    for q_head in w.qh_lo..w.qh_hi {
-        flash_attn::flash_attn_decode_one_qhead(
-            q_head,
-            w.group,
-            w.head_dim,
-            w.cache_len,
-            w.kv_row_stride,
-            w.scale,
-            w.q_data as *const f32,
-            w.k_data as *const f32,
-            w.v_data as *const f32,
-            w.out_data as *mut f32,
-            scores,
-            libm::expf,
-        );
-    }
-}
-
-/// Worker entry invoked on a pool thread via the indirect function table.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub extern "C" fn rayzor_flash_band_worker(work_ptr: i32) -> i64 {
-    unsafe { flash_band(&*(work_ptr as *const FlashWork)) };
-    0
-}
-
-#[cfg(target_arch = "wasm32")]
-#[link(wasm_import_module = "rayzor")]
-extern "C" {
-    fn rayzor_thread_spawn(fn_idx: i32, env_ptr: i32) -> i32;
-    fn rayzor_thread_join_void(handle: i32);
 }
 
 #[no_mangle]
