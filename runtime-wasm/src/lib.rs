@@ -139,6 +139,108 @@ pub extern "C" fn realloc_block(ptr: i32, old_size: i32, new_size: i32) -> i32 {
     }
 }
 
+// ── Allocation tracking (feature = "alloc-track") ───────────────────────────
+// A global allocator wrapping the system allocator that tracks NET live bytes
+// and prints each time the live high-water crosses a 32 MiB boundary. Catches
+// EVERY allocation (Haxe objects, tensors, runtime scratch, worker stacks) so a
+// long generation's per-token heap growth is visible on stderr. Opt-in — zero
+// cost when the feature is off (default System/dlmalloc allocator).
+#[cfg(feature = "alloc-track")]
+mod alloc_track {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::alloc::System;
+
+    static LIVE: AtomicI64 = AtomicI64::new(0);
+    static LAST_MB: AtomicI64 = AtomicI64::new(0);
+    static PRINTING: AtomicBool = AtomicBool::new(false);
+
+    pub struct Tracking;
+
+    unsafe impl GlobalAlloc for Tracking {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            let p = System.alloc(l);
+            if !p.is_null() {
+                note(LIVE.fetch_add(l.size() as i64, Ordering::Relaxed) + l.size() as i64);
+            }
+            p
+        }
+        unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+            let p = System.alloc_zeroed(l);
+            if !p.is_null() {
+                note(LIVE.fetch_add(l.size() as i64, Ordering::Relaxed) + l.size() as i64);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            System.dealloc(p, l);
+            note(LIVE.fetch_sub(l.size() as i64, Ordering::Relaxed) - l.size() as i64);
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            let np = System.realloc(p, l, new);
+            if !np.is_null() {
+                note(
+                    LIVE.fetch_add(new as i64 - l.size() as i64, Ordering::Relaxed) + new as i64
+                        - l.size() as i64,
+                );
+            }
+            np
+        }
+    }
+
+    // Print whenever net live heap moves >=32 MiB from the last print, in EITHER
+    // direction — so a big free (e.g. the GGUF file buffer) shows as a drop, and
+    // a per-token leak shows as a steady climb.
+    unsafe fn note(live: i64) {
+        let mb = live / (1024 * 1024);
+        let last = LAST_MB.load(Ordering::Relaxed);
+        if (mb - last).abs() >= 32
+            && LAST_MB
+                .compare_exchange(last, mb, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            && !PRINTING.swap(true, Ordering::Acquire)
+        {
+            print_live(mb);
+            PRINTING.store(false, Ordering::Release);
+        }
+    }
+
+    // itoa + raw stderr write; no heap use, so it can't re-enter the allocator.
+    unsafe fn print_live(mb: i64) {
+        let mut buf = [0u8; 40];
+        let mut n = 0;
+        for &c in b"[alloc-track] live_mb=" {
+            buf[n] = c;
+            n += 1;
+        }
+        let mut v = mb as u64;
+        if v == 0 {
+            buf[n] = b'0';
+            n += 1;
+        } else {
+            let mut tmp = [0u8; 20];
+            let mut t = 0;
+            while v > 0 {
+                tmp[t] = b'0' + (v % 10) as u8;
+                v /= 10;
+                t += 1;
+            }
+            while t > 0 {
+                t -= 1;
+                buf[n] = tmp[t];
+                n += 1;
+            }
+        }
+        buf[n] = b'\n';
+        n += 1;
+        crate::wasi_write(2, buf.as_ptr(), n);
+    }
+}
+
+#[cfg(feature = "alloc-track")]
+#[global_allocator]
+static GLOBAL_ALLOC: alloc_track::Tracking = alloc_track::Tracking;
+
 // ============================================================================
 // Section 2: HaxeString — layout: { ptr: i32, len: i32, cap: i32 }
 // ============================================================================
