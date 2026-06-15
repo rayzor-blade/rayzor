@@ -65,9 +65,21 @@ class KVCache {
             }
         }
         this.useQ8 = canQ8;
-        if (!canQ8) {
-            // F32 path: pre-allocate full capacity. Zero-init is fine
-            // because the active region (currentLen) bounds what
+        // F32 path: allocation is DEFERRED to the first `append` (see
+        // `ensureF32`). The full-capacity buffers are large (Llama 3.2 1B at
+        // ctx 4096 ≈ 512 MB across 16 layers); allocating them in the ctor
+        // means they coexist with the GGUF whole-file buffer (~770 MB), which
+        // on wasm pushes the load peak toward the 2 GB allocator boundary and
+        // leaves no headroom for decode. Deferring until the first forward —
+        // after the loader frees the file buffer (GGUFLoader bytes.free()) —
+        // keeps the file buffer and the cache from ever coexisting, dropping
+        // the wasm load peak by ~580 MB. `keys`/`values` stay null until then.
+    }
+
+    /** Lazily allocate the F32 backing on first use (see ctor note). */
+    inline function ensureF32():Void {
+        if (!useQ8 && keys == null) {
+            // Zero-init is fine: the active region (currentLen) bounds what
             // attention reads.
             this.keys = Tensor.zeros([maxSeqLen, numKvHeads, headDim], dtype);
             this.values = Tensor.zeros([maxSeqLen, numKvHeads, headDim], dtype);
@@ -99,6 +111,7 @@ class KVCache {
             }
             currentLen = newK;
         } else {
+            ensureF32();
             var krc = keys.appendAlong0(newKeys, currentLen);
             var vrc = values.appendAlong0(newValues, currentLen);
             if (krc != 0 || vrc != 0) {
@@ -127,6 +140,7 @@ class KVCache {
         if (useQ8) {
             return keysQ8.dequantView(currentLen);
         }
+        ensureF32();
         return keys.slice(0, 0, currentLen);
     }
 
@@ -135,6 +149,7 @@ class KVCache {
         if (useQ8) {
             return valuesQ8.dequantView(currentLen);
         }
+        ensureF32();
         return values.slice(0, 0, currentLen);
     }
 
