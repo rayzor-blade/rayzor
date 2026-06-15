@@ -47,7 +47,7 @@ class LocalTempSampler implements Sampler {
     private var recentWrite:Int;
     private var topKLogits:Array<Float>;
     private var topKIds:Array<Int>;
-    private static inline var RECENT_CAP:Int = 64;
+    private static inline var RECENT_CAP:Int = 128;
 
     public function new(temperature:Float, repetitionPenalty:Float, topK:Int, seed:Int) {
         this.temperature = temperature;
@@ -238,6 +238,18 @@ class Main {
             // != NaN). Negative temps clamp to 0 (greedy).
             if (parsed == parsed && parsed >= 0.0) temperature = parsed;
         }
+        // Repetition penalty (arg[5]). Divides positive logits / multiplies
+        // negative logits for any token in the recent window before Top-K, so
+        // a recently-emitted token is less likely to be re-picked. 1.0 disables
+        // it; 1.1–1.3 is the typical chat range, higher = more aggressive
+        // de-looping. Default 1.3: the 1B model (and the wasm path, whose f32
+        // reduction order drifts from native and lands on a more loop-prone
+        // greedy path) needs more than the old 1.15 to break sentence loops.
+        var repPenalty:Float = 1.3;
+        if (args.length > 5) {
+            var rp = Std.parseFloat(args[5]);
+            if (rp == rp && rp >= 1.0) repPenalty = rp;
+        }
 
         trace("=== nue llama-chat ===");
         trace("model:  " + path);
@@ -291,9 +303,14 @@ class Main {
         // direct dispatch: `(temp > 0) ? LocalTempSampler(...) : ArgmaxSampler()`.
         // Until then the LocalTempSampler(1e-4, 1.0, 1, 42) form is
         // deterministic-greedy without tripping the cascade.
+        // Repetition penalty is now applied in BOTH modes (greedy + sampled).
+        // For greedy, topK stays 1 so it remains deterministic, but the penalty
+        // is applied before the top-1 pick — a recently-repeated token gets
+        // demoted so the loop breaks without introducing randomness.
         var sampler:Sampler = (temperature > 0.0)
-            ? new LocalTempSampler(temperature, 1.15, 50, 42)
-            : new LocalTempSampler(1e-4, 1.0, 1, 42);
+            ? new LocalTempSampler(temperature, repPenalty, 50, 42)
+            : new LocalTempSampler(1e-4, repPenalty, 1, 42);
+        trace("rep-penalty: " + repPenalty + "  (recent window " + 128 + ")");
 
         // Instruct models behave best when the prompt is wrapped in the
         // model's chat template. Llama-3 uses
