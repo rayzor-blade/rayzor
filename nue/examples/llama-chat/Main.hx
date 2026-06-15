@@ -47,7 +47,18 @@ class LocalTempSampler implements Sampler {
     private var recentWrite:Int;
     private var topKLogits:Array<Float>;
     private var topKIds:Array<Int>;
-    private static inline var RECENT_CAP:Int = 128;
+    private var survIdx:Array<Int>;
+    // No-repeat-ngram state: a hash set of every emitted 3-gram, plus the
+    // last two tokens (the 3-gram prefix). Blocking exact 3-gram repeats
+    // breaks degenerate block loops WITHOUT penalizing the common tokens
+    // coherent text needs — unlike the windowed multiply-penalty, which loops
+    // when weak and produces garbage when strong.
+    private var seen:Array<Int>;
+    private var t1:Int;
+    private var t2:Int;
+    private static inline var RECENT_CAP:Int = 64;
+    private static inline var NG_TABLE:Int = 1 << 16; // 65536 open-addressed slots
+    private static inline var NG_MASK:Int = (1 << 16) - 1;
 
     public function new(temperature:Float, repetitionPenalty:Float, topK:Int, seed:Int) {
         this.temperature = temperature;
@@ -62,6 +73,44 @@ class LocalTempSampler implements Sampler {
         var k = (topK > 0) ? topK : 1;
         this.topKLogits = [for (_ in 0...k) 0.0];
         this.topKIds = [for (_ in 0...k) -1];
+        this.survIdx = [for (_ in 0...k) 0];
+        this.seen = [for (_ in 0...NG_TABLE) -1];
+        this.t1 = -1;
+        this.t2 = -1;
+    }
+
+    /** Hash a 3-gram into a positive 31-bit key (stored in `seen`). */
+    private inline function ngHash(a:Int, b:Int, c:Int):Int {
+        var h = a * 1000003;
+        h = (h ^ b) * 1000003;
+        h = (h ^ c) * 1000003;
+        return h & 0x7FFFFFFF;
+    }
+
+    /** Has the 3-gram (a,b,c) been emitted before? Open-addressed probe. */
+    private function ngContains(a:Int, b:Int, c:Int):Bool {
+        var h = ngHash(a, b, c);
+        var slot = h & NG_MASK;
+        for (_ in 0...NG_TABLE) {
+            var v = seen[slot];
+            if (v == -1) return false;
+            if (v == h) return true;
+            slot = (slot + 1) & NG_MASK;
+        }
+        return false;
+    }
+
+    /** Record the 3-gram (a,b,c) as emitted (no-op until we have 3 tokens). */
+    private function ngAdd(a:Int, b:Int, c:Int):Void {
+        if (a < 0 || b < 0) return;
+        var h = ngHash(a, b, c);
+        var slot = h & NG_MASK;
+        for (_ in 0...NG_TABLE) {
+            var v = seen[slot];
+            if (v == -1) { seen[slot] = h; return; }
+            if (v == h) return;
+            slot = (slot + 1) & NG_MASK;
+        }
     }
 
     public function sample(logits:Tensor):Int {
@@ -87,24 +136,47 @@ class LocalTempSampler implements Sampler {
             sz = topKScanFallback(logits, n, k, penalize, rp);
         }
 
-        // -------- Temperature softmax over the k survivors ----------
-        var maxLogit = topKLogits[0];
+        // -------- No-repeat-ngram filter ----------
+        // Drop top-K candidates that would repeat an already-seen 3-gram
+        // (prefix = the last two emitted tokens). This is what actually breaks
+        // degenerate block loops; the windowed penalty can't (too weak → loops,
+        // too strong → garbage). Fall back to the full top-K only if EVERY
+        // candidate is banned, so generation never dead-ends.
+        var nSurv = 0;
+        if (t1 >= 0 && t2 >= 0) {
+            for (i in 0...sz) {
+                if (!ngContains(t1, t2, topKIds[i])) {
+                    survIdx[nSurv] = i;
+                    nSurv++;
+                }
+            }
+        }
+        if (nSurv == 0) {
+            for (i in 0...sz) survIdx[i] = i;
+            nSurv = sz;
+        }
+
+        // -------- Temperature softmax over the surviving candidates ----------
+        var maxLogit = topKLogits[survIdx[0]];
         var total = 0.0;
-        for (i in 0...sz) {
-            total += Math.exp((topKLogits[i] - maxLogit) / t);
+        for (s in 0...nSurv) {
+            total += Math.exp((topKLogits[survIdx[s]] - maxLogit) / t);
         }
 
         var r = nextFloat() * total;
         var acc = 0.0;
-        for (i in 0...sz) {
-            acc += Math.exp((topKLogits[i] - maxLogit) / t);
+        var chosen = survIdx[nSurv - 1];
+        for (s in 0...nSurv) {
+            acc += Math.exp((topKLogits[survIdx[s]] - maxLogit) / t);
             if (r <= acc) {
-                var id = topKIds[i];
-                pushRecent(id);
-                return id;
+                chosen = survIdx[s];
+                break;
             }
         }
-        var id = topKIds[sz - 1];
+        var id = topKIds[chosen];
+        ngAdd(t1, t2, id);
+        t1 = t2;
+        t2 = id;
         pushRecent(id);
         return id;
     }
@@ -245,7 +317,7 @@ class Main {
         // de-looping. Default 1.3: the 1B model (and the wasm path, whose f32
         // reduction order drifts from native and lands on a more loop-prone
         // greedy path) needs more than the old 1.15 to break sentence loops.
-        var repPenalty:Float = 1.3;
+        var repPenalty:Float = 1.1;
         if (args.length > 5) {
             var rp = Std.parseFloat(args[5]);
             if (rp == rp && rp >= 1.0) repPenalty = rp;
@@ -309,8 +381,8 @@ class Main {
         // demoted so the loop breaks without introducing randomness.
         var sampler:Sampler = (temperature > 0.0)
             ? new LocalTempSampler(temperature, repPenalty, 50, 42)
-            : new LocalTempSampler(1e-4, repPenalty, 1, 42);
-        trace("rep-penalty: " + repPenalty + "  (recent window " + 128 + ")");
+            : new LocalTempSampler(1e-4, repPenalty, 8, 42);
+        trace("rep-penalty: " + repPenalty + "  + no-repeat-3gram");
 
         // Instruct models behave best when the prompt is wrapped in the
         // model's chat template. Llama-3 uses
