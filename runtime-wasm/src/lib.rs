@@ -473,6 +473,33 @@ pub extern "C" fn haxe_string_free(s: i32) {
     }
 }
 
+/// Free a Bytes' data buffer. The HaxeBytes header is `{data_ptr, len, cap}`;
+/// the data was `rayzor_malloc`-ed (align 8), so reconstruct that layout from
+/// `cap` and dealloc it. The 40-byte header itself is left to leak (negligible
+/// vs. the buffer). SAFETY: ONLY call on an OWNER Bytes, never a `subWithBase`
+/// view — views share the owner's `data_ptr`, so freeing a view would leave
+/// the owner (and siblings) dangling. The GGUF loader frees the whole-file
+/// buffer once, after every tensor/QTensor has copied its slice out of it.
+// Returns i32 (a dummy 0) rather than `()` — the wasm backend lowers this
+// Void-returning extern method with the default i32 result, so the runtime
+// signature must match `(i32) -> i32` or the linker stubs it out.
+#[no_mangle]
+pub extern "C" fn haxe_bytes_free(b: i32) -> i32 {
+    if b == 0 {
+        return 0;
+    }
+    unsafe {
+        let base = b as *const u32;
+        let data_ptr = *base;
+        let cap = *base.add(2);
+        if data_ptr != 0 && cap > 0 {
+            let layout = Layout::from_size_align_unchecked(cap as usize, 8);
+            dealloc(data_ptr as *mut u8, layout);
+        }
+    }
+    0
+}
+
 /// Trace a HaxeString struct to stdout (with "trace: " prefix and newline).
 #[no_mangle]
 pub extern "C" fn haxe_trace_string_struct(s: i32) {

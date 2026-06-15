@@ -129,6 +129,19 @@ class GGUFLoader implements ModelLoader {
             phaseStart = Sys.time();
         }
         var tok = GGUFTokenizer.build(reader);
+        // The whole-file buffer is dead now: every tensor/QTensor copied its
+        // slice (qtensor_from_bytes_* / tensor_from_bytes_* memcpy), the model
+        // is built, and the tokenizer has extracted its vocab. On wasm nothing
+        // reclaims it (the backend emits no scope-exit drop), so it sits as
+        // ~0.77 GB of dead linear memory that, never being reused, pushes the
+        // heap to the 2^31 boundary where rt_alloc's `ptr as i32` sign-flips
+        // (the long-gen corruption). Freeing it returns that low-address block
+        // to dlmalloc; the per-token allocations reuse it instead of growing
+        // the heap, moving corruption onset from ~1250 to ~3300 tokens (verified
+        // clean through 1800). Default-on; set RAYZOR_FREE_GGUF_BYTES=0 to opt out.
+        if (Sys.getEnv("RAYZOR_FREE_GGUF_BYTES") != "0") {
+            bytes.free();
+        }
         if (profileOn) {
             tokenizerS = Sys.time() - phaseStart;
             trace("[profile-load] file_s=" + fileS
