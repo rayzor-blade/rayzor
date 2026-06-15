@@ -286,7 +286,26 @@ pub fn axpy_slice(r: &mut [f32], alpha: f32, b: &[f32]) {
             _mm_storeu_ps(r.as_mut_ptr().add(off), _mm_add_ps(vr, _mm_mul_ps(va, vb)));
         }
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let va = f32x4_splat(alpha);
+        for i in 0..chunks {
+            let off = i * LANES;
+            let vb = v128_load(b.as_ptr().add(off) as *const v128);
+            let vr = v128_load(r.as_ptr().add(off) as *const v128);
+            v128_store(
+                r.as_mut_ptr().add(off) as *mut v128,
+                f32x4_add(vr, f32x4_mul(va, vb)),
+            );
+        }
+    }
+
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
     {
         for i in 0..chunks {
             let off = i * LANES;
@@ -354,7 +373,31 @@ pub fn dot_slice_f32(a: &[f32], b: &[f32]) -> f32 {
         return sum;
     }
 
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let chunks = len / 4;
+        let mut acc = f32x4_splat(0.0);
+        for i in 0..chunks {
+            let va = v128_load(a.as_ptr().add(i * 4) as *const v128);
+            let vb = v128_load(b.as_ptr().add(i * 4) as *const v128);
+            acc = f32x4_add(acc, f32x4_mul(va, vb));
+        }
+        let mut sum = f32x4_extract_lane::<0>(acc)
+            + f32x4_extract_lane::<1>(acc)
+            + f32x4_extract_lane::<2>(acc)
+            + f32x4_extract_lane::<3>(acc);
+        for i in (chunks * 4)..len {
+            sum += a[i] * b[i];
+        }
+        sum
+    }
+
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
     {
         let mut sum = 0.0f32;
         for i in 0..len {
