@@ -440,6 +440,107 @@ unsafe fn qmatmul_chunk_impl(x: i32, qt: i32, y: i32, n_start: i32, n_end: i32) 
     }
 }
 
+/// Allocation-free per-band dot for the threaded guest matmul: dots output rows
+/// `lo..hi` of a Q4_K_M / Q6_K weight matrix against PRE-PREPARED Q8_K
+/// activations for all `batch` rows (`x_q8k`, laid out as
+/// `[batch][blocks_per_row]`, shared read-only across workers). No heap use, so
+/// it runs safely on `rayzor_thread_spawn` worker instances (no libc TLS
+/// needed). Weight row is loaded once per `n_idx` and reused across the batch
+/// (decode is `batch == 1`; prefill drives `batch == prompt_len`).
+#[cfg(target_arch = "wasm32")]
+unsafe fn qmatmul_band_dot(
+    qt: i32,
+    y: i32,
+    batch: usize,
+    n: usize,
+    blocks_per_row: usize,
+    block_bytes: usize,
+    x_q8k: *const Q8KBlock,
+    lo: usize,
+    hi: usize,
+) {
+    let qtr = &*(qt as *const QTensor);
+    let y_data = (*(y as *const Tensor)).data as *mut f32;
+    for n_idx in lo..hi {
+        let row_ptr = qtr.data.add(n_idx * blocks_per_row * block_bytes);
+        for bch in 0..batch {
+            let xq_row = x_q8k.add(bch * blocks_per_row);
+            let mut sum = 0.0f32;
+            for blk in 0..blocks_per_row {
+                let bp = row_ptr.add(blk * block_bytes);
+                let xb = &*xq_row.add(blk);
+                match qtr.scheme {
+                    QSCHEME_Q4_K_M => sum += vec_dot_q4_K_q8_K(&*(bp as *const Q4KMBlock), xb),
+                    _ => sum += vec_dot_q6_K_q8_K(bp, xb),
+                }
+            }
+            *y_data.add(bch * n + n_idx) = sum;
+        }
+    }
+}
+
+/// `RAYZOR_WASM_GUEST_THREADS` parsed once (0 = unset → use the default).
+/// Reading env per matmul call (hundreds per token) would allocate + syscall;
+/// cache it. WASI passes host env through `inherit_env`.
+#[cfg(target_arch = "wasm32")]
+fn guest_threads_override() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("RAYZOR_WASM_GUEST_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Per-worker job: which output-row band to dot, against the shared `x_q8k`.
+#[cfg(target_arch = "wasm32")]
+#[repr(C)]
+struct BandWork {
+    qt: i32,
+    y: i32,
+    batch: usize,
+    n: usize,
+    blocks_per_row: usize,
+    block_bytes: usize,
+    x_q8k: i32,
+    lo: usize,
+    hi: usize,
+}
+
+/// Worker entry, invoked on a `rayzor_thread_spawn` OS thread via the indirect
+/// function table. Reads its `BandWork` from shared memory and dots its band.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn rayzor_qmatmul_band_worker(work_ptr: i32) -> i64 {
+    unsafe {
+        let w = &*(work_ptr as *const BandWork);
+        qmatmul_band_dot(
+            w.qt,
+            w.y,
+            w.batch,
+            w.n,
+            w.blocks_per_row,
+            w.block_bytes,
+            w.x_q8k as *const Q8KBlock,
+            w.lo,
+            w.hi,
+        );
+    }
+    0
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "rayzor")]
+extern "C" {
+    fn rayzor_thread_spawn(fn_idx: i32, env_ptr: i32) -> i32;
+    // Void join: blocks on the worker, discards its (always-0) result without
+    // boxing. The boxing `rayzor_thread_join` is the Thread<T>.join() contract;
+    // the matmul needs neither the box nor the result, just the barrier.
+    fn rayzor_thread_join_void(handle: i32);
+}
+
 /// `Y = X @ Wq^T` for a Q4_K_M weight matrix `Wq [n, k]` and a contiguous
 /// F32 activation `X [m, k]`. Returns a freshly allocated `[m, n]` F32
 /// `Tensor`.
@@ -530,6 +631,97 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
             if handled != 0 {
                 return y;
             }
+        }
+    }
+
+    // In-guest parallel fast path (used when the host pool is off, e.g.
+    // RAYZOR_WASM_NO_HOST_MATMUL=1, or in a pure-wasm host with no native
+    // pool): prequantize x→Q8_K ONCE on this thread, then split the output
+    // rows across `rayzor_thread_spawn` worker threads. Each worker runs the
+    // allocation-free `qmatmul_band_dot` on its own instance sharing this
+    // linear memory, so there is no per-worker libc/TLS dependency.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let xr = &*(x as *const Tensor);
+        let x_strides = slice::from_raw_parts(xr.strides, 2);
+        let fast =
+            (qtr.scheme == QSCHEME_Q4_K_M || qtr.scheme == QSCHEME_Q6_K) && x_strides[1] == 1;
+        // Band count: env override (`RAYZOR_WASM_GUEST_THREADS`, read once) wins;
+        // otherwise the caller's hint, or 6 for the threads<=0 auto default
+        // (sized for the M1-class 6–8 core pool). 1 forces the sequential path.
+        let env_n = guest_threads_override();
+        let nthreads = if env_n > 0 {
+            env_n.min(8)
+        } else if threads <= 0 {
+            6
+        } else {
+            (threads as usize).min(8)
+        };
+        // Worth fanning out once there are enough rows to amortize spawn/join.
+        // Both decode (batch==1) and prefill (batch==prompt_len) parallelize:
+        // prequantize ALL batch rows once, then split the output rows across
+        // workers, each dotting its band against every batch row — mirroring
+        // the host pool's batched path so prefill is no longer single-threaded.
+        if fast && nthreads > 1 && n_out >= 256 {
+            let blocks_per_row = _k / _block_size;
+            let x_stride0 = x_strides[0];
+            let x_data = xr.data as *const f32;
+            let mut x_q8k: std::vec::Vec<Q8KBlock> =
+                std::vec::Vec::with_capacity(batch * blocks_per_row);
+            let mut tmp: std::vec::Vec<Q8KBlock> = std::vec::Vec::with_capacity(blocks_per_row);
+            for bch in 0..batch {
+                prepare_x_q8k_blocks_into(x_data.add(bch * x_stride0), _k, &mut tmp);
+                x_q8k.extend_from_slice(&tmp[..blocks_per_row]);
+            }
+            let x_q8k_ptr = x_q8k.as_ptr() as usize as i32;
+            let band = (n_out + nthreads - 1) / nthreads;
+            let fn_idx = rayzor_qmatmul_band_worker as *const () as usize as i32;
+            let mut handles: std::vec::Vec<i32> = std::vec::Vec::new();
+            let mut works: std::vec::Vec<*mut BandWork> = std::vec::Vec::new();
+            for t in 0..nthreads {
+                let lo = (t * band).min(n_out);
+                let hi = ((t + 1) * band).min(n_out);
+                if lo >= hi {
+                    break;
+                }
+                let work = std::boxed::Box::into_raw(std::boxed::Box::new(BandWork {
+                    qt,
+                    y,
+                    batch,
+                    n: n_out,
+                    blocks_per_row,
+                    block_bytes: _block_bytes,
+                    x_q8k: x_q8k_ptr,
+                    lo,
+                    hi,
+                }));
+                works.push(work);
+                let h = rayzor_thread_spawn(fn_idx, work as usize as i32);
+                if h == 0 {
+                    // Spawn failed — do this band inline so the result is complete.
+                    qmatmul_band_dot(
+                        qt,
+                        y,
+                        batch,
+                        n_out,
+                        blocks_per_row,
+                        _block_bytes,
+                        x_q8k_ptr as *const Q8KBlock,
+                        lo,
+                        hi,
+                    );
+                } else {
+                    handles.push(h);
+                }
+            }
+            // Join all workers before x_q8k (read by every worker) drops.
+            for h in handles {
+                rayzor_thread_join_void(h);
+            }
+            for w in works {
+                drop(std::boxed::Box::from_raw(w));
+            }
+            return y;
         }
     }
 
