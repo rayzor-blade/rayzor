@@ -292,6 +292,13 @@ struct CompileCtx {
     /// Qualified name → import index. Maps "rayzor.gpu.Surface.getFormat" → import idx for
     /// "rayzor_gpu_gfx_surface_get_format". Built from extern function qualified_name fields.
     qualified_to_import: BTreeMap<String, u32>,
+    // ----- WASM memory reclamation (Phase 1: transient string frees) -----
+    /// Import index of `haxe_string_free` (frees a heap HaxeString's data buffer),
+    /// when the string runtime is linked. `None` if strings aren't used by the module.
+    string_free_idx: Option<u32>,
+    /// Master kill-switch for the wasm reclamation pass. `RAYZOR_WASM_FREE=0` disables
+    /// all emitted frees (for A/B + bisection); defaults to enabled.
+    wasm_free_enabled: bool,
 }
 
 impl CompileCtx {
@@ -321,6 +328,9 @@ impl CompileCtx {
             next_table_slot: 1, // slot 0 is reserved (null)
             indirect_target_functions: BTreeSet::new(),
             functions_with_env: BTreeSet::new(),
+            string_free_idx: None,
+            // Reclamation defaults ON; `RAYZOR_WASM_FREE=0` opts out for A/B + bisection.
+            wasm_free_enabled: std::env::var("RAYZOR_WASM_FREE").as_deref() != Ok("0"),
         }
     }
 
@@ -577,6 +587,17 @@ impl CompileCtx {
             }
         }
 
+        // Reclamation (Phase 1): if the string runtime is linked (any haxe_string_*
+        // import is present), force-import `haxe_string_free` so the backend can emit
+        // frees for transient heap strings even though user code never calls it. Gated
+        // on string-runtime presence so non-string modules don't gain an unresolvable
+        // import. Signature: (i32) -> () — takes a HaxeString*, frees its data buffer.
+        if self.wasm_free_enabled && import_entries.keys().any(|n| n.starts_with("haxe_string_")) {
+            import_entries
+                .entry("haxe_string_free".to_string())
+                .or_insert_with(|| (vec![ValType::I32], vec![]));
+        }
+
         // Phase 2: Create imports in deterministic name order (BTreeMap iterates sorted).
         // Build name→index map.
         let mut name_to_idx: BTreeMap<String, u32> = BTreeMap::new();
@@ -597,6 +618,9 @@ impl CompileCtx {
             self.import_name_to_idx.insert(name.clone(), func_idx);
             name_to_idx.insert(name.clone(), func_idx);
         }
+
+        // Cache the reclamation free-fn index for the FunctionLowerer.
+        self.string_free_idx = self.import_name_to_idx.get("haxe_string_free").copied();
 
         // Phase 3: Map ALL IrFunctionIds to their import index via name lookup.
         // This is the key step — IDs resolve by NAME, not by iteration order.
@@ -1570,6 +1594,10 @@ struct FunctionLowerer<'a> {
     /// global only ever descended), eventually marching into the runtime
     /// data segments during model load.
     saved_sp_local: u32,
+    /// Reclamation (Phase 1): (block, instruction-index) -> regs whose heap
+    /// HaxeString to free immediately AFTER that instruction (its last use).
+    /// Computed by `compute_string_free_points`.
+    free_points: BTreeMap<(IrBlockId, usize), Vec<IrId>>,
 }
 
 impl<'a> FunctionLowerer<'a> {
@@ -1588,6 +1616,7 @@ impl<'a> FunctionLowerer<'a> {
             block_order: Vec::new(),
             block_index: BTreeMap::new(),
             saved_sp_local: 0,
+            free_points: BTreeMap::new(),
         };
 
         // Early return for empty-body functions (extern stubs).
@@ -1611,8 +1640,261 @@ impl<'a> FunctionLowerer<'a> {
         // Compute block order.
         low.compute_block_order();
 
+        // Reclamation (Phase 1): compute where to free transient heap strings.
+        low.compute_string_free_points();
+
         // Build the function body.
         low.build_body()
+    }
+
+    // ------------------------------------------------------------------
+    // WASM memory reclamation — Phase 1: transient heap strings
+    //
+    // The wasm backend emits no frees, so every per-token string the decode
+    // loop produces leaks; the heap climbs until an allocation crosses 2^31
+    // and `rt_alloc`'s `ptr as i32` sign-flips into a wild signed write
+    // (the long-gen corruption). This pass reclaims the SAFE subset: results
+    // of runtime string allocators (heap struct+data) whose entire lifetime
+    // is straight-line within one block and which are only ever consumed by
+    // non-retaining runtime calls. Anything that escapes (stored, returned,
+    // captured, phi'd/loop-carried, aliased, used across blocks, or passed to
+    // a user function) is left alone — conservative by construction so a
+    // missed case leaks rather than use-after-frees.
+    // ------------------------------------------------------------------
+
+    /// Resolve a CallDirect callee's IrFunctionId to its MIR name.
+    fn callee_name(&self, func_id: &IrFunctionId) -> Option<&str> {
+        for m in self.ctx.all_module_funcs.iter() {
+            if let Some(name) = m.get(func_id) {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    /// Runtime string functions that return a FRESH heap HaxeString (the 2-arg
+    /// returning forms `rt_alloc(12)` the struct + `alloc_string_data` the buffer).
+    /// Their results are reclamation candidates. Matches both the bare stdlib
+    /// forward-ref names (`string_concat`) and the qualified runtime names.
+    fn is_string_allocator(name: &str) -> bool {
+        let bare = name.rsplit(['.', '_']).next().unwrap_or(name);
+        matches!(
+            name,
+            "haxe_string_concat"
+                | "string_concat"
+                | "haxe_string_from_int"
+                | "string_from_int"
+                | "haxe_string_from_float"
+                | "string_from_float"
+                | "haxe_string_from_bool"
+                | "string_from_bool"
+                | "haxe_string_from_char_code"
+                | "string_from_char_code"
+                | "haxe_string_substring"
+                | "string_substring"
+                | "haxe_string_substr"
+                | "string_substr"
+                | "haxe_string_to_upper_case"
+                | "haxe_string_to_lower_case"
+        ) || matches!(bare, "concat") && name.contains("string")
+    }
+
+    /// Runtime functions that READ a string arg (copy/inspect) but never retain
+    /// the pointer, plus print/trace sinks. Passing a transient string to one of
+    /// these is a legitimate last use; freeing it afterwards is safe. NB: none of
+    /// these return their string argument's pointer (allocators copy; the rest
+    /// return ints/void), so the freed buffer can never alias a live result.
+    fn is_nonretaining_consumer(name: &str) -> bool {
+        Self::is_string_allocator(name)
+            || matches!(
+                name,
+                "haxe_string_length"
+                    | "string_length"
+                    | "haxe_string_char_at"
+                    | "string_char_at"
+                    | "haxe_string_char_code_at"
+                    | "string_char_code_at"
+                    | "haxe_string_index_of"
+                    | "string_index_of"
+                    | "haxe_string_compare"
+                    | "string_compare"
+                    | "haxe_string_equals"
+                    | "string_equals"
+                    | "haxe_sys_println"
+                    | "haxe_sys_print"
+                    | "sys_println"
+                    | "sys_print"
+                    | "haxe_trace_string_struct"
+            )
+    }
+
+    /// Registers an IrTerminator reads (kept local to avoid coupling to Ir internals).
+    fn terminator_uses(t: &IrTerminator) -> Vec<IrId> {
+        match t {
+            IrTerminator::CondBranch { condition, .. } => vec![*condition],
+            IrTerminator::Switch { value, .. } => vec![*value],
+            IrTerminator::Return { value } => value.map(|v| vec![v]).unwrap_or_default(),
+            IrTerminator::NoReturn { call } => vec![*call],
+            IrTerminator::Branch { .. } | IrTerminator::Unreachable => Vec::new(),
+        }
+    }
+
+    fn compute_string_free_points(&mut self) {
+        if !self.ctx.wasm_free_enabled || self.ctx.string_free_idx.is_none() {
+            return;
+        }
+
+        // 1. Candidates: dest of a CallDirect to a string allocator, with its def block.
+        let debug = std::env::var_os("RAYZOR_WASM_FREE_DEBUG").is_some();
+        let mut seen_stringish: BTreeSet<String> = BTreeSet::new();
+        let mut cand_def_block: BTreeMap<IrId, IrBlockId> = BTreeMap::new();
+        for (&bid, block) in &self.ir_func.cfg.blocks {
+            for inst in &block.instructions {
+                if let IrInstruction::CallDirect {
+                    dest: Some(d),
+                    func_id,
+                    ..
+                } = inst
+                {
+                    if let Some(name) = self.callee_name(func_id) {
+                        if debug
+                            && (name.contains("string")
+                                || name.contains("String")
+                                || name.contains("concat")
+                                || name.contains("substr")
+                                || name.contains("from_int")
+                                || name.contains("from_float"))
+                        {
+                            seen_stringish.insert(name.to_string());
+                        }
+                        if Self::is_string_allocator(name) {
+                            cand_def_block.insert(*d, bid);
+                        }
+                    }
+                }
+            }
+        }
+        if debug && !seen_stringish.is_empty() {
+            eprintln!(
+                "[wasm-free] fn '{}': string-ish callees seen = {:?}; matched candidates = {}",
+                self.ir_func.name,
+                seen_stringish,
+                cand_def_block.len()
+            );
+        }
+        if cand_def_block.is_empty() {
+            return;
+        }
+
+        let mut disq: BTreeSet<IrId> = BTreeSet::new();
+        // candidate -> (block, instruction index) of its last (highest-index) use.
+        let mut last_use: BTreeMap<IrId, (IrBlockId, usize)> = BTreeMap::new();
+
+        // 2a. Any phi incoming that is a candidate => merged/loop-carried => disqualify.
+        for block in self.ir_func.cfg.blocks.values() {
+            for phi in &block.phi_nodes {
+                for (_pred, val) in &phi.incoming {
+                    if cand_def_block.contains_key(val) {
+                        disq.insert(*val);
+                    }
+                }
+            }
+        }
+
+        // 2b. Walk instructions: alias/store/capture disqualifiers + use analysis.
+        for (&bid, block) in &self.ir_func.cfg.blocks {
+            for (idx, inst) in block.instructions.iter().enumerate() {
+                // Aliasing / escape into memory or aggregates disqualifies the operand.
+                match inst {
+                    IrInstruction::Copy { src, .. }
+                    | IrInstruction::Move { src, .. }
+                    | IrInstruction::Cast { src, .. }
+                    | IrInstruction::BitCast { src, .. }
+                    | IrInstruction::Clone { src, .. } => {
+                        disq.insert(*src);
+                    }
+                    IrInstruction::Store { value, .. }
+                    | IrInstruction::InsertValue { value, .. } => {
+                        disq.insert(*value);
+                    }
+                    IrInstruction::MemCopy { src, .. } => {
+                        disq.insert(*src);
+                    }
+                    IrInstruction::CreateStruct { fields, .. } => {
+                        for fv in fields {
+                            disq.insert(*fv);
+                        }
+                    }
+                    IrInstruction::MakeClosure {
+                        captured_values, ..
+                    } => {
+                        for cv in captured_values {
+                            disq.insert(*cv);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Use analysis: a candidate may only be consumed by a non-retaining
+                // runtime call, in its own def block. Record the last such use.
+                let nonretaining = match inst {
+                    IrInstruction::CallDirect { func_id, .. } => self
+                        .callee_name(func_id)
+                        .map(Self::is_nonretaining_consumer)
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                for u in inst.uses() {
+                    let Some(&def_bid) = cand_def_block.get(&u) else {
+                        continue;
+                    };
+                    if bid != def_bid || !nonretaining {
+                        disq.insert(u);
+                        continue;
+                    }
+                    let e = last_use.entry(u).or_insert((bid, idx));
+                    if idx > e.1 {
+                        *e = (bid, idx);
+                    }
+                }
+            }
+            // Terminator uses => cross-block / return liveness => disqualify.
+            for u in Self::terminator_uses(&block.terminator) {
+                if cand_def_block.contains_key(&u) {
+                    disq.insert(u);
+                }
+            }
+        }
+
+        // 3. Survivors with a recorded last use get a free point right after it.
+        let mut points: BTreeMap<(IrBlockId, usize), Vec<IrId>> = BTreeMap::new();
+        for cand in cand_def_block.keys() {
+            if disq.contains(cand) {
+                continue;
+            }
+            if let Some(&(bid, idx)) = last_use.get(cand) {
+                points.entry((bid, idx)).or_default().push(*cand);
+            }
+        }
+        if debug {
+            let freed: usize = points.values().map(|v| v.len()).sum();
+            eprintln!(
+                "[wasm-free] fn '{}': {} candidates, {} freed at last-use",
+                self.ir_func.name,
+                cand_def_block.len(),
+                freed
+            );
+        }
+        self.free_points = points;
+    }
+
+    /// Emit `haxe_string_free(reg)` — reclaims the heap data buffer of a HaxeString
+    /// whose lifetime has ended. No-op if the free import isn't present.
+    fn emit_string_free(&self, f: &mut Function, reg: IrId) {
+        if let Some(idx) = self.ctx.string_free_idx {
+            self.get_reg(f, reg);
+            f.instruction(&Instruction::Call(idx));
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1979,7 +2261,7 @@ impl<'a> FunctionLowerer<'a> {
         let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
         self.emit_sp_save(&mut f);
 
-        self.emit_block_instructions(&mut f, &block.instructions);
+        self.emit_block_instructions(&mut f, bid, &block.instructions);
 
         self.emit_terminator_simple(&mut f, &block.terminator);
         f.instruction(&Instruction::End);
@@ -2044,7 +2326,7 @@ impl<'a> FunctionLowerer<'a> {
             let block = self.ir_func.cfg.blocks.get(&bid).unwrap();
 
             // Emit instructions (with vector FMA peephole).
-            self.emit_block_instructions(&mut f, &block.instructions);
+            self.emit_block_instructions(&mut f, bid, &block.instructions);
 
             // Emit terminator (sets $blk, possibly returns).
             let returned = self.emit_terminator_dispatch(&mut f, block, blk_local);
@@ -2263,10 +2545,10 @@ impl<'a> FunctionLowerer<'a> {
     //   doesn't support it, the bytecode won't load — same situation
     //   as the rest of the SIMD lowering, which assumes SIMD128 is
     //   available.
-    fn emit_block_instructions(&self, f: &mut Function, insts: &[IrInstruction]) {
+    fn emit_block_instructions(&self, f: &mut Function, bid: IrBlockId, insts: &[IrInstruction]) {
         let mut vfmul_map: std::collections::BTreeMap<IrId, (IrId, IrId)> =
             std::collections::BTreeMap::new();
-        for inst in insts {
+        for (idx, inst) in insts.iter().enumerate() {
             if let IrInstruction::VectorBinOp {
                 dest,
                 op,
@@ -2323,6 +2605,15 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             self.emit_instruction(f, inst);
+            // Reclamation (Phase 1): free transient heap strings whose last use
+            // was this instruction. The fused-vector `continue` paths above skip
+            // this, but a vector op is never a string-allocator result, so no
+            // free point is ever attached to a fused index.
+            if let Some(regs) = self.free_points.get(&(bid, idx)) {
+                for &reg in regs {
+                    self.emit_string_free(f, reg);
+                }
+            }
         }
     }
 
