@@ -54,9 +54,10 @@ pub unsafe fn vec_dot_q6_K_q8_K_scalar(block_ptr: *const u8, x: &Q8KBlock) -> f3
 }
 
 /// SIMD128 (wasm) Q6_K×Q8_K dot — port of the native NEON `dot_q6_k_q8`
-/// (sdot.rs) using `i32x4.dot_i16x8` over sign-extended i8 halves (the same
-/// `dot16` the Q4_K_M kernel uses; relaxed_dot is unavailable on wasmtime's
-/// aarch64 backend). The 6-bit weights (0..63) reconstruct from ql nibbles +
+/// (sdot.rs). With `relaxed-simd` it uses `i32x4.relaxed_dot_i8x16_i7x16_add_s`
+/// (one op, lowers to NEON SDOT on FEAT_DotProd hosts); otherwise it falls back
+/// to the `dot16` extend + `i32x4.dot_i16x8` the Q4_K_M kernel uses. The 6-bit
+/// weights (0..63 = valid i7) reconstruct from ql nibbles +
 /// qh 2-bit pairs; the −32 bias folds into `32·Σx` via the per-16 bsums.
 /// Bit-exact vs the scalar reference (integer dots are associative; float
 /// accumulation order matches).
@@ -68,6 +69,7 @@ pub unsafe fn vec_dot_q6_K_q8_K_scalar(block_ptr: *const u8, x: &Q8KBlock) -> f3
 pub unsafe fn vec_dot_q6_K_q8_K_simd128(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
     use core::arch::wasm32::*;
 
+    #[allow(dead_code)] // unused when `relaxed-simd` is enabled (see below)
     #[inline(always)]
     fn dot16(a: v128, b: v128) -> v128 {
         let a_lo = i16x8_extend_low_i8x16(a);
@@ -140,8 +142,24 @@ pub unsafe fn vec_dot_q6_K_q8_K_simd128(block_ptr: *const u8, x: &Q8KBlock) -> f
             let x_lo = loadu(x_base.add(x_span));
             let x_hi = loadu(x_base.add(x_span + 16));
 
-            let sdot_lo = hsum(dot16(x_lo, q_lo));
-            let sdot_hi = hsum(dot16(x_hi, q_hi));
+            // Activation (signed i8) × 6-bit weight (0..63 = valid i7),
+            // accumulating from zero. relaxed_dot lowers to NEON SDOT; exact vs
+            // dot16 (q*x products never saturate the i16 intermediate).
+            #[cfg(target_feature = "relaxed-simd")]
+            let (sdot_lo, sdot_hi) = (
+                hsum(i32x4_relaxed_dot_i8x16_i7x16_add(
+                    x_lo,
+                    q_lo,
+                    i32x4_splat(0),
+                )),
+                hsum(i32x4_relaxed_dot_i8x16_i7x16_add(
+                    x_hi,
+                    q_hi,
+                    i32x4_splat(0),
+                )),
+            );
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            let (sdot_lo, sdot_hi) = (hsum(dot16(x_lo, q_lo)), hsum(dot16(x_hi, q_hi)));
 
             let sc_lo = *scales_ptr.add(sc_off + 2 * j) as f32;
             let sc_hi = *scales_ptr.add(sc_off + 2 * j + 1) as f32;
