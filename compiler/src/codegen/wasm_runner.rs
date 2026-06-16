@@ -302,6 +302,18 @@ fn find_wasm_side_module() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
+    // Relative to the rayzor executable (`<root>/target/release/rayzor` →
+    // `<root>/target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm`), so it
+    // resolves regardless of the process CWD — `rayzor run` cd's into the
+    // project dir, which broke the bare CWD-relative paths below.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
+            let p = target_dir.join("wasm32-wasip1-threads-pic/release/nue_plugins.wasm");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
     for c in [
         "target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm",
         "../target/wasm32-wasip1-threads-pic/release/nue_plugins.wasm",
