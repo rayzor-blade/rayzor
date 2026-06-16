@@ -204,6 +204,23 @@ class LlamaArch implements ArchBuilder {
             if (qw == null) {
                 throw "nue.arch.Llama: missing quant weight '" + weightName + "'";
             }
+            // Opt-in: re-quantise Q6_K matmul weights down to Q4_K_M so they
+            // take the fast Q4 SDOT path instead of the slower Q6_K kernel.
+            // Q4_K_M GGUFs promote accuracy-sensitive weights (ffn_down,
+            // attn_v) to Q6_K; on the wasmtime host those go through the
+            // SCALAR Q6_K dot (with a per-block dequant-scratch memset), and
+            // in the browser/in-guest path through the heavier Q6_K SIMD
+            // kernel — both far slower than Q4 SDOT. `requantQ6KToQ4KM()`
+            // no-ops (returns null) on already-Q4 weights, so this hits only
+            // the Q6_K ones. Trades a little quantisation accuracy on those
+            // weights for speed — gated OFF by default; set RAYZOR_REQUANT_Q6K=1.
+            if (Sys.getEnv("RAYZOR_REQUANT_Q6K") == "1") {
+                var rq = qw.requantQ6KToQ4KM();
+                if (rq != null) {
+                    Sys.println("[requant] " + weightName + " Q6_K → Q4_K_M");
+                    qw = rq;
+                }
+            }
             return Linear.fromQuant(qw, b, "weight");
         }
         return new Linear(takeWeight(weights, weightName), b, "weight");
