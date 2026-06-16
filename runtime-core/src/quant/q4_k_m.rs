@@ -286,6 +286,10 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     // i4×i8 dot of two 16-lane vectors → partial i32x4 (sign-extend both
     // halves to i16, two `i32x4.dot_i16x8`). Nibbles are 0..15 so the
     // sign-extend is a no-op on their value.
+    // Fallback dot used when `relaxed-simd` is not enabled; the hot path below
+    // prefers `i32x4_relaxed_dot_i8x16_i7x16_add` (one op, lowers to NEON SDOT
+    // under FEAT_DotProd) when available.
+    #[allow(dead_code)]
     #[inline(always)]
     fn dot16(a: v128, b: v128) -> v128 {
         let a_lo = i16x8_extend_low_i8x16(a);
@@ -335,8 +339,21 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
             let high = u8x16_shr(w, 4); // logical >> 4 → 0..15
             let xl = unsafe { loadu(x_base.add(s_lo * 32 + h * 16)) };
             let xh = unsafe { loadu(x_base.add(s_hi * 32 + h * 16)) };
-            acc_lo = i32x4_add(acc_lo, dot16(low, xl));
-            acc_hi = i32x4_add(acc_hi, dot16(high, xh));
+            // Activation is the signed-i8 operand `a`; the 0..15 nibble is the
+            // i7 operand `b` (top bit clear -> deterministic). The op folds the
+            // accumulate into `c`. Bit-identical to the extend+dot_i16x8 path:
+            // hsum sums all lanes regardless of grouping, and the i8xi7 products
+            // never saturate the i16 intermediate.
+            #[cfg(target_feature = "relaxed-simd")]
+            {
+                acc_lo = i32x4_relaxed_dot_i8x16_i7x16_add(xl, low, acc_lo);
+                acc_hi = i32x4_relaxed_dot_i8x16_i7x16_add(xh, high, acc_hi);
+            }
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            {
+                acc_lo = i32x4_add(acc_lo, dot16(low, xl));
+                acc_hi = i32x4_add(acc_hi, dot16(high, xh));
+            }
         }
         let sdot_lo = hsum(acc_lo);
         let sdot_hi = hsum(acc_hi);
