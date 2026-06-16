@@ -768,6 +768,191 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         1
     }
 
+    /// Host-parallel Q8_0 flash attention (decode, seq_q == 1). Mirrors the
+    /// serial side-module kernel `rayzor_tensor_flash_attn_decode_q8` but bands
+    /// the INDEPENDENT `kv_head`s across the native worker pool — the same pool
+    /// the matmul uses. Unlike the in-guest wasm workers (no TLS → unsafe
+    /// malloc), these are real OS threads, so per-band `Vec` scratch is safe.
+    /// The per-`kv_head` compute is copied verbatim (same NEON helpers, same
+    /// `libm::expf` as the wasm guest's `fmath::exp`, same block-by-block
+    /// reduction order), and kv_heads write disjoint output rows, so the result
+    /// is bit-identical to the serial path. Returns 1 on success, 0 to fall
+    /// back to the guest serial kernel. Reads K/V/Q/out from wasm linear memory
+    /// at the given offsets (`base` is the pinned mmap base).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn host_parallel_flash_q8(
+        base: usize,
+        k_data_off: usize,
+        v_data_off: usize,
+        q_off: usize,
+        out_off: usize,
+        cache_len: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        head_dim_bytes: usize,
+        row_bytes: usize,
+        scale: f32,
+        threads: usize,
+    ) -> i32 {
+        const BS: usize = 32; // Q8_0_BLOCK_SIZE
+        const BB: usize = 34; // Q8_0_BLOCK_BYTES
+        if num_kv_heads == 0 || num_q_heads % num_kv_heads != 0 || head_dim % BS != 0 {
+            return 0;
+        }
+        let group = num_q_heads / num_kv_heads;
+        let blocks_per_head = head_dim / BS;
+        let k_base = base + k_data_off;
+        let v_base = base + v_data_off;
+        let q_base = base + q_off;
+        let out_base = base + out_off;
+
+        // Block helpers — identical to the serial kernel's (NEON on aarch64),
+        // so the f32 reduction order is preserved bit-for-bit.
+        #[inline]
+        unsafe fn dq(src: *const u8, dst: &mut [f32; 32]) {
+            #[cfg(target_arch = "aarch64")]
+            {
+                use std::arch::aarch64::*;
+                let scale =
+                    half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
+                let sv = vdupq_n_f32(scale);
+                let q = src.add(2) as *const i8;
+                let d = dst.as_mut_ptr();
+                for c in 0..2 {
+                    let o = c * 16;
+                    let x = vld1q_s8(q.add(o));
+                    let lo = vmovl_s8(vget_low_s8(x));
+                    let hi = vmovl_s8(vget_high_s8(x));
+                    vst1q_f32(d.add(o), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), sv));
+                    vst1q_f32(d.add(o + 4), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sv));
+                    vst1q_f32(d.add(o + 8), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), sv));
+                    vst1q_f32(d.add(o + 12), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sv));
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let scale =
+                    half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
+                let q = src.add(2) as *const i8;
+                for i in 0..32 {
+                    dst[i] = (*q.add(i) as f32) * scale;
+                }
+            }
+        }
+        #[inline]
+        unsafe fn dotb(q: *const f32, k: &[f32; 32]) -> f32 {
+            #[cfg(target_arch = "aarch64")]
+            {
+                use std::arch::aarch64::*;
+                let kp = k.as_ptr();
+                let mut acc = vdupq_n_f32(0.0);
+                for i in 0..8 {
+                    let o = i * 4;
+                    acc = vfmaq_f32(acc, vld1q_f32(q.add(o)), vld1q_f32(kp.add(o)));
+                }
+                vaddvq_f32(acc)
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let mut acc = 0.0f32;
+                for i in 0..32 {
+                    acc += *q.add(i) * k[i];
+                }
+                acc
+            }
+        }
+        #[inline]
+        unsafe fn axpyb(out: *mut f32, w: f32, v: &[f32; 32]) {
+            #[cfg(target_arch = "aarch64")]
+            {
+                use std::arch::aarch64::*;
+                let wv = vdupq_n_f32(w);
+                let vp = v.as_ptr();
+                for i in 0..8 {
+                    let o = i * 4;
+                    vst1q_f32(out.add(o), vfmaq_f32(vld1q_f32(out.add(o)), wv, vld1q_f32(vp.add(o))));
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                for i in 0..32 {
+                    *out.add(i) += w * v[i];
+                }
+            }
+        }
+
+        rayzor_runtime::worker_pool::global().parallel_rows(num_kv_heads, threads, move |lo, hi| {
+            let mut scores = std::vec![0.0f32; group * cache_len];
+            let mut gmax = std::vec![f32::NEG_INFINITY; group];
+            let mut kb = [0.0f32; BS];
+            let mut vb = [0.0f32; BS];
+            for kv_head in lo..hi {
+                let gstart = kv_head * group;
+                for s in scores.iter_mut() {
+                    *s = 0.0;
+                }
+                for m in gmax.iter_mut() {
+                    *m = f32::NEG_INFINITY;
+                }
+                // K step: dequant each block once, dot against the group's heads.
+                for l in 0..cache_len {
+                    let krow = (k_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
+                    for b in 0..blocks_per_head {
+                        unsafe { dq(krow.add(b * BB), &mut kb) };
+                        for gi in 0..group {
+                            let qrow = (q_base + (gstart + gi) * head_dim * 4) as *const f32;
+                            let p = unsafe { dotb(qrow.add(b * BS), &kb) };
+                            scores[gi * cache_len + l] += p;
+                        }
+                    }
+                    for gi in 0..group {
+                        let s = scores[gi * cache_len + l] * scale;
+                        scores[gi * cache_len + l] = s;
+                        if s > gmax[gi] {
+                            gmax[gi] = s;
+                        }
+                    }
+                }
+                // Softmax (libm::expf — matches the guest's fmath::exp on wasm32).
+                for gi in 0..group {
+                    let mg = gmax[gi];
+                    let row = &mut scores[gi * cache_len..(gi + 1) * cache_len];
+                    let mut denom = 0.0f32;
+                    for s in row.iter_mut() {
+                        let e = libm::expf(*s - mg);
+                        *s = e;
+                        denom += e;
+                    }
+                    let inv = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+                    for s in row.iter_mut() {
+                        *s *= inv;
+                    }
+                }
+                // Zero the group's output rows.
+                for gi in 0..group {
+                    let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
+                    for d in 0..head_dim {
+                        unsafe { *orow.add(d) = 0.0 };
+                    }
+                }
+                // V step: dequant each block once, axpy into the group's heads.
+                for l in 0..cache_len {
+                    let vrow = (v_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
+                    for b in 0..blocks_per_head {
+                        unsafe { dq(vrow.add(b * BB), &mut vb) };
+                        for gi in 0..group {
+                            let w = scores[gi * cache_len + l];
+                            let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
+                            unsafe { axpyb(orow.add(b * BS), w, &vb) };
+                        }
+                    }
+                }
+            }
+        });
+        1
+    }
+
     fn looks_like_wasm_ptr(raw: i32) -> bool {
         wasm_addr(raw) > 65536
     }
@@ -1807,6 +1992,69 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             )
             .map_err(|e| format!("Failed to register rayzor_host_qmatmul_par: {}", e))?;
         registered.insert("rayzor_host_qmatmul_par".to_string());
+    }
+
+    // -- Register host-side parallel Q8 flash attention --
+    // 12 i32 params: k_off, v_off, q_off, out_off, cache_len, num_q_heads,
+    // num_kv_heads, head_dim, head_dim_bytes, row_bytes, scale_bits (f32 bits),
+    // threads -> i32 (1 handled, 0 fall back to the guest serial kernel).
+    if rayzor_import_names.contains("rayzor_host_flash_attn_q8_par") {
+        let fty = FuncType::new(
+            &engine,
+            std::iter::repeat_n(ValType::I32, 12),
+            std::iter::once(ValType::I32),
+        );
+        linker
+            .func_new(
+                "rayzor",
+                "rayzor_host_flash_attn_q8_par",
+                fty,
+                move |mut caller, params, results| {
+                    // Two opt-outs both fall back to the serial guest kernel:
+                    // NO_HOST_MATMUL (global host-offload off) and NO_HOST_FLASH
+                    // (isolate the attention A/B while keeping host matmul on).
+                    if std::env::var("RAYZOR_WASM_NO_HOST_MATMUL").as_deref() == Ok("1")
+                        || std::env::var("RAYZOR_WASM_NO_HOST_FLASH").as_deref() == Ok("1")
+                    {
+                        results[0] = Val::I32(0);
+                        return Ok(());
+                    }
+                    let k_off = val_i32(&params[0]) as u32 as usize;
+                    let v_off = val_i32(&params[1]) as u32 as usize;
+                    let q_off = val_i32(&params[2]) as u32 as usize;
+                    let out_off = val_i32(&params[3]) as u32 as usize;
+                    let cache_len = val_i32(&params[4]).max(0) as usize;
+                    let num_q_heads = val_i32(&params[5]).max(0) as usize;
+                    let num_kv_heads = val_i32(&params[6]).max(0) as usize;
+                    let head_dim = val_i32(&params[7]).max(0) as usize;
+                    let head_dim_bytes = val_i32(&params[8]).max(0) as usize;
+                    let row_bytes = val_i32(&params[9]).max(0) as usize;
+                    let scale = f32::from_bits(val_i32(&params[10]) as u32);
+                    let threads = val_i32(&params[11]);
+                    let nthreads = if threads > 1 {
+                        (threads as usize).min(64)
+                    } else {
+                        rayzor_runtime::worker_pool::auto_kernel_threads()
+                    };
+                    let base = match caller.data().shared_memory.clone() {
+                        Some(shared) => shared.data().as_ptr() as *const u8 as usize,
+                        None => {
+                            results[0] = Val::I32(0);
+                            return Ok(());
+                        }
+                    };
+                    let handled = unsafe {
+                        host_parallel_flash_q8(
+                            base, k_off, v_off, q_off, out_off, cache_len, num_q_heads,
+                            num_kv_heads, head_dim, head_dim_bytes, row_bytes, scale, nthreads,
+                        )
+                    };
+                    results[0] = Val::I32(handled);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register rayzor_host_flash_attn_q8_par: {}", e))?;
+        registered.insert("rayzor_host_flash_attn_q8_par".to_string());
     }
 
     // -- Q8 KV-cache capability trampolines (dylink.0 side-module) --

@@ -48,6 +48,37 @@ extern "C" {
         y_data_off: i32,
         threads: i32,
     ) -> i32;
+
+    // Host-parallel Q8 flash attention (decode, seq_q==1). Implemented in the
+    // wasmtime embedder (wasm_runner.rs). All offsets are raw linear-memory
+    // offsets — on wasm32 a guest pointer IS its memory offset. Returns 1 if
+    // the host computed the result, 0 to fall back to the guest serial kernel
+    // (browser / RAYZOR_WASM_NO_HOST_MATMUL=1 / stubbed import).
+    fn rayzor_host_flash_attn_q8_par(
+        k_data_off: i32,
+        v_data_off: i32,
+        q_data_off: i32,
+        out_data_off: i32,
+        cache_len: i32,
+        num_q_heads: i32,
+        num_kv_heads: i32,
+        head_dim: i32,
+        head_dim_bytes: i32,
+        row_bytes: i32,
+        scale_bits: i32,
+        threads: i32,
+    ) -> i32;
+}
+
+/// Q8 KV-cache header layout — mirrors nue-plugins `RayzorKvCacheQ8`. Read-only
+/// here; the cache buffer is allocated and filled by the Q8 KV side module.
+#[repr(C)]
+struct KvCacheQ8Hdr {
+    data: usize,
+    max_seq_len: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    head_dim_bytes: usize,
 }
 
 #[repr(C)]
@@ -573,6 +604,88 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x: i32, qt: i32) -> i32 {
     y
 }
 
+/// Host-parallel Q8 flash attention dispatcher (decode, `seq_q == 1`).
+///
+/// Self-first ABI mirrors the serial guest kernel
+/// `nue-plugins::rayzor_tensor_flash_attn_decode_q8`, so the Haxe call is
+/// `keysQ8.flashAttnDecodeQ8Host(q, valuesQ8, cacheLen, numQHeads, scale)`.
+/// Reads the Q8 K/V cache headers + the F32 Q tensor, allocates the `[1, nqh,
+/// hd]` F32 output, then hands the raw linear-memory offsets to the host pool
+/// (`rayzor_host_flash_attn_q8_par`). The host's idle worker pool — otherwise
+/// spinning during serial attention — bands `num_kv_heads` across its threads.
+///
+/// Returns the output Tensor handle, or `0` to tell the caller to fall back to
+/// the guest serial kernel (host absent in a browser, or the import stubbed to
+/// return 0). The speculatively-allocated output is freed on that path.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
+    k_handle: i32,
+    q_ptr: i32,
+    v_handle: i32,
+    cache_len: i32,
+    num_q_heads: i32,
+    scale: f64,
+) -> i32 {
+    if k_handle == 0 || q_ptr == 0 || v_handle == 0 || cache_len < 0 || num_q_heads <= 0 {
+        return 0;
+    }
+    let k = &*(k_handle as u32 as usize as *const KvCacheQ8Hdr);
+    let v = &*(v_handle as u32 as usize as *const KvCacheQ8Hdr);
+    let cache_len = cache_len as usize;
+    if cache_len == 0
+        || cache_len > k.max_seq_len
+        || k.num_kv_heads != v.num_kv_heads
+        || k.head_dim != v.head_dim
+        || k.head_dim_bytes != v.head_dim_bytes
+        || k.data == 0
+        || v.data == 0
+    {
+        return 0;
+    }
+    let nqh = num_q_heads as usize;
+    let nkvh = k.num_kv_heads;
+    let hd = k.head_dim;
+    if nkvh == 0 || hd == 0 || nqh % nkvh != 0 {
+        return 0;
+    }
+    // Q must be a contiguous F32 tensor of `nqh * hd` elements. The host reads
+    // it as a flat row-major [nqh, hd] buffer, so a non-contiguous Q would be
+    // read wrong — bail to the serial kernel (which gates the same way and, on
+    // its own null, lets GQAttention fall through to the bmm chain).
+    let q = &*(q_ptr as u32 as usize as *const Tensor);
+    if q.dtype != DTYPE_F32 || q.data.is_null() || q.numel != nqh * hd || !q.is_contiguous() {
+        return 0;
+    }
+
+    let out = crate::tensor::alloc_tensor(&[1, nqh, hd], DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    let row_bytes = nkvh * k.head_dim_bytes;
+    let handled = rayzor_host_flash_attn_q8_par(
+        k.data as i32,
+        v.data as i32,
+        q.data as i32,
+        (*out).data as i32,
+        cache_len as i32,
+        nqh as i32,
+        nkvh as i32,
+        hd as i32,
+        k.head_dim_bytes as i32,
+        row_bytes as i32,
+        (scale as f32).to_bits() as i32,
+        -1, // auto: host picks kernel-thread count
+    );
+    if handled != 0 {
+        out as i32
+    } else {
+        // Host unavailable (browser / stubbed import) — let the caller run the
+        // serial guest kernel; don't leak the speculative output.
+        crate::tensor::rayzor_tensor_free(out as i32);
+        0
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     x: i32,
@@ -647,13 +760,18 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         let fast =
             (qtr.scheme == QSCHEME_Q4_K_M || qtr.scheme == QSCHEME_Q6_K) && x_strides[1] == 1;
         // Band count: env override (`RAYZOR_WASM_GUEST_THREADS`, read once) wins;
-        // otherwise the caller's hint, or 6 for the threads<=0 auto default
-        // (sized for the M1-class 6–8 core pool). 1 forces the sequential path.
+        // otherwise the caller's hint, or 7 for the threads<=0 auto default.
+        // 7 (not 6) measured best on the 8-P-core M1 Pro: the dispatching
+        // thread spin-joins (it does NOT compute a band), so 7 worker bands
+        // saturate 7 P-cores while the 8th absorbs the joining caller + OS;
+        // 8 bands oversubscribe (9 runnable) → an E-core/preempted straggler
+        // gates the join (p95 39.75→47.5ms). Tune via RAYZOR_WASM_GUEST_THREADS
+        // on other core counts. 1 forces the sequential path.
         let env_n = guest_threads_override();
         let nthreads = if env_n > 0 {
             env_n.min(8)
         } else if threads <= 0 {
-            6
+            7
         } else {
             (threads as usize).min(8)
         };

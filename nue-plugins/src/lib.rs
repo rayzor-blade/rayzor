@@ -174,6 +174,8 @@ declare_native_methods! {
         [Ptr, I64]                                                            => Ptr;
     "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
+    "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8Host", instance, "rayzor_tensor_flash_attn_q8_host",
+        [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
 }
 
 #[no_mangle]
@@ -226,6 +228,10 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         entry!(
             b"rayzor_tensor_flash_attn_decode_q8",
             rayzor_tensor_flash_attn_decode_q8
+        ),
+        entry!(
+            b"rayzor_tensor_flash_attn_q8_host",
+            rayzor_tensor_flash_attn_q8_host
         ),
         entry!(b"rayzor_kvcacheq8_clone", rayzor_kvcacheq8_clone),
         entry!(b"rayzor_kvcacheq8_arc_clone", rayzor_kvcacheq8_arc_clone),
@@ -284,7 +290,7 @@ unsafe fn quantize_q8_0_block(src: *const f32, dst: *mut u8) {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
 #[inline]
 unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
     let scale_bits = core::ptr::read_unaligned(src as *const u16);
@@ -292,6 +298,37 @@ unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
     let q_ptr = src.add(2) as *const i8;
     for i in 0..Q8_0_BLOCK_SIZE {
         dst[i] = scale * (*q_ptr.add(i) as f32);
+    }
+}
+
+/// wasm SIMD128 dequant: 32 i8 → 32 f32. Mirrors the NEON path (widen
+/// i8→i16→i32→f32 then multiply by the shared f16 scale) using
+/// `core::arch::wasm32`; per-lane `q[i] * scale` is bit-identical to the
+/// scalar loop. The side-module builds with `+simd128`, so on the in-guest
+/// wasm decode path this replaces the scalar fallback that made the Q8 KV
+/// attention ~18% slower than the SIMD128 F32 flash kernel.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
+    use core::arch::wasm32::*;
+    let scale_bits = core::ptr::read_unaligned(src as *const u16);
+    let scale = f16::from_bits(scale_bits).to_f32();
+    let scale_v = f32x4_splat(scale);
+    let q_ptr = src.add(2) as *const i8;
+    let dst_ptr = dst.as_mut_ptr();
+    for chunk in 0..2 {
+        let off = chunk * 16;
+        let q16 = v128_load(q_ptr.add(off) as *const v128); // 16 i8
+        let lo16 = i16x8_extend_low_i8x16(q16);
+        let hi16 = i16x8_extend_high_i8x16(q16);
+        let i0 = f32x4_convert_i32x4(i32x4_extend_low_i16x8(lo16));
+        let i1 = f32x4_convert_i32x4(i32x4_extend_high_i16x8(lo16));
+        let i2 = f32x4_convert_i32x4(i32x4_extend_low_i16x8(hi16));
+        let i3 = f32x4_convert_i32x4(i32x4_extend_high_i16x8(hi16));
+        v128_store(dst_ptr.add(off) as *mut v128, f32x4_mul(i0, scale_v));
+        v128_store(dst_ptr.add(off + 4) as *mut v128, f32x4_mul(i1, scale_v));
+        v128_store(dst_ptr.add(off + 8) as *mut v128, f32x4_mul(i2, scale_v));
+        v128_store(dst_ptr.add(off + 12) as *mut v128, f32x4_mul(i3, scale_v));
     }
 }
 
@@ -468,7 +505,7 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_dequant_view(handle: i64, current_le
     out.handle
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
 #[inline]
 unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
     let mut s = 0.0f32;
@@ -476,6 +513,29 @@ unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
         s += *q.add(i) * k[i];
     }
     s
+}
+
+/// wasm SIMD128 dot of two 32-element f32 vectors: 8 `f32x4` mul+add into
+/// one accumulator, then a horizontal lane fold. Mul+add (not relaxed_madd)
+/// keeps it deterministic across runtimes; the 4-lane reduction drifts a few
+/// ULP from the scalar sequential sum (same trade as the NEON path), well
+/// below the argmax-on-128k-vocab noise floor.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
+    use core::arch::wasm32::*;
+    let k_ptr = k.as_ptr();
+    let mut acc = f32x4_splat(0.0);
+    for i in 0..8 {
+        let off = i * 4;
+        let qv = v128_load(q.add(off) as *const v128);
+        let kv = v128_load(k_ptr.add(off) as *const v128);
+        acc = f32x4_add(acc, f32x4_mul(qv, kv));
+    }
+    f32x4_extract_lane::<0>(acc)
+        + f32x4_extract_lane::<1>(acc)
+        + f32x4_extract_lane::<2>(acc)
+        + f32x4_extract_lane::<3>(acc)
 }
 
 /// NEON dot of two 32-element f32 vectors. 8 vfmaq into 4 partial
@@ -498,11 +558,28 @@ unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
     vaddvq_f32(acc)
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
 #[inline]
 unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
     for i in 0..Q8_0_BLOCK_SIZE {
         *out.add(i) += w * v[i];
+    }
+}
+
+/// wasm SIMD128 axpy: out[i] += w * v[i] for i in 0..32. 8 `f32x4`
+/// mul+add streaming load/store, `w` splat across lanes — no reduction, so
+/// bit-identical to the scalar loop.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
+    use core::arch::wasm32::*;
+    let w_v = f32x4_splat(w);
+    let v_ptr = v.as_ptr();
+    for i in 0..8 {
+        let off = i * 4;
+        let vv = v128_load(v_ptr.add(off) as *const v128);
+        let ov = v128_load(out.add(off) as *const v128);
+        v128_store(out.add(off) as *mut v128, f32x4_add(ov, f32x4_mul(w_v, vv)));
     }
 }
 
@@ -522,6 +599,28 @@ unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
         let nv = vfmaq_f32(ov, w_v, vv);
         vst1q_f32(out.add(off), nv);
     }
+}
+
+/// Host-parallel Q8 flash attention — native binding.
+///
+/// On native targets there is no wasm host/guest split: the serial kernel
+/// below already runs with full thread access, so returning 0 tells the Haxe
+/// caller to fall through to `flashAttnDecodeQ8` and native behaviour is
+/// unchanged. The wasm build instead resolves this method against the main
+/// runtime module's `rayzor_tensor_flash_attn_q8_host` dispatcher, which bands
+/// the attention across the embedder's otherwise-idle native worker pool.
+/// Gated off wasm so the side-module never exports a shadowing copy.
+#[cfg(not(target_arch = "wasm32"))]
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_flash_attn_q8_host(
+    _k_handle: i64,
+    _q_ptr: i64,
+    _v_handle: i64,
+    _cache_len: i64,
+    _num_q_heads: i64,
+    _scale: f64,
+) -> i64 {
+    0
 }
 
 #[no_mangle]

@@ -51,4 +51,17 @@ extern class KvCacheQ8 {
     public function flashAttnDecodeQ8(
         q:Tensor, vCache:KvCacheQ8, cacheLen:Int, numQHeads:Int, scale:Float
     ):Tensor;
+
+    /**
+     * Host-parallel variant of [flashAttnDecodeQ8]. Same ABI and numerics, but
+     * on the wasm run target the work is banded across the embedder's native
+     * worker pool (otherwise idle while the guest computes attention serially).
+     *
+     * Returns null when no host pool is available — a browser build, the
+     * `RAYZOR_WASM_NO_HOST_MATMUL=1` opt-out, or any native target — so callers
+     * must fall back to [flashAttnDecodeQ8] on a null result.
+     */
+    public function flashAttnDecodeQ8Host(
+        q:Tensor, vCache:KvCacheQ8, cacheLen:Int, numQHeads:Int, scale:Float
+    ):Tensor;
 }
