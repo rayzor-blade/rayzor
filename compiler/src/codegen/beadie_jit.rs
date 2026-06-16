@@ -57,8 +57,17 @@ use crate::ir::{IrFunctionId, IrModule};
 fn tier_event_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var_os("RAYZOR_PROFILE_DECODE").is_some()
-            || std::env::var_os("RAYZOR_PROFILE_TIER_EVENTS").is_some()
+        // Value-gated: `=0`/`=false`/empty/unset all mean OFF (the old
+        // `is_some()` treated `=0` as enabled).
+        let on = |k: &str| {
+            std::env::var(k)
+                .map(|v| {
+                    let v = v.trim();
+                    !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(false)
+        };
+        on("RAYZOR_PROFILE_DECODE") || on("RAYZOR_PROFILE_TIER_EVENTS")
     })
 }
 

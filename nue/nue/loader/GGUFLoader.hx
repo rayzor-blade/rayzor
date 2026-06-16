@@ -78,14 +78,24 @@ class GGUFLoader implements ModelLoader {
         return GGUFTokenizer.build(reader);
     }
 
+    /** Truthy-env check: ON iff the var is set to a value that isn't
+     *  `0`/`false`/empty (so `=0` disables, matching the rest of the CLI). */
+    static function _profEnvOn(name:String):Bool {
+        var v = Sys.getEnv(name);
+        if (v == null) return false;
+        var lv = v.toLowerCase();
+        return lv != "0" && lv != "" && lv != "false" && lv != "no";
+    }
+
     /**
      * Open a GGUF once and return the model + tokenizer together.
      * Cheaper than calling `load(path)` + `tokenizer(path)` separately
      * (which would parse the header twice).
      */
     public function loadWithTokenizer(path:String, maxCtx:Int = 0):LoadedModel {
-        var profileOn = Sys.getEnv("RAYZOR_PROFILE_LOAD") != null
-            || Sys.getEnv("RAYZOR_PROFILE_DECODE") != null;
+        // VALUE-gated: `=0`/`=false`/empty/unset mean OFF (not `!= null`).
+        var profileOn = _profEnvOn("RAYZOR_PROFILE_LOAD")
+            || _profEnvOn("RAYZOR_PROFILE_DECODE");
         var totalStart = profileOn ? Sys.time() : 0.0;
         var phaseStart = totalStart;
         var fileS = 0.0;

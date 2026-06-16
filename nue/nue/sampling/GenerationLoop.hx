@@ -62,12 +62,16 @@ class GenerationLoop {
      */
     public function generate(prompt:String, onToken:Int->String->Bool):String {
         // Per-phase decode timing, env-gated. When `RAYZOR_PROFILE_DECODE`
-        // is set we accumulate wall time on each Haxe-source-level phase
+        // is truthy we accumulate wall time on each Haxe-source-level phase
         // (forward, lastRow, sample, decode_str, free_logits) and emit a
         // single `[profile-decode]` line at exit. When enabled, also
         // records per-step wall time so long runs can report tail latency
         // (p50/p95/p99/max) instead of only final tok/s.
-        var _profileOn = Sys.getEnv("RAYZOR_PROFILE_DECODE") != null;
+        // VALUE-gated, not presence-gated: `=0`/`=false`/empty/unset all mean
+        // OFF (the old `!= null` treated `=0` as enabled — on both backends).
+        var _pdEnv = Sys.getEnv("RAYZOR_PROFILE_DECODE");
+        var _profileOn = _pdEnv != null && _pdEnv != "0" && _pdEnv != ""
+            && _pdEnv.toLowerCase() != "false";
         var _pForward = 0.0;
         var _pLastRow = 0.0;
         var _pSample = 0.0;
