@@ -10,7 +10,6 @@
 
 pub mod gguf_wasm;
 pub mod kernels;
-pub mod kv_q8;
 pub mod qtensor;
 pub mod tensor;
 pub mod type_system;
