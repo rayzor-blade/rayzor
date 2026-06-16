@@ -306,19 +306,44 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
             + i32x4_extract_lane::<3>(v)
     }
 
-    let d = f16::from_bits(weight.d).to_f32();
-    let dmin = f16::from_bits(weight.dmin).to_f32();
+    // Fold x.d into d/dmin up front and accumulate the scaled dot in i32,
+    // converting to f32 exactly ONCE at the end — this mirrors the native fast
+    // kernel `dot_q4_k_q8_kblock_fast` (sdot.rs) and is bit-identical to it.
+    // The previous structure converted each sub-block's sdot to f32 and folded
+    // it into a serial f32 `acc` INSIDE the loop (8 i32->f32 converts + a
+    // ~4-cycle FP dependency chain per super-block, the dominant ILP killer per
+    // the bottleneck analysis). The i32 form exposes far more ILP. Correctness:
+    // the per-sub-block i32 sdot is exact (relaxed_dot lowers to NEON SDOT),
+    // integer sums are associative, and the final f32 fold order
+    // (`-(dmin * Σ min)` then `+ (d * Σ scaled-dot)`) matches the native kernel
+    // verbatim, so the result equals the in-production host-fallback path.
+    let d = x.d * f16::from_bits(weight.d).to_f32();
+    let dmin = x.d * f16::from_bits(weight.dmin).to_f32();
     let header = weight.scales;
-    let mask = u8x16_splat(0x0F);
 
-    // Raw pointers. Both bases can be under-aligned for v128: Q4KMBlock is
-    // repr(packed), and Q8KBlock.qs sits at offset 4 (after the f32 `d`) so
-    // it is only 4-aligned. `v128_load` is `*m` — it ASSUMES 16-byte
-    // alignment, which is UB on these pointers; opt-level >= 2 exploits the
-    // assumption and traps (opt="s" happened to mask it). Use
-    // `read_unaligned`, which lowers to the same wasm `v128.load` (wasm
-    // never traps on misalignment — the align is only a hint) but carries
-    // no alignment precondition.
+    // Decode the 12-byte header ONCE into 8 (scale, min) pairs and index in the
+    // loop — vs the old 8 in-loop `q4_k_get_scale_min` calls. Same llama.cpp
+    // decode, so identical values.
+    let mut scales_arr = [0u8; 8];
+    let mut mins_arr = [0u8; 8];
+    for s in 0..8 {
+        let (sc6, mn6) = q4_k_get_scale_min(s, &header);
+        scales_arr[s] = sc6;
+        mins_arr[s] = mn6;
+    }
+
+    // Min term ONCE: Σ_s (bsum_s · min_s) in i32, folded as `-(dmin · Σ)`.
+    let mut min_term: i32 = 0;
+    for s in 0..8 {
+        let bsum = x.bsums[2 * s] as i32 + x.bsums[2 * s + 1] as i32;
+        min_term += bsum * mins_arr[s] as i32;
+    }
+    let mut sumf = -(dmin * min_term as f32);
+
+    let mask = u8x16_splat(0x0F);
+    // Raw pointers; both bases can be under-aligned for v128 (Q4KMBlock is
+    // repr(packed); Q8KBlock.qs is 4-aligned). `read_unaligned` lowers to the
+    // same wasm `v128.load` (the align is only a hint) with no precondition.
     let w_base = core::ptr::addr_of!(weight.qs) as *const u8;
     let x_base = x.qs.as_ptr() as *const u8;
     #[inline(always)]
@@ -326,7 +351,7 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         core::ptr::read_unaligned(p as *const v128)
     }
 
-    let mut acc = 0.0f32;
+    let mut sumi: i32 = 0;
     for p in 0..4usize {
         let s_lo = 2 * p; // low-nibble sub-block
         let s_hi = 2 * p + 1; // high-nibble sub-block
@@ -339,11 +364,8 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
             let high = u8x16_shr(w, 4); // logical >> 4 → 0..15
             let xl = unsafe { loadu(x_base.add(s_lo * 32 + h * 16)) };
             let xh = unsafe { loadu(x_base.add(s_hi * 32 + h * 16)) };
-            // Activation is the signed-i8 operand `a`; the 0..15 nibble is the
-            // i7 operand `b` (top bit clear -> deterministic). The op folds the
-            // accumulate into `c`. Bit-identical to the extend+dot_i16x8 path:
-            // hsum sums all lanes regardless of grouping, and the i8xi7 products
-            // never saturate the i16 intermediate.
+            // Activation is the signed-i8 operand; the 0..15 nibble is the i7
+            // operand (top bit clear). Lowers to NEON SDOT under FEAT_DotProd.
             #[cfg(target_feature = "relaxed-simd")]
             {
                 acc_lo = i32x4_relaxed_dot_i8x16_i7x16_add(xl, low, acc_lo);
@@ -355,22 +377,13 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
                 acc_hi = i32x4_add(acc_hi, dot16(high, xh));
             }
         }
-        let sdot_lo = hsum(acc_lo);
-        let sdot_hi = hsum(acc_hi);
-
-        let (sc6_lo, mn6_lo) = q4_k_get_scale_min(s_lo, &header);
-        let sub_scale_lo = d * sc6_lo as f32;
-        let sub_min_lo = dmin * mn6_lo as f32;
-        let bsum_lo = x.bsums[2 * s_lo] as i32 + x.bsums[2 * s_lo + 1] as i32;
-        acc += sub_scale_lo * (sdot_lo as f32) - sub_min_lo * (bsum_lo as f32);
-
-        let (sc6_hi, mn6_hi) = q4_k_get_scale_min(s_hi, &header);
-        let sub_scale_hi = d * sc6_hi as f32;
-        let sub_min_hi = dmin * mn6_hi as f32;
-        let bsum_hi = x.bsums[2 * s_hi] as i32 + x.bsums[2 * s_hi + 1] as i32;
-        acc += sub_scale_hi * (sdot_hi as f32) - sub_min_hi * (bsum_hi as f32);
+        // i32 accumulate: reduce each sub-block's dot, scale by its 6-bit
+        // scale, sum into `sumi`. No per-sub-block f32 convert / serial chain.
+        sumi += hsum(acc_lo) * scales_arr[s_lo] as i32;
+        sumi += hsum(acc_hi) * scales_arr[s_hi] as i32;
     }
-    x.d * acc
+    sumf += d * sumi as f32;
+    sumf
 }
 
 /// Encode 256 f32 weights into a single Q4_K_M super-block.
