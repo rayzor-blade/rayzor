@@ -824,10 +824,22 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     let x = vld1q_s8(q.add(o));
                     let lo = vmovl_s8(vget_low_s8(x));
                     let hi = vmovl_s8(vget_high_s8(x));
-                    vst1q_f32(d.add(o), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), sv));
-                    vst1q_f32(d.add(o + 4), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sv));
-                    vst1q_f32(d.add(o + 8), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), sv));
-                    vst1q_f32(d.add(o + 12), vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sv));
+                    vst1q_f32(
+                        d.add(o),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), sv),
+                    );
+                    vst1q_f32(
+                        d.add(o + 4),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sv),
+                    );
+                    vst1q_f32(
+                        d.add(o + 8),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), sv),
+                    );
+                    vst1q_f32(
+                        d.add(o + 12),
+                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sv),
+                    );
                 }
             }
             #[cfg(not(target_arch = "aarch64"))]
@@ -871,7 +883,10 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                 let vp = v.as_ptr();
                 for i in 0..8 {
                     let o = i * 4;
-                    vst1q_f32(out.add(o), vfmaq_f32(vld1q_f32(out.add(o)), wv, vld1q_f32(vp.add(o))));
+                    vst1q_f32(
+                        out.add(o),
+                        vfmaq_f32(vld1q_f32(out.add(o)), wv, vld1q_f32(vp.add(o))),
+                    );
                 }
             }
             #[cfg(not(target_arch = "aarch64"))]
@@ -882,74 +897,78 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             }
         }
 
-        rayzor_runtime::worker_pool::global().parallel_rows(num_kv_heads, threads, move |lo, hi| {
-            let mut scores = std::vec![0.0f32; group * cache_len];
-            let mut gmax = std::vec![f32::NEG_INFINITY; group];
-            let mut kb = [0.0f32; BS];
-            let mut vb = [0.0f32; BS];
-            for kv_head in lo..hi {
-                let gstart = kv_head * group;
-                for s in scores.iter_mut() {
-                    *s = 0.0;
-                }
-                for m in gmax.iter_mut() {
-                    *m = f32::NEG_INFINITY;
-                }
-                // K step: dequant each block once, dot against the group's heads.
-                for l in 0..cache_len {
-                    let krow = (k_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
-                    for b in 0..blocks_per_head {
-                        unsafe { dq(krow.add(b * BB), &mut kb) };
+        rayzor_runtime::worker_pool::global().parallel_rows(
+            num_kv_heads,
+            threads,
+            move |lo, hi| {
+                let mut scores = std::vec![0.0f32; group * cache_len];
+                let mut gmax = std::vec![f32::NEG_INFINITY; group];
+                let mut kb = [0.0f32; BS];
+                let mut vb = [0.0f32; BS];
+                for kv_head in lo..hi {
+                    let gstart = kv_head * group;
+                    for s in scores.iter_mut() {
+                        *s = 0.0;
+                    }
+                    for m in gmax.iter_mut() {
+                        *m = f32::NEG_INFINITY;
+                    }
+                    // K step: dequant each block once, dot against the group's heads.
+                    for l in 0..cache_len {
+                        let krow = (k_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
+                        for b in 0..blocks_per_head {
+                            unsafe { dq(krow.add(b * BB), &mut kb) };
+                            for gi in 0..group {
+                                let qrow = (q_base + (gstart + gi) * head_dim * 4) as *const f32;
+                                let p = unsafe { dotb(qrow.add(b * BS), &kb) };
+                                scores[gi * cache_len + l] += p;
+                            }
+                        }
                         for gi in 0..group {
-                            let qrow = (q_base + (gstart + gi) * head_dim * 4) as *const f32;
-                            let p = unsafe { dotb(qrow.add(b * BS), &kb) };
-                            scores[gi * cache_len + l] += p;
+                            let s = scores[gi * cache_len + l] * scale;
+                            scores[gi * cache_len + l] = s;
+                            if s > gmax[gi] {
+                                gmax[gi] = s;
+                            }
                         }
                     }
+                    // Softmax (libm::expf — matches the guest's fmath::exp on wasm32).
                     for gi in 0..group {
-                        let s = scores[gi * cache_len + l] * scale;
-                        scores[gi * cache_len + l] = s;
-                        if s > gmax[gi] {
-                            gmax[gi] = s;
+                        let mg = gmax[gi];
+                        let row = &mut scores[gi * cache_len..(gi + 1) * cache_len];
+                        let mut denom = 0.0f32;
+                        for s in row.iter_mut() {
+                            let e = libm::expf(*s - mg);
+                            *s = e;
+                            denom += e;
+                        }
+                        let inv = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+                        for s in row.iter_mut() {
+                            *s *= inv;
+                        }
+                    }
+                    // Zero the group's output rows.
+                    for gi in 0..group {
+                        let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
+                        for d in 0..head_dim {
+                            unsafe { *orow.add(d) = 0.0 };
+                        }
+                    }
+                    // V step: dequant each block once, axpy into the group's heads.
+                    for l in 0..cache_len {
+                        let vrow = (v_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
+                        for b in 0..blocks_per_head {
+                            unsafe { dq(vrow.add(b * BB), &mut vb) };
+                            for gi in 0..group {
+                                let w = scores[gi * cache_len + l];
+                                let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
+                                unsafe { axpyb(orow.add(b * BS), w, &vb) };
+                            }
                         }
                     }
                 }
-                // Softmax (libm::expf — matches the guest's fmath::exp on wasm32).
-                for gi in 0..group {
-                    let mg = gmax[gi];
-                    let row = &mut scores[gi * cache_len..(gi + 1) * cache_len];
-                    let mut denom = 0.0f32;
-                    for s in row.iter_mut() {
-                        let e = libm::expf(*s - mg);
-                        *s = e;
-                        denom += e;
-                    }
-                    let inv = if denom > 0.0 { 1.0 / denom } else { 0.0 };
-                    for s in row.iter_mut() {
-                        *s *= inv;
-                    }
-                }
-                // Zero the group's output rows.
-                for gi in 0..group {
-                    let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
-                    for d in 0..head_dim {
-                        unsafe { *orow.add(d) = 0.0 };
-                    }
-                }
-                // V step: dequant each block once, axpy into the group's heads.
-                for l in 0..cache_len {
-                    let vrow = (v_base + l * row_bytes + kv_head * head_dim_bytes) as *const u8;
-                    for b in 0..blocks_per_head {
-                        unsafe { dq(vrow.add(b * BB), &mut vb) };
-                        for gi in 0..group {
-                            let w = scores[gi * cache_len + l];
-                            let orow = (out_base + (gstart + gi) * head_dim * 4) as *mut f32;
-                            unsafe { axpyb(orow.add(b * BS), w, &vb) };
-                        }
-                    }
-                }
-            }
-        });
+            },
+        );
         1
     }
 
@@ -2045,8 +2064,19 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     };
                     let handled = unsafe {
                         host_parallel_flash_q8(
-                            base, k_off, v_off, q_off, out_off, cache_len, num_q_heads,
-                            num_kv_heads, head_dim, head_dim_bytes, row_bytes, scale, nthreads,
+                            base,
+                            k_off,
+                            v_off,
+                            q_off,
+                            out_off,
+                            cache_len,
+                            num_q_heads,
+                            num_kv_heads,
+                            head_dim,
+                            head_dim_bytes,
+                            row_bytes,
+                            scale,
+                            nthreads,
                         )
                     };
                     results[0] = Val::I32(handled);
@@ -2065,12 +2095,16 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     // calls dispatch into the side instance instead of silently returning null.
     // If no side-module is loaded at run time (capability absent), the
     // trampoline returns 0 and the Haxe side falls back to the F32 KV cache.
+    // NOTE: rayzor_tensor_flash_attn_decode_q8 is deliberately ABSENT — the main
+    // runtime-wasm module now exports a PARALLEL in-guest implementation
+    // (qtensor.rs, bands kv_heads across the worker pool), which the linker
+    // resolves ahead of the side-module's serial copy. Keep the cache-lifecycle
+    // fns trampolined to the side module (it owns the Q8 buffer).
     const Q8_SIDE_FNS: &[&str] = &[
         "rayzor_kv_cache_q8_alloc",
         "rayzor_kv_cache_q8_append",
         "rayzor_kv_cache_q8_dequant_view",
         "rayzor_kv_cache_q8_free",
-        "rayzor_tensor_flash_attn_decode_q8",
     ];
     for fname in Q8_SIDE_FNS {
         let func_ty = match rayzor_imports.iter().find(|(n, _)| n == fname) {
