@@ -331,6 +331,37 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     run_wasm_with_args(wasm_bytes, &[])
 }
 
+/// Host quant-matmul offload is OFF by default — the in-guest SIMD128 kernel is
+/// ~3x faster on M1 (the native host threads stream the quantized weights out of
+/// the wasm linear memory rather than native heap). Resolved once per process:
+///   RAYZOR_WASM_NO_HOST_MATMUL=1  -> in-guest (force off)
+///   RAYZOR_WASM_NO_HOST_MATMUL=0  -> host     (force on; restores the A/B toggle)
+///   RAYZOR_WASM_HOST_MATMUL=1     -> host     (opt-in alias for NO_HOST_MATMUL=0)
+///   unset                         -> in-guest (default)
+#[cfg(feature = "wasm-runtime")]
+fn wasm_host_matmul_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(
+        || match std::env::var("RAYZOR_WASM_NO_HOST_MATMUL").ok().as_deref() {
+            Some("1") => false,
+            Some("0") => true,
+            _ => std::env::var("RAYZOR_WASM_HOST_MATMUL").as_deref() == Ok("1"),
+        },
+    )
+}
+
+/// Host Q8 flash attention follows the matmul decision, unless
+/// RAYZOR_WASM_NO_HOST_FLASH=1 forces the guest flash kernel (isolated A/B).
+#[cfg(feature = "wasm-runtime")]
+fn wasm_host_flash_on() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        wasm_host_matmul_on() && std::env::var("RAYZOR_WASM_NO_HOST_FLASH").as_deref() != Ok("1")
+    })
+}
+
 /// Variant of `run_wasm` that threads CLI tail args (everything after `--` on
 /// the rayzor invocation) through to the sandbox. The args become visible to
 /// the Haxe program via `Sys.args()`, which lowers to a `haxe_sys_args` import
@@ -1980,16 +2011,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     // ~3.15x faster on M1 Pro (decode 29.9ms vs 94.2ms; two-point,
                     // prefill cancelled). The native host threads stream the
                     // quantized weights out of the wasm linear memory rather than
-                    // native heap, which costs ~2x per-flop even single-threaded
-                    // (host-1T 239ms vs in-guest-1T 117ms) — so the "native NEON
-                    // kernel via FFI" is a net loss here despite the faster kernel.
-                    // Browsers have no host pool and already fall through to the
-                    // guest kernel. Opt back in with RAYZOR_WASM_HOST_MATMUL=1
-                    // (may win on many-core hosts where the native pool scales
-                    // better, or once weights are mirrored to native heap).
-                    let host_on = std::env::var("RAYZOR_WASM_HOST_MATMUL").as_deref() == Ok("1")
-                        && std::env::var("RAYZOR_WASM_NO_HOST_MATMUL").as_deref() != Ok("1");
-                    if !host_on {
+                    // native heap, costing ~2x per-flop even single-threaded
+                    // (host-1T 239ms vs in-guest-1T 117ms). See wasm_host_matmul_on
+                    // for the env controls (NO_HOST_MATMUL=0 or HOST_MATMUL=1 force
+                    // the host path back on for an A/B).
+                    if !wasm_host_matmul_on() {
                         results[0] = Val::I32(0);
                         return Ok(());
                     }
@@ -2039,16 +2065,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                 "rayzor_host_flash_attn_q8_par",
                 fty,
                 move |mut caller, params, results| {
-                    // Host offload defaults OFF (see rayzor_host_qmatmul_par):
-                    // the in-guest path is 3.15x faster overall on M1 Pro. Host
-                    // flash rides the same opt-in so the native pool isn't left
-                    // spinning for attention while the in-guest matmul runs.
-                    // Enable with RAYZOR_WASM_HOST_MATMUL=1; NO_HOST_FLASH=1 still
-                    // forces the guest flash kernel for an isolated attention A/B.
-                    let host_on = std::env::var("RAYZOR_WASM_HOST_MATMUL").as_deref() == Ok("1")
-                        && std::env::var("RAYZOR_WASM_NO_HOST_MATMUL").as_deref() != Ok("1")
-                        && std::env::var("RAYZOR_WASM_NO_HOST_FLASH").as_deref() != Ok("1");
-                    if !host_on {
+                    // Host flash rides the matmul host decision (see
+                    // wasm_host_flash_on) so the native pool isn't left spinning
+                    // for attention while the in-guest matmul runs;
+                    // NO_HOST_FLASH=1 forces the guest flash kernel for an
+                    // isolated attention A/B.
+                    if !wasm_host_flash_on() {
                         results[0] = Val::I32(0);
                         return Ok(());
                     }
