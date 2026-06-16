@@ -155,12 +155,38 @@ mod alloc_track {
     static LAST_MB: AtomicI64 = AtomicI64::new(0);
     static PRINTING: AtomicBool = AtomicBool::new(false);
 
+    // Net-live bytes bucketed by allocation size, to attribute WHERE the heap
+    // growth is: [<64, <256, <1K, <4K, <16K, <256K, <1M, >=1M]. Small buckets
+    // dominated -> object/string/array leak; large buckets -> tensor/KV/buffer.
+    static BUCKETS: [AtomicI64; 8] = [const { AtomicI64::new(0) }; 8];
+    // Live COUNT of >=1MiB blocks + most-recent such size, to identify the leaker.
+    static BIG_COUNT: AtomicI64 = AtomicI64::new(0);
+    static BIG_LAST: AtomicI64 = AtomicI64::new(0);
+
+    fn bucket_of(size: usize) -> usize {
+        match size {
+            0..=63 => 0,
+            64..=255 => 1,
+            256..=1023 => 2,
+            1024..=4095 => 3,
+            4096..=16383 => 4,
+            16384..=262143 => 5,
+            262144..=1048575 => 6,
+            _ => 7,
+        }
+    }
+
     pub struct Tracking;
 
     unsafe impl GlobalAlloc for Tracking {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             let p = System.alloc(l);
             if !p.is_null() {
+                BUCKETS[bucket_of(l.size())].fetch_add(l.size() as i64, Ordering::Relaxed);
+                if l.size() >= (1 << 20) {
+                    BIG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    BIG_LAST.store(l.size() as i64, Ordering::Relaxed);
+                }
                 note(LIVE.fetch_add(l.size() as i64, Ordering::Relaxed) + l.size() as i64);
             }
             p
@@ -168,17 +194,28 @@ mod alloc_track {
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
             let p = System.alloc_zeroed(l);
             if !p.is_null() {
+                BUCKETS[bucket_of(l.size())].fetch_add(l.size() as i64, Ordering::Relaxed);
+                if l.size() >= (1 << 20) {
+                    BIG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    BIG_LAST.store(l.size() as i64, Ordering::Relaxed);
+                }
                 note(LIVE.fetch_add(l.size() as i64, Ordering::Relaxed) + l.size() as i64);
             }
             p
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             System.dealloc(p, l);
+            BUCKETS[bucket_of(l.size())].fetch_sub(l.size() as i64, Ordering::Relaxed);
+            if l.size() >= (1 << 20) {
+                BIG_COUNT.fetch_sub(1, Ordering::Relaxed);
+            }
             note(LIVE.fetch_sub(l.size() as i64, Ordering::Relaxed) - l.size() as i64);
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
             let np = System.realloc(p, l, new);
             if !np.is_null() {
+                BUCKETS[bucket_of(l.size())].fetch_sub(l.size() as i64, Ordering::Relaxed);
+                BUCKETS[bucket_of(new)].fetch_add(new as i64, Ordering::Relaxed);
                 note(
                     LIVE.fetch_add(new as i64 - l.size() as i64, Ordering::Relaxed) + new as i64
                         - l.size() as i64,
@@ -205,32 +242,61 @@ mod alloc_track {
         }
     }
 
+    // itoa: append a decimal u64 to buf at n, return new n. No heap use.
+    unsafe fn append_u64(buf: &mut [u8], mut n: usize, mut v: u64) -> usize {
+        if v == 0 {
+            buf[n] = b'0';
+            return n + 1;
+        }
+        let mut tmp = [0u8; 20];
+        let mut t = 0;
+        while v > 0 {
+            tmp[t] = b'0' + (v % 10) as u8;
+            v /= 10;
+            t += 1;
+        }
+        while t > 0 {
+            t -= 1;
+            buf[n] = tmp[t];
+            n += 1;
+        }
+        n
+    }
+
     // itoa + raw stderr write; no heap use, so it can't re-enter the allocator.
     unsafe fn print_live(mb: i64) {
-        let mut buf = [0u8; 40];
+        let mut buf = [0u8; 200];
         let mut n = 0;
         for &c in b"[alloc-track] live_mb=" {
             buf[n] = c;
             n += 1;
         }
-        let mut v = mb as u64;
-        if v == 0 {
-            buf[n] = b'0';
+        n = append_u64(&mut buf, n, mb as u64);
+        // Per-bucket net-live in MB: [<64,<256,<1K,<4K,<16K,<256K,<1M,>=1M]
+        for &c in b" mb_by_size=[" {
+            buf[n] = c;
             n += 1;
-        } else {
-            let mut tmp = [0u8; 20];
-            let mut t = 0;
-            while v > 0 {
-                tmp[t] = b'0' + (v % 10) as u8;
-                v /= 10;
-                t += 1;
-            }
-            while t > 0 {
-                t -= 1;
-                buf[n] = tmp[t];
+        }
+        for i in 0..8 {
+            if i > 0 {
+                buf[n] = b',';
                 n += 1;
             }
+            let bmb = (BUCKETS[i].load(Ordering::Relaxed) / (1024 * 1024)).max(0) as u64;
+            n = append_u64(&mut buf, n, bmb);
         }
+        buf[n] = b']';
+        n += 1;
+        for &c in b" big_n=" {
+            buf[n] = c;
+            n += 1;
+        }
+        n = append_u64(&mut buf, n, BIG_COUNT.load(Ordering::Relaxed).max(0) as u64);
+        for &c in b" big_last=" {
+            buf[n] = c;
+            n += 1;
+        }
+        n = append_u64(&mut buf, n, BIG_LAST.load(Ordering::Relaxed).max(0) as u64);
         buf[n] = b'\n';
         n += 1;
         crate::wasi_write(2, buf.as_ptr(), n);
@@ -1453,6 +1519,80 @@ pub extern "C" fn rayzor_realloc(ptr: i32, new_size: i32) -> i32 {
     new_ptr
 }
 
+// ── Object allocator: size-prefix header so a size-less Free{ptr} can reclaim ─
+//
+// The compiler emits `IrInstruction::Free { ptr }` (only a pointer, no size) for
+// non-escaping, dominating, entry-block malloc-class objects — class instances
+// and closures (insert_free.rs). Native frees them with a size-less libc free,
+// but wasm's `std::alloc::dealloc` REQUIRES the Layout. These three functions
+// back the compiler's `malloc`/`free`/`realloc` imports (linker aliases →
+// rayzor_obj_*) and carry the block's total size in an 8-byte header PREPENDED
+// to each block: `rayzor_obj_malloc` returns raw+8, stores the size at raw;
+// `rayzor_obj_free` reads raw = ptr-8.
+//
+// Worker-safe BY CONSTRUCTION: no shared mutable state, no FFI — a pure in-guest
+// leaf op. (A prior attempt used a shared in-guest size *table* which worker
+// stack-allocs raced into corruption; a per-block header has no such hazard.)
+// This is the same self-describing-header pattern `rayzor_anon_drop` uses.
+//
+// Kept SEPARATE from the bare `rayzor_malloc`/`rayzor_free` (which the HOST and
+// worker-stack path call directly, and which `haxe_bytes_free` frees) so adding
+// the header has ZERO blast radius on Bytes / host allocations: those never get
+// a header and their direct deallocs stay correct. The 8-byte header keeps the
+// align-8 invariant rt_alloc guarantees, so the returned raw+8 is 8-aligned.
+const OBJ_HEADER: i32 = 8;
+
+#[no_mangle]
+pub extern "C" fn rayzor_obj_malloc(size: i32) -> i32 {
+    if size <= 0 {
+        return 0;
+    }
+    let total = size + OBJ_HEADER;
+    let raw = rt_alloc(total as usize);
+    if raw == 0 {
+        return 0;
+    }
+    unsafe {
+        // Store the total block size in the header (read back by rayzor_obj_free).
+        *(raw as *mut u32) = total as u32;
+    }
+    raw + OBJ_HEADER
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_obj_free(ptr: i32) {
+    if ptr <= 0 {
+        return;
+    }
+    let raw = ptr - OBJ_HEADER;
+    unsafe {
+        let total = *(raw as *const u32) as usize;
+        let layout = Layout::from_size_align_unchecked(total, 8);
+        dealloc(raw as *mut u8, layout);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_obj_realloc(ptr: i32, new_size: i32) -> i32 {
+    if new_size <= 0 {
+        return 0;
+    }
+    let new_ptr = rayzor_obj_malloc(new_size);
+    if new_ptr == 0 || ptr <= 0 {
+        return new_ptr;
+    }
+    unsafe {
+        let raw = ptr - OBJ_HEADER;
+        let old_total = *(raw as *const u32) as usize;
+        let old_payload = old_total.saturating_sub(OBJ_HEADER as usize);
+        // Copy min(old_payload, new_size) so a shrink never over-reads the old block.
+        let n = old_payload.min(new_size as usize);
+        ptr::copy_nonoverlapping(ptr as *const u8, new_ptr as *mut u8, n);
+    }
+    rayzor_obj_free(ptr);
+    new_ptr
+}
+
 // ============================================================================
 // Section 10: Additional String Functions
 // ============================================================================
@@ -2421,8 +2561,23 @@ pub extern "C" fn rayzor_anon_copy(obj: i32) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn rayzor_anon_drop(_obj: i32) {
-    // rt_alloc is currently arena-style for wasm; keep drops as no-ops.
+pub extern "C" fn rayzor_anon_drop(obj: i32) {
+    // Real single-owner free. rt_alloc is dlmalloc (std::alloc), NOT arena —
+    // dealloc reclaims. `rayzor_anon_clone` deep-copies into an independent
+    // buffer, so every anon handle is the sole owner of its block and a
+    // single-owner free is sound (no refcount needed). InsertFreePass only
+    // emits this drop for non-escaping, dominating, entry-block allocations,
+    // so `obj` is provably dead here. Reconstruct the exact `rayzor_anon_new`
+    // layout from the header's field_count (align 8, matching rt_alloc).
+    if obj == 0 {
+        return;
+    }
+    unsafe {
+        let field_count = anon_field_count(obj) as usize;
+        let size = (ANON_HEADER_BYTES + field_count.saturating_mul(8)).max(ANON_HEADER_BYTES);
+        let layout = Layout::from_size_align_unchecked(size, 8);
+        dealloc(obj as *mut u8, layout);
+    }
 }
 
 /// Get a field by index from an anonymous object.
