@@ -1826,7 +1826,7 @@ impl CraneliftBackend {
         builder
             .ins()
             .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
-        builder.finalize();
+        builder.finalize(self.module.isa().frontend_config());
 
         self.module
             .define_function(func_id, &mut self.ctx)
@@ -2008,7 +2008,7 @@ impl CraneliftBackend {
                 1, // 1-byte alignment
             ));
             let one = builder.ins().iconst(types::I8, 1);
-            builder.ins().stack_store(one, slot, 0);
+            builder.ins().stack_store(types::I64, one, slot, 0);
             self.liveness_slots.insert(*id, slot);
         }
 
@@ -2208,7 +2208,7 @@ impl CraneliftBackend {
         }
 
         // Finalize the function
-        builder.finalize();
+        builder.finalize(self.module.isa().frontend_config());
 
         // Print Cranelift IR if debug mode
         if cfg!(debug_assertions) {
@@ -2700,7 +2700,7 @@ impl CraneliftBackend {
                 // entry block by `compile_function` before translation.
                 let slot = Self::get_liveness_slot(*src, liveness_slots);
                 let zero = builder.ins().iconst(types::I8, 0);
-                builder.ins().stack_store(zero, slot, 0);
+                builder.ins().stack_store(types::I64, zero, slot, 0);
             }
 
             IrInstruction::CheckLive { src, location } => {
@@ -2708,7 +2708,7 @@ impl CraneliftBackend {
                 // If zero, call rayzor_panic_use_after_move(name_ptr, name_len, line)
                 // and trap. Otherwise continue at `live_block`.
                 let slot = Self::get_liveness_slot(*src, liveness_slots);
-                let live_byte = builder.ins().stack_load(types::I8, slot, 0);
+                let live_byte = builder.ins().stack_load(types::I64, types::I8, slot, 0);
 
                 let live_block = builder.create_block();
                 let trap_block = builder.create_block();
@@ -4986,8 +4986,8 @@ impl CraneliftBackend {
                 bytes,
                 align,
             ));
-            builder.ins().stack_store(value, slot, 0);
-            builder.ins().stack_load(ty, slot, 0)
+            builder.ins().stack_store(types::I64, value, slot, 0);
+            builder.ins().stack_load(types::I64, ty, slot, 0)
         } else {
             value
         }

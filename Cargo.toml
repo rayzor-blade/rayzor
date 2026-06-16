@@ -73,10 +73,10 @@ opt-level = 2
 # and wasmtime silently falls back to the Pulley interpreter (~50x
 # slower). Drop this block once 0.133 lands on crates.io.
 [patch.crates-io]
-cranelift = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
-cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", branch = "release-46.0.0" }
+cranelift = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
