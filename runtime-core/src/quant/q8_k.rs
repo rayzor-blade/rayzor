@@ -200,7 +200,7 @@ fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
         }
         max_abs = vmaxvq_f32(vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3)));
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
     {
         for &v in src {
             let a = v.abs();
@@ -208,6 +208,24 @@ fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
                 max_abs = a;
             }
         }
+    }
+    // wasm SIMD128 abs-max: 4-lane parallel f32x4_max of |x|, then a lane fold.
+    // `max` is associative/commutative (no NaN in activations), so the winning
+    // f32 is bit-identical to the scalar sequential reduction.
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let pa = src.as_ptr();
+        let mut m = f32x4_splat(0.0);
+        let mut i = 0;
+        while i < 256 {
+            m = f32x4_max(m, f32x4_abs(v128_load(pa.add(i) as *const v128)));
+            i += 4;
+        }
+        max_abs = f32x4_extract_lane::<0>(m)
+            .max(f32x4_extract_lane::<1>(m))
+            .max(f32x4_extract_lane::<2>(m))
+            .max(f32x4_extract_lane::<3>(m));
     }
 
     // Degenerate block: zero quants, scale=0, bsums=0. Matches llama.cpp
@@ -248,7 +266,7 @@ fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
             bsums[s] = vaddlvq_s8(b8);
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
     {
         for s in 0..16 {
             let mut sum: i32 = 0;
@@ -264,6 +282,59 @@ fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
             // representation (max |sum| = 16 × 127 = 2032 < 2^15, so this
             // never actually saturates for valid input but the cast keeps
             // the type clean).
+            bsums[s] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
+    }
+    // wasm SIMD128 quant: mirrors the NEON pass. wasm SIMD has no round-ties-
+    // away convert, so do it explicitly — trunc(x + copysign(0.5, x)) — which
+    // is bit-identical to scalar `roundf` for |x*inv_d| <= 127. Saturating
+    // i32->i16->i8 narrows mirror the NEON vqmovn chain; bsum sums the i32
+    // lanes (== the i8 values, all <=127) before narrowing.
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use core::arch::wasm32::*;
+        let pa = src.as_ptr();
+        let inv = f32x4_splat(inv_d);
+        let half = f32x4_splat(0.5);
+        let signmask = u32x4_splat(0x8000_0000);
+        #[inline(always)]
+        unsafe fn round_away(x: v128, half: v128, signmask: v128) -> v128 {
+            // x + copysign(0.5, x), then truncate toward zero.
+            let bias = v128_or(v128_and(x, signmask), half);
+            i32x4_trunc_sat_f32x4(f32x4_add(x, bias))
+        }
+        let qp = qs.as_mut_ptr();
+        for s in 0..16 {
+            let base = s * 16;
+            let q0 = round_away(
+                f32x4_mul(v128_load(pa.add(base) as *const v128), inv),
+                half,
+                signmask,
+            );
+            let q1 = round_away(
+                f32x4_mul(v128_load(pa.add(base + 4) as *const v128), inv),
+                half,
+                signmask,
+            );
+            let q2 = round_away(
+                f32x4_mul(v128_load(pa.add(base + 8) as *const v128), inv),
+                half,
+                signmask,
+            );
+            let q3 = round_away(
+                f32x4_mul(v128_load(pa.add(base + 12) as *const v128), inv),
+                half,
+                signmask,
+            );
+            let h0 = i16x8_narrow_i32x4(q0, q1);
+            let h1 = i16x8_narrow_i32x4(q2, q3);
+            let b8 = i8x16_narrow_i16x8(h0, h1);
+            v128_store(qp.add(base) as *mut v128, b8);
+            let ssum = i32x4_add(i32x4_add(q0, q1), i32x4_add(q2, q3));
+            let sum = i32x4_extract_lane::<0>(ssum)
+                + i32x4_extract_lane::<1>(ssum)
+                + i32x4_extract_lane::<2>(ssum)
+                + i32x4_extract_lane::<3>(ssum);
             bsums[s] = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
     }
