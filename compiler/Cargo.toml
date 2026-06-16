@@ -11,6 +11,10 @@ diagnostics = { path = "../diagnostics" }
 rayzor-runtime = { path = "../runtime", features = ["tcc-runtime"] }
 rayzor-runtime-core = { path = "../runtime-core" }
 rayzor-plugin = { path = "../plugin" }
+# Host-parallel Q8 flash attention (wasm_runner): f16 scale decode + the same
+# softmax exp (libm::expf) the wasm guest's fmath uses, for bit-equality.
+half = { version = "2", default-features = false }
+libm = "0.2"
 
 # Beadie — hot-function promotion broker for tier management.
 # Pinned to a git rev rather than crates.io: the batched-compile and

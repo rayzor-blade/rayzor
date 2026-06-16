@@ -175,9 +175,19 @@ class GQAttention implements Module {
         // the F32 dequant view. The kernel streams over Q8 K/V blocks,
         // dequantising into a 32-f32 stack buffer per block.
         if (seqQ == 1 && cache.useQ8) {
-            var ctx = cache.keysQ8.flashAttnDecodeQ8(
+            // Prefer the host-parallel kernel: on the wasm run target it bands
+            // attention across the embedder's native worker pool (otherwise idle
+            // during serial guest attention). Returns null off that path — a
+            // browser/no-host build or any native target — so fall back to the
+            // serial Q8 kernel, which has identical numerics.
+            var ctx = cache.keysQ8.flashAttnDecodeQ8Host(
                 q, cache.valuesQ8, cache.currentLen, numQHeads, scale
             );
+            if (ctx == null) {
+                ctx = cache.keysQ8.flashAttnDecodeQ8(
+                    q, cache.valuesQ8, cache.currentLen, numQHeads, scale
+                );
+            }
             if (ctx != null) {
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
