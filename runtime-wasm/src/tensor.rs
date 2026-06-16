@@ -263,6 +263,17 @@ pub(crate) unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
     }
     let data_bytes = numel * dtype_size(dtype);
 
+    #[cfg(feature = "alloc-track")]
+    if data_bytes >= (4 << 20) {
+        let mut v = [0i64; 9];
+        let k = ndim.min(8);
+        v[0] = data_bytes as i64;
+        for i in 0..k {
+            v[i + 1] = shape[i] as i64;
+        }
+        crate::rt_dbg_n("[bigtensor] bytes+dims", &v[..k + 1]);
+    }
+
     // Data buffer (zero-init).
     let data_layout = Layout::from_size_align(data_bytes.max(1), 16).unwrap();
     let data = alloc(data_layout);

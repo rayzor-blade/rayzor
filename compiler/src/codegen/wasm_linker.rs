@@ -605,9 +605,14 @@ impl LinkerCtx {
         // MIR stdlib wrapper names (e.g., `array_length`) to their runtime-wasm
         // implementations (e.g., `haxe_array_length`).
         let aliases: &[(&str, &str)] = &[
-            ("malloc", "rayzor_malloc"),
-            ("free", "rayzor_free"),
-            ("realloc", "rayzor_realloc"),
+            // The compiler's malloc/free/realloc route to the SIZE-PREFIX-HEADER
+            // allocator (rayzor_obj_*) so the size-less Free{ptr} can reclaim
+            // class instances/closures. The bare rayzor_malloc/free/realloc stay
+            // exported (RUNTIME_EXPORT_WHITELIST) for the host + worker-stack path
+            // and Bytes — those must NOT get a header.
+            ("malloc", "rayzor_obj_malloc"),
+            ("free", "rayzor_obj_free"),
+            ("realloc", "rayzor_obj_realloc"),
             // Array methods — MIR wrappers use bare `array_*` names
             ("array_length", "haxe_array_length"),
             ("array_push", "haxe_array_push_i64"),

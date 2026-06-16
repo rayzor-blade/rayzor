@@ -296,6 +296,11 @@ struct CompileCtx {
     /// Import index of `haxe_string_free` (frees a heap HaxeString's data buffer),
     /// when the string runtime is linked. `None` if strings aren't used by the module.
     string_free_idx: Option<u32>,
+    /// Import index of `free` (linker-aliased to the size-prefix-header
+    /// `rayzor_obj_free`). Used to lower `IrInstruction::Free { ptr }` to a real
+    /// reclamation — the wasm analogue of native's `call free(ptr)`. `None` if
+    /// the runtime allocator isn't linked.
+    free_idx: Option<u32>,
     /// Master kill-switch for the wasm reclamation pass. `RAYZOR_WASM_FREE=0` disables
     /// all emitted frees (for A/B + bisection); defaults to enabled.
     wasm_free_enabled: bool,
@@ -329,6 +334,7 @@ impl CompileCtx {
             indirect_target_functions: BTreeSet::new(),
             functions_with_env: BTreeSet::new(),
             string_free_idx: None,
+            free_idx: None,
             // Reclamation defaults ON; `RAYZOR_WASM_FREE=0` opts out for A/B + bisection.
             wasm_free_enabled: std::env::var("RAYZOR_WASM_FREE").as_deref() != Ok("0"),
         }
@@ -598,6 +604,18 @@ impl CompileCtx {
                 .or_insert_with(|| (vec![ValType::I32], vec![]));
         }
 
+        // Reclamation (Phase 1): force-import `free` (linker-aliased to the
+        // size-prefix-header rayzor_obj_free) so the backend can lower
+        // IrInstruction::Free{ptr} to a real reclamation. Gated on the allocator
+        // being linked (the module imports `malloc`). InsertFreePass emits Free
+        // only for non-escaping, dominating, entry-block malloc-class objects, so
+        // the dropped pointer is provably dead. Signature: (i32) -> ().
+        if self.wasm_free_enabled && import_entries.keys().any(|n| n == "malloc") {
+            import_entries
+                .entry("free".to_string())
+                .or_insert_with(|| (vec![ValType::I32], vec![]));
+        }
+
         // Phase 2: Create imports in deterministic name order (BTreeMap iterates sorted).
         // Build name→index map.
         let mut name_to_idx: BTreeMap<String, u32> = BTreeMap::new();
@@ -621,6 +639,7 @@ impl CompileCtx {
 
         // Cache the reclamation free-fn index for the FunctionLowerer.
         self.string_free_idx = self.import_name_to_idx.get("haxe_string_free").copied();
+        self.free_idx = self.import_name_to_idx.get("free").copied();
 
         // Phase 3: Map ALL IrFunctionIds to their import index via name lookup.
         // This is the key step — IDs resolve by NAME, not by iteration order.
@@ -2988,8 +3007,21 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
 
-            // === Free (no-op in Phase 1) ===
-            IrInstruction::Free { .. } => {}
+            // === Free — real reclamation via the size-prefix-header allocator ===
+            // Mirrors native's `call free(ptr)`. `free` is linker-aliased to
+            // rayzor_obj_free, which reads the 8-byte size header at ptr-8 and
+            // returns the block to dlmalloc. Worker-safe: no shared state, no FFI.
+            // InsertFreePass emits Free only for non-escaping, dominating,
+            // entry-block malloc-class objects, so `ptr` is provably dead.
+            // Gated by RAYZOR_WASM_FREE (free_idx is None when disabled/unlinked).
+            IrInstruction::Free { ptr } => {
+                if self.ctx.wasm_free_enabled {
+                    if let Some(idx) = self.ctx.free_idx {
+                        self.get_reg(f, *ptr);
+                        f.instruction(&Instruction::Call(idx));
+                    }
+                }
+            }
 
             // === CallDirect ===
             IrInstruction::CallDirect {
