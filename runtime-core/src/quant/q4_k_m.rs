@@ -351,7 +351,16 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         core::ptr::read_unaligned(p as *const v128)
     }
 
-    let mut sumi: i32 = 0;
+    // Defer the horizontal reduction. Each sub-block's i32x4 sdot accumulator is
+    // scaled by its 6-bit scale in the VECTOR domain and summed into `sumi_v`;
+    // the single `hsum` happens once at the end instead of 8× per super-block.
+    // wasm has no `addv`, so each in-loop `hsum` lowered to 4 vector→GPR
+    // `mov`s + 3 scalar adds (Cranelift won't fuse a hand-written extract chain
+    // into `addv`) — ~48 latency-bound micro-ops/super-block that also serialized
+    // the sdot drain. Bit-identical: `hsum(Σ acc·scale) == Σ hsum(acc)·scale`
+    // (integer mul distributes over the lane sum; both are exact i32). Magnitudes
+    // stay well within i32 (≤ ~31M/super-block), same as the prior scalar `sumi`.
+    let mut sumi_v = i32x4_splat(0);
     for p in 0..4usize {
         let s_lo = 2 * p; // low-nibble sub-block
         let s_hi = 2 * p + 1; // high-nibble sub-block
@@ -377,12 +386,16 @@ pub fn vec_dot_q4_K_q8_K_simd128(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
                 acc_hi = i32x4_add(acc_hi, dot16(high, xh));
             }
         }
-        // i32 accumulate: reduce each sub-block's dot, scale by its 6-bit
-        // scale, sum into `sumi`. No per-sub-block f32 convert / serial chain.
-        sumi += hsum(acc_lo) * scales_arr[s_lo] as i32;
-        sumi += hsum(acc_hi) * scales_arr[s_hi] as i32;
+        sumi_v = i32x4_add(
+            sumi_v,
+            i32x4_mul(acc_lo, i32x4_splat(scales_arr[s_lo] as i32)),
+        );
+        sumi_v = i32x4_add(
+            sumi_v,
+            i32x4_mul(acc_hi, i32x4_splat(scales_arr[s_hi] as i32)),
+        );
     }
-    sumf += d * sumi as f32;
+    sumf += d * hsum(sumi_v) as f32;
     sumf
 }
 
