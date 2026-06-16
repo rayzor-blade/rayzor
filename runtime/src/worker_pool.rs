@@ -65,6 +65,12 @@ impl<T> std::ops::Deref for CachelinePad<T> {
 struct WorkerSlot {
     /// 0 = idle, 1 = work assigned. Worker resets to 0 after running.
     state: AtomicU8,
+    /// Set true by the worker just before it `thread::park()`s after a long
+    /// idle (see `PARK_AFTER_ROUNDS`); cleared on wake. The dispatcher reads
+    /// it (under a paired SeqCst fence) to decide whether to `unpark`. Lets a
+    /// genuinely-idle or orphaned pool release its cores instead of spinning
+    /// them forever, without adding a syscall to the hot dispatch path.
+    parked: AtomicBool,
     /// Closure-erased trampoline: takes a `*const ()` pointer to the
     /// real closure plus the (lo, hi) band.
     trampoline: AtomicPtr<()>,
@@ -79,6 +85,7 @@ impl WorkerSlot {
     const fn new() -> Self {
         Self {
             state: AtomicU8::new(0),
+            parked: AtomicBool::new(false),
             trampoline: AtomicPtr::new(std::ptr::null_mut()),
             closure_ptr: AtomicPtr::new(std::ptr::null_mut()),
             lo: AtomicUsize::new(0),
@@ -94,6 +101,11 @@ struct PoolInner {
     /// Number of in-flight bands. Dispatcher initialises to `n` before
     /// signalling slots, then spin-waits for it to reach 0.
     pending: CachelinePad<AtomicUsize>,
+    /// Count of workers currently parked (or transitioning to parked). The
+    /// dispatcher reads this (after a SeqCst fence) to short-circuit the
+    /// per-slot unpark scan: zero on every hot-path dispatch, non-zero only
+    /// when the pool has been idle long enough to release cores.
+    parked_count: AtomicUsize,
     shutdown: AtomicBool,
     /// Legacy condvar-pool fallback (RAYZOR_LEGACY_POOL=1). Initialised
     /// only when the env var is set so the spin-wait path stays clean.
@@ -118,6 +130,19 @@ pub struct WorkerPool {
 /// stay hot during a sustained decode pipeline (fork-joins ≤ 1 ms apart)
 /// without burning a syscall on the common idle path.
 const SPIN_LIMIT: u32 = 8192;
+
+/// After this many consecutive `SPIN_LIMIT` rounds with no work, a worker
+/// `thread::park()`s to release its core. An idle round spins on an
+/// uncontended cache line, so ~2048 rounds is on the order of tens-to-low-
+/// hundreds of ms of continuous idle before parking — far longer than the
+/// sub-ms gap between decode fork-joins, so an actively-decoding pool resets
+/// its idle counter long before parking and the spin-wait hot path is
+/// unchanged. Even if a worker did park during an unusually long gap, the
+/// next dispatch just pays a one-off ~µs unpark. Parking engages between
+/// requests, when the process is idle, or when it has been orphaned —
+/// exactly the cases where spinning a core is pure waste (and, for orphans,
+/// a benchmark-contaminating hazard). `RAYZOR_NO_PARK=1` disables.
+const PARK_AFTER_ROUNDS: u32 = 2048;
 
 impl WorkerPool {
     pub fn new(n_workers: usize) -> Self {
@@ -147,6 +172,7 @@ impl WorkerPool {
             pending: CachelinePad {
                 inner: AtomicUsize::new(0),
             },
+            parked_count: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             legacy,
         });
@@ -175,6 +201,28 @@ impl WorkerPool {
     /// Number of worker threads in this pool.
     pub fn workers(&self) -> usize {
         self.n
+    }
+
+    /// Wake any parked workers among the first `dispatched` slots. Called
+    /// right after a dispatch loop flips their `state` to 1.
+    ///
+    /// Hot-path cost when nothing is parked (every dispatch during active
+    /// decode): one `fence(SeqCst)` + one relaxed load of `parked_count`,
+    /// then a short-circuit return — no per-slot scan, no syscall. The fence
+    /// pairs with each worker's fence so a worker mid-transition-to-parked is
+    /// never left asleep (the SeqCst total order forces at least one side to
+    /// observe the other).
+    #[inline]
+    fn wake_parked(&self, dispatched: usize) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.inner.parked_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        for slot_idx in 0..dispatched.min(self.n) {
+            if self.inner.slots[slot_idx].parked.load(Ordering::Relaxed) {
+                self.handles[slot_idx].thread().unpark();
+            }
+        }
     }
 
     /// Dispatch `f(lo, hi)` over `threads` disjoint contiguous ranges that
@@ -267,6 +315,8 @@ impl WorkerPool {
             // before they observe state == 1.
             slot.state.store(1, Ordering::Release);
         }
+        // Wake any workers that parked during a prior idle window.
+        self.wake_parked(dispatched);
 
         if caller_assists {
             // Compute band 0 on this thread while workers run theirs.
@@ -408,6 +458,8 @@ impl WorkerPool {
             slot.trampoline.store(trampoline, Ordering::Relaxed);
             slot.state.store(1, Ordering::Release);
         }
+        // Wake any workers that parked during a prior idle window.
+        self.wake_parked(workers);
 
         if caller_assists {
             WORKER_THREAD.with(|on| *on.borrow_mut() = true);
@@ -494,8 +546,11 @@ impl Drop for WorkerPool {
         if let Some(legacy) = self.inner.legacy.as_ref() {
             legacy.queue_cv.notify_all();
         }
-        // Spin workers: they observe shutdown == true on their next
-        // spin iteration and return.
+        // Wake any parked workers so they observe shutdown and exit; the
+        // unparked spin workers see it on their next spin iteration.
+        for h in &self.handles {
+            h.thread().unpark();
+        }
         for h in self.handles.drain(..) {
             let _ = h.join();
         }
@@ -509,12 +564,20 @@ thread_local! {
 fn spin_worker_loop(inner: Arc<PoolInner>, worker_idx: usize) {
     WORKER_THREAD.with(|on| *on.borrow_mut() = true);
 
+    let park_after = if park_enabled() {
+        PARK_AFTER_ROUNDS
+    } else {
+        u32::MAX // never park
+    };
     let slot = &inner.slots[worker_idx];
     let mut spin_count: u32 = 0;
+    let mut idle_rounds: u32 = 0;
     loop {
-        // Spin-wait for work. We never sleep — for LLM decode the gap
-        // between fork-joins is sub-millisecond. The shutdown flag is
-        // checked at most every SPIN_LIMIT iterations.
+        // Spin-wait for work. During a sustained decode pipeline the gap
+        // between fork-joins is sub-millisecond, so we stay hot (the
+        // shutdown flag is checked at most every SPIN_LIMIT iterations).
+        // Only after ~0.5 s of *continuous* idle (PARK_AFTER_ROUNDS) do we
+        // park to release the core — see PARK_AFTER_ROUNDS.
         loop {
             let state = slot.state.load(Ordering::Acquire);
             if state == 1 {
@@ -526,9 +589,35 @@ fn spin_worker_loop(inner: Arc<PoolInner>, worker_idx: usize) {
                 if inner.shutdown.load(Ordering::Acquire) {
                     return;
                 }
+                idle_rounds = idle_rounds.wrapping_add(1);
+                if idle_rounds >= park_after {
+                    // Long idle: announce parked, then a SeqCst fence + a
+                    // re-read of `state`. This pairs with the dispatcher's
+                    // fence between its `state.store(1)` writes and its
+                    // `parked` reads, so a dispatch that races our decision
+                    // to sleep is never missed: either we observe state==1
+                    // here and skip the park, or the dispatcher observes
+                    // parked==true and unparks us.
+                    slot.parked.store(true, Ordering::Relaxed);
+                    inner.parked_count.fetch_add(1, Ordering::Relaxed);
+                    std::sync::atomic::fence(Ordering::SeqCst);
+                    if slot.state.load(Ordering::Relaxed) != 1
+                        && !inner.shutdown.load(Ordering::Relaxed)
+                    {
+                        std::thread::park();
+                    }
+                    inner.parked_count.fetch_sub(1, Ordering::Relaxed);
+                    slot.parked.store(false, Ordering::Relaxed);
+                    idle_rounds = 0;
+                    if inner.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                }
             }
             std::hint::spin_loop();
         }
+        // Got work: reset the idle counter before running it.
+        idle_rounds = 0;
 
         let lo = slot.lo.load(Ordering::Relaxed);
         let hi = slot.hi.load(Ordering::Relaxed);
@@ -650,6 +739,13 @@ fn chunk_stealing_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1"))
 }
 
+/// Whether idle workers park after `PARK_AFTER_ROUNDS` (default on).
+/// `RAYZOR_NO_PARK=1` keeps the pre-park behaviour (spin forever when idle).
+fn park_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RAYZOR_NO_PARK").map_or(true, |v| v != "1"))
+}
+
 /// Process-wide singleton. Lazily constructed on first `global()` call with a
 /// worker count picked from `RAYZOR_WORKERS` (or 6 by default on M-series).
 pub fn global() -> &'static WorkerPool {
@@ -718,5 +814,48 @@ mod tests {
         });
         let total: usize = counts.iter().map(|c| c.load(Ordering::SeqCst)).sum();
         assert_eq!(total, 400);
+    }
+
+    /// Workers must park after a long idle and then be correctly unparked by
+    /// the next dispatch. A missed wakeup would leave a parked worker asleep,
+    /// so its band's `pending` never decrements and `parallel_rows` would hang
+    /// forever — completing the post-idle dispatch (covering every index once)
+    /// proves the park→unpark protocol is race-free.
+    #[test]
+    fn parks_when_idle_then_unparks_on_next_dispatch() {
+        let pool = WorkerPool::new(4);
+
+        // Prime so workers run, finish, then go idle.
+        let c = Arc::new(AtomicUsize::new(0));
+        let cc = c.clone();
+        pool.parallel_rows(64, 4, move |lo, hi| {
+            cc.fetch_add(hi - lo, Ordering::SeqCst);
+        });
+        assert_eq!(c.load(Ordering::SeqCst), 64);
+
+        // Idle well past the park threshold (tens-to-hundreds of ms).
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(
+            pool.inner.parked_count.load(Ordering::SeqCst) > 0,
+            "expected at least one worker to park after a long idle"
+        );
+
+        // Second dispatch must wake the parked workers and cover every index.
+        const N: usize = 512;
+        let touched: Vec<AtomicUsize> = (0..N).map(|_| AtomicUsize::new(0)).collect();
+        let touched = Arc::new(touched);
+        let t = touched.clone();
+        pool.parallel_rows(N, 4, move |lo, hi| {
+            for i in lo..hi {
+                t[i].fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        for (i, cnt) in touched.iter().enumerate() {
+            assert_eq!(
+                cnt.load(Ordering::SeqCst),
+                1,
+                "index {i} touched != 1 after unpark"
+            );
+        }
     }
 }
