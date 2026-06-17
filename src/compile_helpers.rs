@@ -150,7 +150,22 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         return Err("No MIR modules generated".to_string());
     }
 
-    let module = (**mir_modules.last().unwrap()).clone();
+    let mut module = (**mir_modules.last().unwrap()).clone();
+    // L1: on the wasm/Cranelift-JIT path the stdlib value-type wrappers
+    // (Ptr/Usize/Box/SIMD4f) are merged into the module AFTER the single
+    // InliningPass runs and so each value-type op stays an un-inlined
+    // CallDirect to a 1-3 instruction leaf. Native AOT re-runs its own
+    // PassManager (aot_compiler.rs) so this only matters for wasm. Run one
+    // InliningPass on the merged module, gated on the "wasm" define so native
+    // callers (which pass &[]) are untouched. The wrappers are well under the
+    // cost model's 50-instruction threshold; the forward-ref-stub guard
+    // (d5f2b48) and fresh-pass reg-id recompute (655d7ac) both hold.
+    if extra_defines.iter().any(|d| *d == "wasm") {
+        use compiler::ir::inlining::InliningPass;
+        use compiler::ir::optimization::OptimizationPass;
+        let mut pass = InliningPass::new();
+        let _ = pass.run_on_module(&mut module);
+    }
     let diagnostics = unit.collected_diagnostics.clone();
     let class_alloc_sizes = unit.get_class_alloc_sizes_by_name().clone();
     let qualified_method_map = unit.get_qualified_method_map().clone();
