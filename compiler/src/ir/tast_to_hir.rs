@@ -5534,7 +5534,104 @@ impl<'a> TastToHirContext<'a> {
                 self.collect_var_refs_expr(condition, refs);
                 self.collect_var_refs_stmt(body, refs);
             }
-            _ => {} // Other statement types
+            // NOTE: every statement that can contain sub-statements/expressions MUST
+            // recurse here, or a free variable referenced ONLY inside it is missed and
+            // the closure ends up with an empty/incomplete capture list — at runtime the
+            // body then reads a garbage value for the un-captured variable and segfaults.
+            // (The classic miss was a variable used only inside a `for` body, e.g.
+            // `() -> { for (i in 0...n) acc += c.method(); }` dropping `c`.)
+            TypedStatement::Assignment { target, value, .. } => {
+                self.collect_var_refs_expr(target, refs);
+                self.collect_var_refs_expr(value, refs);
+            }
+            TypedStatement::Throw { exception, .. } => {
+                self.collect_var_refs_expr(exception, refs);
+            }
+            TypedStatement::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(init_stmt) = init {
+                    self.collect_var_refs_stmt(init_stmt, refs);
+                }
+                if let Some(cond) = condition {
+                    self.collect_var_refs_expr(cond, refs);
+                }
+                if let Some(upd) = update {
+                    self.collect_var_refs_expr(upd, refs);
+                }
+                self.collect_var_refs_stmt(body, refs);
+            }
+            TypedStatement::ForIn { iterable, body, .. } => {
+                self.collect_var_refs_expr(iterable, refs);
+                self.collect_var_refs_stmt(body, refs);
+            }
+            TypedStatement::Try {
+                body,
+                catch_clauses,
+                finally_block,
+                ..
+            } => {
+                self.collect_var_refs_stmt(body, refs);
+                for clause in catch_clauses {
+                    if let Some(filter) = &clause.filter {
+                        self.collect_var_refs_expr(filter, refs);
+                    }
+                    self.collect_var_refs_stmt(&clause.body, refs);
+                }
+                if let Some(fin) = finally_block {
+                    self.collect_var_refs_stmt(fin, refs);
+                }
+            }
+            TypedStatement::Switch {
+                discriminant,
+                cases,
+                default_case,
+                ..
+            } => {
+                self.collect_var_refs_expr(discriminant, refs);
+                for case in cases {
+                    self.collect_var_refs_expr(&case.case_value, refs);
+                    for extra in &case.extra_case_values {
+                        self.collect_var_refs_expr(extra, refs);
+                    }
+                    if let Some(guard) = &case.guard {
+                        self.collect_var_refs_expr(guard, refs);
+                    }
+                    self.collect_var_refs_stmt(&case.body, refs);
+                }
+                if let Some(def) = default_case {
+                    self.collect_var_refs_stmt(def, refs);
+                }
+            }
+            TypedStatement::PatternMatch {
+                value, patterns, ..
+            } => {
+                self.collect_var_refs_expr(value, refs);
+                for arm in patterns {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_var_refs_expr(guard, refs);
+                    }
+                    self.collect_var_refs_stmt(&arm.body, refs);
+                }
+            }
+            TypedStatement::Block { statements, .. } => {
+                for s in statements {
+                    self.collect_var_refs_stmt(s, refs);
+                }
+            }
+            TypedStatement::MacroExpansion {
+                expanded_statements,
+                ..
+            } => {
+                for s in expanded_statements {
+                    self.collect_var_refs_stmt(s, refs);
+                }
+            }
+            _ => {} // Break, Continue — no sub-expressions to capture
         }
     }
 
@@ -5592,6 +5689,53 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::Block { statements, .. } => {
                 for stmt in statements {
                     self.collect_var_refs_stmt(stmt, refs);
+                }
+            }
+            // Expression-form control flow — must recurse for the same reason as the
+            // statement forms above (a free var used only here would be missed).
+            TypedExpressionKind::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.collect_var_refs_expr(condition, refs);
+                self.collect_var_refs_expr(then_expr, refs);
+                if let Some(else_e) = else_expr {
+                    self.collect_var_refs_expr(else_e, refs);
+                }
+            }
+            TypedExpressionKind::While {
+                condition,
+                then_expr,
+                ..
+            } => {
+                self.collect_var_refs_expr(condition, refs);
+                self.collect_var_refs_expr(then_expr, refs);
+            }
+            TypedExpressionKind::For { iterable, body, .. } => {
+                self.collect_var_refs_expr(iterable, refs);
+                self.collect_var_refs_expr(body, refs);
+            }
+            TypedExpressionKind::ForIn { iterable, body, .. } => {
+                self.collect_var_refs_expr(iterable, refs);
+                self.collect_var_refs_expr(body, refs);
+            }
+            TypedExpressionKind::Switch {
+                discriminant,
+                cases,
+                ..
+            } => {
+                self.collect_var_refs_expr(discriminant, refs);
+                for case in cases {
+                    self.collect_var_refs_expr(&case.case_value, refs);
+                    for extra in &case.extra_case_values {
+                        self.collect_var_refs_expr(extra, refs);
+                    }
+                    if let Some(guard) = &case.guard {
+                        self.collect_var_refs_expr(guard, refs);
+                    }
+                    self.collect_var_refs_stmt(&case.body, refs);
                 }
             }
             _ => {} // Other expression types - add as needed
