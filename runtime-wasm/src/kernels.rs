@@ -8,6 +8,17 @@ use rayzor_runtime_core::tensor::{flash_attn, rms_norm, rope};
 
 use crate::tensor::{load_f32_at, store_f32_at, Tensor, DTYPE_F16, DTYPE_F32};
 
+/// Guest-side completion counter for the parallel flash. The host Mutex/Condvar
+/// join is OUT of the wasm memory model and establishes NO happens-before the
+/// engine respects for the workers' non-atomic out_data writes (wasm threads
+/// require a GUEST atomic read-from-atomic-write on a shared location; a host
+/// mutex / native fence does not — confirmed against the wasm threads spec +
+/// wasi-libc pthread_join's detach_state discipline). Each worker bumps this
+/// (SC rmw) AFTER its band writes; the main thread SC-loads it before reading,
+/// publishing the bands. wasm atomics are SC (no acquire/release variants).
+#[cfg(target_arch = "wasm32")]
+static FLASH_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// `out[q_head, :] = Σ_l softmax((Q[h] · K[l, kv_head, :]) * scale) * V[l, kv_head, :]`.
 ///
 /// All buffers are F32. Layout (mirrors the native `rayzor_tensor_flash_attn_decode`):
@@ -44,14 +55,98 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     let cache_len = cache_len as usize;
     let kv_row_stride = kv_row_stride as usize;
 
-    // NOTE: q-head parallelization across the worker pool was REVERTED — it
-    // produced non-deterministic output at cache_len>=256 (diverged run-to-run
-    // and from the sequential path, degenerating long generations). The pool's
-    // worker threads lack proper per-thread TLS, so concurrent guest memory ops
-    // there (worker malloc, and even disjoint shared-buffer writes) are unsafe;
-    // the matmul survives only because its workers are allocation-free pure
-    // SIMD with no per-thread state. Revisit attention parallelization once the
-    // pool workers run the full thread-start (TLS) setup. Sequential is correct.
+    // q-head parallel dispatch, gated OFF by default (RAYZOR_FLASH_PAR=1). It is
+    // non-deterministic at cache_len>=256 and the root cause is NOT in this code.
+    // Investigation (2026-06-17) ruled OUT: worker malloc/TLS (alloc-free here),
+    // memory ordering (paired SeqCst release+acquire fences don't help), timing
+    // (a 5M-iter post-join busy-wait doesn't help), the join (a shared atomic
+    // counter shows all 7 workers run + finish BEFORE join returns), disjoint
+    // output overlap (bands are disjoint q-head rows), dynamic-link/fn_idx
+    // dispatch (flash_fn_idx valid + distinct from matmul's; worker_runs_delta=7
+    // = expected), and temperature (greedy temp=0 still diverges while sequential
+    // is bit-stable). KEY CLUE: a *sequential recompute* on the main thread after
+    // join reliably makes the output correct (0/6), but a pure busy-wait does not
+    // — i.e. only main-thread MEMORY TRAFFIC over the shared region refreshes this
+    // instance's view of the workers' non-atomic writes. Signature of a wasmtime
+    // SharedMemory cross-instance consistency issue (each worker is a separate
+    // Store/instance sharing the linear memory); the matmul survives because its
+    // output is consumed later / differently. NEXT: minimal standalone wasm
+    // reproducer (N workers writing disjoint shared regions via this pool) +
+    // wasmtime-level fix or upstream report. Alloc-free: per-band scores scratch
+    // pre-allocated in this caller thread; workers run disjoint q-head bands.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let nt = crate::qtensor::guest_threads_override();
+        let nthreads = (if nt > 0 { nt.min(8) } else { 7 }).min(n_q_heads);
+        if crate::qtensor::flash_par() && cache_len >= 256 && n_q_heads > 1 && nthreads > 1 {
+            let band = n_q_heads.div_ceil(nthreads);
+            let mut scratch: std::vec::Vec<f32> = std::vec![0.0; nthreads * cache_len];
+            let scratch_ptr = scratch.as_mut_ptr();
+            let fn_idx = rayzor_flash_band_worker as *const () as usize as i32;
+            let done_base = FLASH_DONE.load(core::sync::atomic::Ordering::SeqCst);
+            let mut handles: std::vec::Vec<i32> = std::vec::Vec::new();
+            let mut works: std::vec::Vec<*mut FlashBandWork> = std::vec::Vec::new();
+            for t in 0..nthreads {
+                let lo = (t * band).min(n_q_heads);
+                let hi = ((t + 1) * band).min(n_q_heads);
+                if lo >= hi {
+                    break;
+                }
+                let work = std::boxed::Box::into_raw(std::boxed::Box::new(FlashBandWork {
+                    q_data,
+                    k_data,
+                    v_data,
+                    out_data,
+                    group,
+                    head_dim,
+                    cache_len,
+                    kv_row_stride,
+                    scale,
+                    lo,
+                    hi,
+                    scores: scratch_ptr.add(t * cache_len) as usize as i32,
+                }));
+                works.push(work);
+                let h = rayzor_thread_spawn(fn_idx, work as usize as i32);
+                if h == 0 {
+                    let s = slice::from_raw_parts_mut(scratch_ptr.add(t * cache_len), cache_len);
+                    for q_head in lo..hi {
+                        flash_attn::flash_attn_decode_one_qhead(
+                            q_head, group, head_dim, cache_len, kv_row_stride, scale,
+                            q_data as *const f32, k_data as *const f32, v_data as *const f32,
+                            out_data as *mut f32, s, libm::expf,
+                        );
+                    }
+                } else {
+                    handles.push(h);
+                }
+            }
+            let spawned = handles.len() as u32;
+            for h in handles {
+                rayzor_thread_join_void(h);
+            }
+            for w in works {
+                drop(std::boxed::Box::from_raw(w));
+            }
+            // ACQUIRE: SC-load the completion counter (guest atomic, in-program-
+            // order before the caller reads out_data) until every spawned worker
+            // has published. This atomic-read-from-the-workers'-atomic-writes is
+            // the only construct that establishes happens-before in the wasm
+            // memory model; the host join above only parks the threads. The
+            // host-mutex join already waited, so this resolves immediately — its
+            // job is the memory edge, not the wait.
+            while FLASH_DONE
+                .load(core::sync::atomic::Ordering::SeqCst)
+                .wrapping_sub(done_base)
+                < spawned
+            {
+                core::hint::spin_loop();
+            }
+            let _ = fn_idx;
+            return;
+        }
+    }
+
     let mut scores: std::vec::Vec<f32> = std::vec![0.0; cache_len];
     for q_head in 0..n_q_heads {
         flash_attn::flash_attn_decode_one_qhead(
@@ -69,6 +164,61 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
             libm::expf,
         );
     }
+}
+
+/// One band of q-heads for the parallel flash dispatch. `scores` is this band's
+/// disjoint pre-allocated scratch row (`cache_len` f32s).
+#[cfg(target_arch = "wasm32")]
+#[repr(C)]
+struct FlashBandWork {
+    q_data: i32,
+    k_data: i32,
+    v_data: i32,
+    out_data: i32,
+    group: usize,
+    head_dim: usize,
+    cache_len: usize,
+    kv_row_stride: usize,
+    scale: f32,
+    lo: usize,
+    hi: usize,
+    scores: i32,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn rayzor_flash_band_worker(work_ptr: i32) -> i64 {
+    unsafe {
+        let w = &*(work_ptr as *const FlashBandWork);
+        let scores = slice::from_raw_parts_mut(w.scores as *mut f32, w.cache_len);
+        for q_head in w.lo..w.hi {
+            flash_attn::flash_attn_decode_one_qhead(
+                q_head,
+                w.group,
+                w.head_dim,
+                w.cache_len,
+                w.kv_row_stride,
+                w.scale,
+                w.q_data as *const f32,
+                w.k_data as *const f32,
+                w.v_data as *const f32,
+                w.out_data as *mut f32,
+                scores,
+                libm::expf,
+            );
+        }
+    }
+    // PUBLISH: this SC atomic rmw is sequenced AFTER the band writes above, so
+    // it carries them into happens-before for any thread that reads-from it.
+    FLASH_DONE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    0
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "rayzor")]
+extern "C" {
+    fn rayzor_thread_spawn(fn_idx: i32, env_ptr: i32) -> i32;
+    fn rayzor_thread_join_void(handle: i32);
 }
 
 #[no_mangle]
