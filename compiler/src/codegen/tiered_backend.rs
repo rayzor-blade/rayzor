@@ -1743,7 +1743,12 @@ impl TieredBackend {
                     | IrInstruction::VectorInsert { .. }
                     | IrInstruction::VectorReduce { .. }
                     | IrInstruction::VectorUnaryOp { .. }
-                    | IrInstruction::VectorMinMax { .. } => return true,
+                    | IrInstruction::VectorMinMax { .. }
+                    // Atomics need real shared memory → force straight to JIT.
+                    | IrInstruction::AtomicLoad { .. }
+                    | IrInstruction::AtomicStore { .. }
+                    | IrInstruction::AtomicRmw { .. }
+                    | IrInstruction::AtomicCas { .. } => return true,
                     _ => {}
                 }
             }

@@ -39,11 +39,11 @@
 //! ```
 
 use super::{
-    AllocationHint, BinaryOp, CallingConvention, CompareOp, FunctionAttributes, FunctionKind,
-    InlineHint, IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId,
-    IrFunctionSignature, IrId, IrInstruction, IrLocal, IrModule, IrParameter, IrSourceLocation,
-    IrTerminator, IrType, IrTypeParam, IrValue, Linkage, StructField, UnaryOp, UnionVariant,
-    VectorMinMaxKind, VectorUnaryOpKind,
+    AllocationHint, AtomicRmwOp, BinaryOp, CallingConvention, CompareOp, FunctionAttributes,
+    FunctionKind, InlineHint, IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction,
+    IrFunctionId, IrFunctionSignature, IrId, IrInstruction, IrLocal, IrModule, IrParameter,
+    IrSourceLocation, IrTerminator, IrType, IrTypeParam, IrValue, Linkage, StructField, UnaryOp,
+    UnionVariant, VectorMinMaxKind, VectorUnaryOpKind,
 };
 use std::collections::BTreeMap;
 
@@ -616,6 +616,44 @@ impl MirBuilder {
     /// Store SIMD vector to contiguous memory
     pub fn vector_store(&mut self, ptr: IrId, value: IrId, vec_ty: IrType) {
         self.insert_inst(IrInstruction::VectorStore { ptr, value, vec_ty });
+    }
+
+    /// Atomic load (SC). Returns dest = *ptr.
+    pub fn atomic_load(&mut self, ptr: IrId, ty: IrType) -> IrId {
+        let dest = self.alloc_reg_typed(ty.clone());
+        self.insert_inst(IrInstruction::AtomicLoad { dest, ptr, ty });
+        dest
+    }
+
+    /// Atomic store (SC). *ptr = value.
+    pub fn atomic_store(&mut self, ptr: IrId, value: IrId, ty: IrType) {
+        self.insert_inst(IrInstruction::AtomicStore { ptr, value, ty });
+    }
+
+    /// Atomic RMW (SC). Returns the old value.
+    pub fn atomic_rmw(&mut self, op: AtomicRmwOp, ptr: IrId, value: IrId, ty: IrType) -> IrId {
+        let dest = self.alloc_reg_typed(ty.clone());
+        self.insert_inst(IrInstruction::AtomicRmw {
+            dest,
+            op,
+            ptr,
+            value,
+            ty,
+        });
+        dest
+    }
+
+    /// Atomic CAS (SC). Returns the value read (old).
+    pub fn atomic_cas(&mut self, ptr: IrId, expected: IrId, replacement: IrId, ty: IrType) -> IrId {
+        let dest = self.alloc_reg_typed(ty.clone());
+        self.insert_inst(IrInstruction::AtomicCas {
+            dest,
+            ptr,
+            expected,
+            replacement,
+            ty,
+        });
+        dest
     }
 
     /// Element-wise unary operation on a vector (sqrt, abs, neg, ceil, floor, round)

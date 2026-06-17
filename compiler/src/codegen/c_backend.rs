@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::ir::blocks::{IrBlockId, IrPhiNode, IrTerminator};
-use crate::ir::instructions::{BinaryOp, CompareOp, IrInstruction, UnaryOp};
+use crate::ir::instructions::{AtomicRmwOp, BinaryOp, CompareOp, IrInstruction, UnaryOp};
 use crate::ir::modules::IrModule;
 use crate::ir::{IrFunctionId, IrGlobalId, IrId, IrType, IrValue};
 
@@ -164,6 +164,7 @@ impl CBackend {
         self.emit_line("#include <string.h>");
         self.emit_line("#include <stdlib.h>");
         self.emit_line("#include <math.h>");
+        self.emit_line("#include <stdatomic.h>");
         self.emit_line("");
         // Type aliases
         self.emit_line("typedef int8_t i8;");
@@ -598,6 +599,9 @@ impl CBackend {
             | IrInstruction::VectorSplat { vec_ty, .. }
             | IrInstruction::VectorUnaryOp { vec_ty, .. }
             | IrInstruction::VectorMinMax { vec_ty, .. } => vec_ty.clone(),
+            IrInstruction::AtomicLoad { ty, .. }
+            | IrInstruction::AtomicRmw { ty, .. }
+            | IrInstruction::AtomicCas { ty, .. } => ty.clone(),
             IrInstruction::CallIndirect { signature, .. } => {
                 if let IrType::Function { return_type, .. } = signature {
                     (**return_type).clone()
@@ -1456,6 +1460,56 @@ impl CBackend {
                     "for (int _vi=0; _vi<{}; _vi++) {{ {elem_type} _a=(({elem_type}*)&r{})[_vi], _b=(({elem_type}*)&r{})[_vi]; (({elem_type}*)&r{})[_vi] = _a {cmp} _b ? _a : _b; }}",
                     count, left.as_u32(), right.as_u32(), dest.as_u32()
                 ));
+            }
+
+            // === Atomic operations (sequentially consistent) ===
+            IrInstruction::AtomicLoad { dest, ptr, .. } => {
+                self.emit_line(&format!(
+                    "r{} = atomic_load_explicit((_Atomic int*)r{}, memory_order_seq_cst);",
+                    dest.as_u32(),
+                    ptr.as_u32()
+                ));
+            }
+            IrInstruction::AtomicStore { ptr, value, .. } => {
+                self.emit_line(&format!(
+                    "atomic_store_explicit((_Atomic int*)r{}, r{}, memory_order_seq_cst);",
+                    ptr.as_u32(),
+                    value.as_u32()
+                ));
+            }
+            IrInstruction::AtomicRmw {
+                dest,
+                op,
+                ptr,
+                value,
+                ..
+            } => {
+                let func = match op {
+                    AtomicRmwOp::Add => "atomic_fetch_add_explicit",
+                    AtomicRmwOp::Sub => "atomic_fetch_sub_explicit",
+                    AtomicRmwOp::And => "atomic_fetch_and_explicit",
+                    AtomicRmwOp::Or => "atomic_fetch_or_explicit",
+                    AtomicRmwOp::Xor => "atomic_fetch_xor_explicit",
+                    AtomicRmwOp::Xchg => "atomic_exchange_explicit",
+                };
+                self.emit_line(&format!(
+                    "r{} = {}((_Atomic int*)r{}, r{}, memory_order_seq_cst);",
+                    dest.as_u32(),
+                    func,
+                    ptr.as_u32(),
+                    value.as_u32()
+                ));
+            }
+            IrInstruction::AtomicCas {
+                dest,
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                self.emit_line(&format!(
+                    "{{ int _exp = r{}; atomic_compare_exchange_strong_explicit((_Atomic int*)r{}, &_exp, r{}, memory_order_seq_cst, memory_order_seq_cst); r{} = _exp; }}",
+                    expected.as_u32(), ptr.as_u32(), replacement.as_u32(), dest.as_u32()));
             }
         }
 

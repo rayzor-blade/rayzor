@@ -548,8 +548,13 @@ pub enum Opcode {
     // look through. Same handler as Copy in the interpreter (just
     // copy the value); backends emit a real instruction.
     SsaBarrier = 58,
+    // Atomic memory operations
+    AtomicLoad = 59,
+    AtomicStore = 60,
+    AtomicRmw = 61,
+    AtomicCas = 62,
     // Sentinel for table size
-    _Count = 59,
+    _Count = 63,
 }
 
 impl Opcode {
@@ -619,6 +624,11 @@ impl Opcode {
             // Ownership hints (no-op at runtime)
             IrInstruction::MarkMoved { .. } => Opcode::MarkMoved,
             IrInstruction::CheckLive { .. } => Opcode::CheckLive,
+            // Atomic memory operations
+            IrInstruction::AtomicLoad { .. } => Opcode::AtomicLoad,
+            IrInstruction::AtomicStore { .. } => Opcode::AtomicStore,
+            IrInstruction::AtomicRmw { .. } => Opcode::AtomicRmw,
+            IrInstruction::AtomicCas { .. } => Opcode::AtomicCas,
         }
     }
 }
@@ -2094,7 +2104,12 @@ impl MirInterpreter {
             | IrInstruction::VectorInsert { .. }
             | IrInstruction::VectorReduce { .. }
             | IrInstruction::VectorUnaryOp { .. }
-            | IrInstruction::VectorMinMax { .. } => {
+            | IrInstruction::VectorMinMax { .. }
+            // Atomics require real shared memory — never interpret.
+            | IrInstruction::AtomicLoad { .. }
+            | IrInstruction::AtomicStore { .. }
+            | IrInstruction::AtomicRmw { .. }
+            | IrInstruction::AtomicCas { .. } => {
                 return Err(InterpError::JitBailout(function.id));
             }
 

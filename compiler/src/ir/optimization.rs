@@ -851,6 +851,26 @@ impl InstructionExt for IrInstruction {
                 replace(left);
                 replace(right);
             }
+            // Atomic instructions (silent _ => {} below would miscompile these)
+            IrInstruction::AtomicLoad { ptr, .. } => replace(ptr),
+            IrInstruction::AtomicStore { ptr, value, .. } => {
+                replace(ptr);
+                replace(value);
+            }
+            IrInstruction::AtomicRmw { ptr, value, .. } => {
+                replace(ptr);
+                replace(value);
+            }
+            IrInstruction::AtomicCas {
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                replace(ptr);
+                replace(expected);
+                replace(replacement);
+            }
             // Move/Clone instructions
             IrInstruction::Move { src, .. } => replace(src),
             IrInstruction::Clone { src, .. } => replace(src),

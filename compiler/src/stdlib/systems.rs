@@ -6,8 +6,8 @@
 /// Usize operations are native i64 arithmetic.
 use crate::ir::mir_builder::MirBuilder;
 use crate::ir::{
-    BinaryOp, CallingConvention, CompareOp, InlineHint, IrType, IrValue, VectorMinMaxKind,
-    VectorUnaryOpKind,
+    AtomicRmwOp, BinaryOp, CallingConvention, CompareOp, InlineHint, IrType, IrValue,
+    VectorMinMaxKind, VectorUnaryOpKind,
 };
 
 /// Build all systems-level type functions
@@ -88,6 +88,13 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd4f_normalize(builder);
     build_simd4f_cross3(builder);
     build_simd4f_distance(builder);
+
+    // rayzor.Atomic MIR wrappers (native atomic MIR ops — no externs)
+    build_atomic_of(builder);
+    build_atomic_load(builder);
+    build_atomic_store(builder);
+    build_atomic_fetch_add(builder);
+    build_atomic_cas(builder);
 
     // Build sys.io.File MIR wrappers (default binary=true for read/write/append/update)
     declare_file_externs(builder);
@@ -875,6 +882,97 @@ fn build_simd4f_store(builder: &mut MirBuilder) {
     let ptr = builder.get_param(1);
     builder.vector_store(ptr, self_val, vec_ty);
     builder.ret(None);
+}
+
+// ---------------------------------------------------------------------------
+// rayzor.Atomic MIR wrappers
+// ---------------------------------------------------------------------------
+
+/// Atomic_of(addr: i64) -> i64  (static identity — returns the address)
+fn build_atomic_of(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Atomic_of")
+        .param("addr", IrType::I64)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let addr = builder.get_param(0);
+    builder.ret(Some(addr)); // identity
+}
+
+/// Atomic_load(self_addr: i64) -> i32
+fn build_atomic_load(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Atomic_load")
+        .param("self_addr", IrType::I64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let addr = builder.get_param(0);
+    let v = builder.atomic_load(addr, IrType::I32);
+    builder.ret(Some(v));
+}
+
+/// Atomic_store(self_addr: i64, v: i32) -> void
+fn build_atomic_store(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Atomic_store")
+        .param("self_addr", IrType::I64)
+        .param("v", IrType::I32)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let addr = builder.get_param(0);
+    let v = builder.get_param(1);
+    builder.atomic_store(addr, v, IrType::I32);
+    builder.ret(None);
+}
+
+/// Atomic_fetch_add(self_addr: i64, v: i32) -> i32  (returns old)
+fn build_atomic_fetch_add(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Atomic_fetch_add")
+        .param("self_addr", IrType::I64)
+        .param("v", IrType::I32)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let addr = builder.get_param(0);
+    let v = builder.get_param(1);
+    let old = builder.atomic_rmw(AtomicRmwOp::Add, addr, v, IrType::I32);
+    builder.ret(Some(old));
+}
+
+/// Atomic_cas(self_addr: i64, expected: i32, replacement: i32) -> i32  (returns value read)
+fn build_atomic_cas(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Atomic_cas")
+        .param("self_addr", IrType::I64)
+        .param("expected", IrType::I32)
+        .param("replacement", IrType::I32)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let addr = builder.get_param(0);
+    let exp = builder.get_param(1);
+    let rep = builder.get_param(2);
+    let old = builder.atomic_cas(addr, exp, rep, IrType::I32);
+    builder.ret(Some(old));
 }
 
 /// SIMD4f_extract(self: vec<f32; 4>, lane: i32) -> f32
