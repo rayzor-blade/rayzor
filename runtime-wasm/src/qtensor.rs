@@ -525,6 +525,18 @@ pub(crate) fn guest_threads_override() -> usize {
     })
 }
 
+/// Parallel q-head flash dispatch — ON by default now that the shadow-stack
+/// reservation race is fixed (export __stack_pointer + serialize the per-worker
+/// rayzor_malloc; see kernels.rs + wasm_runner.rs worker_main). Self-gates to
+/// cache_len>=256 so short context is unchanged. Opt out with RAYZOR_FLASH_PAR=0.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn flash_par() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAYZOR_FLASH_PAR").as_deref() != Ok("0"))
+}
+
+
 /// Per-worker job: which output-row band to dot, against the shared `x_q8k`.
 #[cfg(target_arch = "wasm32")]
 #[repr(C)]

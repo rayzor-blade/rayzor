@@ -30,6 +30,15 @@ rustflags = [
     "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128,+relaxed-simd",
     "-C", "link-arg=--shared-memory",
     "-C", "link-arg=--import-memory",
+    # Export __stack_pointer so the host worker pool (wasm_runner.rs worker_main)
+    # can give each worker instance a PRIVATE shadow stack. Without it the
+    # reservation's get_export("__stack_pointer") returns None and silently falls
+    # through, leaving every worker on the SAME default stack — concurrent frames
+    # corrupt each other (deterministic for the tiny matmul frame, a ~50-60%
+    # non-deterministic race for the deeper flash frame). Isolated via a
+    # standalone wasmtime reproducer: shared stack => 300/300 race, per-worker
+    # reserved stack => 0/300.
+    "-C", "link-arg=--export=__stack_pointer",
     # 4 GiB (wasm32 cap). A 770 MB GGUF needs to sit in linear memory
     # alongside the runtime-wasm QTensor allocations (each Q6_K weight
     # copies its block buffer), pushing peak usage past the old 1 GiB cap.

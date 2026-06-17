@@ -1180,13 +1180,27 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         // __stack_pointer at its top (stacks grow down). Reused across all jobs
         // since a worker runs them serially.
         const STACK_SIZE: i32 = 1 << 20;
-        if let Some(wasmtime::Extern::Func(f)) = inst.get_export(&mut store, "rayzor_malloc") {
-            if let Ok(t) = f.typed::<i32, i32>(&store) {
-                if let Ok(base) = t.call(&mut store, STACK_SIZE) {
-                    if let Some(wasmtime::Extern::Global(g)) =
-                        inst.get_export(&mut store, "__stack_pointer")
-                    {
-                        let _ = g.set(&mut store, wasmtime::Val::I32(base + STACK_SIZE));
+        // SERIALIZE the reservation: `rayzor_malloc` is the guest allocator over
+        // the SHARED linear memory and is NOT thread-safe, so the N workers
+        // reserving concurrently at pool init can collide and hand back the SAME
+        // base — overlapping shadow stacks whose concurrent frames corrupt each
+        // other (the matmul's tiny frame survives; the deeper flash frame does
+        // not, giving a ~50-60% per-process race). A standalone wasmtime
+        // reproducer confirms: thread-safe (atomic) reservation => 0/300 races,
+        // racy reservation => intermittent 300/300. The `__stack_pointer` export
+        // (runtime-wasm/.cargo/config) is the other half — without it this set is
+        // skipped entirely and every worker shares the default stack.
+        {
+            static RESERVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = RESERVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(wasmtime::Extern::Func(f)) = inst.get_export(&mut store, "rayzor_malloc") {
+                if let Ok(t) = f.typed::<i32, i32>(&store) {
+                    if let Ok(base) = t.call(&mut store, STACK_SIZE) {
+                        if let Some(wasmtime::Extern::Global(g)) =
+                            inst.get_export(&mut store, "__stack_pointer")
+                        {
+                            let _ = g.set(&mut store, wasmtime::Val::I32(base + STACK_SIZE));
+                        }
                     }
                 }
             }
