@@ -204,6 +204,30 @@ impl<'a> TraitChecker<'a> {
                 }
             }
 
+            // Abstract types: an explicit @:derive wins; otherwise delegate to
+            // the underlying representation type; a @:coreType value-type with
+            // no underlying (SIMD4f / Ptr / Usize / Atomic — register- or
+            // pointer-sized opaque values) is Send/Sync/Copy/Clone like a
+            // primitive. (Sharing such a value across threads is exactly what
+            // rayzor.Atomic exists for.)
+            TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            } => {
+                if self.class_implements_trait(*symbol_id, trait_) {
+                    true
+                } else if let Some(u) = underlying {
+                    self.implements_trait(*u, trait_)
+                } else {
+                    // Only Send/Sync for a bare @:coreType (a shared address /
+                    // register value is safe to move/share across threads).
+                    // Copy/Clone are deliberately NOT auto-granted here — that
+                    // changes value-identity semantics (test_copy_clone_identity).
+                    matches!(trait_, DerivedTrait::Send | DerivedTrait::Sync)
+                }
+            }
+
             // Dynamic type: unknown, assume NOT Send/Sync
             TypeKind::Dynamic => false,
 

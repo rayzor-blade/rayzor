@@ -441,6 +441,28 @@ pub enum IrInstruction {
         right: IrId,
         vec_ty: IrType,
     },
+
+    // === Atomic memory operations (sequentially consistent) ===
+    /// Atomic load. dest = *ptr.
+    AtomicLoad { dest: IrId, ptr: IrId, ty: IrType },
+    /// Atomic store. *ptr = value.
+    AtomicStore { ptr: IrId, value: IrId, ty: IrType },
+    /// Atomic RMW. dest = old *ptr; *ptr = op(old, value).
+    AtomicRmw {
+        dest: IrId,
+        op: AtomicRmwOp,
+        ptr: IrId,
+        value: IrId,
+        ty: IrType,
+    },
+    /// Atomic compare-and-swap. dest = old *ptr; if old==expected then *ptr=replacement.
+    AtomicCas {
+        dest: IrId,
+        ptr: IrId,
+        expected: IrId,
+        replacement: IrId,
+        ty: IrType,
+    },
 }
 
 /// Binary operations
@@ -499,6 +521,17 @@ pub enum VectorUnaryOpKind {
 pub enum VectorMinMaxKind {
     Min,
     Max,
+}
+
+/// Atomic read-modify-write operation kind (SC ordering implied)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtomicRmwOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
 }
 
 /// Comparison operations
@@ -585,7 +618,11 @@ impl IrInstruction {
             IrInstruction::VectorInsert { dest, .. } |
             IrInstruction::VectorReduce { dest, .. } |
             IrInstruction::VectorUnaryOp { dest, .. } |
-            IrInstruction::VectorMinMax { dest, .. } => Some(*dest),
+            IrInstruction::VectorMinMax { dest, .. } |
+            // Atomic instructions (AtomicStore omitted → falls to _ => None)
+            IrInstruction::AtomicLoad { dest, .. } |
+            IrInstruction::AtomicRmw { dest, .. } |
+            IrInstruction::AtomicCas { dest, .. } => Some(*dest),
 
             IrInstruction::CallDirect { dest, .. } |
             IrInstruction::CallIndirect { dest, .. } |
@@ -638,7 +675,10 @@ impl IrInstruction {
             | IrInstruction::VectorInsert { dest, .. }
             | IrInstruction::VectorReduce { dest, .. }
             | IrInstruction::VectorUnaryOp { dest, .. }
-            | IrInstruction::VectorMinMax { dest, .. } => *dest = new_dest,
+            | IrInstruction::VectorMinMax { dest, .. }
+            | IrInstruction::AtomicLoad { dest, .. }
+            | IrInstruction::AtomicRmw { dest, .. }
+            | IrInstruction::AtomicCas { dest, .. } => *dest = new_dest,
 
             IrInstruction::CallDirect { dest, .. }
             | IrInstruction::CallIndirect { dest, .. }
@@ -706,6 +746,16 @@ impl IrInstruction {
             IrInstruction::VectorReduce { vector, .. } => vec![*vector],
             IrInstruction::VectorUnaryOp { operand, .. } => vec![*operand],
             IrInstruction::VectorMinMax { left, right, .. } => vec![*left, *right],
+            // Atomic instructions
+            IrInstruction::AtomicLoad { ptr, .. } => vec![*ptr],
+            IrInstruction::AtomicStore { ptr, value, .. } => vec![*ptr, *value],
+            IrInstruction::AtomicRmw { ptr, value, .. } => vec![*ptr, *value],
+            IrInstruction::AtomicCas {
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => vec![*ptr, *expected, *replacement],
             // Move/borrow instructions
             IrInstruction::Move { src, .. } => vec![*src],
             IrInstruction::MarkMoved { src } => vec![*src],
@@ -768,6 +818,10 @@ impl IrInstruction {
                 | IrInstruction::MemSet { .. }
                 | IrInstruction::Throw { .. }
                 | IrInstruction::InlineAsm { .. }
+                | IrInstruction::AtomicStore { .. }
+                | IrInstruction::AtomicRmw { .. }
+                | IrInstruction::AtomicCas { .. }
+                | IrInstruction::AtomicLoad { .. }
         )
     }
 }

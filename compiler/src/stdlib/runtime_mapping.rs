@@ -261,6 +261,7 @@ impl StdlibMapping {
         mapping.register_usize_methods();
         mapping.register_cstring_methods();
         mapping.register_simd4f_methods();
+        mapping.register_atomic_methods();
         mapping.register_tensor_methods();
         mapping.register_qtensor_methods();
         mapping.register_cpu_topology_methods();
@@ -3352,6 +3353,34 @@ impl StdlibMapping {
             // simd.distance(other): Float
             map_method!(instance "rayzor_SIMD4f", "distance" => "SIMD4f_distance", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => F64),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // Atomic Methods (rayzor.Atomic)
+    // ============================================================================
+
+    fn register_atomic_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // Atomic.of(addr): Atomic   (static identity — returns the address)
+            map_method!(static "rayzor_Atomic", "of" => "Atomic_of", params: 1, mir_wrapper,
+                types: &[I64] => I64),
+            // a.load(): Int
+            map_method!(instance "rayzor_Atomic", "load" => "Atomic_load", params: 0, mir_wrapper,
+                types: &[I64] => I32),
+            // a.store(v): Void
+            map_method!(instance "rayzor_Atomic", "store" => "Atomic_store", params: 1, mir_wrapper,
+                types: &[I64, I32]),
+            // a.fetchAdd(v): Int   (returns old)
+            map_method!(instance "rayzor_Atomic", "fetchAdd" => "Atomic_fetch_add", params: 1, mir_wrapper,
+                types: &[I64, I32] => I32),
+            // a.compareExchange(expected, replacement): Int   (returns value read)
+            map_method!(instance "rayzor_Atomic", "compareExchange" => "Atomic_cas", params: 2, mir_wrapper,
+                types: &[I64, I32, I32] => I32),
         ];
 
         self.register_from_tuples(mappings);

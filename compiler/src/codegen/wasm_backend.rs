@@ -31,7 +31,7 @@ use wasm_encoder::{
 use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
 use crate::ir::functions::{IrFunction, IrFunctionId, IrFunctionSignature};
 use crate::ir::instructions::{
-    BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind,
+    AtomicRmwOp, BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind,
 };
 use crate::ir::modules::{IrGlobalId, IrModule};
 use crate::ir::{IrId, IrType, IrValue};
@@ -3796,6 +3796,72 @@ impl<'a> FunctionLowerer<'a> {
                     memory_index: 0,
                 };
                 f.instruction(&Instruction::V128Store(ma));
+            }
+
+            // === Atomic operations (sequentially consistent) ===
+            // align: 2 == log2(4); atomics require a naturally-aligned MemArg.
+            IrInstruction::AtomicLoad { dest, ptr, .. } => {
+                self.get_reg(f, *ptr);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                };
+                f.instruction(&Instruction::I32AtomicLoad(ma));
+                self.set_reg(f, *dest);
+            }
+            IrInstruction::AtomicStore { ptr, value, .. } => {
+                self.get_reg(f, *ptr);
+                self.get_reg(f, *value);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                };
+                f.instruction(&Instruction::I32AtomicStore(ma));
+            }
+            IrInstruction::AtomicRmw {
+                dest,
+                op,
+                ptr,
+                value,
+                ..
+            } => {
+                self.get_reg(f, *ptr);
+                self.get_reg(f, *value);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                };
+                match op {
+                    AtomicRmwOp::Add => f.instruction(&Instruction::I32AtomicRmwAdd(ma)),
+                    AtomicRmwOp::Sub => f.instruction(&Instruction::I32AtomicRmwSub(ma)),
+                    AtomicRmwOp::And => f.instruction(&Instruction::I32AtomicRmwAnd(ma)),
+                    AtomicRmwOp::Or => f.instruction(&Instruction::I32AtomicRmwOr(ma)),
+                    AtomicRmwOp::Xor => f.instruction(&Instruction::I32AtomicRmwXor(ma)),
+                    AtomicRmwOp::Xchg => f.instruction(&Instruction::I32AtomicRmwXchg(ma)),
+                };
+                self.set_reg(f, *dest);
+            }
+            IrInstruction::AtomicCas {
+                dest,
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                // wasm stack order: addr, expected, replacement
+                self.get_reg(f, *ptr);
+                self.get_reg(f, *expected);
+                self.get_reg(f, *replacement);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                };
+                f.instruction(&Instruction::I32AtomicRmwCmpxchg(ma));
+                self.set_reg(f, *dest);
             }
 
             // Catch-all for anything else.

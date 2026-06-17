@@ -4126,6 +4126,122 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // no-op"). The compile-time TAST ownership checker still
             // catches the diagnostic-grade cases ahead of codegen.
             IrInstruction::MarkMoved { .. } | IrInstruction::CheckLive { .. } => {}
+
+            // === Atomic operations (sequentially consistent) ===
+            IrInstruction::AtomicLoad { dest, ptr, ty } => {
+                let pv = self.get_value(*ptr)?;
+                let p = if pv.is_pointer_value() {
+                    pv.into_pointer_value()
+                } else {
+                    self.builder
+                        .build_int_to_ptr(
+                            pv.into_int_value(),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "aload_ptr",
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let load_ty = self.translate_type(ty)?;
+                let loaded = self
+                    .builder
+                    .build_load(load_ty, p, "aload")
+                    .map_err(|e| e.to_string())?;
+                let li = loaded.as_instruction_value().unwrap();
+                li.set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent)
+                    .map_err(|e| e.to_string())?;
+                li.set_alignment(4).map_err(|e| e.to_string())?;
+                self.value_map.insert(*dest, loaded);
+            }
+            IrInstruction::AtomicStore { ptr, value, .. } => {
+                let pv = self.get_value(*ptr)?;
+                let p = if pv.is_pointer_value() {
+                    pv.into_pointer_value()
+                } else {
+                    self.builder
+                        .build_int_to_ptr(
+                            pv.into_int_value(),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "astore_ptr",
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let v = self.get_value(*value)?;
+                let st = self.builder.build_store(p, v).map_err(|e| e.to_string())?;
+                st.set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent)
+                    .map_err(|e| e.to_string())?;
+                st.set_alignment(4).map_err(|e| e.to_string())?;
+            }
+            IrInstruction::AtomicRmw {
+                dest,
+                op,
+                ptr,
+                value,
+                ..
+            } => {
+                let pv = self.get_value(*ptr)?;
+                let p = if pv.is_pointer_value() {
+                    pv.into_pointer_value()
+                } else {
+                    self.builder
+                        .build_int_to_ptr(
+                            pv.into_int_value(),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "armw_ptr",
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let v = self.get_value(*value)?.into_int_value();
+                let binop = match op {
+                    crate::ir::AtomicRmwOp::Add => inkwell::AtomicRMWBinOp::Add,
+                    crate::ir::AtomicRmwOp::Sub => inkwell::AtomicRMWBinOp::Sub,
+                    crate::ir::AtomicRmwOp::And => inkwell::AtomicRMWBinOp::And,
+                    crate::ir::AtomicRmwOp::Or => inkwell::AtomicRMWBinOp::Or,
+                    crate::ir::AtomicRmwOp::Xor => inkwell::AtomicRMWBinOp::Xor,
+                    crate::ir::AtomicRmwOp::Xchg => inkwell::AtomicRMWBinOp::Xchg,
+                };
+                let old = self
+                    .builder
+                    .build_atomicrmw(binop, p, v, inkwell::AtomicOrdering::SequentiallyConsistent)
+                    .map_err(|e| e.to_string())?;
+                self.value_map.insert(*dest, old.into());
+            }
+            IrInstruction::AtomicCas {
+                dest,
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                let pv = self.get_value(*ptr)?;
+                let p = if pv.is_pointer_value() {
+                    pv.into_pointer_value()
+                } else {
+                    self.builder
+                        .build_int_to_ptr(
+                            pv.into_int_value(),
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "acas_ptr",
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let e = self.get_value(*expected)?.into_int_value();
+                let x = self.get_value(*replacement)?.into_int_value();
+                let pair = self
+                    .builder
+                    .build_cmpxchg(
+                        p,
+                        e,
+                        x,
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let old = self
+                    .builder
+                    .build_extract_value(pair, 0, "cas_old")
+                    .map_err(|e| e.to_string())?;
+                self.value_map.insert(*dest, old);
+            }
         }
 
         Ok(())

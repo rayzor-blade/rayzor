@@ -19,8 +19,8 @@ use cranelift_native;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId, IrInstruction,
-    IrModule, IrTerminator, IrType, IrValue,
+    AtomicRmwOp, IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId,
+    IrInstruction, IrModule, IrTerminator, IrType, IrValue,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -4326,6 +4326,74 @@ impl CraneliftBackend {
                     .ins()
                     .load(cl_vec_ty, MemFlagsData::new(), ptr_val, 0);
                 value_map.insert(*dest, loaded);
+            }
+
+            // === Atomic operations (sequentially consistent) ===
+            IrInstruction::AtomicLoad { dest, ptr, ty } => {
+                let p = *value_map
+                    .get(ptr)
+                    .ok_or_else(|| format!("AtomicLoad ptr {:?} not found", ptr))?;
+                let cl_ty = Self::mir_type_to_cranelift_static(ty)?;
+                let old = builder.ins().atomic_load(cl_ty, MemFlagsData::new(), p);
+                value_map.insert(*dest, old);
+            }
+            IrInstruction::AtomicStore { ptr, value, .. } => {
+                let p = *value_map
+                    .get(ptr)
+                    .ok_or_else(|| format!("AtomicStore ptr {:?} not found", ptr))?;
+                let x = *value_map
+                    .get(value)
+                    .ok_or_else(|| format!("AtomicStore value {:?} not found", value))?;
+                // (flags, VALUE, PTR)
+                builder.ins().atomic_store(MemFlagsData::new(), x, p);
+            }
+            IrInstruction::AtomicRmw {
+                dest,
+                op,
+                ptr,
+                value,
+                ty,
+            } => {
+                let p = *value_map
+                    .get(ptr)
+                    .ok_or_else(|| format!("AtomicRmw ptr {:?} not found", ptr))?;
+                let x = *value_map
+                    .get(value)
+                    .ok_or_else(|| format!("AtomicRmw value {:?} not found", value))?;
+                let cl_ty = Self::mir_type_to_cranelift_static(ty)?;
+                use cranelift_codegen::ir::AtomicRmwOp as ClRmw;
+                let cl_op = match op {
+                    AtomicRmwOp::Add => ClRmw::Add,
+                    AtomicRmwOp::Sub => ClRmw::Sub,
+                    AtomicRmwOp::And => ClRmw::And,
+                    AtomicRmwOp::Or => ClRmw::Or,
+                    AtomicRmwOp::Xor => ClRmw::Xor,
+                    AtomicRmwOp::Xchg => ClRmw::Xchg,
+                };
+                let old = builder
+                    .ins()
+                    .atomic_rmw(cl_ty, MemFlagsData::new(), cl_op, p, x);
+                value_map.insert(*dest, old);
+            }
+            IrInstruction::AtomicCas {
+                dest,
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                let p = *value_map
+                    .get(ptr)
+                    .ok_or_else(|| format!("AtomicCas ptr {:?} not found", ptr))?;
+                let e = *value_map
+                    .get(expected)
+                    .ok_or_else(|| format!("AtomicCas expected {:?} not found", expected))?;
+                let x = *value_map
+                    .get(replacement)
+                    .ok_or_else(|| format!("AtomicCas replacement {:?} not found", replacement))?;
+                // (flags, PTR, EXPECTED, NEW) -> old
+                let old = builder.ins().atomic_cas(MemFlagsData::new(), p, e, x);
+                value_map.insert(*dest, old);
             }
 
             IrInstruction::VectorStore {

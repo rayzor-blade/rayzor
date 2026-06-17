@@ -12592,6 +12592,10 @@ impl<'a> HirToMirContext<'a> {
                             let ir_ty = self.convert_type(receiver_type);
                             if ir_ty.is_vector() {
                                 Some("rayzor_SIMD4f".to_string())
+                            } else if self.type_is_native_named(receiver_type, "rayzor::Atomic") {
+                                // Atomic's type-map returns Ptr<I32> (not a vector), so is_vector()
+                                // never fires; resolve it by the abstract's @:native name instead.
+                                Some("rayzor_Atomic".to_string())
                             } else if let crate::ir::hir::HirExprKind::Variable {
                                 symbol: recv_sym,
                                 ..
@@ -12634,6 +12638,20 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 None
                             }
+                        } else if receiver_class_hint == Some("rayzor_Atomic") {
+                            // Atomic direct lookup: bypass FALLBACK2 (mirror of SIMD4f).
+                            let method_name_str = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .and_then(|s| self.string_interner.get(s.name));
+                            method_name_str.and_then(|mn| {
+                                self.stdlib_mapping
+                                    .find_by_name_and_params("rayzor_Atomic", mn, param_count)
+                                    .or_else(|| {
+                                        self.stdlib_mapping.find_by_name("rayzor_Atomic", mn)
+                                    })
+                                    .map(|(sig, mapping)| (sig.class, sig.method, mapping))
+                            })
                         } else {
                             // Try to find stdlib runtime mapping for this method
                             self.get_stdlib_runtime_info(
@@ -21664,6 +21682,7 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(ref nn) = native_name {
                         match nn.as_str() {
                             "rayzor::SIMD4f" => return IrType::vector(IrType::F32, 4),
+                            "rayzor::Atomic" => return IrType::Ptr(Box::new(IrType::I32)),
                             _ => {}
                         }
                     }
@@ -22570,6 +22589,22 @@ impl<'a> HirToMirContext<'a> {
 
     /// Fallback @:from conversion for extern abstracts via stdlib mapping.
     /// Searches for a static "fromArray"/"fromXxx" method in the abstract's stdlib class.
+    /// True if `ty` resolves to an extern abstract whose @:native string == `name`.
+    fn type_is_native_named(&self, ty: TypeId, name: &str) -> bool {
+        if let Some(ti) = self.type_table.get(ty) {
+            if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
+                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                    return sym
+                        .native_name
+                        .and_then(|nn| self.string_interner.get(nn))
+                        .map(|s| s == name)
+                        .unwrap_or(false);
+                }
+            }
+        }
+        false
+    }
+
     fn try_stdlib_from_cast(
         &mut self,
         expr: &HirExpr,
