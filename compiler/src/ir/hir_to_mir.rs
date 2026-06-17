@@ -9895,7 +9895,7 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if let Some((class_name, method_name, runtime_call)) = stdlib_info {
-                            let runtime_func_owned = runtime_call.runtime_name.to_string();
+                            let mut runtime_func_owned = runtime_call.runtime_name.to_string();
                             let is_mir_wrapper = runtime_call.is_mir_wrapper;
                             let raw_value_params = runtime_call.raw_value_params;
                             let extend_to_i64_params = runtime_call.extend_to_i64_params;
@@ -9904,6 +9904,46 @@ impl<'a> HirToMirContext<'a> {
                             let explicit_return_type =
                                 runtime_call.return_type.map(|rt| rt.to_ir_type());
                             let has_self_param = runtime_call.has_self_param;
+
+                            // L3: size-correct Ptr<T> wrappers. The default
+                            // Ptr_offset/deref/write are size-erased (treat T as
+                            // i64=8B). When the receiver's pointee is a narrow value
+                            // type, redirect to the sized variant registered in
+                            // systems.rs. Unknown/generic/>=8-byte pointee keeps the
+                            // default name -> byte-identical to pre-L3 codegen.
+                            if matches!(
+                                runtime_func_owned.as_str(),
+                                "Ptr_offset" | "Ptr_deref" | "Ptr_write"
+                            ) {
+                                let pointee = {
+                                    let type_table = self.type_table;
+                                    type_table.get(object.ty).and_then(|ti| match &ti.kind {
+                                        crate::tast::TypeKind::Class { type_args, .. }
+                                        | crate::tast::TypeKind::GenericInstance {
+                                            type_args,
+                                            ..
+                                        } => {
+                                            if !type_args.is_empty() {
+                                                Some(self.convert_type(type_args[0]))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    })
+                                };
+                                if let Some(pointee) = pointee {
+                                    let suffix = match &pointee {
+                                        IrType::F32 => "_4f",
+                                        IrType::I32 | IrType::U32 => "_4",
+                                        IrType::U8 | IrType::I8 | IrType::Bool => "_1",
+                                        _ => "",
+                                    };
+                                    if !suffix.is_empty() {
+                                        runtime_func_owned.push_str(suffix);
+                                    }
+                                }
+                            }
                             let runtime_func: &str = &runtime_func_owned;
 
                             // Try special runtime calls that need custom MIR lowering

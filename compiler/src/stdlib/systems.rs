@@ -6,7 +6,8 @@
 /// Usize operations are native i64 arithmetic.
 use crate::ir::mir_builder::MirBuilder;
 use crate::ir::{
-    BinaryOp, CallingConvention, CompareOp, IrType, IrValue, VectorMinMaxKind, VectorUnaryOpKind,
+    BinaryOp, CallingConvention, CompareOp, InlineHint, IrType, IrValue, VectorMinMaxKind,
+    VectorUnaryOpKind,
 };
 
 /// Build all systems-level type functions
@@ -27,6 +28,18 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_ptr_write(builder);
     build_ptr_offset(builder);
     build_ptr_is_null(builder);
+
+    // Size-typed Ptr variants (L3). Selected at the call site by pointee size;
+    // size 8 keeps the default Ptr_offset/deref/write. Size 2 (Ptr<I16/U16>)
+    // has no consumer + no IrTypeDescriptor variant, so it falls to size-8.
+    build_ptr_offset_sized(builder, "Ptr_offset_1", 1);
+    build_ptr_offset_sized(builder, "Ptr_offset_4", 4);
+    build_ptr_deref_typed(builder, "Ptr_deref_1", IrType::U8);
+    build_ptr_deref_typed(builder, "Ptr_deref_4", IrType::I32);
+    build_ptr_deref_typed(builder, "Ptr_deref_4f", IrType::F32);
+    build_ptr_write_typed(builder, "Ptr_write_1", IrType::U8);
+    build_ptr_write_typed(builder, "Ptr_write_4", IrType::I32);
+    build_ptr_write_typed(builder, "Ptr_write_4f", IrType::F32);
 
     // Build Ref MIR wrappers (no externs needed — direct MIR ops)
     build_ref_from_raw(builder);
@@ -337,6 +350,74 @@ fn build_ptr_offset(builder: &mut MirBuilder) {
     let byte_offset = builder.mul(n, eight, i64_ty.clone());
     let result = builder.add(ptr, byte_offset, i64_ty);
     builder.ret(Some(result));
+}
+
+// --- Size-typed Ptr wrappers (L3: Ptr<T> size-erasure fix) -------------------
+// The default Ptr_offset/deref/write above are size-erased (treat T as i64=8B),
+// so Ptr<Float>/Ptr<Int32>/Ptr<U8> compute the wrong byte stride and read/write
+// the wrong width. These variants bake the correct element size in; the call
+// site (hir_to_mir) redirects to the matching one by the receiver's pointee
+// type, falling back to the size-8 default for i64/unknown pointees (so the
+// existing corpus stays byte-identical). The `ptr` param MUST stay IrType::I64
+// (never Ptr<elem>): the Cranelift Store path keys `is_struct_field` on a
+// Ptr(_) ptr type and would sign-extend a narrow store back to 8 bytes.
+
+/// Ptr_offset_<sz>(ptr: i64, n: i64) -> ptr + n*<sz>   (sz = sizeof(T))
+fn build_ptr_offset_sized(builder: &mut MirBuilder, name: &str, sz: i64) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function(name)
+        .param("ptr", i64_ty.clone())
+        .param("n", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ptr = builder.get_param(0);
+    let n = builder.get_param(1);
+    let k = builder.const_i64(sz);
+    let byte_offset = builder.mul(n, k, i64_ty.clone());
+    let result = builder.add(ptr, byte_offset, i64_ty);
+    builder.ret(Some(result));
+}
+
+/// Ptr_deref_<w>(ptr: i64) -> load <elem_ty>   (elem_ty drives load width)
+fn build_ptr_deref_typed(builder: &mut MirBuilder, name: &str, elem_ty: IrType) {
+    let func_id = builder
+        .begin_function(name)
+        .param("ptr", IrType::I64) // MUST be I64, not Ptr<elem>
+        .returns(elem_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ptr = builder.get_param(0);
+    let value = builder.load(ptr, elem_ty);
+    builder.ret(Some(value));
+}
+
+/// Ptr_write_<w>(ptr: i64, value: <elem_ty>) -> void   (value reg type drives store width)
+fn build_ptr_write_typed(builder: &mut MirBuilder, name: &str, elem_ty: IrType) {
+    let func_id = builder
+        .begin_function(name)
+        .param("ptr", IrType::I64) // MUST be I64 (Cranelift is_struct_field guard)
+        .param("value", elem_ty.clone())
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ptr = builder.get_param(0);
+    let value = builder.get_param(1);
+    builder.store(ptr, value);
+    builder.ret(None);
 }
 
 /// Ptr_isNull(ptr: i64) -> bool  — ptr == 0

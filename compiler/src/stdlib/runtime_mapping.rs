@@ -3135,6 +3135,27 @@ impl StdlibMapping {
             // ptr.isNull(): Bool  (instance, compare to 0)
             map_method!(instance "rayzor_Ptr", "isNull" => "Ptr_isNull", params: 0, mir_wrapper,
                 types: &[I64] => Bool),
+            // Size-typed Ptr wrappers (L3). Selected at the call site by pointee
+            // size (see hir_to_mir). Registered only so get_function_signature()
+            // resolves param/return widths for these runtime names; find_by_name
+            // still returns the default "offset"/"deref"/"write" row first, so an
+            // un-redirected call stays byte-identical.
+            map_method!(instance "rayzor_Ptr", "offset" => "Ptr_offset_4", params: 1, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(instance "rayzor_Ptr", "offset" => "Ptr_offset_1", params: 1, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_4", params: 0, mir_wrapper,
+                types: &[I64] => I32),
+            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_4f", params: 0, mir_wrapper,
+                types: &[I64] => F32),
+            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_1", params: 0, mir_wrapper,
+                types: &[I64] => U8),
+            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_4", params: 1, mir_wrapper,
+                types: &[I64, I32]),
+            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_4f", params: 1, mir_wrapper,
+                types: &[I64, F32]),
+            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_1", params: 1, mir_wrapper,
+                types: &[I64, U8]),
         ];
 
         self.register_from_tuples(mappings);
