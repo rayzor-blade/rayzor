@@ -7,7 +7,13 @@
 //! No std::io, no threads, no platform FFI. Uses raw WASI fd_write for output.
 
 #![allow(clippy::missing_safety_doc)]
+// Real in-guest Arc/Mutex use the wasm futex (memory.atomic.wait32/notify),
+// which is exposed behind this unstable intrinsic gate (rust #77839). The crate
+// already builds on nightly (build.sh: `cargo +nightly`); on non-wasm targets
+// (host `cargo test`) the gated intrinsics are cfg'd out, so this is inert there.
+#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
 
+pub mod concurrent;
 pub mod gguf_wasm;
 pub mod kernels;
 pub mod qtensor;
