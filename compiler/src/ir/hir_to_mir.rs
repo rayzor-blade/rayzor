@@ -12837,6 +12837,44 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     };
 
+                                    // Thread<T>.join() boxes its result via haxe_box_int_ptr
+                                    // (rayzor_thread_join), so for a concrete HEAP T the boxed
+                                    // i64 payload IS the object pointer. maybe_unbox's raw
+                                    // passthrough arm — shared with methods that return an
+                                    // UN-boxed handle (e.g. Arc.get) — would skip the unbox and
+                                    // hand back the box address (garbage). Unbox inline, keyed on
+                                    // the wrapper so only the boxing method changes behavior.
+                                    // Excludes Ptr(primitive) (Null<Int>), handled above.
+                                    let resolved_is_heap_ptr = matches!(&resolved_expected, IrType::Ptr(inner) if !matches!(
+                                        inner.as_ref(),
+                                        IrType::I32
+                                            | IrType::I64
+                                            | IrType::F32
+                                            | IrType::F64
+                                            | IrType::Bool
+                                    )) || matches!(
+                                        resolved_expected,
+                                        IrType::String
+                                    );
+                                    let mir_ret_is_ptr_u8 = matches!(&mir_return_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::Void));
+                                    if runtime_func == "Thread_join"
+                                        && resolved_is_heap_ptr
+                                        && mir_ret_is_ptr_u8
+                                    {
+                                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                        let unbox_id = self.get_or_register_extern_function(
+                                            "haxe_unbox_int_ptr",
+                                            vec![ptr_u8.clone()],
+                                            IrType::I64,
+                                        );
+                                        let i64v = self.builder.build_call_direct(
+                                            unbox_id,
+                                            vec![call_result],
+                                            IrType::I64,
+                                        )?;
+                                        return self.builder.build_cast(i64v, IrType::I64, ptr_u8);
+                                    }
+
                                     return self.maybe_unbox_for_extern_return(
                                         call_result,
                                         &mir_return_type,
