@@ -20,11 +20,7 @@ import rayzor.Atomic;
  *
  * Both targets print PASS for all three patterns.
  *
- * Known limitations (worker closures today):
- *   - A `@:coreType` value (Atomic/Ptr) crossing a thread boundary needs an
- *     explicit type — `var c:Atomic = Atomic.of(...)` — or the static-call
- *     result infers `Dynamic` and the Send check rejects it (E0302). Heap
- *     types (Arc/Mutex/class instances) need no annotation.
+ * Known limitation (worker closures today):
  *   - Haxe `Array` operations are not safe inside a spawned worker (alloc /
  *     push / returning an Array across `join` are unreliable). Workers should
  *     exchange primitives and mutate shared state through Arc/Mutex/Atomic.
@@ -104,7 +100,7 @@ class Main {
     static function atomicWorkStealing():Bool {
         final total = 50000;
         var cell = Box.init(0);
-        var cursor:Atomic = Atomic.of(cell.asPtr()); // coreType: annotate to cross threads
+        var cursor = Atomic.of(cell.asPtr()); // inferred Atomic<Int>; crosses threads, no annotation
         var hs = new Array<Thread<Int>>();
         for (t in 0...WORKERS) {
             hs.push(Thread.spawn(() -> {

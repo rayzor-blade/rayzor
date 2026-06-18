@@ -1,21 +1,25 @@
 package rayzor;
 
 /**
- * Atomic Int over a shared linear-memory cell (sequentially consistent).
+ * Atomic cell over a shared linear-memory address (sequentially consistent).
  *
- * Each method lowers to one machine atomic instruction:
- * `i32.atomic.*` on wasm, Cranelift/LLVM atomics on native. There is no
- * function-call overhead and no lock.
+ * `Atomic<T>` is generic so the element type propagates from the wrapped
+ * pointer at the call site — `Atomic.of(ptr:Ptr<Int>)` infers `Atomic<Int>` —
+ * which keeps the value properly typed (and `Send`) when it crosses a thread
+ * boundary, instead of degrading to `Dynamic`. `T` is a 32-bit cell type
+ * (`Int`); each method lowers to one machine atomic instruction
+ * (`i32.atomic.*` on wasm, Cranelift/LLVM atomics on native) — no call
+ * overhead, no lock.
  *
- * The wrapped `addr` MUST be 4-byte aligned or the access traps on wasm.
+ * The wrapped address MUST be 4-byte aligned or the access traps on wasm.
  *
  * Example:
  * ```haxe
  * var cell:Ptr<Int> = Ptr.alloc(1);
  * cell[0] = 0;
- * var a = Atomic.of(cell);
- * a.fetchAdd(1);          // returns old value (0), cell now 1
- * trace(a.load());        // 1
+ * var a = Atomic.of(cell);   // a : Atomic<Int>
+ * a.fetchAdd(1);             // returns old value (0), cell now 1
+ * trace(a.load());           // 1
  * a.store(42);
  * a.compareExchange(42, 99); // swaps, returns 42
  * ```
@@ -26,24 +30,24 @@ package rayzor;
 // (so multiple workers atomic-rmw the SAME cell) is the entire point.
 @:derive([Send])
 @:native("rayzor::Atomic")
-extern abstract Atomic {
+extern abstract Atomic<T> {
     /** Wrap a 4-byte-aligned shared-memory address as an Atomic cell (identity). */
     @:native("of")
-    public static function of(addr:Ptr<Int>):Atomic;
+    public static function of<T>(addr:Ptr<T>):Atomic<T>;
 
     /** Atomic load (SC). */
     @:native("load")
-    public function load():Int;
+    public function load():T;
 
     /** Atomic store (SC). */
     @:native("store")
-    public function store(v:Int):Void;
+    public function store(v:T):Void;
 
     /** fetch_add (SC) — returns the OLD value. */
     @:native("fetchAdd")
-    public function fetchAdd(v:Int):Int;
+    public function fetchAdd(v:T):T;
 
     /** compare-and-swap (SC) — returns the value READ (old). */
     @:native("compareExchange")
-    public function compareExchange(expected:Int, replacement:Int):Int;
+    public function compareExchange(expected:T, replacement:T):T;
 }
