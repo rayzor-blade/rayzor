@@ -18,13 +18,10 @@ import rayzor.Atomic;
  *   rayzor run examples/concurrency/Main.hx
  *   rayzor run --wasm examples/concurrency/Main.hx
  *
- * Both targets print PASS for all three patterns.
- *
- * Known limitation (worker closures today):
- *   - A worker may freely allocate/use Haxe Arrays internally and write disjoint
- *     bands of a SHARED pre-sized Array (pattern 4 below), but it cannot RETURN a
- *     heap object (Array/class instance) across `join` — only primitives marshal
- *     back. Hand results back through a shared Arc/Mutex or a captured buffer.
+ * Both targets print PASS for all four patterns. A worker may allocate/use Haxe
+ * Arrays internally, write disjoint bands of a shared buffer (pattern 4), AND
+ * return a heap object (Array/class) across `join()` — all marshal correctly on
+ * native and wasm.
  */
 class Main {
     static final WORKERS = 4;
