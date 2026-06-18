@@ -4118,6 +4118,16 @@ impl<'a> AstLowering<'a> {
 
         // Initialize class_fields for this abstract so field tracking works (needed for enum abstract)
         self.class_fields.insert(abstract_symbol, Vec::new());
+        // Initialize class_methods so the pre-pass-typed abstract methods are
+        // reachable by resolve_class_method_symbol Strategy 1 at call sites.
+        // The abstract symbol's scope_id stays at root (ScopeId::first()), so
+        // the scope-based Strategy 3 cannot find methods registered in the
+        // abstract's inner scope; the class_methods map is the same mechanism
+        // regular classes use and keeps `@:coreType` static calls (Atomic.of,
+        // Box.init) bound to their typed method instead of a Dynamic placeholder.
+        self.class_methods
+            .entry(abstract_symbol)
+            .or_insert_with(Vec::new);
 
         // Push abstract onto class context stack so `this` resolves correctly in method bodies
         self.context.class_context_stack.push(abstract_symbol);
@@ -4191,6 +4201,12 @@ impl<'a> AstLowering<'a> {
                     self.context
                         .symbol_table
                         .update_symbol_type(sym, function_type);
+                    // Register in class_methods so static (Atomic.of) and instance
+                    // (cell.asPtr()) calls resolve to this typed symbol via
+                    // resolve_class_method_symbol Strategy 1.
+                    if let Some(methods) = self.class_methods.get_mut(&abstract_symbol) {
+                        methods.push((method_name, sym, is_static));
+                    }
                 }
                 ClassFieldKind::Var {
                     name, type_hint, ..
@@ -6674,6 +6690,11 @@ impl<'a> AstLowering<'a> {
         if let Some(type_info) = type_table.get(type_id) {
             match &type_info.kind {
                 crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                // `@:coreType extern abstract` receivers (Box<Int>, Atomic<Int>, Ptr<Int>)
+                // resolve to the abstract symbol so instance method calls (cell.asPtr(),
+                // a.fetchAdd()) find the pre-pass-typed method in the abstract's scope and
+                // keep their declared return type instead of decaying to Dynamic.
+                crate::tast::core::TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
                 crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
                     // For generic instances like Thread<Int>, resolve the base type
                     self.resolve_type_to_class_symbol_inner(type_table, *base_type)
@@ -7153,6 +7174,36 @@ impl<'a> AstLowering<'a> {
                             .qualified_name
                             .and_then(|qn| self.context.string_interner.get(qn))
                             .map(|qn| qn == expected_qname)
+                            .unwrap_or(false)
+                })
+                .into_iter()
+                .next()
+            {
+                return Some(sym.id);
+            }
+
+            // Strategy 2b: package-qualified suffix match. A `@:coreType extern
+            // abstract` loaded from the stdlib (Atomic/Box/Ptr) carries a BARE
+            // class qualified_name (`Atomic`) while its methods are registered
+            // with the fully-packaged qname (`rayzor.Atomic.of`). The exact
+            // match above misses, leaving the call bound to a typeless
+            // placeholder whose return decays to Dynamic. Match a typed Function
+            // whose qname ends with `.<class_bare_name>.<method>` so the real
+            // pre-typed method is recovered. Restricted to symbols with a valid
+            // type so it never prefers a fresh placeholder.
+            let class_bare = class_qname.rsplit('.').next().unwrap_or(class_qname);
+            let suffix = format!(".{}.{}", class_bare, method_name_str);
+            if let Some(sym) = self
+                .context
+                .symbol_table
+                .find_symbols(|sym| {
+                    sym.kind == crate::tast::symbols::SymbolKind::Function
+                        && sym.name == method_name
+                        && sym.type_id.is_valid()
+                        && sym
+                            .qualified_name
+                            .and_then(|qn| self.context.string_interner.get(qn))
+                            .map(|qn| qn.ends_with(&suffix))
                             .unwrap_or(false)
                 })
                 .into_iter()
@@ -8892,7 +8943,14 @@ impl<'a> AstLowering<'a> {
                     {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                             // Check if this symbol represents a class declaration (not just a variable of class type)
-                            if symbol.kind == crate::tast::symbols::SymbolKind::Class {
+                            // `@:coreType extern abstract` types (Atomic, Box, Ptr) carry
+                            // SymbolKind::Abstract; their static methods (Atomic.of, Box.init)
+                            // must take the same static-call path as classes so the call keeps
+                            // its declared concrete return type (Atomic<T>/Box<T>) instead of
+                            // falling through to the instance path and decaying to Dynamic.
+                            if symbol.kind == crate::tast::symbols::SymbolKind::Class
+                                || symbol.kind == crate::tast::symbols::SymbolKind::Abstract
+                            {
                                 // This is a class name, so this is a static method call
                                 //
                                 // For extern classes (Std, Math, Sys, etc.), the type_id may be invalid
