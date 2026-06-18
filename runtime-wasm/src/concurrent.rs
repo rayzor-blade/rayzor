@@ -214,6 +214,24 @@ fn futex_wait(addr: *mut i32, expected: i32) {
     }
 }
 
+/// Park with a TIMEOUT (nanoseconds), then return regardless. Used by the
+/// channel: parking yields the CPU so a peer worker can run (a pure spin starves
+/// it), while the bounded timeout guarantees the caller re-checks its condition
+/// under the lock — so even if a cross-instance `memory.atomic.notify` is missed
+/// (unreliable in the current wasmtime host) it can never deadlock.
+#[inline]
+fn futex_wait_timed(addr: *mut i32, expected: i32, timeout_ns: i64) {
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        core::arch::wasm32::memory_atomic_wait32(addr, expected, timeout_ns);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (addr, expected, timeout_ns);
+        std::thread::yield_now();
+    }
+}
+
 /// Wake up to `count` threads parked on the word at `addr`.
 #[inline]
 fn futex_notify(addr: *mut i32, count: u32) {
@@ -367,6 +385,240 @@ pub extern "C" fn sys_mutex_try_acquire(mutex: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn sys_mutex_release(mutex: i32) {
     rayzor_mutex_unlock(mutex);
+}
+
+// ============================================================================
+// Channel — bounded MPMC ring buffer over shared linear memory.
+//
+// rayzor.concurrent.Channel was UNIMPLEMENTED on the wasmtime target (no
+// runtime-wasm symbol, no host fake) so every call returned 0. This is the real
+// in-guest implementation, mirroring the native std::sync::Mutex-guarded
+// VecDeque: a spinlock protects the head/tail/slots, and the existing futex
+// (memory.atomic.wait32/notify) blocks senders while full and receivers while
+// empty. All values are i32 (the boxed/object pointer in linear memory).
+//
+// Layout (header 20 bytes, then `capacity` i32 slots):
+//   +0  lock    (AtomicU32)  spinlock: 0 unlocked, 1 locked
+//   +4  head    (AtomicU32)  monotonic consume counter
+//   +8  tail    (AtomicU32)  monotonic produce counter
+//   +12 closed  (AtomicU32)
+//   +16 capacity(i32)
+//   +20 slots   [i32; capacity]
+// count = tail - head (wrapping); empty = 0; full = count >= capacity.
+// ============================================================================
+
+const CH_LOCK: i32 = 0;
+const CH_HEAD: i32 = 4;
+const CH_TAIL: i32 = 8;
+const CH_CLOSED: i32 = 12;
+const CH_CAP: i32 = 16;
+const CH_SLOTS: i32 = 20;
+
+#[inline]
+unsafe fn ch_lock(ch: i32) {
+    let l = atomic(ch, CH_LOCK);
+    while l
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+#[inline]
+unsafe fn ch_unlock(ch: i32) {
+    atomic(ch, CH_LOCK).store(0, Ordering::Release);
+}
+#[inline]
+unsafe fn ch_slot_addr(ch: i32, idx: u32) -> i32 {
+    CH_SLOTS + (idx as i32).wrapping_mul(4)
+}
+
+/// Allocate a channel with the given capacity. capacity<=0 has no unbounded ring
+/// on wasm, so it falls back to a fixed buffer (documented limitation).
+#[no_mangle]
+pub extern "C" fn rayzor_channel_init(capacity: i32) -> i32 {
+    let cap: i32 = if capacity > 0 { capacity } else { 256 };
+    let bytes = (CH_SLOTS + cap.wrapping_mul(4)).max(CH_SLOTS);
+    let h = crate::rayzor_malloc(bytes);
+    if h == 0 {
+        return 0;
+    }
+    unsafe {
+        atomic(h, CH_LOCK).store(0, Ordering::Relaxed);
+        atomic(h, CH_HEAD).store(0, Ordering::Relaxed);
+        atomic(h, CH_TAIL).store(0, Ordering::Relaxed);
+        atomic(h, CH_CLOSED).store(0, Ordering::Relaxed);
+        store_word(h, CH_CAP, cap);
+    }
+    h
+}
+
+/// Send (blocks while full). No-op once closed.
+#[no_mangle]
+pub extern "C" fn rayzor_channel_send(channel: i32, value: i32) {
+    if channel == 0 {
+        return;
+    }
+    let cap = unsafe { load_word(channel, CH_CAP) } as u32;
+    loop {
+        unsafe {
+            ch_lock(channel);
+            if atomic(channel, CH_CLOSED).load(Ordering::Relaxed) != 0 {
+                ch_unlock(channel);
+                return;
+            }
+            let h = atomic(channel, CH_HEAD).load(Ordering::Relaxed);
+            let t = atomic(channel, CH_TAIL).load(Ordering::Relaxed);
+            if t.wrapping_sub(h) < cap {
+                store_word(channel, ch_slot_addr(channel, t % cap), value);
+                atomic(channel, CH_TAIL).store(t.wrapping_add(1), Ordering::Release);
+                ch_unlock(channel);
+                futex_notify(cell_addr(channel, CH_TAIL) as *mut i32, 1);
+                return;
+            }
+            // Full: park on CH_HEAD (yields CPU so the consumer can drain) with a
+            // short timeout — a missed cross-instance notify can't deadlock.
+            ch_unlock(channel);
+            futex_wait_timed(cell_addr(channel, CH_HEAD) as *mut i32, h as i32, 1_000_000);
+        }
+    }
+}
+
+/// Try-send (non-blocking). Returns 1 on success, 0 if full or closed.
+#[no_mangle]
+pub extern "C" fn rayzor_channel_try_send(channel: i32, value: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    let cap = unsafe { load_word(channel, CH_CAP) } as u32;
+    unsafe {
+        ch_lock(channel);
+        if atomic(channel, CH_CLOSED).load(Ordering::Relaxed) != 0 {
+            ch_unlock(channel);
+            return 0;
+        }
+        let h = atomic(channel, CH_HEAD).load(Ordering::Relaxed);
+        let t = atomic(channel, CH_TAIL).load(Ordering::Relaxed);
+        if t.wrapping_sub(h) < cap {
+            store_word(channel, ch_slot_addr(channel, t % cap), value);
+            atomic(channel, CH_TAIL).store(t.wrapping_add(1), Ordering::Release);
+            ch_unlock(channel);
+            futex_notify(cell_addr(channel, CH_TAIL) as *mut i32, 1);
+            1
+        } else {
+            ch_unlock(channel);
+            0
+        }
+    }
+}
+
+/// Receive (blocks while empty). Returns 0 (null) if the channel is closed+empty.
+#[no_mangle]
+pub extern "C" fn rayzor_channel_receive(channel: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    let cap = unsafe { load_word(channel, CH_CAP) } as u32;
+    loop {
+        unsafe {
+            ch_lock(channel);
+            let h = atomic(channel, CH_HEAD).load(Ordering::Relaxed);
+            let t = atomic(channel, CH_TAIL).load(Ordering::Relaxed);
+            if t.wrapping_sub(h) > 0 {
+                let v = load_word(channel, ch_slot_addr(channel, h % cap));
+                atomic(channel, CH_HEAD).store(h.wrapping_add(1), Ordering::Release);
+                ch_unlock(channel);
+                futex_notify(cell_addr(channel, CH_HEAD) as *mut i32, 1);
+                return v;
+            }
+            if atomic(channel, CH_CLOSED).load(Ordering::Relaxed) != 0 {
+                ch_unlock(channel);
+                return 0;
+            }
+            // Empty: park on CH_TAIL with a short timeout (see send()).
+            ch_unlock(channel);
+            futex_wait_timed(cell_addr(channel, CH_TAIL) as *mut i32, t as i32, 1_000_000);
+        }
+    }
+}
+
+/// Try-receive (non-blocking). Returns the value, or 0 if empty.
+#[no_mangle]
+pub extern "C" fn rayzor_channel_try_receive(channel: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    let cap = unsafe { load_word(channel, CH_CAP) } as u32;
+    unsafe {
+        ch_lock(channel);
+        let h = atomic(channel, CH_HEAD).load(Ordering::Relaxed);
+        let t = atomic(channel, CH_TAIL).load(Ordering::Relaxed);
+        if t.wrapping_sub(h) > 0 {
+            let v = load_word(channel, ch_slot_addr(channel, h % cap));
+            atomic(channel, CH_HEAD).store(h.wrapping_add(1), Ordering::Release);
+            ch_unlock(channel);
+            futex_notify(cell_addr(channel, CH_HEAD) as *mut i32, 1);
+            v
+        } else {
+            ch_unlock(channel);
+            0
+        }
+    }
+}
+
+/// Close: mark closed and wake every blocked sender/receiver.
+#[no_mangle]
+pub extern "C" fn rayzor_channel_close(channel: i32) {
+    if channel == 0 {
+        return;
+    }
+    unsafe {
+        atomic(channel, CH_CLOSED).store(1, Ordering::Release);
+        futex_notify(cell_addr(channel, CH_TAIL) as *mut i32, u32::MAX);
+        futex_notify(cell_addr(channel, CH_HEAD) as *mut i32, u32::MAX);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_channel_is_closed(channel: i32) -> i32 {
+    if channel == 0 {
+        return 1;
+    }
+    unsafe { i32::from(atomic(channel, CH_CLOSED).load(Ordering::Relaxed) != 0) }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_channel_len(channel: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    unsafe {
+        let h = atomic(channel, CH_HEAD).load(Ordering::Relaxed);
+        let t = atomic(channel, CH_TAIL).load(Ordering::Relaxed);
+        t.wrapping_sub(h) as i32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_channel_capacity(channel: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    unsafe { load_word(channel, CH_CAP) }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_channel_is_empty(channel: i32) -> i32 {
+    i32::from(rayzor_channel_len(channel) == 0)
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_channel_is_full(channel: i32) -> i32 {
+    if channel == 0 {
+        return 0;
+    }
+    let cap = unsafe { load_word(channel, CH_CAP) };
+    i32::from(rayzor_channel_len(channel) >= cap)
 }
 
 // ============================================================================
