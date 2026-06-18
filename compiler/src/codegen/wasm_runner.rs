@@ -1226,13 +1226,25 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                 }
             };
             let r = if let Ok(t) = func.typed::<i32, i64>(&store) {
-                t.call(&mut store, job.env_ptr).unwrap_or(0)
+                match t.call(&mut store, job.env_ptr) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[wasm-worker {worker_id}] closure TRAPPED: {e}");
+                        0
+                    }
+                }
             } else if let Ok(t) = func.typed::<i32, i32>(&store) {
-                t.call(&mut store, job.env_ptr)
-                    .map(|r| r as i64)
-                    .unwrap_or(0)
+                match t.call(&mut store, job.env_ptr) {
+                    Ok(v) => v as i64,
+                    Err(e) => {
+                        eprintln!("[wasm-worker {worker_id}] closure TRAPPED: {e}");
+                        0
+                    }
+                }
             } else if let Ok(t) = func.typed::<i32, ()>(&store) {
-                let _ = t.call(&mut store, job.env_ptr);
+                if let Err(e) = t.call(&mut store, job.env_ptr) {
+                    eprintln!("[wasm-worker {worker_id}] closure TRAPPED: {e}");
+                }
                 0
             } else {
                 0
