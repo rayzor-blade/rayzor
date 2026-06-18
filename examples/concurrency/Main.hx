@@ -21,11 +21,10 @@ import rayzor.Atomic;
  * Both targets print PASS for all three patterns.
  *
  * Known limitation (worker closures today):
- *   - Haxe `Array` operations are not safe inside a spawned worker (alloc /
- *     push / returning an Array across `join` are unreliable). Workers should
- *     exchange primitives and mutate shared state through Arc/Mutex/Atomic.
- *     The disjoint-buffer write form of `parallel_rows` therefore still goes
- *     through the Rust runtime; the banded-reduction form below is pure Haxe.
+ *   - A worker may freely allocate/use Haxe Arrays internally and write disjoint
+ *     bands of a SHARED pre-sized Array (pattern 4 below), but it cannot RETURN a
+ *     heap object (Array/class instance) across `join` — only primitives marshal
+ *     back. Hand results back through a shared Arc/Mutex or a captured buffer.
  */
 class Main {
     static final WORKERS = 4;
@@ -35,6 +34,7 @@ class Main {
         report("1. banded fork-join reduce  (parallel_rows: disjoint band -> partial -> fold)", bandedReduce());
         report("2. Arc<Mutex> shared state  (cross-worker mutual-exclusion accumulate)", arcMutexReduce());
         report("3. Atomic work-stealing     (lock-free shared cursor, each index once)", atomicWorkStealing());
+        report("4. disjoint-band buffer     (parallel_rows: zero-copy disjoint writes)", disjointBandWrite());
         Sys.println("=== done ===");
     }
 
@@ -118,6 +118,30 @@ class Main {
         var expect = 0;
         for (i in 0...total) expect += i;
         return sum == expect;
+    }
+
+    // --- 4. Disjoint-band buffer writes (the zero-copy parallel_rows) ------
+    // The faithful kernel shape: one shared, pre-sized output buffer; each worker
+    // owns a disjoint band [lo, hi) and writes its slice directly, no locking and
+    // no copy (writes never overlap, so there is no race). This is how the Rust
+    // matmul/attention kernels fill a tensor — here in pure Haxe, native + wasm.
+    static function disjointBandWrite():Bool {
+        final N = 4000;
+        final per = Std.int(N / WORKERS);
+        var out = new Array<Int>();
+        for (i in 0...N) out.push(0); // pre-size so workers never reallocate
+        var hs = new Array<Thread<Int>>();
+        for (t in 0...WORKERS) {
+            var lo = t * per;
+            var hi = (t == WORKERS - 1) ? N : (t + 1) * per;
+            hs.push(Thread.spawn(() -> {
+                for (i in lo...hi) out[i] = i * i; // disjoint slice, no lock
+                return 0;
+            }));
+        }
+        for (h in hs) h.join();
+        for (i in 0...N) if (out[i] != i * i) return false;
+        return true;
     }
 }
 
