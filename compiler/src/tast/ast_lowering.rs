@@ -14683,11 +14683,29 @@ impl<'a> AstLowering<'a> {
         match &callee.kind {
             ExprKind::Ident(name) => {
                 let name_interned = self.context.string_interner.intern(name);
-                let sym = self
+                // Direct scope lookup first: free functions and locals/params
+                // holding a closure value (a local shadows a same-name method).
+                if let Some(sym) = self
                     .context
                     .symbol_table
-                    .lookup_symbol(self.context.current_scope, name_interned)?;
-                self.function_param_types_from_symbol(sym.id)
+                    .lookup_symbol(self.context.current_scope, name_interned)
+                {
+                    if let Some(params) = self.function_param_types_from_symbol(sym.id) {
+                        return Some(params);
+                    }
+                }
+                // Fall back: an unqualified call inside a class method is a
+                // call to a method of the current class (`run(...)` ==
+                // `ThisClass.run(...)`). The bare scope lookup misses
+                // same-class static/instance methods, so consult the
+                // `class_methods` table the real call path uses (9827+).
+                // Without this, a lambda passed to a same-class method gets
+                // no expected-param-types hint and its untyped params default
+                // to Dynamic → `*void` MIR formals → the caller passes raw
+                // i32 that the body unboxes (deref of a small int → SIGSEGV).
+                let class_sym = *self.context.class_context_stack.last()?;
+                let method_sym = self.resolve_class_method_symbol(class_sym, name_interned)?;
+                self.function_param_types_from_symbol(method_sym)
             }
             ExprKind::Field {
                 expr: obj, field, ..
