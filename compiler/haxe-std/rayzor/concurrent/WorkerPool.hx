@@ -73,6 +73,11 @@ class WorkerPool {
         var nodes = _nodeCount;
         var chunkSize = Std.int(items / nodes);
         var threads = new Array<Thread<Int>>();
+        // Only pin affinity on real multi-NUMA hardware. On UMA (macOS, wasm,
+        // laptops, single-socket) bindToNode is a meaningless soft hint, and
+        // calling it from several freshly-spawned worker threads has crashed
+        // (native SIGILL / wasm host-import trap), so skip it entirely there.
+        var multiNode = CpuTopology.multiNode();
 
         for (n in 0...nodes) {
             var lo = n * chunkSize;
@@ -80,7 +85,7 @@ class WorkerPool {
             var node = n;
             var f = fn;
             var t = Thread.spawn(function():Int {
-                CpuTopology.bindToNode(node);
+                if (multiNode) CpuTopology.bindToNode(node);
                 var i = lo;
                 while (i < hi) {
                     f(i, node);
@@ -114,6 +119,9 @@ class WorkerPool {
         var nodes = _nodeCount;
         var chunkSize = Std.int(rows / nodes);
         var threads = new Array<Thread<Int>>();
+        // See parallelFor: skip affinity binding on UMA (it's a no-op hint that
+        // has crashed when issued from multiple fresh worker threads).
+        var multiNode = CpuTopology.multiNode();
 
         for (n in 0...nodes) {
             var lo = n * chunkSize;
@@ -121,7 +129,7 @@ class WorkerPool {
             var node = n;
             var f = fn;
             var t = Thread.spawn(function():Int {
-                CpuTopology.bindToNode(node);
+                if (multiNode) CpuTopology.bindToNode(node);
                 f(lo, hi, node);
                 return 0;
             });

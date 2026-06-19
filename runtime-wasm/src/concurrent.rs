@@ -622,6 +622,53 @@ pub extern "C" fn rayzor_channel_is_full(channel: i32) -> i32 {
 }
 
 // ============================================================================
+// CPU topology — wasm has no NUMA / thread affinity, so these are in-guest
+// no-ops with single-node defaults. Defining them HERE (rather than leaving them
+// as host imports) is what lets a Thread.spawn WORKER call CpuTopology.bindToNode
+// without trapping: the worker linker (wasm_runner.rs) stubs every host IMPORT to
+// a trap, but a merged in-guest function is callable. WorkerPool.withForcedNodes'
+// fanout closure calls bindToNode before the user work — without this it trapped
+// on the worker and the pool silently produced nothing.
+// ============================================================================
+
+/// No NUMA on wasm.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_multi_node() -> i32 {
+    0
+}
+
+/// Single node.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_node_count() -> i32 {
+    1
+}
+
+/// The guest can't introspect host cores; wasm parallelism comes from the worker
+/// pool, not topology. Report one logical CPU.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_cpu_count() -> i32 {
+    1
+}
+
+/// Every CPU maps to node 0.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_cpu_to_node(_cpu: i32) -> i32 {
+    0
+}
+
+/// Affinity bind is a no-op (success) in the wasm sandbox.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_bind_to_node(_node: i32) -> i32 {
+    0
+}
+
+/// Unbind is a no-op (success).
+#[no_mangle]
+pub extern "C" fn rayzor_topology_unbind() -> i32 {
+    0
+}
+
+// ============================================================================
 // Verification (this crate does not build for the host target — a pre-existing
 // cfg gap, `rayzor_host_flash_attn_q8_par` — so `cargo test` here is not
 // runnable):
