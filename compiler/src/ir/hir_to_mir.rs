@@ -32548,6 +32548,16 @@ impl<'a> HirToMirContext<'a> {
             self.infer_lambda_return_type(lambda_func, entry_block, body_result)
         };
 
+        // The block the builder ENDED on after lowering the body — for a body
+        // whose last construct is a loop / conditional this is the loop-exit /
+        // merge block, NOT the entry block. The implicit return must terminate
+        // THAT block (mirroring how `ensure_terminator` finalizes a regular
+        // function on its current block). Finalizing only the entry block left
+        // a fall-through Void lambda's loop-exit block as `Unreachable`, which
+        // executes as a trap (`udf` / SIGILL) once the loop exits — e.g. a
+        // `(lo,hi,n)->{ var i=lo; while(i<hi){...;i++;} }` worker closure.
+        let term_block = self.builder.current_block().unwrap_or(entry_block);
+
         // Update signature and add terminator (borrows function mutably)
         {
             let lambda_func = self.builder.module.functions.get_mut(&func_id)?;
@@ -32568,7 +32578,7 @@ impl<'a> HirToMirContext<'a> {
             lambda_func.signature.return_type = return_type.clone();
             Self::finalize_lambda_terminator_static(
                 lambda_func,
-                entry_block,
+                term_block,
                 body_result,
                 &return_type,
             )?;
