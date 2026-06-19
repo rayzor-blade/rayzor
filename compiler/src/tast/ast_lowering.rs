@@ -644,6 +644,19 @@ pub struct AstLowering<'a> {
     /// `None` at the top means no usable hint (untyped lambda call, dynamic
     /// dispatch, …) — the existing scope-walk resolution applies.
     expected_arg_type_stack: Vec<Option<TypeId>>,
+    /// Re-entrancy guard for the best-effort callee-hint resolution.
+    /// `resolve_callee_*` lowers a call's RECEIVER (`lower_expression(obj)`)
+    /// to find its method; when that receiver is itself a call this re-enters
+    /// `lower_call_expression`, which would resolve hints again — and because
+    /// each call resolves hints twice (param + formal), a chain of
+    /// call-valued receivers blows up to O(2^depth) redundant lowerings
+    /// (observed as a multi-second / unbounded compile hang on
+    /// `WorkerPool.parallelRows`). The hint is purely best-effort, so while we
+    /// are resolving one we suppress nested hint resolution: the receiver is
+    /// still lowered (once) for its type, just without recursively re-pricing
+    /// the hint at every level. The real per-call hint is still computed when
+    /// that nested call is lowered for real, outside this guard.
+    suppress_callee_hint: bool,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -1256,6 +1269,7 @@ impl<'a> AstLowering<'a> {
             class_constructor_symbols: BTreeMap::new(),
             expected_lambda_params_stack: Vec::new(),
             expected_arg_type_stack: Vec::new(),
+            suppress_callee_hint: false,
         }
     }
 
@@ -8902,8 +8916,21 @@ impl<'a> AstLowering<'a> {
         // `function(i, n) { ... }` (Phase 1c NumaPool callback case). This
         // is best-effort: if we can't statically resolve a callee, we just
         // lower args with no hints and the existing behavior applies.
-        let expected_param_types = self.resolve_callee_param_types(expr);
-        let expected_arg_types = self.resolve_callee_formal_param_types(expr);
+        //
+        // Re-entrancy guard: `resolve_callee_*` lowers the receiver, which
+        // for a call-valued receiver re-enters here. Suppress nested hint
+        // resolution during that lowering so a chain of call receivers stays
+        // O(depth) instead of O(2^depth) — otherwise `WorkerPool.parallelRows`
+        // and similar bodies hang the compiler. See `suppress_callee_hint`.
+        let (expected_param_types, expected_arg_types) = if self.suppress_callee_hint {
+            (None, None)
+        } else {
+            self.suppress_callee_hint = true;
+            let p = self.resolve_callee_param_types(expr);
+            let a = self.resolve_callee_formal_param_types(expr);
+            self.suppress_callee_hint = false;
+            (p, a)
+        };
 
         let arg_exprs = args
             .iter()
