@@ -20924,6 +20924,26 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// True iff `sym` is an actual function-parameter symbol.
+    ///
+    /// Loop-phi construction excludes parameters (they don't need a header
+    /// phi). The previous test compared REGISTERS — `symbol_map.get(sym) ==
+    /// Some(&p.reg)` — which also matched a *local* initialized directly from
+    /// a parameter, because `var i = lo` aliases `i` to `lo`'s register
+    /// instead of emitting a copy. That misclassified the loop counter as a
+    /// parameter, so no phi was created: the increment was computed and then
+    /// discarded, and the loop condition read the parameter's entry value
+    /// forever — an infinite loop on band-iteration patterns like
+    /// `var i = lo; while (i < hi) { ...; i++; }` and `for (i in lo...hi)`.
+    /// Identify parameters by SYMBOL KIND so an aliasing local is not
+    /// excluded and correctly receives a loop phi.
+    fn is_parameter_symbol(&self, sym: &SymbolId) -> bool {
+        self.symbol_table
+            .get_symbol(*sym)
+            .map(|s| s.kind == crate::tast::symbols::SymbolKind::Parameter)
+            .unwrap_or(false)
+    }
+
     /// Lower while loop
     fn lower_while_loop(
         &mut self,
@@ -20990,15 +21010,10 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Check if this is a function parameter by seeing if it's in the current function's parameters
-                let is_param = if let Some(func) = self.builder.current_function() {
-                    func.signature.parameters.iter().any(|p| {
-                        // Check if the symbol maps to this parameter's register
-                        self.symbol_map.get(sym) == Some(&p.reg)
-                    })
-                } else {
-                    false
-                };
+                // Exclude only ACTUAL parameter symbols (by kind, not by
+                // register — see is_parameter_symbol; a `var i = lo` local
+                // aliases the param's register and must still get a phi).
+                let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
@@ -29240,14 +29255,9 @@ impl<'a> HirToMirContext<'a> {
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
                 // Check if this is a function parameter by seeing if it's in the current function's parameters
-                let is_param = if let Some(func) = self.builder.current_function() {
-                    func.signature
-                        .parameters
-                        .iter()
-                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
-                } else {
-                    false
-                };
+                // Exclude only ACTUAL parameter symbols, by kind not register
+                // (see is_parameter_symbol).
+                let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
@@ -29703,14 +29713,9 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                let is_param = if let Some(func) = self.builder.current_function() {
-                    func.signature
-                        .parameters
-                        .iter()
-                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
-                } else {
-                    false
-                };
+                // Exclude only ACTUAL parameter symbols, by kind not register
+                // (see is_parameter_symbol).
+                let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
@@ -30531,14 +30536,9 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                let is_param = if let Some(func) = self.builder.current_function() {
-                    func.signature
-                        .parameters
-                        .iter()
-                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
-                } else {
-                    false
-                };
+                // Exclude only ACTUAL parameter symbols, by kind not register
+                // (see is_parameter_symbol).
+                let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
@@ -30834,14 +30834,9 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                let is_param = if let Some(func) = self.builder.current_function() {
-                    func.signature
-                        .parameters
-                        .iter()
-                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
-                } else {
-                    false
-                };
+                // Exclude only ACTUAL parameter symbols, by kind not register
+                // (see is_parameter_symbol).
+                let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
