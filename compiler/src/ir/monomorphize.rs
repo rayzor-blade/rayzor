@@ -160,6 +160,34 @@ impl Monomorphizer {
     /// 2. Find all call sites that use generic functions with concrete type args
     /// 3. Generate specialized versions and rewrite call sites
     pub fn monomorphize_module(&mut self, module: &mut IrModule) {
+        // Seed the instance-id counter ABOVE every id already in THIS module
+        // instead of the fixed 10_000 from `new()`. The import renumber
+        // (compilation.rs `renumber_and_push_import_mir`) shifts every
+        // function in import module N by `import_base = 100_000 + N*10_000`
+        // (stride 10_000). A fixed start of 10_000 makes a monomorphized
+        // instance in module N renumber to `base(N)+10_000 == base(N+1)` —
+        // the slot-0 (typically the `malloc` extern) of the *next* import
+        // module — which the final merge then silently overwrites. Symptom:
+        // `new WorkerPool()`'s heap-alloc CallDirect (to WorkerPool's malloc,
+        // renumbered to e.g. 230000) was clobbered by BalancedTree's
+        // `get_height__i64_i64` instance (10000 + base 220000 = 230000), so
+        // the allocation dispatched into get_height, returned a small int
+        // (a tree height) as the object pointer, and SIGSEGV'd. Seeding from
+        // the live max keeps instance ids inside this module's own
+        // [0, stride) band so they never alias another module's base after
+        // renumbering. (`module.functions` may contain ids inserted directly
+        // — Phase 4 below does exactly that — so consult the keys, not just
+        // `next_function_id`.)
+        let max_existing = module
+            .functions
+            .keys()
+            .chain(module.extern_functions.keys())
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+            .max(module.next_function_id);
+        self.next_func_id = max_existing.saturating_add(1);
+
         // Phase 1: Identify generic functions
         let generic_funcs: Vec<IrFunctionId> = module
             .functions
@@ -199,6 +227,13 @@ impl Monomorphizer {
         // (e.g., set__String_i32 calls setLoop which has fixups for Reflect.compare).
         // Propagate the substitution map to create specialized versions of those callees.
         self.propagate_transitive_fixups(module);
+
+        // Keep the module's id allocator above the instances we just minted.
+        // Phase 4 / transitive monomorphization insert directly into
+        // `module.functions` without going through `add_function`, so without
+        // this a later `new_function_id()`/`add_function()` could hand out an
+        // id that aliases a monomorphized instance.
+        module.next_function_id = module.next_function_id.max(self.next_func_id);
     }
 
     /// Collect all places where generic functions are called with concrete types
