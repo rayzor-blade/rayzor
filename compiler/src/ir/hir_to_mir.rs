@@ -11003,9 +11003,29 @@ impl<'a> HirToMirContext<'a> {
                                         let obj_reg = self.lower_expression(object)?;
                                         vec![obj_reg]
                                     };
-                                    for arg in args {
+                                    // Coerce each user arg to the wrapper's DECLARED param type.
+                                    // Critical for SIMD4f static methods (splat/make/load): they
+                                    // declare F32 lane params, but Haxe `Float` args are F64 —
+                                    // without the demote the raw f64 bit-pattern lands in the f32
+                                    // lanes as garbage (splat(4.0) -> nonsense). param_offset skips
+                                    // the leading self slot on instance wrappers. Previously args
+                                    // were pushed raw, so any wrapper whose signature param type
+                                    // differed from the arg type (F32 vs F64 here) silently
+                                    // mismatched at the call boundary.
+                                    let param_offset = if is_static_call { 0 } else { 1 };
+                                    for (i, arg) in args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
-                                            arg_regs.push(reg);
+                                            let actual_ty = self.convert_type(arg.ty);
+                                            let expected_ty = expected_param_types
+                                                .get(i + param_offset)
+                                                .cloned()
+                                                .unwrap_or_else(|| actual_ty.clone());
+                                            let final_reg = self.maybe_box_for_extern_call(
+                                                reg,
+                                                &actual_ty,
+                                                &expected_ty,
+                                            )?;
+                                            arg_regs.push(final_reg);
                                         }
                                     }
 

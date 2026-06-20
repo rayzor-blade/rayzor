@@ -2136,8 +2136,31 @@ impl<'a> TastToHirContext<'a> {
 
                 // OPERATOR OVERLOADING: rewrite `a OP b` to a method call when the
                 // LHS type (abstract or class) declares an @:op-tagged method matching OP.
+                //
+                // EXCEPTION — SIMD vector arithmetic (SIMD4f + - * /): those @:op
+                // methods are `@:native` markers with no runtime body; they are
+                // designed to lower through the inline `Binary -> VectorBinOp` path in
+                // hir_to_mir (see runtime_mapping register_simd4f_methods). Synthesizing
+                // a MethodCall here instead mis-resolves `SIMD4f.add` to `Usize.add`
+                // (integer add), which emits an invalid `iadd.f32` and traps. Skip the
+                // @:op rewrite for SIMD vector arithmetic so it falls through to the
+                // plain binary lowering, which hir_to_mir turns into a VectorBinOp once
+                // it sees the vector-typed operand registers.
+                let op_method = self.find_binary_operator_method(left.expr_type, operator);
+                let owner_name_id = op_method
+                    .as_ref()
+                    .and_then(|(_, owner, _)| self.symbol_table.get_symbol(*owner).map(|s| s.name));
+                let skip_simd_vector_arith = matches!(
+                    operator,
+                    BinaryOperator::Add
+                        | BinaryOperator::Sub
+                        | BinaryOperator::Mul
+                        | BinaryOperator::Div
+                ) && owner_name_id
+                    .and_then(|n| self.string_interner.get(n))
+                    .map_or(false, |n| n == "SIMD4f");
                 if let Some((method_symbol, _owner_symbol, is_class)) =
-                    self.find_binary_operator_method(left.expr_type, operator)
+                    op_method.filter(|_| !skip_simd_vector_arith)
                 {
                     if !is_class {
                         // Abstract: try inline first (existing path); fall through if not inlinable.
