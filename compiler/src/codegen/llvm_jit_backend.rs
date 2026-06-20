@@ -3781,6 +3781,66 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, acc);
             }
 
+            // Fused widening dot-accumulate: dest = acc + dot(a_i8x16, b_i8x16),
+            // result[j] = acc[j] + Σ_{i=0..3} a[4j+i]·b[4j+i]. Emitted in the
+            // canonical sext→mul→partial-reduce form that LLVM's AArch64 backend
+            // recognizes and folds to SDOT (`sdot`): widen both i8x16 operands to
+            // i32x16, multiply, then sum strided groups of 4 into the i32x4 result
+            // (4 shuffles + 3 adds) and add the accumulator. Matches the Cranelift
+            // and wasm lowerings bit-for-bit.
+            IrInstruction::VectorDot { dest, acc, a, b } => {
+                use inkwell::types::VectorType;
+                let acc_v = self.get_value(*acc)?.into_vector_value();
+                let a_v = self.get_value(*a)?.into_vector_value();
+                let b_v = self.get_value(*b)?.into_vector_value();
+                let i32_ty = self.context.i32_type();
+                let i32x16 = i32_ty.vec_type(16);
+                let a32 = self
+                    .builder
+                    .build_int_s_extend(a_v, i32x16, "dot_a32")
+                    .map_err(|e| format!("VectorDot sext a failed: {}", e))?;
+                let b32 = self
+                    .builder
+                    .build_int_s_extend(b_v, i32x16, "dot_b32")
+                    .map_err(|e| format!("VectorDot sext b failed: {}", e))?;
+                let mul = self
+                    .builder
+                    .build_int_mul(a32, b32, "dot_mul")
+                    .map_err(|e| format!("VectorDot mul failed: {}", e))?;
+                let c = |n: u64| i32_ty.const_int(n, false);
+                let masks = [
+                    VectorType::const_vector(&[c(0), c(4), c(8), c(12)]),
+                    VectorType::const_vector(&[c(1), c(5), c(9), c(13)]),
+                    VectorType::const_vector(&[c(2), c(6), c(10), c(14)]),
+                    VectorType::const_vector(&[c(3), c(7), c(11), c(15)]),
+                ];
+                let mut groups = Vec::with_capacity(4);
+                for (i, m) in masks.iter().enumerate() {
+                    groups.push(
+                        self.builder
+                            .build_shuffle_vector(mul, mul, *m, &format!("dot_s{}", i))
+                            .map_err(|e| format!("VectorDot shuffle failed: {}", e))?,
+                    );
+                }
+                let t0 = self
+                    .builder
+                    .build_int_add(groups[0], groups[1], "dot_t0")
+                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
+                let t1 = self
+                    .builder
+                    .build_int_add(groups[2], groups[3], "dot_t1")
+                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
+                let d = self
+                    .builder
+                    .build_int_add(t0, t1, "dot_d")
+                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
+                let res = self
+                    .builder
+                    .build_int_add(d, acc_v, "dot_res")
+                    .map_err(|e| format!("VectorDot acc add failed: {}", e))?;
+                self.value_map.insert(*dest, res.into());
+            }
+
             IrInstruction::VectorUnaryOp {
                 dest,
                 op,

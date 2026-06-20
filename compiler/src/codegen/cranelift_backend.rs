@@ -4598,6 +4598,40 @@ impl CraneliftBackend {
                 value_map.insert(*dest, result);
             }
 
+            // Fused widening dot-accumulate: dest = acc + dot(a_i8x16, b_i8x16),
+            // result[j] = acc[j] + Σ_{i=0..3} a[4j+i]·b[4j+i] (SDOT lane grouping).
+            // Built as the exact CLIF tree that the AArch64 backend's FEAT_DotProd
+            // ISLE rule folds to a single SDOT (vdotq_s32):
+            //   iadd(iadd_pairwise(swiden_low(dot), swiden_high(dot)), acc)
+            //   where dot = iadd_pairwise(imul(swiden_low a, swiden_low b),
+            //                             imul(swiden_high a, swiden_high b)).
+            // Without FEAT_DotProd it lowers to the equivalent smull/addp chain —
+            // same value, just slower. This is the identical tree wasm's
+            // relaxed_dot lowers through, so native and wasm agree bit-for-bit.
+            IrInstruction::VectorDot { dest, acc, a, b } => {
+                let acc_v = *value_map
+                    .get(acc)
+                    .ok_or_else(|| format!("VectorDot acc {:?} not found", acc))?;
+                let a_v = *value_map
+                    .get(a)
+                    .ok_or_else(|| format!("VectorDot a {:?} not found", a))?;
+                let b_v = *value_map
+                    .get(b)
+                    .ok_or_else(|| format!("VectorDot b {:?} not found", b))?;
+                let a_lo = builder.ins().swiden_low(a_v);
+                let a_hi = builder.ins().swiden_high(a_v);
+                let b_lo = builder.ins().swiden_low(b_v);
+                let b_hi = builder.ins().swiden_high(b_v);
+                let p_lo = builder.ins().imul(a_lo, b_lo);
+                let p_hi = builder.ins().imul(a_hi, b_hi);
+                let dot = builder.ins().iadd_pairwise(p_lo, p_hi);
+                let dot_lo = builder.ins().swiden_low(dot);
+                let dot_hi = builder.ins().swiden_high(dot);
+                let pair = builder.ins().iadd_pairwise(dot_lo, dot_hi);
+                let result = builder.ins().iadd(pair, acc_v);
+                value_map.insert(*dest, result);
+            }
+
             IrInstruction::VectorUnaryOp {
                 dest,
                 op,

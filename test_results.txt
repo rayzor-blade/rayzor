@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Sat Jun 20 16:33:55 BST 2026
+  Sat Jun 20 17:15:59 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -409,13 +409,12 @@ Running compiler/tests/haxe/test_conditional.hx [debug] [preset: Application]...
 rayzor
 done
 
---- test_copy [PASS] ---
+--- test_copy [FAIL(exit=133)] ---
 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
 3
 42
 3
 10
-done
 
 --- test_copy_clone_identity [PASS] ---
 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
@@ -654,7 +653,7 @@ done
 --- test_exception [CRASH(134/SIGABRT)] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 
-thread 'main' (14979472) has overflowed its stack
+thread 'main' (15036577) has overflowed its stack
 fatal runtime error: stack overflow, aborting
 
 --- test_exception_method_parity [PASS] ---
@@ -1123,6 +1122,14 @@ PASS simd4f-loop-phi add=800 mul=64
 Running compiler/tests/haxe/test_simd4f_values.hx [debug] [preset: Application]...
 PASS simd4f-values add=36 mul=70 dot=70 splat=16 sqrt=8
 
+--- test_simd4i32 [PASS] ---
+Running compiler/tests/haxe/test_simd4i32.hx [debug] [preset: Application]...
+PASS simd4i32 add.sum=50 mul.sum=100 lanes=11,14
+
+--- test_simd_dot [PASS] ---
+Running compiler/tests/haxe/test_simd_dot.hx [debug] [preset: Application]...
+PASS simd-dot sum1=96 sum2=192 sum3=560
+
 --- test_simd_from_array [PASS] ---
 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
 10
@@ -1348,8 +1355,8 @@ Done
 
 
 =========================================
-  TOTAL:        140
-  PASSED:       139
-  FAILED:       0
+  TOTAL:        142
+  PASSED:       140
+  FAILED:       1
   CRASHED:      1
 =========================================

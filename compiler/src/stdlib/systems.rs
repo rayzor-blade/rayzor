@@ -78,6 +78,10 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd4i32_extract(builder);
     build_simd4i32_insert(builder);
     build_simd4i32_sum(builder);
+    build_simd4i32_dot16(builder);
+    // SIMD16i8 (i8x16 dot operands) MIR wrappers
+    build_simd16i8_splat(builder);
+    build_simd16i8_load(builder);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1217,6 +1221,83 @@ fn build_simd4i32_sum(builder: &mut MirBuilder) {
 
     let self_val = builder.get_param(0);
     let result = builder.vector_reduce(BinaryOp::Add, self_val, i32_ty.clone());
+    builder.ret(Some(result));
+}
+
+/// SIMD4i32_dot16(acc: vec<i32;4>, a: vec<i8;16>, b: vec<i8;16>) -> vec<i32;4>
+/// Fused widening dot-accumulate (the quant-matmul primitive): acc + the 16
+/// i8×i8 products summed in groups of 4 → 4 i32 lanes. Lowers to SDOT.
+fn build_simd4i32_dot16(builder: &mut MirBuilder) {
+    let vec_i32 = IrType::vector(IrType::I32, 4);
+    let vec_i8 = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD4i32_dot16")
+        .param("acc", vec_i32.clone())
+        .param("a", vec_i8.clone())
+        .param("b", vec_i8.clone())
+        .returns(vec_i32)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let acc = builder.get_param(0);
+    let a = builder.get_param(1);
+    let b = builder.get_param(2);
+    let result = builder.vector_dot(acc, a, b);
+    builder.ret(Some(result));
+}
+
+// ============================================================================
+// SIMD16i8 — 128-bit vector of 16×i8 (the integer dot operands)
+// ============================================================================
+
+/// SIMD16i8_splat(scalar: i32) -> vec<i8; 16>  (broadcast low byte to all lanes)
+fn build_simd16i8_splat(builder: &mut MirBuilder) {
+    let i32_ty = IrType::I32;
+    let i8_ty = IrType::I8;
+    let vec_ty = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD16i8_splat")
+        .param("scalar", i32_ty.clone())
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let scalar = builder.get_param(0);
+    // Narrow i32 → i8 so the Cranelift splat gets the i8 lane type. On wasm the
+    // value stays an i32 local and i8x16.splat uses its low byte either way.
+    let scalar8 = builder.cast(scalar, i32_ty, i8_ty);
+    let result = builder.vector_splat(scalar8, vec_ty);
+    builder.ret(Some(result));
+}
+
+/// SIMD16i8_load(ptr: i64) -> vec<i8; 16>  (load 16 contiguous bytes)
+fn build_simd16i8_load(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let vec_ty = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD16i8_load")
+        .param("ptr", i64_ty)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let ptr = builder.get_param(0);
+    let result = builder.vector_load(ptr, vec_ty);
     builder.ret(Some(result));
 }
 

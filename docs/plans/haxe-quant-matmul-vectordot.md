@@ -89,7 +89,29 @@ wasm vector arms committed (87a14a6e).
   `extend_low/high`.
 - **Gate:** load 16×i8, and-mask `0x0F`, `shr 4`, store — bit-correct native+wasm.
 
-## Phase 2 — The `VectorDot` fused-dot IR op *(leverage point)*
+## Phase 2 — DONE (2026-06-20): VectorDot lands SDOT on all backends.
+
+`SIMD16i8` (i8x16) + `SIMD4i32.dot(acc, a, b)` work native + wasm + LLVM with
+identical values (test_simd_dot.hx: 96/192/560). The new `VectorDot { dest, acc,
+a, b }` IR op lowers to the SDOT path on **every** backend:
+- **Cranelift (native):** the exact `swiden_low/high → imul → iadd_pairwise →
+  swiden_low/high → iadd_pairwise → iadd` CLIF tree — CLIF-dump-verified — which
+  is precisely what PR #13640's FEAT_DotProd ISLE rule folds to `sdot` (same
+  cranelift that yields 24 sdot in production wasm).
+- **wasm:** `i32x4.relaxed_dot_i8x16_i7x16_add_s` (dump-verified, 26×) → wasmtime
+  47 → SDOT.
+- **LLVM:** `sext<16xi8→i32> → mul → 4-way strided shuffle-reduce → add acc` —
+  the canonical idiom LLVM's AArch64 backend folds to SDOT. (LLVM is NOT optional;
+  it's where the Rust kernel itself gets SDOT — implemented properly, not stubbed.)
+- **c/interpreter:** correct scalar fallbacks (interpreter bails to JIT).
+
+Wiring: VectorDot in instructions.rs (+ dest/replace_dest/operands/replace_uses)
++ MirBuilder::vector_dot + Opcode::VectorDot. SIMD16i8.hx (splat/load), SIMD4i32.dot,
+hir_to_mir type-map (vector(I8,16)), runtime_mapping VecI8x16 + dot16 + SIMD16i8
+methods, systems.rs wrappers (dot16/splat/load). No regressions (simd_e2e 17/17,
+simd4i32 + f32 unchanged, native suite — only known-flaky test_copy/test_exception).
+
+## (original) Phase 2 — The `VectorDot` fused-dot IR op *(leverage point)*
 
 - New IR instruction `VectorDot { acc, a, b, widen }` (`i8x16→i32x4` and
   `i16x8→i32x4`); add `MirBuilder::vector_dot`.
