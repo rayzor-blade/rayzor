@@ -533,6 +533,27 @@ impl MirBuilder {
         self.cmp(op, left, right)
     }
 
+    /// Ternary select: `condition ? true_val : false_val`. `result_ty` is the
+    /// type of both arms (and the result). Backends lower this to a `select`
+    /// (cmov on native, the untyped `select` on wasm — valid for numeric
+    /// operand types, not V128).
+    pub fn select(
+        &mut self,
+        condition: IrId,
+        true_val: IrId,
+        false_val: IrId,
+        result_ty: IrType,
+    ) -> IrId {
+        let dest = self.alloc_reg_typed(result_ty);
+        self.insert_inst(IrInstruction::Select {
+            dest,
+            condition,
+            true_val,
+            false_val,
+        });
+        dest
+    }
+
     // === Arithmetic Helper Methods ===
 
     /// Addition

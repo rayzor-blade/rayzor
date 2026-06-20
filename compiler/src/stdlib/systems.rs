@@ -995,8 +995,30 @@ fn build_simd4f_extract(builder: &mut MirBuilder) {
     builder.set_insert_point(entry);
 
     let self_val = builder.get_param(0);
-    let f32_result = builder.vector_extract(self_val, 0, f32_ty.clone());
-    let result = builder.cast(f32_result, f32_ty, f64_ty);
+    let lane = builder.get_param(1);
+
+    // VectorExtract requires a compile-time-constant lane, but `lane` here is a
+    // runtime value (e.g. `v.get(i)` in a loop). Extract all four lanes with
+    // constant indices and pick the matching one with a branchless select chain
+    // — selecting on f32 scalars (the wasm untyped `select` is valid for f32).
+    // The previous code hard-coded lane 0, so `v.get(i)` always returned lane 0.
+    let e0 = builder.vector_extract(self_val, 0, f32_ty.clone());
+    let e1 = builder.vector_extract(self_val, 1, f32_ty.clone());
+    let e2 = builder.vector_extract(self_val, 2, f32_ty.clone());
+    let e3 = builder.vector_extract(self_val, 3, f32_ty.clone());
+
+    let c1 = builder.const_i32(1);
+    let c2 = builder.const_i32(2);
+    let c3 = builder.const_i32(3);
+    // Default to lane 0; override when lane == 1/2/3.
+    let is1 = builder.icmp(CompareOp::Eq, lane, c1, IrType::Bool);
+    let r1 = builder.select(is1, e1, e0, f32_ty.clone());
+    let is2 = builder.icmp(CompareOp::Eq, lane, c2, IrType::Bool);
+    let r2 = builder.select(is2, e2, r1, f32_ty.clone());
+    let is3 = builder.icmp(CompareOp::Eq, lane, c3, IrType::Bool);
+    let r3 = builder.select(is3, e3, r2, f32_ty.clone());
+
+    let result = builder.cast(r3, f32_ty, f64_ty);
     builder.ret(Some(result));
 }
 
