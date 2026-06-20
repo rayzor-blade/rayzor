@@ -52,6 +52,39 @@ Everything below sits on this.
 - **Gate:** Haxe test doing integer vector `add/mul/and/shr` returns correct
   values on wasm (today wrong) and matches native.
 
+## Phase 1 status (2026-06-20): native WORKS; wasm BLOCKED on an IR-type gap
+
+A first integer type `SIMD4i32` (i32x4) was wired end-to-end (abstract +
+hir_to_mir type map + tast_to_hir `@:op` skip + runtime_mapping + systems.rs
+wrappers + `VecI32x4` descriptor). Result:
+- **Native: PASS** — `make/splat/+/-/*/get(const+runtime)/sum` all correct
+  (50/100/11/14). Proves the design + wiring + Phase 0 are right.
+- **WASM: returns 0.** ROOT CAUSE (objdump-confirmed via `RAYZOR_DUMP_WASM`):
+  `VectorExtract`/`VectorReduce`/`VectorInsert` carry **no element type** in the
+  IR — the wasm backend infers it from `register_types[vector]`. That works for
+  a *called* wrapper (the param type is in the signature) but **breaks when the
+  wrapper is inlined into the caller**: the inlined vector operand's reg has no
+  `vector(I32,4)` entry in the caller's `register_types`, so the backend
+  defaults to F32 and emits `f32x4.extract_lane` on an i32 vector → reads i32
+  lanes as floats → ~0 → truncates to 0. Main had 16 `f32x4.extract_lane`, zero
+  `i32x4.extract_lane`. (Native is immune — Cranelift tracks SSA value types.)
+  `InlineHint::Never` on the wrappers did NOT prevent it (sum/extract still
+  inlined by a lower pass), confirming the fix must be in the IR, not inlining.
+
+**THE FIX (prerequisite for any integer SIMD on wasm, incl. the quant kernel):**
+add an explicit `elem_ty: IrType` field to `VectorExtract`, `VectorInsert`,
+`VectorReduce` (the MirBuilder builders ALREADY receive it — `vector_extract(vec,
+idx, elem_ty)`, `vector_reduce(op, vec, elem_ty)` — they just don't store it).
+Then the wasm backend reads `elem_ty` directly instead of `vec_elem_of_reg`.
+Blast radius ~12 files (instructions.rs + mir_builder.rs + match arms in
+cranelift/wasm/llvm/c/interpreter/tiered/dump/optimization/vectorization/
+builder) — each non-wasm arm just binds-and-ignores the field. Do this as its
+own careful pass with all-backend verification BEFORE landing SIMD4i32.
+
+`vec_elem_of_reg` (wasm_backend) + the param-signature fallback are still correct
+and useful (they fix the *called*-wrapper case); the IR field makes the inlined
+case robust too. Phase 0 (element-aware wasm vector arms) is committed and solid.
+
 ## Phase 1 — Integer SIMD types + stdlib surface
 
 - Add abstracts: `SIMD16i8` (i8x16 dot operands), `SIMD16u8` (u8x16 dequant

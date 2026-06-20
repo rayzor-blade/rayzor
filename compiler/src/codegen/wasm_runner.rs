@@ -371,6 +371,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     use std::collections::{BTreeMap, BTreeSet};
     use wasmtime::*;
 
+    if let Some(p) = std::env::var_os("RAYZOR_DUMP_WASM") {
+        let _ = std::fs::write(&p, wasm_bytes);
+        eprintln!("[wasm] dumped {} bytes to {:?}", wasm_bytes.len(), p);
+    }
+
     // -- Host state accessible from all host functions via Caller::data_mut() --
     struct WasmState {
         wasi_ctx: wasi_common::p1::WasiP1Ctx,
