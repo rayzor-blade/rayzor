@@ -12664,7 +12664,13 @@ impl<'a> HirToMirContext<'a> {
                         let receiver_class_hint_owned = if receiver_class_hint_owned.is_none() {
                             let ir_ty = self.convert_type(receiver_type);
                             if ir_ty.is_vector() {
-                                Some("rayzor_SIMD4f".to_string())
+                                // Distinguish the integer companion SIMD4i32 (i32x4)
+                                // from SIMD4f (f32x4) — both are vectors, but their
+                                // instance methods (sum/get/set) map to different
+                                // wrappers. Without this, SIMD4i32.sum() dispatched to
+                                // SIMD4f_sum (f32 reduce) — masked on native (Cranelift
+                                // reduces by SSA value type) but wrong on wasm.
+                                Some(simd_vector_class(&ir_ty).to_string())
                             } else if self.type_is_native_named(receiver_type, "rayzor::Atomic") {
                                 // Atomic's type-map returns Ptr<I32> (not a vector), so is_vector()
                                 // never fires; resolve it by the abstract's @:native name instead.
@@ -12681,7 +12687,7 @@ impl<'a> HirToMirContext<'a> {
                                     .get(recv_sym)
                                     .and_then(|reg| self.builder.get_register_type(*reg))
                                     .filter(|ty| ty.is_vector())
-                                    .map(|_| "rayzor_SIMD4f".to_string())
+                                    .map(|ty| simd_vector_class(&ty).to_string())
                             } else {
                                 None
                             }
@@ -12696,17 +12702,19 @@ impl<'a> HirToMirContext<'a> {
 
                         // SIMD4f direct lookup: When receiver is known to be SIMD4f, bypass
                         // get_stdlib_runtime_info (whose FALLBACK2 excludes SIMD matches).
-                        let runtime_info = if receiver_class_hint == Some("rayzor_SIMD4f") {
+                        let runtime_info = if matches!(
+                            receiver_class_hint,
+                            Some("rayzor_SIMD4f") | Some("rayzor_SIMD4i32")
+                        ) {
+                            let simd_cls = receiver_class_hint.unwrap();
                             let method_name_str = self
                                 .symbol_table
                                 .get_symbol(*symbol)
                                 .and_then(|s| self.string_interner.get(s.name));
                             if let Some(mn) = method_name_str {
                                 self.stdlib_mapping
-                                    .find_by_name_and_params("rayzor_SIMD4f", mn, param_count)
-                                    .or_else(|| {
-                                        self.stdlib_mapping.find_by_name("rayzor_SIMD4f", mn)
-                                    })
+                                    .find_by_name_and_params(simd_cls, mn, param_count)
+                                    .or_else(|| self.stdlib_mapping.find_by_name(simd_cls, mn))
                                     .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                             } else {
                                 None
@@ -21808,6 +21816,7 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(ref nn) = native_name {
                         match nn.as_str() {
                             "rayzor::SIMD4f" => return IrType::vector(IrType::F32, 4),
+                            "rayzor::SIMD4i32" => return IrType::vector(IrType::I32, 4),
                             "rayzor::Atomic" => return IrType::Ptr(Box::new(IrType::I32)),
                             _ => {}
                         }
@@ -37699,6 +37708,21 @@ impl<'a> HirToMirContext<'a> {
 enum MirBinaryOp {
     Binary(BinaryOp),
     Compare(CompareOp),
+}
+
+/// Map a SIMD vector IrType to its stdlib class name, so instance-method
+/// dispatch picks the right wrapper set: i32x4 → SIMD4i32, everything else
+/// (f32x4) → SIMD4f. Both are 128-bit vectors but their `sum`/`get`/`set`
+/// methods map to different MIR wrappers.
+fn simd_vector_class(ty: &IrType) -> &'static str {
+    match ty {
+        IrType::Vector { element, .. }
+            if matches!(element.as_ref(), IrType::I32 | IrType::U32) =>
+        {
+            "rayzor_SIMD4i32"
+        }
+        _ => "rayzor_SIMD4f",
+    }
 }
 
 /// Public API for HIR to MIR lowering

@@ -408,6 +408,11 @@ pub enum IrInstruction {
         dest: IrId,
         vector: IrId,
         index: u8, // Lane index (0-15 for 16-element vectors)
+        /// Lane element type. Carried explicitly so backends that don't track
+        /// SSA value types (the wasm backend) know whether to emit f32x4 vs
+        /// i32x4/i8x16/... lane ops — register-type inference is lost across
+        /// inlining, so this must travel with the instruction.
+        elem_ty: IrType,
     },
 
     /// Insert scalar into vector lane
@@ -416,6 +421,8 @@ pub enum IrInstruction {
         vector: IrId,
         scalar: IrId,
         index: u8,
+        /// Lane element type (see VectorExtract::elem_ty).
+        elem_ty: IrType,
     },
 
     /// Horizontal reduction (e.g., sum all elements)
@@ -423,6 +430,8 @@ pub enum IrInstruction {
         dest: IrId,
         op: BinaryOp, // Add, Mul, And, Or, Xor for reductions
         vector: IrId,
+        /// Lane element type (see VectorExtract::elem_ty).
+        elem_ty: IrType,
     },
 
     /// SIMD element-wise unary operation (sqrt, abs, neg, ceil, floor, round)

@@ -72,6 +72,12 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd4f_sum(builder);
     build_simd4f_dot(builder);
     build_simd4f_from_array(builder);
+    // SIMD4i32 (integer companion) MIR wrappers
+    build_simd4i32_splat(builder);
+    build_simd4i32_make(builder);
+    build_simd4i32_extract(builder);
+    build_simd4i32_insert(builder);
+    build_simd4i32_sum(builder);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1068,6 +1074,149 @@ fn build_simd4f_sum(builder: &mut MirBuilder) {
     let self_val = builder.get_param(0);
     let f32_result = builder.vector_reduce(BinaryOp::Add, self_val, f32_ty.clone());
     let result = builder.cast(f32_result, f32_ty, f64_ty);
+    builder.ret(Some(result));
+}
+
+// ============================================================================
+// SIMD4i32 — 128-bit vector of 4×i32 (integer companion to SIMD4f)
+// add/sub/mul lower through VectorBinOp (the @:op skip), so only the
+// non-operator helpers need MIR wrappers.
+// ============================================================================
+
+/// SIMD4i32_splat(scalar: i32) -> vec<i32; 4>
+fn build_simd4i32_splat(builder: &mut MirBuilder) {
+    let i32_ty = IrType::I32;
+    let vec_ty = IrType::vector(IrType::I32, 4);
+
+    let func_id = builder
+        .begin_function("SIMD4i32_splat")
+        .param("scalar", i32_ty)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let scalar = builder.get_param(0);
+    let result = builder.vector_splat(scalar, vec_ty);
+    builder.ret(Some(result));
+}
+
+/// SIMD4i32_make(x, y, z, w: i32) -> vec<i32; 4>
+fn build_simd4i32_make(builder: &mut MirBuilder) {
+    let i32_ty = IrType::I32;
+    let vec_ty = IrType::vector(IrType::I32, 4);
+
+    let func_id = builder
+        .begin_function("SIMD4i32_make")
+        .param("x", i32_ty.clone())
+        .param("y", i32_ty.clone())
+        .param("z", i32_ty.clone())
+        .param("w", i32_ty)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let x = builder.get_param(0);
+    let y = builder.get_param(1);
+    let z = builder.get_param(2);
+    let w = builder.get_param(3);
+
+    let v0 = builder.vector_splat(x, vec_ty.clone());
+    let v1 = builder.vector_insert(v0, y, 1, vec_ty.clone());
+    let v2 = builder.vector_insert(v1, z, 2, vec_ty.clone());
+    let v3 = builder.vector_insert(v2, w, 3, vec_ty);
+    builder.ret(Some(v3));
+}
+
+/// SIMD4i32_extract(self: vec<i32; 4>, lane: i32) -> i32
+/// Runtime lane via a branchless select chain (same approach as SIMD4f_extract).
+fn build_simd4i32_extract(builder: &mut MirBuilder) {
+    let vec_ty = IrType::vector(IrType::I32, 4);
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("SIMD4i32_extract")
+        .param("self_val", vec_ty)
+        .param("lane", i32_ty.clone())
+        .returns(i32_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let lane = builder.get_param(1);
+
+    let e0 = builder.vector_extract(self_val, 0, i32_ty.clone());
+    let e1 = builder.vector_extract(self_val, 1, i32_ty.clone());
+    let e2 = builder.vector_extract(self_val, 2, i32_ty.clone());
+    let e3 = builder.vector_extract(self_val, 3, i32_ty.clone());
+
+    let c1 = builder.const_i32(1);
+    let c2 = builder.const_i32(2);
+    let c3 = builder.const_i32(3);
+    let is1 = builder.icmp(CompareOp::Eq, lane, c1, IrType::Bool);
+    let r1 = builder.select(is1, e1, e0, i32_ty.clone());
+    let is2 = builder.icmp(CompareOp::Eq, lane, c2, IrType::Bool);
+    let r2 = builder.select(is2, e2, r1, i32_ty.clone());
+    let is3 = builder.icmp(CompareOp::Eq, lane, c3, IrType::Bool);
+    let r3 = builder.select(is3, e3, r2, i32_ty.clone());
+
+    builder.ret(Some(r3));
+}
+
+/// SIMD4i32_insert(self: vec<i32; 4>, lane: i32, value: i32) -> vec<i32; 4>
+/// Static lane 0 for now (same limitation as SIMD4f_insert).
+fn build_simd4i32_insert(builder: &mut MirBuilder) {
+    let vec_ty = IrType::vector(IrType::I32, 4);
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("SIMD4i32_insert")
+        .param("self_val", vec_ty.clone())
+        .param("lane", i32_ty.clone())
+        .param("value", i32_ty)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let value = builder.get_param(2);
+    let result = builder.vector_insert(self_val, value, 0, vec_ty);
+    builder.ret(Some(result));
+}
+
+/// SIMD4i32_sum(self: vec<i32; 4>) -> i32  — horizontal add
+fn build_simd4i32_sum(builder: &mut MirBuilder) {
+    let vec_ty = IrType::vector(IrType::I32, 4);
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("SIMD4i32_sum")
+        .param("self_val", vec_ty)
+        .returns(i32_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let result = builder.vector_reduce(BinaryOp::Add, self_val, i32_ty.clone());
     builder.ret(Some(result));
 }
 

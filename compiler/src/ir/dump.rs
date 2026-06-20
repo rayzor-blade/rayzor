@@ -481,6 +481,7 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             dest,
             vector,
             index,
+            ..
         } => {
             format!("{} = simd4f.extract {}[{}]", dest, vector, index)
         }
@@ -489,6 +490,7 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             vector,
             scalar,
             index,
+            ..
         } => {
             format!("{} = simd4f.insert {}[{}], {}", dest, vector, index, scalar)
         }

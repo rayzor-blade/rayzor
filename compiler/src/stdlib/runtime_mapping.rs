@@ -64,6 +64,8 @@ pub enum IrTypeDescriptor {
     PtrI64,
     /// SIMD vector: 4 × f32 (128-bit)
     VecF32x4,
+    /// SIMD vector: 4 × i32 (128-bit)
+    VecI32x4,
 }
 
 impl IrTypeDescriptor {
@@ -85,6 +87,7 @@ impl IrTypeDescriptor {
             IrTypeDescriptor::PtrI32 => IrType::Ptr(Box::new(IrType::I32)),
             IrTypeDescriptor::PtrI64 => IrType::Ptr(Box::new(IrType::I64)),
             IrTypeDescriptor::VecF32x4 => IrType::vector(IrType::F32, 4),
+            IrTypeDescriptor::VecI32x4 => IrType::vector(IrType::I32, 4),
         }
     }
 }
@@ -261,6 +264,7 @@ impl StdlibMapping {
         mapping.register_usize_methods();
         mapping.register_cstring_methods();
         mapping.register_simd4f_methods();
+        mapping.register_simd4i32_methods();
         mapping.register_atomic_methods();
         mapping.register_tensor_methods();
         mapping.register_qtensor_methods();
@@ -3353,6 +3357,36 @@ impl StdlibMapping {
             // simd.distance(other): Float
             map_method!(instance "rayzor_SIMD4f", "distance" => "SIMD4f_distance", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => F64),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SIMD4i32 Methods (rayzor.SIMD4i32 — integer companion to SIMD4f)
+    // ============================================================================
+    // add/sub/mul are @:op operators that lower through the inline
+    // Binary -> VectorBinOp path (see the skip_simd_vector_arith gate in
+    // tast_to_hir), so only the non-operator helpers need MIR-wrapper mappings.
+    fn register_simd4i32_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // SIMD4i32.splat(v: Int): SIMD4i32  (static, broadcast scalar to all lanes)
+            map_method!(static "rayzor_SIMD4i32", "splat" => "SIMD4i32_splat", params: 1, mir_wrapper,
+                types: &[I32] => VecI32x4),
+            // SIMD4i32.make(x, y, z, w): SIMD4i32  (static, construct from 4 scalars)
+            map_method!(static "rayzor_SIMD4i32", "make" => "SIMD4i32_make", params: 4, mir_wrapper,
+                types: &[I32, I32, I32, I32] => VecI32x4),
+            // simd.get(lane): Int  (instance, @:arrayAccess read)
+            map_method!(instance "rayzor_SIMD4i32", "get" => "SIMD4i32_extract", params: 1, mir_wrapper,
+                types: &[VecI32x4, I32] => I32),
+            // simd.set(lane, value): SIMD4i32  (instance, @:arrayAccess write)
+            map_method!(instance "rayzor_SIMD4i32", "set" => "SIMD4i32_insert", params: 2, mir_wrapper,
+                types: &[VecI32x4, I32, I32] => VecI32x4),
+            // simd.sum(): Int  (instance, horizontal sum)
+            map_method!(instance "rayzor_SIMD4i32", "sum" => "SIMD4i32_sum", params: 0, mir_wrapper,
+                types: &[VecI32x4] => I32),
         ];
 
         self.register_from_tuples(mappings);

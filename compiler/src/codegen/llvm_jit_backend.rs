@@ -3652,6 +3652,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 dest,
                 vector,
                 index,
+                ..
             } => {
                 let vec_val = self.get_value(*vector)?.into_vector_value();
                 let idx = self.context.i32_type().const_int(*index as u64, false);
@@ -3667,6 +3668,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 vector,
                 scalar,
                 index,
+                ..
             } => {
                 let vec_val = self.get_value(*vector)?.into_vector_value();
                 let scalar_val = self.get_value(*scalar)?;
@@ -3683,7 +3685,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, result.into());
             }
 
-            IrInstruction::VectorReduce { dest, op, vector } => {
+            IrInstruction::VectorReduce {
+                dest, op, vector, ..
+            } => {
                 let vec_val = self.get_value(*vector)?.into_vector_value();
                 let vec_ty = vec_val.get_type();
                 let lane_count = vec_ty.get_size();

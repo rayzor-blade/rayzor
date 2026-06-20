@@ -2158,7 +2158,7 @@ impl<'a> TastToHirContext<'a> {
                         | BinaryOperator::Div
                 ) && owner_name_id
                     .and_then(|n| self.string_interner.get(n))
-                    .map_or(false, |n| n == "SIMD4f");
+                    .map_or(false, |n| n == "SIMD4f" || n == "SIMD4i32");
                 if let Some((method_symbol, _owner_symbol, is_class)) =
                     op_method.filter(|_| !skip_simd_vector_arith)
                 {

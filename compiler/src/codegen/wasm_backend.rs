@@ -3723,15 +3723,11 @@ impl<'a> FunctionLowerer<'a> {
                 dest,
                 vector,
                 index,
+                elem_ty,
             } => {
                 self.get_reg(f, *vector);
-                let elem = vec_element(
-                    self.ir_func
-                        .register_types
-                        .get(vector)
-                        .unwrap_or(&IrType::F32),
-                );
-                let inst = match elem {
+                // elem_ty travels WITH the instruction, so it survives inlining
+                let inst = match elem_ty {
                     IrType::F32 => Instruction::F32x4ExtractLane(*index),
                     IrType::F64 => Instruction::F64x2ExtractLane(*index),
                     IrType::I8 => Instruction::I8x16ExtractLaneS(*index),
@@ -3752,16 +3748,11 @@ impl<'a> FunctionLowerer<'a> {
                 vector,
                 scalar,
                 index,
+                elem_ty,
             } => {
                 self.get_reg(f, *vector);
                 self.get_reg(f, *scalar);
-                let elem = vec_element(
-                    self.ir_func
-                        .register_types
-                        .get(vector)
-                        .unwrap_or(&IrType::F32),
-                );
-                let inst = match elem {
+                let inst = match elem_ty {
                     IrType::F32 => Instruction::F32x4ReplaceLane(*index),
                     IrType::F64 => Instruction::F64x2ReplaceLane(*index),
                     IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16ReplaceLane(*index),
@@ -3830,16 +3821,21 @@ impl<'a> FunctionLowerer<'a> {
             // extract every lane and fold with a scalar op. Lane shape + count
             // come from the vector register's IR type (f32x4 default), so this
             // now handles i8x16/i16x8/i32x4/i64x2 reductions, not only f32x4.
-            IrInstruction::VectorReduce { dest, op, vector } => {
-                let vty = self
-                    .ir_func
-                    .register_types
-                    .get(vector)
-                    .cloned()
-                    .unwrap_or_else(|| IrType::vector(IrType::F32, 4));
-                let (elem, count) = match &vty {
-                    IrType::Vector { element, count } => ((**element).clone(), *count as u8),
-                    _ => (IrType::F32, 4u8),
+            IrInstruction::VectorReduce {
+                dest,
+                op,
+                vector,
+                elem_ty,
+            } => {
+                let elem = elem_ty;
+                // Lane count derived from the element width — all our vectors are
+                // 128-bit, so count = 16 / sizeof(elem). Derived from elem_ty (not
+                // register_types) so it survives inlining.
+                let count: u8 = match elem {
+                    IrType::I8 | IrType::U8 | IrType::Bool => 16,
+                    IrType::I16 | IrType::U16 => 8,
+                    IrType::I64 | IrType::U64 | IrType::F64 => 2,
+                    _ => 4, // I32/U32/F32
                 };
                 let extract = |lane: u8| -> Instruction {
                     match elem {

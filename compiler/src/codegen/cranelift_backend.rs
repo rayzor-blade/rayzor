@@ -4527,6 +4527,7 @@ impl CraneliftBackend {
                 dest,
                 vector,
                 index,
+                ..
             } => {
                 let vec_val = *value_map
                     .get(vector)
@@ -4541,6 +4542,7 @@ impl CraneliftBackend {
                 vector,
                 scalar,
                 index,
+                ..
             } => {
                 let vec_val = *value_map
                     .get(vector)
@@ -4553,7 +4555,9 @@ impl CraneliftBackend {
                 value_map.insert(*dest, result);
             }
 
-            IrInstruction::VectorReduce { dest, op, vector } => {
+            IrInstruction::VectorReduce {
+                dest, op, vector, ..
+            } => {
                 let vec_val = *value_map
                     .get(vector)
                     .ok_or_else(|| format!("VectorReduce vector {:?} not found", vector))?;
