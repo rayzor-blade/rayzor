@@ -4803,6 +4803,34 @@ impl<'a> TastToHirContext<'a> {
 
         let method = found_method?;
 
+        // Recursion guard. A self-recursive (or mutually-recursive) static
+        // abstract method — e.g. `haxe.CallStack.equalItems` / `itemToString`,
+        // which call themselves on the nested `StackItem.FilePos` argument —
+        // must NOT be inlined into itself, or `try_inline_static_abstract_method`
+        // expands forever and overflows the compiler stack (the whole abstract is
+        // lowered on import, so this fired even when the methods were unused).
+        // If the method is already on the inline stack, bail (`None`) so the call
+        // is lowered as an ordinary recursive call instead.
+        thread_local! {
+            static INLINING_STATIC_ABSTRACT: std::cell::RefCell<std::collections::HashSet<SymbolId>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
+        if INLINING_STATIC_ABSTRACT.with(|s| s.borrow().contains(&method_symbol)) {
+            return None;
+        }
+        struct InlineGuard(SymbolId);
+        impl Drop for InlineGuard {
+            fn drop(&mut self) {
+                INLINING_STATIC_ABSTRACT.with(|s| {
+                    s.borrow_mut().remove(&self.0);
+                });
+            }
+        }
+        INLINING_STATIC_ABSTRACT.with(|s| {
+            s.borrow_mut().insert(method_symbol);
+        });
+        let _inline_guard = InlineGuard(method_symbol);
+
         // Build parameter mapping
         let lowered_arguments: Vec<HirExpr> = arguments
             .iter()
