@@ -348,8 +348,25 @@ pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i32, ndim: i32, dtype: i3
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
-    // Deterministic placeholder until wasm RNG parity lands.
-    rayzor_tensor_zeros(shape_ptr, ndim, dtype)
+    // Deterministic LCG fill (same constants as the host fallback in
+    // wasm_runner.rs) so `Tensor.rand` yields non-zero data on wasm instead of
+    // a zero tensor. It is NOT cross-RNG-parity with native rand (native uses a
+    // real RNG) — parity tests should use deterministic inputs — but it stops
+    // wasm benches/tests from silently running on all-zeros.
+    let t = rayzor_tensor_zeros(shape_ptr, ndim, dtype);
+    if t == 0 {
+        return 0;
+    }
+    let tr = &*(t as *const Tensor);
+    let mut seed: u64 = 12345;
+    for i in 0..tr.numel {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let v = (seed >> 33) as f32 / (1u32 << 31) as f32;
+        store_f32_at(tr.data, i, tr.dtype, v);
+    }
+    t
 }
 
 /// `Tensor.full(shape, ndim, value, dtype)`.
