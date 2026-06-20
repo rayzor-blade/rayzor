@@ -2925,14 +2925,7 @@ impl<'a> FunctionLowerer<'a> {
                 ..
             } => {
                 // GEP: result = ptr + sum(index * elem_size)
-                let elem_size: i32 = match ty {
-                    IrType::Ptr(inner) => match inner.as_ref() {
-                        IrType::U8 | IrType::I8 => 1,
-                        _ => 8,
-                    },
-                    IrType::U8 | IrType::I8 => 1,
-                    _ => 8,
-                };
+                let elem_size: i32 = gep_pointee_size(ty);
                 self.get_reg(f, *ptr);
                 for idx_reg in indices {
                     self.get_reg(f, *idx_reg);
@@ -2961,14 +2954,7 @@ impl<'a> FunctionLowerer<'a> {
                 // prefill). Use the SAME size rule as the GEP arm above so
                 // the two stay consistent on this backend; Ptr<U8> users
                 // (byte offsets) keep scale 1 and are unaffected.
-                let elem_size: i32 = match ty {
-                    IrType::Ptr(inner) => match inner.as_ref() {
-                        IrType::U8 | IrType::I8 => 1,
-                        _ => 8,
-                    },
-                    IrType::U8 | IrType::I8 => 1,
-                    _ => 8,
-                };
+                let elem_size: i32 = gep_pointee_size(ty);
                 self.get_reg(f, *ptr);
                 self.get_reg(f, *offset);
                 if elem_size != 1 {
@@ -4530,6 +4516,31 @@ fn wasm_alloc_size(ty: &IrType) -> i32 {
         IrType::Ptr(_) | IrType::Ref(_) => 4,
         IrType::Struct { fields, .. } => (fields.len() as i32) * 8,
         _ => 8,
+    }
+}
+
+/// Byte stride for a GEP / PtrAdd index, derived from the pointee type.
+///
+/// On wasm the backend lays packed numeric buffers out at their natural element
+/// width (f32/i32/u32 = 4, i16/u16 = 2, i8/u8 = 1), while pointer-sized slots —
+/// `Ptr<I64>`/`Ptr<Void>` headers, array element slots, object fields — keep the
+/// 8-byte stride the rest of the backend assumes. The previous inline rule
+/// scaled *everything* non-byte by 8, so f32 tensor-buffer indexing strode 8
+/// bytes per element and read every other lane as garbage. `ty` may be either a
+/// `Ptr(inner)` (the common GEP shape) or a bare element type, so handle both.
+fn gep_pointee_size(ty: &IrType) -> i32 {
+    fn size_of(t: &IrType) -> i32 {
+        match t {
+            IrType::U8 | IrType::I8 => 1,
+            IrType::U16 | IrType::I16 => 2,
+            IrType::U32 | IrType::I32 | IrType::F32 => 4,
+            // I64/U64/F64/Bool/Ptr/Void/struct/etc. — 8-byte slot layout.
+            _ => 8,
+        }
+    }
+    match ty {
+        IrType::Ptr(inner) => size_of(inner),
+        other => size_of(other),
     }
 }
 
