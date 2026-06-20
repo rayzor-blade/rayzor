@@ -451,6 +451,21 @@ pub enum IrInstruction {
         vec_ty: IrType,
     },
 
+    /// Fused widening dot-product accumulate: `dest = acc + dot(a, b)`, where
+    /// `a`/`b` are 16-lane i8 vectors and the 16 i8×i8 products are summed in
+    /// groups of 4 into the 4 i32 lanes of `dest` (and added to `acc`). This is
+    /// the quantized-matmul primitive: it lowers to a single AArch64 SDOT
+    /// (`vdotq_s32`) on native and to `i32x4.relaxed_dot_i8x16_i7x16_add_s` on
+    /// wasm (which wasmtime 47 lowers to SDOT). For cross-runtime-deterministic
+    /// results the `b` operand must stay in i7 range (−64..63) — quant weights
+    /// (4-bit nibbles 0..15, 6-bit 0..63) satisfy this.
+    VectorDot {
+        dest: IrId,
+        acc: IrId,
+        a: IrId,
+        b: IrId,
+    },
+
     // === Atomic memory operations (sequentially consistent) ===
     /// Atomic load. dest = *ptr.
     AtomicLoad { dest: IrId, ptr: IrId, ty: IrType },
@@ -628,6 +643,7 @@ impl IrInstruction {
             IrInstruction::VectorReduce { dest, .. } |
             IrInstruction::VectorUnaryOp { dest, .. } |
             IrInstruction::VectorMinMax { dest, .. } |
+            IrInstruction::VectorDot { dest, .. } |
             // Atomic instructions (AtomicStore omitted → falls to _ => None)
             IrInstruction::AtomicLoad { dest, .. } |
             IrInstruction::AtomicRmw { dest, .. } |
@@ -685,6 +701,7 @@ impl IrInstruction {
             | IrInstruction::VectorReduce { dest, .. }
             | IrInstruction::VectorUnaryOp { dest, .. }
             | IrInstruction::VectorMinMax { dest, .. }
+            | IrInstruction::VectorDot { dest, .. }
             | IrInstruction::AtomicLoad { dest, .. }
             | IrInstruction::AtomicRmw { dest, .. }
             | IrInstruction::AtomicCas { dest, .. } => *dest = new_dest,
@@ -755,6 +772,7 @@ impl IrInstruction {
             IrInstruction::VectorReduce { vector, .. } => vec![*vector],
             IrInstruction::VectorUnaryOp { operand, .. } => vec![*operand],
             IrInstruction::VectorMinMax { left, right, .. } => vec![*left, *right],
+            IrInstruction::VectorDot { acc, a, b, .. } => vec![*acc, *a, *b],
             // Atomic instructions
             IrInstruction::AtomicLoad { ptr, .. } => vec![*ptr],
             IrInstruction::AtomicStore { ptr, value, .. } => vec![*ptr, *value],

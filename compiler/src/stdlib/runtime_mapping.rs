@@ -66,6 +66,8 @@ pub enum IrTypeDescriptor {
     VecF32x4,
     /// SIMD vector: 4 × i32 (128-bit)
     VecI32x4,
+    /// SIMD vector: 16 × i8 (128-bit)
+    VecI8x16,
 }
 
 impl IrTypeDescriptor {
@@ -88,6 +90,7 @@ impl IrTypeDescriptor {
             IrTypeDescriptor::PtrI64 => IrType::Ptr(Box::new(IrType::I64)),
             IrTypeDescriptor::VecF32x4 => IrType::vector(IrType::F32, 4),
             IrTypeDescriptor::VecI32x4 => IrType::vector(IrType::I32, 4),
+            IrTypeDescriptor::VecI8x16 => IrType::vector(IrType::I8, 16),
         }
     }
 }
@@ -265,6 +268,7 @@ impl StdlibMapping {
         mapping.register_cstring_methods();
         mapping.register_simd4f_methods();
         mapping.register_simd4i32_methods();
+        mapping.register_simd16i8_methods();
         mapping.register_atomic_methods();
         mapping.register_tensor_methods();
         mapping.register_qtensor_methods();
@@ -3387,6 +3391,28 @@ impl StdlibMapping {
             // simd.sum(): Int  (instance, horizontal sum)
             map_method!(instance "rayzor_SIMD4i32", "sum" => "SIMD4i32_sum", params: 0, mir_wrapper,
                 types: &[VecI32x4] => I32),
+            // SIMD4i32.dot(acc, a, b): SIMD4i32  (static, fused widening dot-accumulate:
+            // acc + Σ a·b over 16 i8 lanes grouped by 4 → i32x4). Lowers to SDOT.
+            map_method!(static "rayzor_SIMD4i32", "dot" => "SIMD4i32_dot16", params: 3, mir_wrapper,
+                types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SIMD16i8 Methods (rayzor.SIMD16i8 — 16×i8, the dot operands)
+    // ============================================================================
+    fn register_simd16i8_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // SIMD16i8.splat(v: Int): SIMD16i8  (static, broadcast a byte to all 16 lanes)
+            map_method!(static "rayzor_SIMD16i8", "splat" => "SIMD16i8_splat", params: 1, mir_wrapper,
+                types: &[I32] => VecI8x16),
+            // SIMD16i8.load(ptr): SIMD16i8  (static, load 16 contiguous bytes)
+            map_method!(static "rayzor_SIMD16i8", "load" => "SIMD16i8_load", params: 1, mir_wrapper,
+                types: &[I64] => VecI8x16),
         ];
 
         self.register_from_tuples(mappings);

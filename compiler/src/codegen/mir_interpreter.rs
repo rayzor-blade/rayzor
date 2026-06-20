@@ -553,8 +553,9 @@ pub enum Opcode {
     AtomicStore = 60,
     AtomicRmw = 61,
     AtomicCas = 62,
+    VectorDot = 63,
     // Sentinel for table size
-    _Count = 63,
+    _Count = 64,
 }
 
 impl Opcode {
@@ -618,6 +619,7 @@ impl Opcode {
             IrInstruction::VectorReduce { .. } => Opcode::VectorReduce,
             IrInstruction::VectorUnaryOp { .. } => Opcode::VectorUnaryOp,
             IrInstruction::VectorMinMax { .. } => Opcode::VectorMinMax,
+            IrInstruction::VectorDot { .. } => Opcode::VectorDot,
             // Global variable access
             IrInstruction::LoadGlobal { .. } => Opcode::LoadGlobal,
             IrInstruction::StoreGlobal { .. } => Opcode::StoreGlobal,
@@ -2105,6 +2107,7 @@ impl MirInterpreter {
             | IrInstruction::VectorReduce { .. }
             | IrInstruction::VectorUnaryOp { .. }
             | IrInstruction::VectorMinMax { .. }
+            | IrInstruction::VectorDot { .. }
             // Atomics require real shared memory — never interpret.
             | IrInstruction::AtomicLoad { .. }
             | IrInstruction::AtomicStore { .. }

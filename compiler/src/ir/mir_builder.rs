@@ -638,6 +638,15 @@ impl MirBuilder {
         dest
     }
 
+    /// Fused widening dot-accumulate: `dest = acc + dot(a, b)` where a/b are
+    /// 16-lane i8 vectors and the result is an i32x4 (4 i32 lanes, each the sum
+    /// of 4 i8×i8 products). Lowers to AArch64 SDOT / wasm relaxed_dot.
+    pub fn vector_dot(&mut self, acc: IrId, a: IrId, b: IrId) -> IrId {
+        let dest = self.alloc_reg_typed(IrType::vector(IrType::I32, 4));
+        self.insert_inst(IrInstruction::VectorDot { dest, acc, a, b });
+        dest
+    }
+
     /// Load contiguous elements into a SIMD vector
     pub fn vector_load(&mut self, ptr: IrId, vec_ty: IrType) -> IrId {
         let dest = self.alloc_reg_typed(vec_ty.clone());

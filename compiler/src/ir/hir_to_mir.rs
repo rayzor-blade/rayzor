@@ -21817,6 +21817,7 @@ impl<'a> HirToMirContext<'a> {
                         match nn.as_str() {
                             "rayzor::SIMD4f" => return IrType::vector(IrType::F32, 4),
                             "rayzor::SIMD4i32" => return IrType::vector(IrType::I32, 4),
+                            "rayzor::SIMD16i8" => return IrType::vector(IrType::I8, 16),
                             "rayzor::Atomic" => return IrType::Ptr(Box::new(IrType::I32)),
                             _ => {}
                         }

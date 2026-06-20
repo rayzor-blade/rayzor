@@ -3884,6 +3884,18 @@ impl<'a> FunctionLowerer<'a> {
                 self.set_reg(f, *dest);
             }
 
+            // Fused widening dot-accumulate: dest = acc + dot(a_i8x16, b_i8x16).
+            // i32x4.relaxed_dot_i8x16_i7x16_add_s(a, b, acc) — one instruction
+            // that wasmtime 47 lowers to AArch64 SDOT. Exact (= the native
+            // result) when b stays in i7 range, which quant weights satisfy.
+            IrInstruction::VectorDot { dest, acc, a, b } => {
+                self.get_reg(f, *a);
+                self.get_reg(f, *b);
+                self.get_reg(f, *acc);
+                f.instruction(&Instruction::I32x4RelaxedDotI8x16I7x16AddS);
+                self.set_reg(f, *dest);
+            }
+
             // Load 16 bytes from memory into a v128
             IrInstruction::VectorLoad { dest, ptr, .. } => {
                 self.get_reg(f, *ptr);
