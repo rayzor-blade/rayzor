@@ -4727,6 +4727,29 @@ impl CraneliftBackend {
                 }
             }
 
+            // Ternary select: `condition ? true_val : false_val`. Emitted by
+            // stdlib MIR wrappers (e.g. SIMD4f.get(lane)'s branchless lane
+            // pick); normal Haxe ternaries lower to branches+phi instead, so
+            // this arm previously didn't exist and any Select trapped (W0020).
+            IrInstruction::Select {
+                dest,
+                condition,
+                true_val,
+                false_val,
+            } => {
+                let cond = *value_map
+                    .get(condition)
+                    .ok_or_else(|| format!("Select condition {:?} not found", condition))?;
+                let tv = *value_map
+                    .get(true_val)
+                    .ok_or_else(|| format!("Select true_val {:?} not found", true_val))?;
+                let fv = *value_map
+                    .get(false_val)
+                    .ok_or_else(|| format!("Select false_val {:?} not found", false_val))?;
+                let result = builder.ins().select(cond, tv, fv);
+                value_map.insert(*dest, result);
+            }
+
             // TODO: Implement remaining instructions
             _ => {
                 return Err(format!("Unsupported instruction: {:?}", instruction));

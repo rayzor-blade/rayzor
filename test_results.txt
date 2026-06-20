@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Sat Jun 20 12:59:36 BST 2026
+  Sat Jun 20 13:24:05 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -653,7 +653,7 @@ done
 --- test_exception [CRASH(134/SIGABRT)] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 
-thread 'main' (14661210) has overflowed its stack
+thread 'main' (14705091) has overflowed its stack
 fatal runtime error: stack overflow, aborting
 
 --- test_exception_method_parity [PASS] ---
@@ -718,10 +718,10 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-hello
 world
-10
+hello
 30
+10
 20
 done
 
@@ -918,7 +918,7 @@ Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]..
 99
 true
 false
-{2 => 200, 1 => 100}
+{1 => 100, 2 => 200}
 100
 200
 true
