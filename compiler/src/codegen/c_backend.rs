@@ -1380,6 +1380,7 @@ impl CBackend {
                 dest,
                 vector,
                 index,
+                ..
             } => {
                 self.emit_line(&format!(
                     "r{} = ((i64*)&r{})[{}];",
@@ -1394,6 +1395,7 @@ impl CBackend {
                 vector,
                 scalar,
                 index,
+                ..
             } => {
                 self.emit_line(&format!("r{} = r{};", dest.as_u32(), vector.as_u32()));
                 self.emit_line(&format!(
@@ -1404,7 +1406,9 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::VectorReduce { dest, op, vector } => {
+            IrInstruction::VectorReduce {
+                dest, op, vector, ..
+            } => {
                 // Simple reduction: accumulate across elements
                 let op_char = Self::simple_binop_char(*op);
                 self.emit_line(&format!(

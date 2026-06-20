@@ -599,31 +599,42 @@ impl MirBuilder {
 
     /// Extract scalar from vector lane
     pub fn vector_extract(&mut self, vector: IrId, index: u8, elem_ty: IrType) -> IrId {
-        let dest = self.alloc_reg_typed(elem_ty);
+        let dest = self.alloc_reg_typed(elem_ty.clone());
         self.insert_inst(IrInstruction::VectorExtract {
             dest,
             vector,
             index,
+            elem_ty,
         });
         dest
     }
 
     /// Insert scalar into vector lane
     pub fn vector_insert(&mut self, vector: IrId, scalar: IrId, index: u8, vec_ty: IrType) -> IrId {
+        let elem_ty = match &vec_ty {
+            IrType::Vector { element, .. } => (**element).clone(),
+            other => other.clone(),
+        };
         let dest = self.alloc_reg_typed(vec_ty);
         self.insert_inst(IrInstruction::VectorInsert {
             dest,
             vector,
             scalar,
             index,
+            elem_ty,
         });
         dest
     }
 
     /// Horizontal reduction (e.g., sum all elements)
     pub fn vector_reduce(&mut self, op: BinaryOp, vector: IrId, elem_ty: IrType) -> IrId {
-        let dest = self.alloc_reg_typed(elem_ty);
-        self.insert_inst(IrInstruction::VectorReduce { dest, op, vector });
+        let dest = self.alloc_reg_typed(elem_ty.clone());
+        self.insert_inst(IrInstruction::VectorReduce {
+            dest,
+            op,
+            vector,
+            elem_ty,
+        });
         dest
     }
 

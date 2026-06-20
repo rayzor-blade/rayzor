@@ -1652,6 +1652,7 @@ impl LoopVectorizationPass {
                     dest: reduction.accumulator,
                     op: reduction.op,
                     vector: reduction.accumulator,
+                    elem_ty: vec_type.element_type(),
                 };
                 block.instructions.insert(0, reduce_inst);
                 let _ = vec_type; // Used for type checking in full implementation

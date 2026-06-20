@@ -333,11 +333,12 @@ impl IrBuilder {
         elem_ty: IrType,
     ) -> Option<IrId> {
         let dest = self.alloc_reg()?;
-        self.set_register_type(dest, elem_ty);
+        self.set_register_type(dest, elem_ty.clone());
         self.add_instruction(IrInstruction::VectorExtract {
             dest,
             vector,
             index,
+            elem_ty,
         })?;
         Some(dest)
     }

@@ -52,38 +52,32 @@ Everything below sits on this.
 - **Gate:** Haxe test doing integer vector `add/mul/and/shr` returns correct
   values on wasm (today wrong) and matches native.
 
-## Phase 1 status (2026-06-20): native WORKS; wasm BLOCKED on an IR-type gap
+## Phase 1 — DONE (2026-06-20): SIMD4i32 works native + wasm.
 
-A first integer type `SIMD4i32` (i32x4) was wired end-to-end (abstract +
-hir_to_mir type map + tast_to_hir `@:op` skip + runtime_mapping + systems.rs
-wrappers + `VecI32x4` descriptor). Result:
-- **Native: PASS** — `make/splat/+/-/*/get(const+runtime)/sum` all correct
-  (50/100/11/14). Proves the design + wiring + Phase 0 are right.
-- **WASM: returns 0.** ROOT CAUSE (objdump-confirmed via `RAYZOR_DUMP_WASM`):
-  `VectorExtract`/`VectorReduce`/`VectorInsert` carry **no element type** in the
-  IR — the wasm backend infers it from `register_types[vector]`. That works for
-  a *called* wrapper (the param type is in the signature) but **breaks when the
-  wrapper is inlined into the caller**: the inlined vector operand's reg has no
-  `vector(I32,4)` entry in the caller's `register_types`, so the backend
-  defaults to F32 and emits `f32x4.extract_lane` on an i32 vector → reads i32
-  lanes as floats → ~0 → truncates to 0. Main had 16 `f32x4.extract_lane`, zero
-  `i32x4.extract_lane`. (Native is immune — Cranelift tracks SSA value types.)
-  `InlineHint::Never` on the wrappers did NOT prevent it (sum/extract still
-  inlined by a lower pass), confirming the fix must be in the IR, not inlining.
+`SIMD4i32` (i32x4) is wired end-to-end and PASSES on both targets (make/splat/
++/-/*/get(const+runtime)/sum = 50/100/11/14; test_simd4i32.hx). It took TWO
+fixes that were jointly required:
 
-**THE FIX (prerequisite for any integer SIMD on wasm, incl. the quant kernel):**
-add an explicit `elem_ty: IrType` field to `VectorExtract`, `VectorInsert`,
-`VectorReduce` (the MirBuilder builders ALREADY receive it — `vector_extract(vec,
-idx, elem_ty)`, `vector_reduce(op, vec, elem_ty)` — they just don't store it).
-Then the wasm backend reads `elem_ty` directly instead of `vec_elem_of_reg`.
-Blast radius ~12 files (instructions.rs + mir_builder.rs + match arms in
-cranelift/wasm/llvm/c/interpreter/tiered/dump/optimization/vectorization/
-builder) — each non-wasm arm just binds-and-ignores the field. Do this as its
-own careful pass with all-backend verification BEFORE landing SIMD4i32.
+1. **`elem_ty` on the vector IR instructions.** `VectorExtract/Insert/Reduce`
+   carried no element type — the wasm backend inferred it from `register_types`,
+   which is LOST when a vector wrapper is inlined → an inlined integer reduce
+   emitted `f32x4.extract_lane` on an i32 vector (i32 lanes read as floats → 0).
+   Added `elem_ty: IrType` to all three (the MirBuilder builders already received
+   it); the wasm backend reads it directly. ~12 files; non-wasm match arms just
+   `..`-ignore it. Survives inlining (remap_instruction clones it).
 
-`vec_elem_of_reg` (wasm_backend) + the param-signature fallback are still correct
-and useful (they fix the *called*-wrapper case); the IR field makes the inlined
-case robust too. Phase 0 (element-aware wasm vector arms) is committed and solid.
+2. **SIMD instance-method dispatch.** hir_to_mir hard-coded a `rayzor_SIMD4f`
+   class hint for ANY vector receiver, so `SIMD4i32.sum()/get()` dispatched to
+   the SIMD4f (f32) wrappers. Native masked it (Cranelift reduces/extracts by the
+   SSA value type = i32x4 → correct value by accident); wasm exposed it (uses
+   `elem_ty` from the f32 wrapper → 0). Added `simd_vector_class(ty)`:
+   i32x4 → `rayzor_SIMD4i32`, else `rayzor_SIMD4f`, used at both hint-assignment
+   sites + the SIMD direct-lookup dispatch.
+
+No regressions: test_simd_e2e 17/17, test_tensor_e2e 20/20, SimdDemo + getlane2
+f32 unchanged, native suite 139 pass. Debugging tool: `RAYZOR_DUMP_WASM` +
+`wasm-tools print` (the f32x4-on-i32 disasm cracked it). Phase 0 element-aware
+wasm vector arms committed (87a14a6e).
 
 ## Phase 1 — Integer SIMD types + stdlib surface
 
