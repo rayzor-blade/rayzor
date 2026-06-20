@@ -2368,6 +2368,12 @@ impl CraneliftBackend {
                 crate::ir::IrType::Bool => types::I8,
                 crate::ir::IrType::Ptr(_) => types::I64,
                 crate::ir::IrType::Ref(_) => types::I64,
+                // SIMD vector phi: keep the vector type so the block param and
+                // the incoming values share the FPR/vector reg class (see the
+                // matching arm in translate_phi_node_static).
+                crate::ir::IrType::Vector { .. } => {
+                    Self::mir_type_to_cranelift_static(&phi_node.ty).unwrap_or(types::I64)
+                }
                 _ => types::I64,
             };
 
@@ -2464,6 +2470,12 @@ impl CraneliftBackend {
             crate::ir::IrType::Bool => cranelift_codegen::ir::types::I8,
             crate::ir::IrType::Ptr(_) => cranelift_codegen::ir::types::I64, // Assume 64-bit pointers
             crate::ir::IrType::Ref(_) => cranelift_codegen::ir::types::I64, // Assume 64-bit refs
+            // SIMD vector phi (e.g. a SIMD4f loop accumulator <4 x f32>): must
+            // be a vector Cranelift type, NOT the I64 default — otherwise the
+            // block param is a GPR while the incoming values are FPR/vector
+            // regs, and AArch64 regalloc panics in gen_move (GPR<->FPR move).
+            crate::ir::IrType::Vector { .. } => Self::mir_type_to_cranelift_static(&phi_node.ty)
+                .unwrap_or(cranelift_codegen::ir::types::I64),
             _ => cranelift_codegen::ir::types::I64,                         // Default
         };
 
