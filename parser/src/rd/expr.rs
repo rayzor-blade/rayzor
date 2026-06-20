@@ -1000,6 +1000,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.restore(saved);
 
         let inner = self.parse_expression()?;
+        // Tuple literal: `(expr, expr, ...)` — e.g. `var a:SIMD4f = (1.0, 2.0, 3.0, 4.0)`.
+        // Without this the RD parser hit `expect(RParen)` on the first comma and
+        // bailed to the legacy parser. Mirrors haxe_parser_expr3's tuple branch
+        // (collect comma-separated exprs, allow a trailing comma).
+        if self.stream.at(TokenKind::Comma) {
+            let mut elements = vec![inner];
+            while self.stream.eat(TokenKind::Comma).is_some() {
+                if self.stream.at(TokenKind::RParen) {
+                    break; // trailing comma
+                }
+                elements.push(self.parse_expression()?);
+            }
+            let end = self.stream.expect(TokenKind::RParen)?;
+            return Ok(Expr {
+                kind: ExprKind::Tuple(elements),
+                span: Span::new(start, end.end),
+            });
+        }
         // Type check: (expr : Type)
         if self.stream.eat(TokenKind::Colon).is_some() {
             let ty = self.parse_type()?;
