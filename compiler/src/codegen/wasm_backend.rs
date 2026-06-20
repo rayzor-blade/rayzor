@@ -3608,56 +3608,145 @@ impl<'a> FunctionLowerer<'a> {
             // Locals/params with IrType::Vector{F32,4} are typed as ValType::V128
             // via ir_type_to_wasm.
 
-            // Splat: scalar f32 → vec
-            IrInstruction::VectorSplat { dest, scalar, .. } => {
+            // Splat: scalar → all lanes. Lane shape from vec_ty (f32x4 default).
+            IrInstruction::VectorSplat {
+                dest,
+                scalar,
+                vec_ty,
+            } => {
                 self.get_reg(f, *scalar);
-                f.instruction(&Instruction::F32x4Splat);
+                let inst = match vec_element(vec_ty) {
+                    IrType::F32 => Instruction::F32x4Splat,
+                    IrType::F64 => Instruction::F64x2Splat,
+                    IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16Splat,
+                    IrType::I16 | IrType::U16 => Instruction::I16x8Splat,
+                    IrType::I32 | IrType::U32 => Instruction::I32x4Splat,
+                    IrType::I64 | IrType::U64 => Instruction::I64x2Splat,
+                    _ => Instruction::I32x4Splat,
+                };
+                f.instruction(&inst);
                 self.set_reg(f, *dest);
             }
 
-            // Element-wise binary ops (add/sub/mul/div)
+            // Element-wise binary ops. Lane shape from vec_ty (f32x4 default).
+            // Bitwise And/Or/Xor are whole-v128 (lane-agnostic). For shifts the
+            // convention is `right` = a scalar i32 shift amount (wasm's
+            // {i8x16,i16x8,...}.shr pop [v128, i32]), not a vector. Integer ops
+            // here previously fell through to F32x4* (silent miscompile) or
+            // Unreachable.
             IrInstruction::VectorBinOp {
                 dest,
                 op,
                 left,
                 right,
-                ..
+                vec_ty,
             } => {
                 self.get_reg(f, *left);
                 self.get_reg(f, *right);
-                match op {
-                    BinaryOp::Add | BinaryOp::FAdd => {
-                        f.instruction(&Instruction::F32x4Add);
-                    }
-                    BinaryOp::Sub | BinaryOp::FSub => {
-                        f.instruction(&Instruction::F32x4Sub);
-                    }
-                    BinaryOp::Mul | BinaryOp::FMul => {
-                        f.instruction(&Instruction::F32x4Mul);
-                    }
-                    BinaryOp::Div | BinaryOp::FDiv => {
-                        f.instruction(&Instruction::F32x4Div);
-                    }
-                    _ => {
-                        // Unsupported vector binop (And/Or/Xor/Shl on f32 not meaningful)
-                        f.instruction(&Instruction::Unreachable);
-                    }
-                }
+                let elem = vec_element(vec_ty);
+                let inst = match op {
+                    BinaryOp::Add | BinaryOp::FAdd => match elem {
+                        IrType::F32 => Instruction::F32x4Add,
+                        IrType::F64 => Instruction::F64x2Add,
+                        IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16Add,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8Add,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4Add,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2Add,
+                        _ => Instruction::I32x4Add,
+                    },
+                    BinaryOp::Sub | BinaryOp::FSub => match elem {
+                        IrType::F32 => Instruction::F32x4Sub,
+                        IrType::F64 => Instruction::F64x2Sub,
+                        IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16Sub,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8Sub,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4Sub,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2Sub,
+                        _ => Instruction::I32x4Sub,
+                    },
+                    BinaryOp::Mul | BinaryOp::FMul => match elem {
+                        IrType::F32 => Instruction::F32x4Mul,
+                        IrType::F64 => Instruction::F64x2Mul,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8Mul,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4Mul,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2Mul,
+                        // wasm SIMD has no packed i8x16 multiply.
+                        IrType::I8 | IrType::U8 => Instruction::Unreachable,
+                        _ => Instruction::F32x4Mul,
+                    },
+                    BinaryOp::Div | BinaryOp::FDiv => match elem {
+                        IrType::F32 => Instruction::F32x4Div,
+                        IrType::F64 => Instruction::F64x2Div,
+                        // No packed integer vector division in wasm SIMD.
+                        _ => Instruction::Unreachable,
+                    },
+                    BinaryOp::And => Instruction::V128And,
+                    BinaryOp::Or => Instruction::V128Or,
+                    BinaryOp::Xor => Instruction::V128Xor,
+                    BinaryOp::Shl => match elem {
+                        IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16Shl,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8Shl,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4Shl,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2Shl,
+                        _ => Instruction::Unreachable,
+                    },
+                    // Arithmetic (sign-propagating) right shift.
+                    BinaryOp::Shr => match elem {
+                        IrType::I8 => Instruction::I8x16ShrS,
+                        IrType::U8 | IrType::Bool => Instruction::I8x16ShrU,
+                        IrType::I16 => Instruction::I16x8ShrS,
+                        IrType::U16 => Instruction::I16x8ShrU,
+                        IrType::I32 => Instruction::I32x4ShrS,
+                        IrType::U32 => Instruction::I32x4ShrU,
+                        IrType::I64 => Instruction::I64x2ShrS,
+                        IrType::U64 => Instruction::I64x2ShrU,
+                        _ => Instruction::Unreachable,
+                    },
+                    // Logical (zero-filling) right shift.
+                    BinaryOp::Ushr => match elem {
+                        IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16ShrU,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8ShrU,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4ShrU,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2ShrU,
+                        _ => Instruction::Unreachable,
+                    },
+                    _ => Instruction::Unreachable,
+                };
+                f.instruction(&inst);
                 self.set_reg(f, *dest);
             }
 
-            // Extract a single lane (compile-time index)
+            // Extract a single lane (compile-time index). These ops carry no
+            // vec_ty, so the lane shape comes from the vector register's IR type
+            // (f32x4 default). Sub-32-bit integer lanes pick signed/unsigned
+            // extract from the element type.
             IrInstruction::VectorExtract {
                 dest,
                 vector,
                 index,
             } => {
                 self.get_reg(f, *vector);
-                f.instruction(&Instruction::F32x4ExtractLane(*index));
+                let elem = vec_element(
+                    self.ir_func
+                        .register_types
+                        .get(vector)
+                        .unwrap_or(&IrType::F32),
+                );
+                let inst = match elem {
+                    IrType::F32 => Instruction::F32x4ExtractLane(*index),
+                    IrType::F64 => Instruction::F64x2ExtractLane(*index),
+                    IrType::I8 => Instruction::I8x16ExtractLaneS(*index),
+                    IrType::U8 | IrType::Bool => Instruction::I8x16ExtractLaneU(*index),
+                    IrType::I16 => Instruction::I16x8ExtractLaneS(*index),
+                    IrType::U16 => Instruction::I16x8ExtractLaneU(*index),
+                    IrType::I32 | IrType::U32 => Instruction::I32x4ExtractLane(*index),
+                    IrType::I64 | IrType::U64 => Instruction::I64x2ExtractLane(*index),
+                    _ => Instruction::F32x4ExtractLane(*index),
+                };
+                f.instruction(&inst);
                 self.set_reg(f, *dest);
             }
 
-            // Insert a single lane (compile-time index)
+            // Insert a single lane (compile-time index).
             IrInstruction::VectorInsert {
                 dest,
                 vector,
@@ -3666,7 +3755,22 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 self.get_reg(f, *vector);
                 self.get_reg(f, *scalar);
-                f.instruction(&Instruction::F32x4ReplaceLane(*index));
+                let elem = vec_element(
+                    self.ir_func
+                        .register_types
+                        .get(vector)
+                        .unwrap_or(&IrType::F32),
+                );
+                let inst = match elem {
+                    IrType::F32 => Instruction::F32x4ReplaceLane(*index),
+                    IrType::F64 => Instruction::F64x2ReplaceLane(*index),
+                    IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16ReplaceLane(*index),
+                    IrType::I16 | IrType::U16 => Instruction::I16x8ReplaceLane(*index),
+                    IrType::I32 | IrType::U32 => Instruction::I32x4ReplaceLane(*index),
+                    IrType::I64 | IrType::U64 => Instruction::I64x2ReplaceLane(*index),
+                    _ => Instruction::F32x4ReplaceLane(*index),
+                };
+                f.instruction(&inst);
                 self.set_reg(f, *dest);
             }
 
@@ -3722,39 +3826,63 @@ impl<'a> FunctionLowerer<'a> {
                 self.set_reg(f, *dest);
             }
 
-            // Horizontal reduction. WASM has no native f32x4 horizontal reduce,
-            // so we extract all 4 lanes and sum them.
+            // Horizontal reduction. WASM has no native horizontal reduce, so we
+            // extract every lane and fold with a scalar op. Lane shape + count
+            // come from the vector register's IR type (f32x4 default), so this
+            // now handles i8x16/i16x8/i32x4/i64x2 reductions, not only f32x4.
             IrInstruction::VectorReduce { dest, op, vector } => {
-                match op {
-                    BinaryOp::Add | BinaryOp::FAdd => {
-                        // s = lane0 + lane1 + lane2 + lane3
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(0));
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(1));
-                        f.instruction(&Instruction::F32Add);
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(2));
-                        f.instruction(&Instruction::F32Add);
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(3));
-                        f.instruction(&Instruction::F32Add);
+                let vty = self
+                    .ir_func
+                    .register_types
+                    .get(vector)
+                    .cloned()
+                    .unwrap_or_else(|| IrType::vector(IrType::F32, 4));
+                let (elem, count) = match &vty {
+                    IrType::Vector { element, count } => ((**element).clone(), *count as u8),
+                    _ => (IrType::F32, 4u8),
+                };
+                let extract = |lane: u8| -> Instruction {
+                    match elem {
+                        IrType::F32 => Instruction::F32x4ExtractLane(lane),
+                        IrType::F64 => Instruction::F64x2ExtractLane(lane),
+                        IrType::I8 => Instruction::I8x16ExtractLaneS(lane),
+                        IrType::U8 | IrType::Bool => Instruction::I8x16ExtractLaneU(lane),
+                        IrType::I16 => Instruction::I16x8ExtractLaneS(lane),
+                        IrType::U16 => Instruction::I16x8ExtractLaneU(lane),
+                        IrType::I32 | IrType::U32 => Instruction::I32x4ExtractLane(lane),
+                        IrType::I64 | IrType::U64 => Instruction::I64x2ExtractLane(lane),
+                        _ => Instruction::F32x4ExtractLane(lane),
                     }
-                    BinaryOp::Mul | BinaryOp::FMul => {
+                };
+                let is_f64 = matches!(elem, IrType::F64);
+                let is_i64 = matches!(elem, IrType::I64 | IrType::U64);
+                let is_float = matches!(elem, IrType::F32 | IrType::F64);
+                let combine = match op {
+                    BinaryOp::Add | BinaryOp::FAdd if is_f64 => Instruction::F64Add,
+                    BinaryOp::Add | BinaryOp::FAdd if is_float => Instruction::F32Add,
+                    BinaryOp::Add | BinaryOp::FAdd if is_i64 => Instruction::I64Add,
+                    BinaryOp::Add | BinaryOp::FAdd => Instruction::I32Add,
+                    BinaryOp::Mul | BinaryOp::FMul if is_f64 => Instruction::F64Mul,
+                    BinaryOp::Mul | BinaryOp::FMul if is_float => Instruction::F32Mul,
+                    BinaryOp::Mul | BinaryOp::FMul if is_i64 => Instruction::I64Mul,
+                    BinaryOp::Mul | BinaryOp::FMul => Instruction::I32Mul,
+                    BinaryOp::And if is_i64 => Instruction::I64And,
+                    BinaryOp::And => Instruction::I32And,
+                    BinaryOp::Or if is_i64 => Instruction::I64Or,
+                    BinaryOp::Or => Instruction::I32Or,
+                    BinaryOp::Xor if is_i64 => Instruction::I64Xor,
+                    BinaryOp::Xor => Instruction::I32Xor,
+                    _ => Instruction::Unreachable,
+                };
+                if matches!(combine, Instruction::Unreachable) || count == 0 {
+                    f.instruction(&Instruction::Unreachable);
+                } else {
+                    self.get_reg(f, *vector);
+                    f.instruction(&extract(0));
+                    for lane in 1..count {
                         self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(0));
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(1));
-                        f.instruction(&Instruction::F32Mul);
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(2));
-                        f.instruction(&Instruction::F32Mul);
-                        self.get_reg(f, *vector);
-                        f.instruction(&Instruction::F32x4ExtractLane(3));
-                        f.instruction(&Instruction::F32Mul);
-                    }
-                    _ => {
-                        f.instruction(&Instruction::Unreachable);
+                        f.instruction(&extract(lane));
+                        f.instruction(&combine);
                     }
                 }
                 self.set_reg(f, *dest);
@@ -4516,6 +4644,16 @@ fn wasm_alloc_size(ty: &IrType) -> i32 {
         IrType::Ptr(_) | IrType::Ref(_) => 4,
         IrType::Struct { fields, .. } => (fields.len() as i32) * 8,
         _ => 8,
+    }
+}
+
+/// Lane element type of a vector IrType. Defaults to F32 (the legacy f32x4
+/// behavior) for a non-vector / unknown type so existing SIMD4f codegen stays
+/// byte-identical — only genuinely-typed integer vectors take the new arms.
+fn vec_element(ty: &IrType) -> IrType {
+    match ty {
+        IrType::Vector { element, .. } => (**element).clone(),
+        _ => IrType::F32,
     }
 }
 
