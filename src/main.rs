@@ -1601,6 +1601,32 @@ fn run_file(
         if let Some(ref h) = progress_handle {
             h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
         }
+        // Surface non-fatal compile WARNINGS (errors already abort the compile).
+        // e.g. the untyped-empty-array "uncertain element type" warning. Rendered
+        // through the standard diagnostic formatter, like errors.
+        {
+            // W-prefixed codes only: these normal warnings have no other display
+            // path. Safety/ownership warnings (E0382 etc.) are rendered by their
+            // own pass — including them here would double-print them.
+            let warns: Vec<&diagnostics::Diagnostic> = compile_diagnostics
+                .iter()
+                .filter(|d| {
+                    d.severity == diagnostics::DiagnosticSeverity::Warning
+                        && d.code.as_deref().is_some_and(|c| c.starts_with('W'))
+                })
+                .collect();
+            if !warns.is_empty() {
+                let mut source_map = diagnostics::SourceMap::new();
+                source_map.add_file(
+                    file.to_str().unwrap_or("unknown").to_string(),
+                    source.clone(),
+                );
+                let formatter = diagnostics::ErrorFormatter::with_colors();
+                for d in warns {
+                    eprintln!("{}", formatter.format_diagnostic(d, &source_map));
+                }
+            }
+        }
 
         // Tree-shake unused stdlib functions
         {

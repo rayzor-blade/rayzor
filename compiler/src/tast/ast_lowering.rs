@@ -618,10 +618,18 @@ pub struct AstLowering<'a> {
     /// Symbols declared as an untyped empty array literal (`var x = []`), whose
     /// element type is still the placeholder `Dynamic` and should be bound (the
     /// monomorph rewrite) from the FIRST `x.push(e)` / `x[i] = e` — at which
-    /// point `e`'s type is known (earlier statements are already lowered). Once
-    /// bound the symbol is removed. Keeps numeric arrays unboxed (`Array<Float>`
-    /// routes through the f64 push/get path instead of the truncating generic).
-    empty_array_inferred: std::collections::BTreeSet<SymbolId>,
+    /// point `e`'s type is known (earlier statements are already lowered). Maps
+    /// the symbol to its declaration location (for the "uncertain element type"
+    /// warning). Once bound the symbol is removed. Keeps numeric arrays unboxed
+    /// (`Array<Float>` routes through the f64 push/get path, not the truncating
+    /// generic one).
+    empty_array_inferred: std::collections::BTreeMap<SymbolId, SourceLocation>,
+    /// Subset of `empty_array_inferred` that was USED (pushed/index-assigned)
+    /// but whose element type could not be determined at compile time — if a
+    /// symbol is still here AND still unbound at end of file, it stayed
+    /// `Array<Dynamic>` and earns a `Correctness` warning (a later peekable push
+    /// clears it, per "until another push says otherwise").
+    empty_array_used_uncertain: std::collections::BTreeSet<SymbolId>,
     /// Active 'using' modules for static extension resolution
     /// Maps module name (e.g., "StringTools") to class symbol ID
     using_modules: Vec<(InternedString, SymbolId)>,
@@ -1286,52 +1294,70 @@ impl<'a> AstLowering<'a> {
             Some(s) => s,
             None => return,
         };
-        if !self.empty_array_inferred.contains(&sym) {
+        if !self.empty_array_inferred.contains_key(&sym) {
             return;
         }
-        let elem_ty = match self.peek_ast_expr_type(elem_ast) {
-            Some(t) => t,
-            None => {
-                // The cheap peek didn't resolve it (e.g. `a.push(x.getFlat(i))`).
-                // Fall back to lowering for method-call / property / index args —
-                // the result is discarded (the push re-lowers it), we only want
-                // the type. Leaving the symbol in `empty_array_inferred` means a
-                // LATER peekable push can still bind it ("until getFlat's return
-                // type says otherwise, or another push does"). Skip other kinds
-                // (e.g. lambdas) to avoid double-lowering a closure.
-                if matches!(
-                    &elem_ast.kind,
-                    ExprKind::Call { .. } | ExprKind::Field { .. } | ExprKind::Index { .. }
-                ) {
-                    match self.lower_expression(elem_ast) {
-                        Ok(te) => te.expr_type,
-                        Err(_) => return,
-                    }
-                } else {
-                    return;
-                }
+        // A use happened on an empty-inferred array. Resolve the element type:
+        // cheap syntactic peek first, then lower Call/Field/Index args (e.g.
+        // `a.push(x.getFlat(i))`) for their type — the lowered result is
+        // discarded (the push re-lowers it). Lambdas etc. are left to a later
+        // peekable push (avoids double-lowering a closure).
+        let elem_ty = self.peek_ast_expr_type(elem_ast).or_else(|| {
+            if matches!(
+                &elem_ast.kind,
+                ExprKind::Call { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::New { .. }
+            ) {
+                self.lower_expression(elem_ast).ok().map(|te| te.expr_type)
+            } else {
+                None
             }
-        };
-        // Only bind to a concrete element type — keep the placeholder otherwise.
-        let keep_placeholder = {
+        });
+        // Only bind to a CONCRETE element type; Dynamic/Unknown/None means the
+        // type is uncertain at this use — mark it (a later peekable push can
+        // still bind & clear it; if not, it warns at end of file).
+        let concrete = elem_ty.filter(|t| {
             let tt = self.context.type_table.borrow();
-            matches!(
-                tt.get(elem_ty).map(|t| &t.kind),
+            !matches!(
+                tt.get(*t).map(|ty| &ty.kind),
                 None | Some(TypeKind::Dynamic)
                     | Some(TypeKind::Unknown)
                     | Some(TypeKind::Error)
             )
-        };
-        if keep_placeholder {
-            return;
+        });
+        match concrete {
+            Some(t) => {
+                let array_ty = self.context.type_table.borrow_mut().create_array_type(t);
+                self.context.symbol_table.update_symbol_type(sym, array_ty);
+                self.empty_array_inferred.remove(&sym);
+                self.empty_array_used_uncertain.remove(&sym);
+            }
+            None => {
+                self.empty_array_used_uncertain.insert(sym);
+            }
         }
-        let array_ty = self
-            .context
-            .type_table
-            .borrow_mut()
-            .create_array_type(elem_ty);
-        self.context.symbol_table.update_symbol_type(sym, array_ty);
-        self.empty_array_inferred.remove(&sym);
+    }
+
+    /// Drain the "untyped empty array, element type uncertain" warnings: symbols
+    /// that were used but never bound to a concrete element type, so they stay
+    /// `Array<Dynamic>`. Returns (declaration location, message) pairs for the
+    /// pipeline to surface as `Correctness` warnings. Call after `lower_file`.
+    pub fn take_empty_array_warnings(&mut self) -> Vec<(SourceLocation, String)> {
+        let mut out = Vec::new();
+        for sym in std::mem::take(&mut self.empty_array_used_uncertain) {
+            if let Some(loc) = self.empty_array_inferred.get(&sym) {
+                out.push((
+                    *loc,
+                    "type of array literal can not be inferred at assignment, \
+                     this would fall back to Array<Dynamic>; annotate \
+                     `var a:Array<T> = []` for deterministic behavior at runtime"
+                        .to_string(),
+                ));
+            }
+        }
+        out
     }
 
     pub fn new(
@@ -1363,7 +1389,8 @@ impl<'a> AstLowering<'a> {
             skip_stdlib_loading: false,
             skip_pre_registration: false,
             collected_errors: Vec::new(),
-            empty_array_inferred: std::collections::BTreeSet::new(),
+            empty_array_inferred: std::collections::BTreeMap::new(),
+            empty_array_used_uncertain: std::collections::BTreeSet::new(),
             using_modules: Vec::new(),
             pending_usings: Vec::new(),
             // (class_fields will be seeded below if global_class_fields provided)
@@ -8777,7 +8804,8 @@ impl<'a> AstLowering<'a> {
                         .map(|e| matches!(&e.kind, ExprKind::Array(els) if els.is_empty()))
                         .unwrap_or(false)
                 {
-                    self.empty_array_inferred.insert(var_symbol);
+                    let loc = self.context.span_to_location(&expression.span);
+                    self.empty_array_inferred.insert(var_symbol, loc);
                 }
 
                 TypedExpressionKind::VarDeclarationExpr {
