@@ -12,8 +12,10 @@
 // native and wasm — the actual decode-latency target. A wasm run is the gate.
 //
 // Workarounds in use (real compiler bugs, see memory):
-//   - Q8_K block scales kept in a Bytes (setDouble/getDouble): Array<Float>
-//     element set/get truncates f64 on wasm.
+//   - Q8_K block scales kept in a Bytes (setDouble/getDouble). The root issue
+//     is element-type inference: an UNTYPED empty literal `var a = []` locks to
+//     Array<Int> and truncates floats stored later (annotating `:Array<Float>`
+//     would also fix it; the Bytes route is just what this test happens to use).
 //   - clamp via a ternary, not `if(c) v=k;`: the statement-form reassign inside
 //     the nested quant loop fails wasm compilation.
 //   - block header via SIMD16i8.get, not Ptr<Int>.deref (which segfaults).
