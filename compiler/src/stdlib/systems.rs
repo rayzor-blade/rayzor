@@ -89,6 +89,7 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd16i8_shl(builder);
     build_simd16i8_shr(builder);
     build_simd16i8_ushr(builder);
+    build_simd16i8_extract(builder);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1375,6 +1376,56 @@ fn build_simd16i8_shr(builder: &mut MirBuilder) {
 }
 fn build_simd16i8_ushr(builder: &mut MirBuilder) {
     build_simd16i8_shift(builder, "SIMD16i8_ushr", BinaryOp::Ushr);
+}
+
+/// SIMD16i8_extract(self: vec<i8;16>, lane: i32) -> i32
+/// Read one i8 lane, sign-extended to i32, via a branchless select chain
+/// (same approach as SIMD4i32_extract). Lets a Haxe kernel pull individual
+/// bytes out of a loaded vector in-guest (the Q4 block header: d/dmin/scales),
+/// avoiding the broken Ptr<Int>.deref and per-byte Bytes FFI crossings on wasm.
+/// Bytes are signed i8; mask `& 0xFF` in Haxe for unsigned 0..255.
+fn build_simd16i8_extract(builder: &mut MirBuilder) {
+    let vec_ty = IrType::vector(IrType::I8, 16);
+    let i8_ty = IrType::I8;
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("SIMD16i8_extract")
+        .param("self_val", vec_ty)
+        .param("lane", i32_ty.clone())
+        .returns(i32_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let lane = builder.get_param(1);
+
+    // Extract all 16 lanes as i8, sign-extend each to i32.
+    let mut e = Vec::with_capacity(16);
+    for k in 0..16u8 {
+        let xi8 = builder.vector_extract(self_val, k, i8_ty.clone());
+        let xi32 = builder.cast(xi8, i8_ty.clone(), i32_ty.clone());
+        e.push(xi32);
+    }
+    // Branchless select chain: r = (lane==k) ? e[k] : r.
+    let mut r = e[0];
+    for k in 1..16usize {
+        let ck = builder.const_i32(k as i32);
+        let is = builder.icmp(CompareOp::Eq, lane, ck, IrType::Bool);
+        r = builder.select(is, e[k], r, i32_ty.clone());
+    }
+    // Normalise the low byte to a sign-extended i32: the cast above zero-extends
+    // on Cranelift but I8x16ExtractLaneS sign-extends on wasm — `(r << 24) >> 24`
+    // (arithmetic) makes get() consistently SIGNED i8 on both targets. Header
+    // reads mask `& 0xFF` for unsigned and are unaffected either way.
+    let c24 = builder.const_i32(24);
+    let shl = builder.bin_op(BinaryOp::Shl, r, c24);
+    let signed = builder.bin_op(BinaryOp::Shr, shl, c24);
+    builder.ret(Some(signed));
 }
 
 /// SIMD4f_dot(self: vec<f32; 4>, other: vec<f32; 4>) -> f32
