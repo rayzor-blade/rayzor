@@ -34,7 +34,7 @@ use crate::ir::instructions::{
     AtomicRmwOp, BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind,
 };
 use crate::ir::modules::{IrGlobalId, IrModule};
-use crate::ir::{IrId, IrType, IrValue};
+use crate::ir::{DominatorTree, IrId, IrType, IrValue, LoopNestInfo};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1619,6 +1619,28 @@ struct FunctionLowerer<'a> {
     free_points: BTreeMap<(IrBlockId, usize), Vec<IrId>>,
 }
 
+/// A CFG shape recognised as a single reducible natural loop whose body is an
+/// acyclic, well-nested region. Produced by `try_structured_shape` and consumed
+/// by `build_structured_loop`. All fields are validated by the probe using
+/// terminator-derived successors (never cached predecessors), so the emitter can
+/// trust them.
+struct StructuredLoop {
+    /// Single-successor blocks from the function entry up to (not including) the
+    /// loop header, in execution order. Each falls through to the next; the last
+    /// falls into `header`. May be empty (entry == header).
+    entry_chain: Vec<IrBlockId>,
+    /// The loop header (target of the back edge; the only loop entry).
+    header: IrBlockId,
+    /// The single back-edge source (latch). Its terminator is `br header`.
+    latch: IrBlockId,
+    /// The in-loop target of the header's continuation test (loop body start).
+    body_entry: IrBlockId,
+    /// The single out-of-loop target of the header's continuation test.
+    exit_block: IrBlockId,
+    /// All blocks belonging to the loop (header..latch inclusive).
+    loop_blocks: BTreeSet<IrBlockId>,
+}
+
 impl<'a> FunctionLowerer<'a> {
     fn lower(ctx: &'a CompileCtx, ir_func: &'a IrFunction) -> Result<Function, String> {
         let has_implicit_env_param = ctx.functions_with_env.contains(&ir_func.id);
@@ -2256,6 +2278,35 @@ impl<'a> FunctionLowerer<'a> {
             return self.build_single_block();
         }
 
+        // Structured-loop fast path (strictly additive): if the function's CFG
+        // is a single reducible natural loop whose body is an acyclic, well-
+        // nested region (optionally with in-loop if/else diamonds), emit it as
+        // a real `(block $exit (loop $hdr <straight-line body> br $hdr))` so the
+        // loop body stays on the operand stack (v128 in registers, no spill/
+        // reload across a br_table dispatch boundary). On ANY non-match this
+        // probe returns None and we fall through to the UNCHANGED br_table path
+        // below, byte-for-byte identical to before. RAYZOR_WASM_NO_STRUCTURED=1
+        // forces the legacy br_table path for every function (escape hatch / A/B).
+        let structured_disabled = std::env::var("RAYZOR_WASM_NO_STRUCTURED").is_ok();
+        if !structured_disabled {
+            if let Some(s) = self.try_structured_shape() {
+                match self.build_structured_loop(&s) {
+                    Ok(func) => return Ok(func),
+                    Err(_e) => {
+                        // Defensive: should not happen because the probe already
+                        // validated the shape, but never ship a broken function —
+                        // fall back to the proven br_table lowering.
+                        if std::env::var("RAYZOR_WASM_STRUCTURED_DEBUG").is_ok() {
+                            eprintln!(
+                                "[wasm-structured] fn '{}': build failed ({}), falling back to br_table",
+                                self.ir_func.name, _e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         self.build_multi_block()
     }
 
@@ -2375,6 +2426,734 @@ impl<'a> FunctionLowerer<'a> {
         f.instruction(&Instruction::End);
 
         Ok(f)
+    }
+
+    // ------------------------------------------------------------------
+    // Structured-loop fast path
+    //
+    // Recognises the common counted/while-loop shape produced by Haxe lowering
+    // — a single reducible natural loop whose body is an acyclic, well-nested
+    // region (optionally with in-loop if/else diamonds) — and emits it as a
+    // real wasm `(block $exit (loop $hdr ...))` instead of the br_table dispatch
+    // machine. Keeping the body straight-line on the operand stack is what lets
+    // wasmtime/Cranelift hold v128 accumulators in registers across the loop,
+    // closing the ~37x SIMD-kernel gap vs native.
+    //
+    // STRICTLY ADDITIVE: the probe rejects (returns None) on the slightest doubt
+    // and the caller falls through to the unchanged br_table path. Phi resolution
+    // reuses emit_phi_set at exactly the same logical edges as today.
+    // ------------------------------------------------------------------
+
+    /// Successors of a block derived purely from its terminator (never the
+    /// possibly-stale cached predecessor lists). Returns at most a small vec.
+    fn term_successors(&self, bid: IrBlockId) -> Vec<IrBlockId> {
+        self.ir_func
+            .cfg
+            .blocks
+            .get(&bid)
+            .map(|b| b.successors())
+            .unwrap_or_default()
+    }
+
+    /// Compute reverse-postorder over the CFG from the entry, using terminator
+    /// successors. Self-contained (does not touch the private loop_analysis DFS).
+    fn structured_rpo(&self) -> Vec<IrBlockId> {
+        let entry = self.ir_func.cfg.entry_block;
+        let mut visited: BTreeSet<IrBlockId> = BTreeSet::new();
+        let mut post: Vec<IrBlockId> = Vec::new();
+        // Iterative DFS postorder (avoid recursion depth surprises).
+        let mut stack: Vec<(IrBlockId, usize)> = vec![(entry, 0)];
+        visited.insert(entry);
+        while let Some(&mut (bid, ref mut next)) = stack.last_mut() {
+            let succs = self.term_successors(bid);
+            if *next < succs.len() {
+                let s = succs[*next];
+                *next += 1;
+                if visited.insert(s) {
+                    stack.push((s, 0));
+                }
+            } else {
+                post.push(bid);
+                stack.pop();
+            }
+        }
+        post.reverse();
+        post
+    }
+
+    /// The structurability probe. Returns Some(StructuredLoop) only for a CFG
+    /// that is exactly: an optional single-successor entry chain into ONE
+    /// reducible natural loop (single header, single latch/back-edge, single
+    /// out-of-loop exit), whose body — when the back edge is removed — is an
+    /// acyclic, well-nested single-entry region with NO Switch / NoReturn /
+    /// Unreachable control and NO exception-handler blocks, and where every phi
+    /// in the loop takes incoming only from in-region edges that the structured
+    /// emitter visits. Anything else => None (fall back to br_table).
+    fn try_structured_shape(&self) -> Option<StructuredLoop> {
+        match self.try_structured_shape_inner() {
+            Ok(s) => Some(s),
+            Err(reason) => {
+                if std::env::var("RAYZOR_WASM_STRUCTURED_DEBUG").is_ok() {
+                    eprintln!(
+                        "[wasm-structured] fn '{}': rejected ({})",
+                        self.ir_func.name, reason
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    fn try_structured_shape_inner(&self) -> Result<StructuredLoop, &'static str> {
+        let cfg = &self.ir_func.cfg;
+        if cfg.blocks.len() < 2 {
+            return Err("fewer than 2 blocks");
+        }
+
+        // Reject up front any control we don't structure here.
+        for block in cfg.blocks.values() {
+            match &block.terminator {
+                IrTerminator::Branch { .. }
+                | IrTerminator::CondBranch { .. }
+                | IrTerminator::Return { .. } => {}
+                // Switch, NoReturn, and (explicit) Unreachable-as-control are
+                // handled only by the br_table fallback.
+                IrTerminator::Unreachable => {
+                    // An Unreachable terminator that the lowering reaches as
+                    // real control flow is the fallback's job; bail.
+                    return Err("unreachable terminator");
+                }
+                _ => return Err("switch/noreturn terminator"),
+            }
+            if block.metadata.in_exception_handler {
+                return Err("exception-handler block");
+            }
+        }
+
+        // Find the single natural loop via the existing analysis.
+        let domtree = DominatorTree::compute(self.ir_func);
+        let nest = LoopNestInfo::analyze(self.ir_func, &domtree);
+        if nest.loops.len() != 1 {
+            return Err("not exactly one natural loop");
+        }
+        let (&header, nloop) = nest.loops.iter().next().unwrap();
+        // No nested loops, no children.
+        if !nloop.children.is_empty() || nloop.nesting_depth != 0 {
+            return Err("nested loop");
+        }
+
+        // The latch is the back-edge source. Trust the analysis to have picked
+        // the dominance-correct back edge, but recompute the loop body ourselves
+        // from terminator-derived edges (robust to stale cached predecessors,
+        // which is exactly what truncates LoopNestInfo's body set).
+        let latch = nloop.back_edge_source;
+        // The latch must reach the header by an UNCONDITIONAL branch — otherwise
+        // the back-edge can't be a simple `br $hdr`.
+        match &cfg.get_block(latch).ok_or("latch missing")?.terminator {
+            IrTerminator::Branch { target } if *target == header => {}
+            _ => return Err("latch is not an unconditional branch to header"),
+        }
+
+        // Build a fresh predecessor map from terminator successors.
+        let mut preds: BTreeMap<IrBlockId, Vec<IrBlockId>> = BTreeMap::new();
+        for &b in cfg.blocks.keys() {
+            for s in self.term_successors(b) {
+                preds.entry(s).or_default().push(b);
+            }
+        }
+        // Loop body = {header} plus every block that can reach the latch without
+        // passing through the header (standard natural-loop body computation).
+        let mut loop_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+        loop_blocks.insert(header);
+        if latch != header {
+            let mut stack = vec![latch];
+            loop_blocks.insert(latch);
+            while let Some(b) = stack.pop() {
+                if let Some(ps) = preds.get(&b) {
+                    for &p in ps {
+                        if p == header {
+                            continue;
+                        }
+                        if loop_blocks.insert(p) {
+                            stack.push(p);
+                        }
+                    }
+                }
+            }
+        }
+
+        // SINGLE back-edge: exactly one IN-LOOP block branches to the header.
+        // Other header predecessors must be OUTSIDE the loop (preheaders/entry
+        // chain). More than one in-loop back-edge can't be a single `br $hdr`.
+        let header_preds = preds.get(&header).cloned().unwrap_or_default();
+        let in_loop_backedges: Vec<IrBlockId> = header_preds
+            .iter()
+            .copied()
+            .filter(|p| loop_blocks.contains(p))
+            .collect();
+        if in_loop_backedges.len() != 1 || in_loop_backedges[0] != latch {
+            if std::env::var("RAYZOR_WASM_STRUCTURED_DEBUG").is_ok() {
+                eprintln!(
+                    "[wasm-structured]   backedge-check fail: header={header}, latch={latch}, in_loop_backedges={in_loop_backedges:?}, loop_blocks={loop_blocks:?}"
+                );
+            }
+            return Err("not exactly one in-loop back-edge");
+        }
+
+        // Single-entry (reducibility) check, independent of the library's
+        // dominator computation: the header must be the ONLY loop block reachable
+        // from outside the loop. If any other loop block has a predecessor outside
+        // loop_blocks, the loop is multi-entry/irreducible — fall back.
+        for &b in &loop_blocks {
+            if b == header {
+                continue;
+            }
+            if let Some(ps) = preds.get(&b) {
+                if ps.iter().any(|p| !loop_blocks.contains(p)) {
+                    return Err("loop is multi-entry (irreducible)");
+                }
+            }
+        }
+
+        // The header's terminator decides loop continuation. It must be a
+        // CondBranch with exactly one in-loop target (body) and one out-of-loop
+        // target (the single exit), OR an unconditional branch into the body
+        // with a separate single exit (rare; we require the CondBranch form to
+        // keep a single, well-defined exit). Compute the exit set independently.
+        let header_block = cfg.get_block(header).ok_or("header missing")?;
+        let (cond_body, cond_exit) = match &header_block.terminator {
+            IrTerminator::CondBranch {
+                condition: _,
+                true_target,
+                false_target,
+            } => {
+                let t_in = loop_blocks.contains(true_target);
+                let f_in = loop_blocks.contains(false_target);
+                if t_in && !f_in {
+                    (*true_target, *false_target)
+                } else if !t_in && f_in {
+                    (*false_target, *true_target)
+                } else {
+                    // Both in-loop or both out-of-loop: not the shape we model.
+                    return Err("header branch targets both in-loop or both out-of-loop");
+                }
+            }
+            _ => return Err("header terminator is not a CondBranch"),
+        };
+
+        // The single loop exit edge must be the header's. No other block in the
+        // loop may branch outside the loop (single-exit requirement), so every
+        // successor of every loop block is either in-loop or is `cond_exit` (and
+        // only the header may go to cond_exit).
+        for &b in &loop_blocks {
+            for s in self.term_successors(b) {
+                if loop_blocks.contains(&s) {
+                    continue;
+                }
+                // Out-of-loop edge: only allowed from the header, only to cond_exit.
+                if b != header || s != cond_exit {
+                    if std::env::var("RAYZOR_WASM_STRUCTURED_DEBUG").is_ok() {
+                        eprintln!(
+                            "[wasm-structured]   exit-check fail: edge {b}->{s}, header={header}, cond_exit={cond_exit}, loop_blocks={loop_blocks:?}"
+                        );
+                    }
+                    return Err("multiple loop exits");
+                }
+            }
+        }
+
+        // Entry chain: from cfg entry, follow single-successor blocks until we
+        // reach the header. Every entry-chain block must be a plain `Branch`
+        // (single successor) and not part of the loop.
+        let entry = cfg.entry_block;
+        let mut entry_chain: Vec<IrBlockId> = Vec::new();
+        if entry != header {
+            let mut cur = entry;
+            let mut guard = 0usize;
+            loop {
+                guard += 1;
+                if guard > cfg.blocks.len() + 2 {
+                    return Err("entry chain too long");
+                }
+                if loop_blocks.contains(&cur) {
+                    // Walked into the loop without a clean preheader chain.
+                    return Err("entry chain enters loop without preheader");
+                }
+                let b = cfg.get_block(cur).ok_or("entry-chain block missing")?;
+                match &b.terminator {
+                    IrTerminator::Branch { target } => {
+                        entry_chain.push(cur);
+                        if *target == header {
+                            break;
+                        }
+                        cur = *target;
+                    }
+                    // The entry chain must be straight-line into the header.
+                    _ => return Err("entry chain has non-Branch terminator"),
+                }
+            }
+        }
+
+        // Validate that the loop body (back edge removed) is a well-nested
+        // acyclic region the recursive emitter can walk, visiting each loop
+        // block exactly once, and that every phi's incoming edges come only
+        // from blocks the emitter actually traverses to that block. We perform a
+        // dry structural walk mirroring the emitter.
+        let rpo = self.structured_rpo();
+        let rpo_index: BTreeMap<IrBlockId, usize> =
+            rpo.iter().enumerate().map(|(i, &b)| (b, i)).collect();
+        let mut visited: BTreeSet<IrBlockId> = BTreeSet::new();
+        // The body starts at cond_body; the header itself is handled outside the
+        // recursion. Mark header + latch role here; the walk must end at the
+        // latch's back edge and visit every loop block except the header once.
+        let ok = self.dry_walk_region(
+            cond_body,
+            None,
+            header,
+            &loop_blocks,
+            &rpo_index,
+            &mut visited,
+        );
+        if !ok {
+            return Err("body region not well-nested");
+        }
+        // The walk must have covered every loop block except the header.
+        for &b in &loop_blocks {
+            if b == header {
+                continue;
+            }
+            if !visited.contains(&b) {
+                return Err("body walk did not cover all loop blocks");
+            }
+        }
+
+        // Phi safety: every phi in any loop block (and in the exit + entry
+        // targets the emitter seeds) must have incoming only from predecessors
+        // that the structured emitter visits as the immediate predecessor edge.
+        // For the header: incoming only from {entry-chain last block (preheader)
+        // or function entry} and {latch}. For other loop blocks and the exit:
+        // incoming only from their structural predecessors. emit_phi_set keys on
+        // (from_bid -> to_bid); since we replay every edge the br_table path
+        // would, the sequential-copy contract is preserved as long as no phi has
+        // incoming from a block outside the set we traverse. Verify the header
+        // case strictly (the only loop-carried merge).
+        let preheader = entry_chain.last().copied().unwrap_or(entry);
+        if let Some(hb) = cfg.get_block(header) {
+            for phi in &hb.phi_nodes {
+                for (pred, _val) in &phi.incoming {
+                    if *pred != preheader && *pred != latch {
+                        return Err("header phi has incoming outside {preheader, latch}");
+                    }
+                }
+            }
+        }
+
+        Ok(StructuredLoop {
+            entry_chain,
+            header,
+            latch,
+            body_entry: cond_body,
+            exit_block: cond_exit,
+            loop_blocks,
+        })
+    }
+
+    /// Find the structured merge (reconvergence) block of a CondBranch whose two
+    /// targets are `tt` and `ft`, both inside `loop_blocks`, when the back edge
+    /// to `header` is removed. The merge is the common forward-reachable block
+    /// with the smallest RPO index. Returns None if the arms never reconverge
+    /// inside the loop (e.g. one arm only reaches the latch's back edge), which
+    /// the caller treats as "the arm runs to the back edge / shared tail".
+    fn region_merge(
+        &self,
+        tt: IrBlockId,
+        ft: IrBlockId,
+        header: IrBlockId,
+        loop_blocks: &BTreeSet<IrBlockId>,
+        rpo_index: &BTreeMap<IrBlockId, usize>,
+    ) -> Option<IrBlockId> {
+        let reach = |start: IrBlockId| -> BTreeSet<IrBlockId> {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![start];
+            while let Some(b) = stack.pop() {
+                if !seen.insert(b) {
+                    continue;
+                }
+                for s in self.term_successors(b) {
+                    // Do not cross the back edge into the header, and stay in-loop.
+                    if s == header || !loop_blocks.contains(&s) {
+                        continue;
+                    }
+                    stack.push(s);
+                }
+            }
+            seen
+        };
+        let rt = reach(tt);
+        let rf = reach(ft);
+        rt.intersection(&rf)
+            .copied()
+            .min_by_key(|b| rpo_index.get(b).copied().unwrap_or(usize::MAX))
+    }
+
+    /// Dry structural walk that mirrors `emit_region` exactly but only records
+    /// visited blocks and validates well-nestedness (no block visited twice, all
+    /// branches resolve, diamonds reconverge cleanly). Returns false on any shape
+    /// the emitter could not faithfully reproduce.
+    fn dry_walk_region(
+        &self,
+        start: IrBlockId,
+        stop: Option<IrBlockId>,
+        header: IrBlockId,
+        loop_blocks: &BTreeSet<IrBlockId>,
+        rpo_index: &BTreeMap<IrBlockId, usize>,
+        visited: &mut BTreeSet<IrBlockId>,
+    ) -> bool {
+        let mut cur = start;
+        let mut guard = 0usize;
+        loop {
+            guard += 1;
+            if guard > loop_blocks.len() + 2 {
+                return false; // cycle other than the modelled back edge
+            }
+            if Some(cur) == stop {
+                return true; // reconverged; caller continues at `stop`
+            }
+            if !loop_blocks.contains(&cur) {
+                return false; // left the loop body unexpectedly
+            }
+            if !visited.insert(cur) {
+                return false; // visited twice => not well-nested (shared tail)
+            }
+            let term = match self.ir_func.cfg.get_block(cur) {
+                Some(b) => &b.terminator,
+                None => return false,
+            };
+            match term {
+                IrTerminator::Branch { target } => {
+                    if *target == header {
+                        // Back edge: this is the latch. End of this path.
+                        return true;
+                    }
+                    if Some(*target) == stop {
+                        return true;
+                    }
+                    if !loop_blocks.contains(target) {
+                        return false;
+                    }
+                    cur = *target;
+                }
+                IrTerminator::CondBranch {
+                    true_target,
+                    false_target,
+                    ..
+                } => {
+                    // In-loop diamond. Both arms must be in-loop (the single
+                    // out-of-loop edge is the header's, handled separately).
+                    if !loop_blocks.contains(true_target) || !loop_blocks.contains(false_target) {
+                        return false;
+                    }
+                    let merge = self.region_merge(
+                        *true_target,
+                        *false_target,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                    );
+                    // Walk both arms up to the merge.
+                    if !self.dry_walk_region(
+                        *true_target,
+                        merge,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                        visited,
+                    ) {
+                        return false;
+                    }
+                    if !self.dry_walk_region(
+                        *false_target,
+                        merge,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                        visited,
+                    ) {
+                        return false;
+                    }
+                    match merge {
+                        Some(m) => {
+                            if Some(m) == stop {
+                                return true;
+                            }
+                            cur = m;
+                        }
+                        // No reconvergence: both arms ended (back edge / return).
+                        None => return true,
+                    }
+                }
+                IrTerminator::Return { .. } => {
+                    // A return inside the loop body is fine (early return); the
+                    // path ends here.
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Build a structured-loop function body. Mirrors build_single_block's
+    /// straight-line emission but wraps the loop body in `(block $exit (loop
+    /// $hdr ...))`. Phi resolution uses emit_phi_set at the identical logical
+    /// edges as the br_table path.
+    fn build_structured_loop(&mut self, s: &StructuredLoop) -> Result<Function, String> {
+        let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
+        self.emit_sp_save(&mut f);
+
+        let cfg = &self.ir_func.cfg;
+
+        // 1) Entry chain (preheader path), straight-line. Each block falls
+        //    through to the next; the last seeds the header's loop-entry phis.
+        for (i, &b) in s.entry_chain.iter().enumerate() {
+            let block = cfg
+                .get_block(b)
+                .ok_or_else(|| format!("entry-chain block {b} missing"))?;
+            self.emit_block_instructions(&mut f, b, &block.instructions);
+            // The entry chain is unconditional branches; seed the successor's phis.
+            if let IrTerminator::Branch { target } = &block.terminator {
+                self.emit_phi_set(&mut f, b, *target);
+            } else {
+                return Err(format!("entry-chain block {b} is not an unconditional branch"));
+            }
+            let _ = i;
+        }
+        // If entry == header (no entry chain), the header's loop-entry phis still
+        // need seeding from the function entry pseudo-edge. emit_phi_set keys on
+        // the predecessor block id; the entry's incoming pred is the entry block
+        // itself, which IS the header in that degenerate case — but a loop header
+        // that is also the entry has its loop-entry phi incoming from the entry
+        // block id == header id. That can't happen for these shapes (the probe's
+        // entry_chain is empty only when entry==header, and then the header phi's
+        // non-latch incoming pred is the header/entry id). Seed it explicitly.
+        if s.entry_chain.is_empty() {
+            // Preheader is the entry block (== header). Seed loop-entry phis whose
+            // incoming pred is the entry block.
+            self.emit_phi_set(&mut f, cfg.entry_block, s.header);
+        }
+
+        // 2) (block $exit (loop $hdr ...))
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+
+        // Header instructions, then the continuation test.
+        let header_block = cfg
+            .get_block(s.header)
+            .ok_or_else(|| "header block missing".to_string())?;
+        self.emit_block_instructions(&mut f, s.header, &header_block.instructions);
+
+        // Header continuation: `if (stay-in-loop) { <body> br $hdr } ; <exit>`.
+        // Inside the loop, before any `if`, depth-to-loop = 0, depth-to-exit = 1.
+        let (cond, normalize_eqz) = match &header_block.terminator {
+            IrTerminator::CondBranch {
+                condition,
+                true_target,
+                false_target,
+            } => {
+                if *true_target == s.body_entry && *false_target == s.exit_block {
+                    (*condition, false) // true => body (stay): no negation
+                } else if *false_target == s.body_entry && *true_target == s.exit_block {
+                    (*condition, true) // true => exit: negate so true => body
+                } else {
+                    return Err("header targets do not match body/exit".to_string());
+                }
+            }
+            _ => return Err("header terminator is not a CondBranch".to_string()),
+        };
+        self.get_reg(&mut f, cond);
+        if normalize_eqz {
+            f.instruction(&Instruction::I32Eqz);
+        }
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // Inside this `if`: depth-to-loop = 1, depth-to-exit = 2.
+        self.emit_region(&mut f, s.body_entry, None, s.header, &s.loop_blocks, 1, 2)?;
+        f.instruction(&Instruction::End); // end if
+
+        // cond == false (fell out of the `if`): exit the loop. Seed exit phis,
+        // then br to $exit. At this point depth-to-exit = 1.
+        self.emit_phi_set(&mut f, s.header, s.exit_block);
+        f.instruction(&Instruction::Br(1)); // -> $exit
+
+        f.instruction(&Instruction::End); // end loop
+        f.instruction(&Instruction::End); // end $exit
+
+        // 3) Exit block + any straight-line continuation (must terminate in a
+        //    return for these shapes — validated by the probe's single-exit and
+        //    terminator checks).
+        self.emit_exit_chain(&mut f, s.exit_block)?;
+
+        f.instruction(&Instruction::End); // end function
+        Ok(f)
+    }
+
+    /// Emit the out-of-loop continuation starting at `start`. For the shapes the
+    /// probe accepts this is a straight-line chain ending in a Return.
+    fn emit_exit_chain(&self, f: &mut Function, start: IrBlockId) -> Result<(), String> {
+        let cfg = &self.ir_func.cfg;
+        let mut cur = start;
+        let mut guard = 0usize;
+        loop {
+            guard += 1;
+            if guard > cfg.blocks.len() + 2 {
+                return Err("exit chain did not terminate".to_string());
+            }
+            let block = cfg
+                .get_block(cur)
+                .ok_or_else(|| format!("exit block {cur} missing"))?;
+            self.emit_block_instructions(f, cur, &block.instructions);
+            match &block.terminator {
+                IrTerminator::Return { .. } => {
+                    self.emit_terminator_simple(f, &block.terminator);
+                    return Ok(());
+                }
+                IrTerminator::Branch { target } => {
+                    self.emit_phi_set(f, cur, *target);
+                    cur = *target;
+                }
+                _ => {
+                    return Err("exit chain has unsupported terminator".to_string());
+                }
+            }
+        }
+    }
+
+    /// Recursively emit an acyclic in-loop region as straight-line code with
+    /// structured `if/else` for diamonds. `depth_to_loop` / `depth_to_exit` are
+    /// the wasm relative branch depths to the `loop $hdr` and `block $exit`
+    /// labels from the current emission point. `stop` is the merge block where
+    /// this region rejoins outer control (None = run to a terminator / back
+    /// edge). Returns Ok(()) on success.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_region(
+        &self,
+        f: &mut Function,
+        start: IrBlockId,
+        stop: Option<IrBlockId>,
+        header: IrBlockId,
+        loop_blocks: &BTreeSet<IrBlockId>,
+        depth_to_loop: u32,
+        depth_to_exit: u32,
+    ) -> Result<(), String> {
+        // We do not recompute the merge per recursion at runtime cost concerns;
+        // the body regions are tiny. Build RPO index once lazily per call chain.
+        let rpo = self.structured_rpo();
+        let rpo_index: BTreeMap<IrBlockId, usize> =
+            rpo.iter().enumerate().map(|(i, &b)| (b, i)).collect();
+        self.emit_region_inner(
+            f,
+            start,
+            stop,
+            header,
+            loop_blocks,
+            &rpo_index,
+            depth_to_loop,
+            depth_to_exit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_region_inner(
+        &self,
+        f: &mut Function,
+        start: IrBlockId,
+        stop: Option<IrBlockId>,
+        header: IrBlockId,
+        loop_blocks: &BTreeSet<IrBlockId>,
+        rpo_index: &BTreeMap<IrBlockId, usize>,
+        depth_to_loop: u32,
+        depth_to_exit: u32,
+    ) -> Result<(), String> {
+        let cfg = &self.ir_func.cfg;
+        let mut cur = start;
+        loop {
+            if Some(cur) == stop {
+                return Ok(());
+            }
+            let block = cfg
+                .get_block(cur)
+                .ok_or_else(|| format!("region block {cur} missing"))?;
+            self.emit_block_instructions(f, cur, &block.instructions);
+            match &block.terminator {
+                IrTerminator::Branch { target } => {
+                    if *target == header {
+                        // Back edge (latch): seed loop-carried phis then br $hdr.
+                        self.emit_phi_set(f, cur, *target);
+                        f.instruction(&Instruction::Br(depth_to_loop));
+                        return Ok(());
+                    }
+                    if Some(*target) == stop {
+                        // Reconvergence: seed the merge phis and fall through.
+                        self.emit_phi_set(f, cur, *target);
+                        return Ok(());
+                    }
+                    self.emit_phi_set(f, cur, *target);
+                    cur = *target;
+                }
+                IrTerminator::CondBranch {
+                    condition,
+                    true_target,
+                    false_target,
+                } => {
+                    let merge = self.region_merge(
+                        *true_target,
+                        *false_target,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                    );
+                    // Emit `if (cond) { <true arm> } else { <false arm> }`.
+                    self.get_reg(f, *condition);
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    self.emit_phi_set(f, cur, *true_target);
+                    self.emit_region_inner(
+                        f,
+                        *true_target,
+                        merge,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                        depth_to_loop + 1,
+                        depth_to_exit + 1,
+                    )?;
+                    f.instruction(&Instruction::Else);
+                    self.emit_phi_set(f, cur, *false_target);
+                    self.emit_region_inner(
+                        f,
+                        *false_target,
+                        merge,
+                        header,
+                        loop_blocks,
+                        rpo_index,
+                        depth_to_loop + 1,
+                        depth_to_exit + 1,
+                    )?;
+                    f.instruction(&Instruction::End); // end if
+                    match merge {
+                        Some(m) => {
+                            if Some(m) == stop {
+                                return Ok(());
+                            }
+                            cur = m;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                IrTerminator::Return { .. } => {
+                    self.emit_terminator_simple(f, &block.terminator);
+                    return Ok(());
+                }
+                _ => return Err(format!("region block {cur} has unsupported terminator")),
+            }
+        }
     }
 
     // ------------------------------------------------------------------
