@@ -1715,8 +1715,21 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        // The bare-name fallbacks below return a lone same-named function. Reject
+        // a match that POSITIVELY belongs to a different class than the receiver,
+        // so e.g. `NativeStackTrace.callStack` (an extern with a runtime mapping)
+        // does NOT bind to `haxe.CallStack.callStack` — which would then call
+        // `NativeStackTrace.callStack()` → itself → infinite recursion. Returning
+        // None here lets the caller fall through to the runtime-mapping dispatch.
+        // Conservative: only rejects when the qname clearly names another class.
+        let lone_ok = |this: &Self, fid: IrFunctionId| -> bool {
+            class_short_hint.map_or(true, |s| this.func_not_other_class(fid, s))
+        };
         if module_name_matches.len() == 1 {
-            return module_name_matches.iter().next().copied();
+            let fid = *module_name_matches.iter().next().unwrap();
+            if lone_ok(self, fid) {
+                return Some(fid);
+            }
         }
 
         let mut extern_name_matches = BTreeSet::new();
@@ -1727,11 +1740,17 @@ impl<'a> HirToMirContext<'a> {
             extern_name_matches.insert(*func_id);
         }
         if extern_name_matches.len() == 1 {
-            return extern_name_matches.iter().next().copied();
+            let fid = *extern_name_matches.iter().next().unwrap();
+            if lone_ok(self, fid) {
+                return Some(fid);
+            }
         }
 
         if name_matches.len() == 1 {
-            return name_matches.iter().next().copied();
+            let fid = *name_matches.iter().next().unwrap();
+            if lone_ok(self, fid) {
+                return Some(fid);
+            }
         }
 
         // Final fallback: construct "ClassName.methodName" and search external_function_name_map.
@@ -1753,6 +1772,33 @@ impl<'a> HirToMirContext<'a> {
         }
 
         None
+    }
+
+    /// True UNLESS `func_id`'s qualified name positively identifies a class
+    /// other than `class_short`. Used to stop the bare-name method-resolution
+    /// fallbacks from binding a call to a same-named method in a *different*
+    /// class (e.g. `NativeStackTrace.callStack` → `haxe.CallStack.callStack`).
+    /// Conservative: a qname shaped `pkg…Class.method` has its class in the
+    /// second-to-last segment; when the class can't be read (no qname, or a bare
+    /// name), it returns true so existing cross-module resolution is unchanged.
+    fn func_not_other_class(&self, func_id: IrFunctionId, class_short: &str) -> bool {
+        match self
+            .builder
+            .module
+            .functions
+            .get(&func_id)
+            .and_then(|f| f.qualified_name.as_deref())
+        {
+            Some(q) => {
+                let parts: Vec<&str> = q.split('.').collect();
+                if parts.len() >= 2 {
+                    parts[parts.len() - 2] == class_short
+                } else {
+                    true
+                }
+            }
+            None => true,
+        }
     }
 
     /// Find a MIR function by its bare name in function_map
