@@ -2588,6 +2588,20 @@ impl TieredBackend {
         use crate::ir::modules::IrTypeDefinition;
         use rayzor_runtime::type_system::register_class_from_mir;
 
+        // Map raw TypeId → deterministic registry id so the registered super
+        // pointer matches the registry key (see cranelift_backend for rationale).
+        let mut typeid_to_rtti: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
+        for (_id, typedef) in &module.types {
+            if let IrTypeDefinition::Struct { .. } = &typedef.definition {
+                let rtti = typedef
+                    .runtime_type_id
+                    .map(|h| h as u32)
+                    .unwrap_or(typedef.type_id.0);
+                typeid_to_rtti.insert(typedef.type_id.0, rtti);
+            }
+        }
+
         for (_id, typedef) in &module.types {
             if let IrTypeDefinition::Struct { fields, .. } = &typedef.definition {
                 // Separate instance and static fields
@@ -2607,7 +2621,9 @@ impl TieredBackend {
                     .collect();
                 let static_fields: Vec<String> = Vec::new();
 
-                let super_type_id = typedef.super_type_id.map(|t| t.0);
+                let super_type_id = typedef
+                    .super_type_id
+                    .map(|t| typeid_to_rtti.get(&t.0).copied().unwrap_or(t.0));
 
                 // Prefer the deterministic runtime_type_id when present so
                 // the RTTI registry key matches what the New handler stores
