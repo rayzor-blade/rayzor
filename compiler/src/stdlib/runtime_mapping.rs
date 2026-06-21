@@ -2697,6 +2697,10 @@ impl StdlibMapping {
             // bytes.getInt64(pos: Int): Int64
             map_method!(instance "rayzor_Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
+            // bytes.address(): Usize — raw base address of the buffer (native only),
+            // so a Haxe SIMD kernel can SIMD16i8.load straight from a Bytes buffer.
+            map_method!(instance "rayzor_Bytes", "address" => "haxe_bytes_data_address", params: 0, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I64),
             // Float getters (little-endian)
             // bytes.getFloat(pos: Int): Float
             map_method!(instance "rayzor_Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,

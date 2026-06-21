@@ -183,6 +183,24 @@ extern class Bytes {
     public function getInt64(pos: Int): Int;
 
     /**
+        Returns the raw base address of the byte buffer as a `Usize`, so a
+        pure-Haxe SIMD kernel can load directly out of it:
+
+        ```haxe
+        var base = block.address();
+        var v = SIMD16i8.load(Ptr.fromRaw(base + Usize.fromInt(16)));
+        ```
+
+        Native only: on the wasm host-import path the buffer does not live in
+        guest linear memory, so a guest vector load against this address is
+        invalid — the in-guest wasm kernel reads weights through the QTensor
+        data pointer instead.
+
+        @return The buffer's base address (pointer-sized)
+    **/
+    public function address(): Usize;
+
+    /**
         Gets a 32-bit float at the given position.
         Uses little-endian byte order.
 

@@ -3067,6 +3067,21 @@ pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
     unsafe { (*bytes).len as i32 }
 }
 
+/// Raw base address of the byte buffer (the `ptr` field), as a pointer-sized
+/// integer. Lets pure-Haxe SIMD kernels load directly from a Bytes buffer:
+/// `SIMD16i8.load(Ptr.fromRaw(bytes.address() + Usize.fromInt(byteOffset)))`.
+/// Native only — on the wasm host-import path the buffer is not in guest
+/// linear memory, so a guest V128Load against this address would be invalid;
+/// the in-guest wasm kernel reads weights through the QTensor data pointer.
+/// bytes.address(): Usize
+#[no_mangle]
+pub extern "C" fn haxe_bytes_data_address(bytes: *const HaxeBytes) -> i64 {
+    if bytes.is_null() {
+        return 0;
+    }
+    unsafe { (*bytes).ptr as i64 }
+}
+
 /// Get a single byte
 /// bytes.get(pos: Int): Int
 #[no_mangle]
