@@ -705,11 +705,19 @@ impl HaxeCompilationPipeline {
                 // Stage 2: Lower AST to TAST
                 let lowering_start = std::time::Instant::now();
                 match self.lower_ast_to_tast(ast_file, file_path.as_ref(), source, source_map) {
-                    Ok((mut typed_file, lowering_errors, symbol_table, type_table, scope_tree)) => {
+                    Ok((
+                        mut typed_file,
+                        lowering_errors,
+                        symbol_table,
+                        type_table,
+                        scope_tree,
+                        empty_array_warnings,
+                    )) => {
                         self.stats.lowering_time_us += lowering_start.elapsed().as_micros() as u64;
 
                         // Add any type errors from lowering/type checking
                         result.errors.extend(lowering_errors);
+                        result.warnings.extend(empty_array_warnings);
 
                         // Stage 2b: Detect program-level safety mode (check Main class for @:safety)
                         let program_safety_mode = typed_file.detect_program_safety_mode();
@@ -1226,6 +1234,7 @@ impl HaxeCompilationPipeline {
             SymbolTable,
             Rc<RefCell<TypeTable>>,
             crate::tast::ScopeTree,
+            Vec<CompilationWarning>,
         ),
         Vec<CompilationError>,
     > {
@@ -1324,6 +1333,19 @@ impl HaxeCompilationPipeline {
                 }
             };
 
+        // Monomorph rewrite: untyped empty arrays whose element type stayed
+        // uncertain (never bound by a push/assign) earn a Correctness warning.
+        let empty_array_warnings: Vec<CompilationWarning> = lowering
+            .take_empty_array_warnings()
+            .into_iter()
+            .map(|(loc, msg)| CompilationWarning {
+                message: msg,
+                location: loc,
+                category: WarningCategory::Correctness,
+                suppressible: true,
+            })
+            .collect();
+
         // Run type checking with diagnostics
         let diagnostics = type_check_with_diagnostics(
             &mut typed_file,
@@ -1395,6 +1417,7 @@ impl HaxeCompilationPipeline {
             symbol_table,
             type_table,
             scope_tree,
+            empty_array_warnings,
         ))
     }
 

@@ -5081,6 +5081,36 @@ impl CompilationUnit {
                 .or_insert_with(|| fields.clone());
         }
 
+        // Normal (non-safety) warnings: untyped empty array literals whose
+        // element type stayed uncertain (never bound by a push/assign), so they
+        // remain Array<Dynamic>. Always emitted — unlike ownership/safety
+        // warnings these are not gated by `emit_safety_warnings`. (Last use of
+        // `lowering` so its &mut borrow ends before the diagnostics push.)
+        let array_warnings = lowering.take_empty_array_warnings();
+        for (loc, msg) in array_warnings {
+            let pos = diagnostics::SourcePosition::new(
+                loc.line.max(1) as usize,
+                loc.column.max(1) as usize,
+                loc.byte_offset as usize,
+            );
+            let end_pos = diagnostics::SourcePosition::new(
+                loc.line.max(1) as usize,
+                (loc.column.max(1) + 1) as usize,
+                (loc.byte_offset + 1) as usize,
+            );
+            let span = diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0));
+            self.collected_diagnostics.push(diagnostics::Diagnostic {
+                severity: diagnostics::DiagnosticSeverity::Warning,
+                code: Some("W0110".to_string()),
+                message: msg,
+                span,
+                labels: Vec::new(),
+                suggestions: Vec::new(),
+                notes: Vec::new(),
+                help: Vec::new(),
+            });
+        }
+
         // Send/Sync validation — check thread safety constraints (user files only)
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
         if !is_stdlib {
