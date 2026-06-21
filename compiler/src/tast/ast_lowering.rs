@@ -1291,7 +1291,26 @@ impl<'a> AstLowering<'a> {
         }
         let elem_ty = match self.peek_ast_expr_type(elem_ast) {
             Some(t) => t,
-            None => return,
+            None => {
+                // The cheap peek didn't resolve it (e.g. `a.push(x.getFlat(i))`).
+                // Fall back to lowering for method-call / property / index args —
+                // the result is discarded (the push re-lowers it), we only want
+                // the type. Leaving the symbol in `empty_array_inferred` means a
+                // LATER peekable push can still bind it ("until getFlat's return
+                // type says otherwise, or another push does"). Skip other kinds
+                // (e.g. lambdas) to avoid double-lowering a closure.
+                if matches!(
+                    &elem_ast.kind,
+                    ExprKind::Call { .. } | ExprKind::Field { .. } | ExprKind::Index { .. }
+                ) {
+                    match self.lower_expression(elem_ast) {
+                        Ok(te) => te.expr_type,
+                        Err(_) => return,
+                    }
+                } else {
+                    return;
+                }
+            }
         };
         // Only bind to a concrete element type — keep the placeholder otherwise.
         let keep_placeholder = {
