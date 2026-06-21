@@ -37780,15 +37780,20 @@ enum MirBinaryOp {
 }
 
 /// Map a SIMD vector IrType to its stdlib class name, so instance-method
-/// dispatch picks the right wrapper set: i32x4 → SIMD4i32, everything else
-/// (f32x4) → SIMD4f. Both are 128-bit vectors but their `sum`/`get`/`set`
-/// methods map to different MIR wrappers.
+/// dispatch picks the right wrapper set: i32x4 → SIMD4i32, i8x16 → SIMD16i8,
+/// everything else (f32x4) → SIMD4f. All are 128-bit vectors but their
+/// `sum`/`get`/`set` methods map to different MIR wrappers.
 fn simd_vector_class(ty: &IrType) -> &'static str {
     match ty {
         IrType::Vector { element, .. }
             if matches!(element.as_ref(), IrType::I32 | IrType::U32) =>
         {
             "rayzor_SIMD4i32"
+        }
+        IrType::Vector { element, count }
+            if *count == 16 && matches!(element.as_ref(), IrType::I8 | IrType::U8) =>
+        {
+            "rayzor_SIMD16i8"
         }
         _ => "rayzor_SIMD4f",
     }

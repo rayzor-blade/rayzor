@@ -3431,6 +3431,10 @@ impl StdlibMapping {
                 types: &[VecI8x16, I32] => VecI8x16),
             map_method!(static "rayzor_SIMD16i8", "ushr" => "SIMD16i8_ushr", params: 2, mir_wrapper,
                 types: &[VecI8x16, I32] => VecI8x16),
+            // v.get(lane): Int — read one i8 lane (sign-extended). In-guest byte
+            // extraction for the Q4 block header (d/dmin/scales); mask &0xFF for unsigned.
+            map_method!(instance "rayzor_SIMD16i8", "get" => "SIMD16i8_extract", params: 1, mir_wrapper,
+                types: &[VecI8x16, I32] => I32),
         ];
 
         self.register_from_tuples(mappings);

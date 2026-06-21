@@ -61,4 +61,14 @@ extern abstract SIMD16i8 {
      */
     @:native("ushr")
     public static function ushr(a:SIMD16i8, n:Int):SIMD16i8;
+
+    /**
+     * Read lane `i` as an Int (the i8 value, sign-extended). Lets a kernel pull
+     * individual bytes out of a loaded vector in-guest — e.g. the Q4 block
+     * header `d`/`dmin`/`scales` from the first 16 bytes. Bytes are signed; mask
+     * `& 0xFF` for an unsigned 0..255 value.
+     */
+    @:arrayAccess
+    @:native("extract")
+    public function get(lane:Int):Int;
 }
