@@ -3723,6 +3723,10 @@ impl StdlibMapping {
                 params: 0, mir_wrapper, types: &[PtrVoid] => I64),
             map_method!(instance "rayzor_ds_QTensor", "cols" => "QTensor_cols",
                 params: 0, mir_wrapper, types: &[PtrVoid] => I64),
+            // qt.dataPtr(): Usize — raw weight-byte base (guest-resident on wasm),
+            // so a pure-Haxe qmatmul can SIMD16i8.load Q4_K_M blocks directly.
+            map_method!(instance "rayzor_ds_QTensor", "dataPtr" => "QTensor_data_ptr",
+                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
             map_method!(instance "rayzor_ds_QTensor", "numel" => "QTensor_numel",
                 params: 0, mir_wrapper, types: &[PtrVoid] => I64),
             map_method!(instance "rayzor_ds_QTensor", "scheme" => "QTensor_scheme",

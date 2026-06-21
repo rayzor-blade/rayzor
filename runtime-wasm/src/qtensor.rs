@@ -248,6 +248,16 @@ pub unsafe extern "C" fn rayzor_qtensor_rows(qt: i32) -> i32 {
     (*(qt as *const QTensor)).rows as i32
 }
 
+/// Raw base offset of the quantised weight bytes in guest linear memory, so a
+/// pure-Haxe qmatmul can SIMD16i8.load Q4_K_M blocks directly in-guest.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt: i32) -> i32 {
+    if qt == 0 {
+        return 0;
+    }
+    (*(qt as *const QTensor)).data as i32
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt: i32) -> i32 {
     if qt == 0 {

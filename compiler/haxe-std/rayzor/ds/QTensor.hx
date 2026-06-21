@@ -92,6 +92,24 @@ extern class QTensor {
     @:native("qtensor_cols")
     public function cols():Int;
 
+    /**
+        Raw base address of the quantised weight bytes, as a `Usize`. Lets a
+        pure-Haxe qmatmul read Q4_K_M super-blocks directly out of the weight
+        buffer (the per-block dot leaves Rust FFI):
+
+        ```haxe
+        var base = qt.dataPtr();
+        var bpr = qt.cols() >> 8; // blocks-per-row = cols / 256
+        // row r, block b begins at base + (r*bpr + b)*144 bytes
+        var blk = SIMD16i8.load(Ptr.fromRaw(base + Usize.fromInt(((r*bpr + b)*144) + 16)));
+        ```
+
+        Guest-resident on wasm (the weight buffer lives in guest linear memory),
+        so the offset is a valid guest `SIMD16i8.load` address.
+    **/
+    @:native("qtensor_data_ptr")
+    public function dataPtr():Usize;
+
     /** Total element count (rows * cols). */
     @:native("qtensor_numel")
     public function numel():Int;

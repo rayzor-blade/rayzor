@@ -653,6 +653,19 @@ pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
     (*(qt_ptr as *const RayzorQTensor)).rows as i64
 }
 
+/// `qt.dataPtr() -> Usize` — raw base address of the quantised weight bytes.
+/// Lets a pure-Haxe qmatmul read Q4_K_M super-blocks directly:
+/// `SIMD16i8.load(Ptr.fromRaw(qt.dataPtr() + Usize.fromInt((r*bpr + b)*144)))`,
+/// where bpr = cols/256. Guest-resident on wasm (the QTensor data buffer is
+/// dlmalloc'd in guest linear memory), so the offset is a valid guest load.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
+    if qt_ptr == 0 {
+        return 0;
+    }
+    (*(qt_ptr as *const RayzorQTensor)).data as i64
+}
+
 /// `qt.cols() -> i64`
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt_ptr: i64) -> i64 {
