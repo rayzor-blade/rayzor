@@ -3413,6 +3413,20 @@ impl StdlibMapping {
             // SIMD16i8.load(ptr): SIMD16i8  (static, load 16 contiguous bytes)
             map_method!(static "rayzor_SIMD16i8", "load" => "SIMD16i8_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI8x16),
+            // Lane-wise bitwise (vector & vector). AND masks the Q4 low nibble.
+            map_method!(static "rayzor_SIMD16i8", "and" => "SIMD16i8_and", params: 2, mir_wrapper,
+                types: &[VecI8x16, VecI8x16] => VecI8x16),
+            map_method!(static "rayzor_SIMD16i8", "or" => "SIMD16i8_or", params: 2, mir_wrapper,
+                types: &[VecI8x16, VecI8x16] => VecI8x16),
+            map_method!(static "rayzor_SIMD16i8", "xor" => "SIMD16i8_xor", params: 2, mir_wrapper,
+                types: &[VecI8x16, VecI8x16] => VecI8x16),
+            // Shift-by-scalar (vector, i32 amount). USHR yields the Q4 high nibble.
+            map_method!(static "rayzor_SIMD16i8", "shl" => "SIMD16i8_shl", params: 2, mir_wrapper,
+                types: &[VecI8x16, I32] => VecI8x16),
+            map_method!(static "rayzor_SIMD16i8", "shr" => "SIMD16i8_shr", params: 2, mir_wrapper,
+                types: &[VecI8x16, I32] => VecI8x16),
+            map_method!(static "rayzor_SIMD16i8", "ushr" => "SIMD16i8_ushr", params: 2, mir_wrapper,
+                types: &[VecI8x16, I32] => VecI8x16),
         ];
 
         self.register_from_tuples(mappings);
