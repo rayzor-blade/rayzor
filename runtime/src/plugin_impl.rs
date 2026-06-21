@@ -736,6 +736,10 @@ register_symbol!(
     crate::haxe_sys::haxe_bytes_of_string
 );
 register_symbol!("haxe_bytes_length", crate::haxe_sys::haxe_bytes_length);
+register_symbol!(
+    "haxe_bytes_data_address",
+    crate::haxe_sys::haxe_bytes_data_address
+);
 register_symbol!("haxe_bytes_get", crate::haxe_sys::haxe_bytes_get);
 register_symbol!("haxe_bytes_set", crate::haxe_sys::haxe_bytes_set);
 register_symbol!("haxe_bytes_sub", crate::haxe_sys::haxe_bytes_sub);
