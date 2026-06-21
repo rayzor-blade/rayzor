@@ -143,7 +143,7 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
     builder.mark_as_extern(func_id);
 
     // matmul_qt_t_f32_chunk: (x_tensor, qt, y_tensor, n_start, n_end) -> i64
-    // Fills rows [n_start, n_end) of y in-place. Used by NumaPool's
+    // Fills rows [n_start, n_end) of y in-place. Used by WorkerPool's
     // parallelRows dispatch to thread the qmatmul over output features.
     let func_id = builder
         .begin_function("rayzor_tensor_matmul_qt_t_f32_chunk")
@@ -159,8 +159,8 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
 
     // matmul_qt_t_f32_threaded: (x_tensor, qt, threads) -> i64
     // Per-call fork-join via std::thread::scope. `threads = 0` picks
-    // a default; this is the practical threading path until
-    // NumaPool import cascade is fixed.
+    // a default; the established threading path while the WorkerPool
+    // band-loop route is re-verified (an earlier nue.Linear import cascade).
     let func_id = builder
         .begin_function("rayzor_tensor_matmul_qt_t_f32_threaded")
         .param("x_tensor", i64_ty.clone())
@@ -535,7 +535,7 @@ fn build_qtensor_matmul_xtq(builder: &mut MirBuilder) {
 /// QTensor_matmulXTQChunk(qt, x, y, n_start, n_end) -> i64
 ///
 /// Fills rows `[n_start, n_end)` of a pre-allocated `y` tensor in
-/// place. The Haxe `NumaPool.parallelRows` dispatcher splits the row
+/// place. The Haxe `WorkerPool.parallelRows` dispatcher splits the row
 /// range across workers and calls this per chunk. Haxe receiver
 /// order is `(qt, x, y, n_start, n_end)`; the runtime takes
 /// `(x_tensor, qt, y_tensor, n_start, n_end)`.

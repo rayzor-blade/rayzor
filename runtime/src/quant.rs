@@ -933,7 +933,7 @@ pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> 
 ///
 /// Single-threaded fallback. The Haxe path threads explicitly by
 /// allocating Y first and dispatching `rayzor_tensor_matmul_qt_t_f32_chunk`
-/// across workers via `rayzor.concurrent.NumaPool.parallelRows`.
+/// across workers via `rayzor.concurrent.WorkerPool.parallelRows`.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64) -> i64 {
     if x_tensor == 0 || qt_w == 0 {
@@ -971,9 +971,10 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
 /// falls through to the single-threaded path with no spawn overhead.
 ///
 /// This lives next to the chunk entry point so the Haxe-side
-/// `NumaPool.parallelRows` route stays available; the threaded entry
-/// point exists because (a) importing `NumaPool` from `nue.Linear`
-/// currently triggers a JIT cascade we haven't isolated, and
+/// `WorkerPool.parallelRows` route stays available; the threaded entry
+/// point exists because (a) importing the pool from `nue.Linear` hit an
+/// earlier JIT cascade (re-verify it is resolved post WorkerPool fix
+/// chain), and
 /// (b) for a single matmul-per-Linear-forward the fork-join cost
 /// shape is the same either way.
 ///
@@ -1447,7 +1448,7 @@ fn bias_to_performance_core() {
 /// Compute output rows `[n_start, n_end)` of `Y = X @ Wq.T` and store
 /// them into a pre-allocated Y tensor.
 ///
-/// This is the threading entry point. The caller (Haxe `NumaPool.parallelRows`)
+/// This is the threading entry point. The caller (Haxe `WorkerPool.parallelRows`)
 /// allocates Y once, then fans out non-overlapping `[n_start, n_end)` ranges
 /// to workers. Each call:
 ///   - dequants its own slice of `Wq` rows into a thread-local scratch,

@@ -134,7 +134,7 @@ extern class QTensor {
      * ranges and write to non-overlapping columns of `y`, so no
      * synchronisation is needed beyond the caller's fork-join barrier.
      *
-     * Used by `rayzor.concurrent.NumaPool.parallelRows` to multi-thread
+     * Used by `rayzor.concurrent.WorkerPool.parallelRows` to multi-thread
      * the large projection matmuls (Q/K/V/O, FFN gate/up/down) without
      * a hidden Rust thread pool.
      *
@@ -150,9 +150,12 @@ extern class QTensor {
      * headroom). Workers split disjoint output-row ranges; the join
      * is implicit at the scope boundary, no pool outlives the call.
      *
-     * This is the practical threading path while the Haxe-side
-     * `NumaPool` import currently triggers a JIT trap-stub cascade
-     * when imported from `nue.Linear`.
+     * This is the established default threading path. The pure-Haxe
+     * `WorkerPool.parallelRows` band-loop route (`matmulXTQChunk`) is the
+     * alternative; an earlier JIT trap-stub cascade when importing the pool
+     * from `nue.Linear` was the reason it was avoided — re-verify it is
+     * resolved (the WorkerPool fix chain likely closed it) before switching
+     * Linear's forward over.
      *
      * Returns a fresh F32 `Tensor`; null on shape mismatch.
      */

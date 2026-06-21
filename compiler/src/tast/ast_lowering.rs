@@ -8913,7 +8913,7 @@ impl<'a> AstLowering<'a> {
 
         // Try to peek the callee's formal parameter types so we can supply
         // expected lambda signatures to untyped function literals like
-        // `function(i, n) { ... }` (Phase 1c NumaPool callback case). This
+        // `function(i, n) { ... }` (Phase 1c WorkerPool callback case). This
         // is best-effort: if we can't statically resolve a callee, we just
         // lower args with no hints and the existing behavior applies.
         //
@@ -10141,7 +10141,7 @@ impl<'a> AstLowering<'a> {
         //
         // Without this, the trait checker's `TypeKind::Function` rule has
         // to either reject ALL function values (over-restrictive: rejects
-        // legitimate `Thread.spawn(named_fn)` calls and breaks `NumaPool`,
+        // legitimate `Thread.spawn(named_fn)` calls and breaks `WorkerPool`,
         // `Future.all`, etc.) or accept ALL function values (unsound:
         // closures with non-Send captures escape to other threads). The
         // per-construction Send computation lets us be precise.
