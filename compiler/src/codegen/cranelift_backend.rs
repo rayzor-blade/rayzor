@@ -3459,9 +3459,53 @@ impl CraneliftBackend {
                     }
 
                     // Emit the call instruction
-                    let call_mismatch = {
+                    let expected_param_types: Vec<cranelift_codegen::ir::Type> = {
                         let decl = module.declarations().get_function_decl(cl_func_id);
-                        let expected_params = decl.signature.params.len();
+                        decl.signature.params.iter().map(|p| p.value_type).collect()
+                    };
+                    let expected_params = expected_param_types.len();
+                    // Under-arity call (fewer args than the callee expects): this is the
+                    // shape of a Haxe trailing optional/default param (e.g. `skip:Int = 0`)
+                    // whose call site was lowered through a path that didn't run
+                    // fill_default_args (notably runtime-mapped extern statics like
+                    // NativeStackTrace.toHaxe). Pad the missing trailing args with
+                    // zero/null of the exact declared type instead of trapping — a
+                    // runtime trap here is strictly worse than calling with defaulted
+                    // trailing args. Over-arity still traps below (genuinely wrong MIR).
+                    if call_args.len() < expected_params {
+                        let mut paddable = true;
+                        let mut pads = Vec::new();
+                        for ty in &expected_param_types[call_args.len()..] {
+                            let ty = *ty;
+                            let v = if ty == types::F64 {
+                                builder.ins().f64const(0.0)
+                            } else if ty == types::F32 {
+                                builder.ins().f32const(0.0)
+                            } else if ty.is_int() {
+                                builder.ins().iconst(ty, 0)
+                            } else {
+                                // Vector/reference params can't be cheaply zeroed here;
+                                // leave the arity mismatch to the trap path.
+                                paddable = false;
+                                break;
+                            };
+                            pads.push(v);
+                        }
+                        if paddable {
+                            warn!(
+                                "CALL UNDER-ARITY in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args — padding {} trailing default(s) with zero",
+                                function.name,
+                                called_func.name,
+                                func_id,
+                                cl_func_id,
+                                expected_params,
+                                call_args.len(),
+                                pads.len()
+                            );
+                            call_args.extend(pads);
+                        }
+                    }
+                    let call_mismatch = {
                         if expected_params != call_args.len() {
                             warn!(
                                 "CALL MISMATCH in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",

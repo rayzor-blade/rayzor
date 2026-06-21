@@ -4254,13 +4254,18 @@ impl StdlibMapping {
 
         let mappings = vec![
             // saveStack(exception:Any):Void
-            map_method!(static "NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
+            // NOTE: keyed by the package-qualified class name ("haxe_NativeStackTrace"),
+            // matching how static-call dispatch derives the receiver class (qualified_name
+            // with '.'→'_', same convention as haxe_io_Bytes). The bare "NativeStackTrace"
+            // never matched — calls fell through to a bare-name bind onto haxe.CallStack's
+            // same-named methods, which then trapped on toHaxe's arity.
+            map_method!(static "haxe_NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
             // callStack():String
-            map_method!(static "NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            map_method!(static "haxe_NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
             // exceptionStack():String
-            map_method!(static "NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            map_method!(static "haxe_NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
             // toHaxe(nativeStackTrace:Any, skip:Int = 0):Array<StackItem>
-            map_method!(static "NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
+            map_method!(static "haxe_NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
