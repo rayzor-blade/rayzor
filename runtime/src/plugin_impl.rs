@@ -1975,6 +1975,10 @@ register_symbol!(
 );
 register_symbol!("rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows);
 register_symbol!("rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols);
+register_symbol!(
+    "rayzor_qtensor_data_ptr",
+    crate::quant::rayzor_qtensor_data_ptr
+);
 register_symbol!("rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel);
 register_symbol!("rayzor_qtensor_scheme", crate::quant::rayzor_qtensor_scheme);
 register_symbol!(

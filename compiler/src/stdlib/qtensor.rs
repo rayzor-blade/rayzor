@@ -22,6 +22,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
 
     build_qtensor_rows(builder);
     build_qtensor_cols(builder);
+    build_qtensor_data_ptr(builder);
     build_qtensor_numel(builder);
     build_qtensor_scheme(builder);
 
@@ -103,6 +104,7 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         "rayzor_qtensor_cols",
         "rayzor_qtensor_numel",
         "rayzor_qtensor_scheme",
+        "rayzor_qtensor_data_ptr",
     ] {
         let func_id = builder
             .begin_function(*name)
@@ -466,6 +468,9 @@ fn build_unary_i64_passthrough(builder: &mut MirBuilder, wrapper_name: &str, ext
 
 fn build_qtensor_rows(builder: &mut MirBuilder) {
     build_unary_i64_passthrough(builder, "QTensor_rows", "rayzor_qtensor_rows");
+}
+fn build_qtensor_data_ptr(builder: &mut MirBuilder) {
+    build_unary_i64_passthrough(builder, "QTensor_data_ptr", "rayzor_qtensor_data_ptr");
 }
 fn build_qtensor_cols(builder: &mut MirBuilder) {
     build_unary_i64_passthrough(builder, "QTensor_cols", "rayzor_qtensor_cols");
