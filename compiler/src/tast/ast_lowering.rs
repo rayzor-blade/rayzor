@@ -615,6 +615,13 @@ pub struct AstLowering<'a> {
     skip_pre_registration: bool,
     /// Collected errors during lowering (for error recovery)
     pub collected_errors: Vec<LoweringError>,
+    /// Symbols declared as an untyped empty array literal (`var x = []`), whose
+    /// element type is still the placeholder `Dynamic` and should be bound (the
+    /// monomorph rewrite) from the FIRST `x.push(e)` / `x[i] = e` — at which
+    /// point `e`'s type is known (earlier statements are already lowered). Once
+    /// bound the symbol is removed. Keeps numeric arrays unboxed (`Array<Float>`
+    /// routes through the f64 push/get path instead of the truncating generic).
+    empty_array_inferred: std::collections::BTreeSet<SymbolId>,
     /// Active 'using' modules for static extension resolution
     /// Maps module name (e.g., "StringTools") to class symbol ID
     using_modules: Vec<(InternedString, SymbolId)>,
@@ -1232,6 +1239,82 @@ impl<'a> AstLowering<'a> {
         None
     }
 
+    /// Peek a simple AST expression's type WITHOUT lowering it — for binding an
+    /// inferred empty-array element type from the first push/index-assign before
+    /// that statement is lowered. Handles literals, in-scope identifiers, and
+    /// arithmetic; `None` means "leave Array<Dynamic>" (no regression).
+    fn peek_ast_expr_type(&mut self, e: &Expr) -> Option<TypeId> {
+        match &e.kind {
+            ExprKind::Float(_) => Some(self.context.type_table.borrow().float_type()),
+            ExprKind::Int(_) => Some(self.context.type_table.borrow().int_type()),
+            ExprKind::Bool(_) => Some(self.context.type_table.borrow().bool_type()),
+            ExprKind::String(_) | ExprKind::StringInterpolation(_) => {
+                Some(self.context.type_table.borrow().string_type())
+            }
+            ExprKind::Ident(name) => {
+                let interned = self.context.intern_string(name);
+                let sym = self.resolve_symbol_in_scope_hierarchy(interned)?;
+                self.context.symbol_table.get_symbol(sym).map(|s| s.type_id)
+            }
+            ExprKind::Binary { left, right, .. } => {
+                let lt = self.peek_ast_expr_type(left);
+                let rt = self.peek_ast_expr_type(right);
+                let ftype = self.context.type_table.borrow().float_type();
+                if lt == Some(ftype) || rt == Some(ftype) {
+                    Some(ftype)
+                } else {
+                    lt.or(rt)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Monomorph rewrite: if `arr_ast` names a var that was declared as an
+    /// untyped empty array literal (still `Array<Dynamic>`), bind its element
+    /// type from `elem_ast`'s peeked type. Called BEFORE lowering the
+    /// `arr.push(e)` / `arr[i] = e`, so the receiver and every later reference
+    /// resolve to the concrete `Array<T>` and route through the typed (e.g. f64)
+    /// push/get path instead of the generic one that truncates floats.
+    fn try_bind_inferred_array(&mut self, arr_ast: &Expr, elem_ast: &Expr) {
+        let name = match &arr_ast.kind {
+            ExprKind::Ident(n) => n.clone(),
+            _ => return,
+        };
+        let interned = self.context.intern_string(&name);
+        let sym = match self.resolve_symbol_in_scope_hierarchy(interned) {
+            Some(s) => s,
+            None => return,
+        };
+        if !self.empty_array_inferred.contains(&sym) {
+            return;
+        }
+        let elem_ty = match self.peek_ast_expr_type(elem_ast) {
+            Some(t) => t,
+            None => return,
+        };
+        // Only bind to a concrete element type — keep the placeholder otherwise.
+        let keep_placeholder = {
+            let tt = self.context.type_table.borrow();
+            matches!(
+                tt.get(elem_ty).map(|t| &t.kind),
+                None | Some(TypeKind::Dynamic)
+                    | Some(TypeKind::Unknown)
+                    | Some(TypeKind::Error)
+            )
+        };
+        if keep_placeholder {
+            return;
+        }
+        let array_ty = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_array_type(elem_ty);
+        self.context.symbol_table.update_symbol_type(sym, array_ty);
+        self.empty_array_inferred.remove(&sym);
+    }
+
     pub fn new(
         string_interner: &'a mut StringInterner,
         string_interner_rc: Rc<RefCell<StringInterner>>,
@@ -1261,6 +1344,7 @@ impl<'a> AstLowering<'a> {
             skip_stdlib_loading: false,
             skip_pre_registration: false,
             collected_errors: Vec::new(),
+            empty_array_inferred: std::collections::BTreeSet::new(),
             using_modules: Vec::new(),
             pending_usings: Vec::new(),
             // (class_fields will be seeded below if global_class_fields provided)
@@ -7621,6 +7705,19 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Call { expr, args } => {
+                // Monomorph rewrite: `arr.push(e)` on an untyped empty array binds
+                // its element type from `e` (before the call lowers, so the
+                // receiver resolves to the concrete Array<T>).
+                if args.len() == 1 {
+                    if let ExprKind::Field {
+                        expr: recv, field, ..
+                    } = &expr.kind
+                    {
+                        if field == "push" {
+                            self.try_bind_inferred_array(recv, &args[0]);
+                        }
+                    }
+                }
                 return self.lower_call_expression(expression, expr, args);
             }
             ExprKind::Field {
@@ -7640,6 +7737,11 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Assign { left, op, right } => {
+                // Monomorph rewrite: `arr[i] = e` on an untyped empty array binds
+                // its element type from `e` before the target lowers.
+                if let ExprKind::Index { expr: recv, .. } = &left.kind {
+                    self.try_bind_inferred_array(recv, right);
+                }
                 let target_expr = self.lower_expression(left)?;
                 // Same `@:multiType` propagation as Var declarations: when
                 // the RHS is a bare `new C()`, the LHS's static type seeds
@@ -8644,6 +8746,19 @@ impl<'a> AstLowering<'a> {
                     .get_scope_mut(self.context.current_scope)
                 {
                     scope.add_symbol(var_symbol, var_name);
+                }
+
+                // Monomorph rewrite: an UNTYPED empty array literal (`var x = []`)
+                // gets element type Dynamic here; track it so the first
+                // `x.push(e)` / `x[i] = e` can bind it to e's concrete type (see
+                // bind_inferred_array_element). Skip if the user annotated a type.
+                if declared_type.is_none()
+                    && expr
+                        .as_ref()
+                        .map(|e| matches!(&e.kind, ExprKind::Array(els) if els.is_empty()))
+                        .unwrap_or(false)
+                {
+                    self.empty_array_inferred.insert(var_symbol);
                 }
 
                 TypedExpressionKind::VarDeclarationExpr {
