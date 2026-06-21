@@ -296,14 +296,20 @@ pub extern "C" fn rayzor_exception_type_matches(actual_type_id: i32, expected_ty
     if actual_type_id == expected_type_id {
         return 1;
     }
-    // Only class types use +1000 offset
+    // Class type ids are large deterministic name-hashes (always > 1000);
+    // primitives are < 1000. A class never matches a primitive by hierarchy.
     if actual_type_id < 1000 || expected_type_id < 1000 {
         return 0;
     }
-    // Convert +1000 throw/catch IDs to raw TYPE_REGISTRY keys
-    let actual_raw = (actual_type_id - 1000) as i64;
-    let expected_raw = (expected_type_id - 1000) as i64;
-    if crate::type_system::type_id_matches_with_hierarchy(actual_raw, expected_raw) {
+    // Both ids are the SAME deterministic ids the TYPE_REGISTRY is keyed by
+    // (object headers, runtime_type_id and the catch's expected id all use them
+    // now), so walk the inheritance chain with them directly — the old `-1000`
+    // turned them into keys that miss the registry, breaking subclass-by-parent
+    // catches.
+    if crate::type_system::type_id_matches_with_hierarchy(
+        actual_type_id as i64,
+        expected_type_id as i64,
+    ) {
         1
     } else {
         0

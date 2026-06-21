@@ -5544,8 +5544,14 @@ impl<'a> HirToMirContext<'a> {
                     };
 
                     // Call rayzor_throw_typed(exception_value, type_id).
-                    // For class throws, derive the raw type id from the object header at runtime,
-                    // then add +1000 to match typed-catch encoding.
+                    // For class throws, read the RUNTIME type id straight from the
+                    // object header[0] — it already holds the deterministic class
+                    // id that `runtime_type_id` produces for typed catches, so the
+                    // thrown id and the catch's expected id are the SAME encoding.
+                    // (A stale `+1000` here double-encoded it, so a derived class
+                    // thrown as `throw new MyException(...)` reported id N+1000
+                    // while `catch (e:MyException)` expected N → the specific catch
+                    // never matched and a later `catch (e:Exception)` caught it.)
                     let thrown_type_reg = if self.get_class_symbol(thrown_type).is_some() {
                         let obj_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
                         let obj_ptr = self
@@ -5564,16 +5570,8 @@ impl<'a> HirToMirContext<'a> {
                             .builder
                             .build_load(header_ptr, IrType::I64)
                             .expect("failed to load throw header type id");
-                        let class_offset = self
-                            .builder
-                            .build_const(IrValue::I64(1000))
-                            .expect("failed to create throw class offset const");
-                        let encoded = self
-                            .builder
-                            .build_binop(BinaryOp::Add, header_raw, class_offset)
-                            .expect("failed to encode throw class type id");
                         self.builder
-                            .build_cast(encoded, IrType::I64, IrType::I32)
+                            .build_cast(header_raw, IrType::I64, IrType::I32)
                             .expect("failed to cast throw class type id")
                     } else {
                         let thrown_type_id = self.runtime_type_id(expr.ty);

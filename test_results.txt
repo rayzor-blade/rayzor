@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Sun Jun 21 10:42:30 BST 2026
+  Sun Jun 21 11:05:05 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -386,7 +386,7 @@ Dog
 TClass(Dog)
 true
 false
-null
+Animal
 
 --- test_closures [PASS] ---
 Running compiler/tests/haxe/test_closures.hx [debug] [preset: Application]...
@@ -651,12 +651,13 @@ Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
 hello world
 done
 
---- test_exception [FAIL(exit=133)] ---
+--- test_exception [CRASH(132/SIGILL)] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
-WRONG
+specific
 42
+caught dynamic
 
 --- test_exception_method_parity [PASS] ---
 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
@@ -722,8 +723,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 world
 hello
-10
 20
+10
 30
 done
 
@@ -915,7 +916,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
@@ -1281,7 +1282,7 @@ Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
 42
 hello
 99
-WRONG: dynamic
+boom
 caught dynamic
 
 --- test_typedef [PASS] ---
@@ -1359,6 +1360,6 @@ Done
 =========================================
   TOTAL:        142
   PASSED:       141
-  FAILED:       1
-  CRASHED:      0
+  FAILED:       0
+  CRASHED:      1
 =========================================

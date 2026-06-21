@@ -5235,6 +5235,26 @@ impl CraneliftBackend {
         use crate::ir::modules::IrTypeDefinition;
         use rayzor_runtime::type_system::register_class_from_mir;
 
+        // The registry is keyed by the deterministic runtime_type_id (below), but
+        // super_type_id is stored on the typedef as a RAW TypeId. Build a global
+        // raw-TypeId → deterministic-id map first (across all modules, for
+        // cross-module inheritance) so the super pointer we register matches the
+        // registry key — otherwise hierarchy walks (subclass caught by a parent
+        // `catch`, instanceof/cast to a base) miss and fail.
+        let mut typeid_to_rtti: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
+        for module in modules {
+            for (_id, typedef) in &module.types {
+                if let IrTypeDefinition::Struct { .. } = &typedef.definition {
+                    let rtti = typedef
+                        .runtime_type_id
+                        .map(|h| h as u32)
+                        .unwrap_or(typedef.type_id.0);
+                    typeid_to_rtti.insert(typedef.type_id.0, rtti);
+                }
+            }
+        }
+
         for module in modules {
             for (_id, typedef) in &module.types {
                 if let IrTypeDefinition::Struct { fields, .. } = &typedef.definition {
@@ -5251,7 +5271,10 @@ impl CraneliftBackend {
                         .map(|f| Self::ir_type_to_param_type(&f.ty))
                         .collect();
                     let static_fields: Vec<String> = Vec::new();
-                    let super_type_id = typedef.super_type_id.map(|t| t.0);
+                    // Map the super's raw TypeId to its deterministic registry id.
+                    let super_type_id = typedef
+                        .super_type_id
+                        .map(|t| typeid_to_rtti.get(&t.0).copied().unwrap_or(t.0));
 
                     // Prefer the deterministic runtime_type_id (FNV-1a hash
                     // of the qualified class name) when present so cached
