@@ -28,4 +28,37 @@ extern abstract SIMD16i8 {
     /** Load 16 contiguous bytes from a pointer */
     @:native("load")
     public static function load(ptr:Ptr<Int>):SIMD16i8;
+
+    /**
+     * Bitwise AND of two i8x16 vectors, lane-wise. The mask for Q4 nibble
+     * unpack: `SIMD16i8.and(v, SIMD16i8.splat(0x0F))` keeps the low nibble.
+     */
+    @:native("and")
+    public static function and(a:SIMD16i8, b:SIMD16i8):SIMD16i8;
+
+    /** Bitwise OR of two i8x16 vectors, lane-wise. */
+    @:native("or")
+    public static function or(a:SIMD16i8, b:SIMD16i8):SIMD16i8;
+
+    /** Bitwise XOR of two i8x16 vectors, lane-wise. */
+    @:native("xor")
+    public static function xor(a:SIMD16i8, b:SIMD16i8):SIMD16i8;
+
+    /** Logical left shift of every lane by `n` (same amount for all 16 lanes). */
+    @:native("shl")
+    public static function shl(a:SIMD16i8, n:Int):SIMD16i8;
+
+    /**
+     * Arithmetic (sign-propagating) right shift of every lane by `n`.
+     * For zero-filling unpack (e.g. Q4 high nibble) use `ushr`.
+     */
+    @:native("shr")
+    public static function shr(a:SIMD16i8, n:Int):SIMD16i8;
+
+    /**
+     * Logical (zero-filling) right shift of every lane by `n`. The Q4 high
+     * nibble: `SIMD16i8.ushr(v, 4)` yields the top 4 bits as 0..15.
+     */
+    @:native("ushr")
+    public static function ushr(a:SIMD16i8, n:Int):SIMD16i8;
 }

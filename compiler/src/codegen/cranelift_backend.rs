@@ -4548,6 +4548,29 @@ impl CraneliftBackend {
                     crate::ir::BinaryOp::And => builder.ins().band(lhs, rhs),
                     crate::ir::BinaryOp::Or => builder.ins().bor(lhs, rhs),
                     crate::ir::BinaryOp::Xor => builder.ins().bxor(lhs, rhs),
+                    // Vector shift-by-scalar: `rhs` is an i32 shift amount (not a
+                    // vector), matching the wasm I8x16Shl/Shr semantics. cranelift
+                    // ishl/ushr/sshr take (vector, scalar). `Shr` is the
+                    // sign-aware right shift — arithmetic for signed element
+                    // types, logical for unsigned; `Ushr` is always logical.
+                    // (Nibble unpack uses AND for the low nibble + Ushr for the
+                    // high nibble, so zero-fill is what the Q4 path needs.)
+                    crate::ir::BinaryOp::Shl => builder.ins().ishl(lhs, rhs),
+                    crate::ir::BinaryOp::Shr => {
+                        let elem_signed = match vec_ty {
+                            IrType::Vector { element, .. } => matches!(
+                                **element,
+                                IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64
+                            ),
+                            _ => true,
+                        };
+                        if elem_signed {
+                            builder.ins().sshr(lhs, rhs)
+                        } else {
+                            builder.ins().ushr(lhs, rhs)
+                        }
+                    }
+                    crate::ir::BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
                     _ => return Err(format!("Unsupported vector binary op: {:?}", op)),
                 };
                 value_map.insert(*dest, result);

@@ -82,6 +82,13 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     // SIMD16i8 (i8x16 dot operands) MIR wrappers
     build_simd16i8_splat(builder);
     build_simd16i8_load(builder);
+    // Bitwise + shift (Q4 nibble unpack: AND-mask low nibble, USHR high nibble)
+    build_simd16i8_and(builder);
+    build_simd16i8_or(builder);
+    build_simd16i8_xor(builder);
+    build_simd16i8_shl(builder);
+    build_simd16i8_shr(builder);
+    build_simd16i8_ushr(builder);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1299,6 +1306,75 @@ fn build_simd16i8_load(builder: &mut MirBuilder) {
     let ptr = builder.get_param(0);
     let result = builder.vector_load(ptr, vec_ty);
     builder.ret(Some(result));
+}
+
+/// Shared body for the lane-wise i8x16 bitwise wrappers
+/// `SIMD16i8_and/or/xor(a, b: vec<i8;16>) -> vec<i8;16>`.
+fn build_simd16i8_bitwise(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
+    let vec_ty = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function(name)
+        .param("a", vec_ty.clone())
+        .param("b", vec_ty.clone())
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let a = builder.get_param(0);
+    let b = builder.get_param(1);
+    let result = builder.vector_bin_op(op, a, b, vec_ty);
+    builder.ret(Some(result));
+}
+
+fn build_simd16i8_and(builder: &mut MirBuilder) {
+    build_simd16i8_bitwise(builder, "SIMD16i8_and", BinaryOp::And);
+}
+fn build_simd16i8_or(builder: &mut MirBuilder) {
+    build_simd16i8_bitwise(builder, "SIMD16i8_or", BinaryOp::Or);
+}
+fn build_simd16i8_xor(builder: &mut MirBuilder) {
+    build_simd16i8_bitwise(builder, "SIMD16i8_xor", BinaryOp::Xor);
+}
+
+/// Shared body for the i8x16 shift wrappers
+/// `SIMD16i8_shl/shr/ushr(a: vec<i8;16>, n: i32) -> vec<i8;16>`.
+/// `n` is a scalar shift amount applied to every lane (vector-by-scalar),
+/// matching the wasm I8x16Shl/ShrS/ShrU and cranelift ishl/sshr/ushr shape.
+fn build_simd16i8_shift(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
+    let vec_ty = IrType::vector(IrType::I8, 16);
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function(name)
+        .param("a", vec_ty.clone())
+        .param("n", i32_ty)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let a = builder.get_param(0);
+    let n = builder.get_param(1);
+    let result = builder.vector_bin_op(op, a, n, vec_ty);
+    builder.ret(Some(result));
+}
+
+fn build_simd16i8_shl(builder: &mut MirBuilder) {
+    build_simd16i8_shift(builder, "SIMD16i8_shl", BinaryOp::Shl);
+}
+fn build_simd16i8_shr(builder: &mut MirBuilder) {
+    build_simd16i8_shift(builder, "SIMD16i8_shr", BinaryOp::Shr);
+}
+fn build_simd16i8_ushr(builder: &mut MirBuilder) {
+    build_simd16i8_shift(builder, "SIMD16i8_ushr", BinaryOp::Ushr);
 }
 
 /// SIMD4f_dot(self: vec<f32; 4>, other: vec<f32; 4>) -> f32
