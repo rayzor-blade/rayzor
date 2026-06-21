@@ -4,9 +4,9 @@
 // plan). Verifies: address() returns a usable base, byte-granular offset
 // arithmetic (base + 16), and that load reads the correct 16 bytes IN ORDER.
 //
-// NATIVE only: on the wasm host-import path the Bytes buffer is not in guest
-// linear memory, so a guest V128Load against this address is invalid. The
-// in-guest wasm kernel reads weights through the QTensor data pointer instead.
+// Bit-identical on native AND wasm: Bytes data is guest-resident on wasm too
+// (the wasm_runner host_alloc's the buffer in guest linear memory), so the
+// address() offset is directly loadable by a guest V128Load.
 //
 // Read-out uses the already-verified dot+sum primitives. Order is checked by
 // dotting two DIFFERENT loaded regions (a ramp × a ramp is order-sensitive).

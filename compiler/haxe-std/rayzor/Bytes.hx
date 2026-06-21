@@ -191,10 +191,8 @@ extern class Bytes {
         var v = SIMD16i8.load(Ptr.fromRaw(base + Usize.fromInt(16)));
         ```
 
-        Native only: on the wasm host-import path the buffer does not live in
-        guest linear memory, so a guest vector load against this address is
-        invalid — the in-guest wasm kernel reads weights through the QTensor
-        data pointer instead.
+        Works on both targets — Bytes data is guest-resident on wasm too, so
+        the returned offset is directly loadable by a guest `SIMD16i8.load`.
 
         @return The buffer's base address (pointer-sized)
     **/

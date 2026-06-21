@@ -1974,8 +1974,10 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_bytes_sub" => Some("haxe_bytes_sub"),
             "haxe_bytes_sub_base_u64lh" => Some("haxe_bytes_sub_base_u64lh"),
             "haxe_bytes_to_string" => Some("haxe_bytes_to_string"),
+            "haxe_bytes_data_address" => Some("haxe_bytes_data_address"),
             // Bare names (from runtime-wasm module imports surviving linker merge)
             "alloc" => Some("haxe_bytes_alloc"),
+            "address" => Some("haxe_bytes_data_address"),
             "ofString" => Some("haxe_bytes_of_string"),
             "length" => Some("haxe_bytes_length"),
             "get" => Some("haxe_bytes_get"),
@@ -2278,6 +2280,31 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let len = bytes_total_len(&mut caller, h) as i32;
                             results[0] = ret_int(len, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- address(handle) -> Usize --
+            // The buffer's GUEST linear-memory data offset (the header's `ptr`
+            // field). Bytes data is guest-resident on wasm (write_haxe_bytes_in_wasm
+            // host_alloc's both the header and the data IN the guest), so this
+            // offset is directly loadable by a guest SIMD16i8.load — the data-access
+            // path for the pure-Haxe Q4 dot kernel on wasm.
+            "haxe_bytes_data_address" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let data_ptr = read_haxe_bytes_header(&mut caller, h)
+                                .map(|(p, _, _)| p as i32)
+                                .unwrap_or(0);
+                            results[0] = ret_int(data_ptr, &rt);
                             Ok(())
                         },
                     )

@@ -610,3 +610,83 @@ pub unsafe fn q4_k_m_matmul_f32(
         }
     }
 }
+
+#[cfg(test)]
+mod golden_gate {
+    //! Golden reference for the pure-Haxe Q4_K_M×Q8_K dot kernel bit-exact gate
+    //! (docs/plans/haxe-quant-matmul-vectordot.md, Phase 3). Constructs a fully
+    //! deterministic, easily-Haxe-reproducible block pair and prints the scalar
+    //! oracle's f32 result. The Haxe test rebuilds the SAME inputs and must match.
+    use super::*;
+
+    #[test]
+    fn golden_q4_dot_for_haxe_gate() {
+        // Weight: d=1.0 (0x3C00), dmin=0.5 (0x3800); sc6[s]=s+1, mn6[s]=1;
+        // qs[i]=i (low nibble i&0x0F in 0..15, high nibble i>>4 in 0..7).
+        let sc6: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mn6: [u8; 8] = [1, 1, 1, 1, 1, 1, 1, 1];
+        let scales = pack_q4_k_scales(&sc6, &mn6);
+        let mut qs = [0u8; 128];
+        for i in 0..128 {
+            qs[i] = i as u8;
+        }
+        let weight = Q4KMBlock { d: 0x3C00, dmin: 0x3800, scales, qs };
+
+        // Activation: d=0.01; qs[i]=(i%16)-8 → every 16-block sums to -8,
+        // so bsums all -8. qs in -8..7 (well inside the dot's i7 operand range).
+        let mut xqs = [0i8; 256];
+        for i in 0..256 {
+            xqs[i] = ((i % 16) as i32 - 8) as i8;
+        }
+        let mut bsums = [0i16; 16];
+        for s in 0..16 {
+            let mut sum = 0i32;
+            for j in 0..16 {
+                sum += xqs[s * 16 + j] as i32;
+            }
+            bsums[s] = sum as i16;
+        }
+        let x = Q8KBlock { d: 0.01, qs: xqs, bsums };
+
+        let dot = vec_dot_q4_K_q8_K_scalar(&weight, &x);
+        eprintln!("GOLDEN packed_scales={:?}", scales);
+        eprintln!("GOLDEN bsums={:?}", bsums);
+        eprintln!("GOLDEN dot_bits=0x{:08x}", dot.to_bits());
+        eprintln!("GOLDEN1 packed_scales={:?}", scales);
+        eprintln!("GOLDEN1 bsums={:?}", bsums);
+        eprintln!("GOLDEN1 dot_bits=0x{:08x}", dot.to_bits());
+        eprintln!("GOLDEN1 dot={:.10}", dot);
+
+        // Case 2: fully varied — different d/dmin, per-sub-block scales/mins,
+        // per-lane nibbles, and NEGATIVE activations, to exercise the high-
+        // nibble path + sign handling that case 1's uniform-ish data misses.
+        let sc6b: [u8; 8] = [3, 8, 13, 18, 23, 28, 33, 38];
+        let mn6b: [u8; 8] = [2, 5, 8, 11, 14, 17, 20, 23];
+        let scales2 = pack_q4_k_scales(&sc6b, &mn6b);
+        let mut qs2 = [0u8; 128];
+        for i in 0..128 {
+            qs2[i] = ((i * 7 + 3) % 256) as u8;
+        }
+        let weight2 = Q4KMBlock { d: 0x2E66, dmin: 0x2C00, scales: scales2, qs: qs2 };
+
+        let mut xqs2 = [0i8; 256];
+        for i in 0..256 {
+            xqs2[i] = (((i * 11 + 5) % 64) as i32 - 32) as i8; // -32..31, i7-valid
+        }
+        let mut bsums2 = [0i16; 16];
+        for s in 0..16 {
+            let mut sum = 0i32;
+            for j in 0..16 {
+                sum += xqs2[s * 16 + j] as i32;
+            }
+            bsums2[s] = sum as i16;
+        }
+        let x2 = Q8KBlock { d: 0.0375, qs: xqs2, bsums: bsums2 };
+
+        let dot2 = vec_dot_q4_K_q8_K_scalar(&weight2, &x2);
+        eprintln!("GOLDEN2 packed_scales={:?}", scales2);
+        eprintln!("GOLDEN2 bsums={:?}", bsums2);
+        eprintln!("GOLDEN2 dot_bits=0x{:08x}", dot2.to_bits());
+        eprintln!("GOLDEN2 dot={:.10}", dot2);
+    }
+}
