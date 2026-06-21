@@ -127,6 +127,22 @@ simd4i32 + f32 unchanged, native suite — only known-flaky test_copy/test_excep
 
 ## Phase 3 — Port the Q4_K_M dot kernel to Haxe
 
+**Prereqs status (2026-06-21, a 4-agent map workflow confirmed Phase 3 needs
+compiler prereqs first, not "just write Haxe"):**
+- ✅ **Nibble-unpack ops** — `SIMD16i8.and/or/xor/shl/shr/ushr` (8a007a39).
+  wasm already lowered them; native Cranelift had NO vector shift (added
+  ishl/sshr/ushr). Static methods. Gate: test_simd16i8_bitops.hx bit-identical N+W.
+- ✅ **SIMD vectors as fn params** — coreType SIMD was typed I64 as a param
+  (128→64-bit truncation, codegen crash); fixed in convert_type (d3c3bb1e).
+  Unblocks helper-fn decomposition of the kernel.
+- ⏳ **Bytes→Ptr load path** — add `Bytes.address():Usize` (HaxeBytes.ptr@0);
+  `SIMD16i8.load(Ptr.fromRaw(addr+byteOff))` byte-granular. UNPROVEN from real Bytes.
+- ⏳ **f16→f32 decode** for d/dmin (pure-Haxe bit math).
+- ⏳ **Bit-exact gate** — NO single-block dot FFI exists; either add
+  `rayzor_vec_dot_q4_k_q8_k(wptr,xptr)->f32` or drive via 1×256 QTensor matmulXTQ.
+  Oracle = `vec_dot_q4_K_q8_K_scalar` (q4_k_m.rs:233); add a golden-bits printer test.
+- See `memory/project_haxe_q4_dot_phase3.md` for the full refined spec.
+
 Template off `q4_k_m.rs:vec_dot_q4_K_q8_K_simd128` (cleaner than NEON intrinsics).
 
 - Haxe block structs matching `types.rs`: `Q4KMBlock`, `Q8KBlock`.
