@@ -177,6 +177,63 @@ fn collect_wasm_host_functions(
     map
 }
 
+/// Run binaryen's `wasm-opt -O3 -all` on a wasm module.
+///
+/// Uses the bundled `wasm-opt` crate (brson/wasm-opt-rs), which compiles
+/// binaryen from source — there is NO external `wasm-opt` binary dependency.
+/// The crate API is file-based, so we round-trip through a temp `.wasm` in/out.
+///
+/// `all_features()` is the equivalent of the CLI `-all` flag: it enables the
+/// full feature set (SIMD, RELAXED-SIMD — `i32x4.relaxed_dot` must survive,
+/// THREADS/atomics, BULK-MEMORY, NONTRAPPING-FLOAT-TO-INT, MUTABLE-GLOBALS,
+/// SIGN-EXT, ...), so the module is accepted and no relaxed-simd op is lowered
+/// away.
+///
+/// Returns the optimized bytes, or an error if optimization failed.
+fn wasm_opt_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let inp = dir.join(format!("rayzor_wopt_in_{}.wasm", pid));
+    let outp = dir.join(format!("rayzor_wopt_out_{}.wasm", pid));
+    std::fs::write(&inp, input).map_err(|e| format!("write temp: {}", e))?;
+
+    let result = wasm_opt::OptimizationOptions::new_opt_level_3()
+        .all_features()
+        .run(&inp, &outp)
+        .map_err(|e| format!("wasm-opt: {}", e));
+
+    let out = result.and_then(|()| std::fs::read(&outp).map_err(|e| format!("read temp: {}", e)));
+
+    let _ = std::fs::remove_file(&inp);
+    let _ = std::fs::remove_file(&outp);
+    out
+}
+
+/// Apply the binaryen post-pass to a linked wasm module by DEFAULT.
+///
+/// Skips the pass if `RAYZOR_WASM_NO_OPT` is set (escape hatch). On any
+/// wasm-opt error, logs to stderr and falls back to the unoptimized module —
+/// the pass is never allowed to fail the run.
+fn maybe_wasm_opt(linked_wasm: Vec<u8>) -> Vec<u8> {
+    if std::env::var("RAYZOR_WASM_NO_OPT").is_ok() {
+        return linked_wasm;
+    }
+    match wasm_opt_bytes(&linked_wasm) {
+        Ok(o) => {
+            eprintln!(
+                "[wasm-opt] {} KB -> {} KB",
+                linked_wasm.len() / 1024,
+                o.len() / 1024
+            );
+            o
+        }
+        Err(e) => {
+            eprintln!("[wasm-opt] failed ({}); using unoptimized", e);
+            linked_wasm
+        }
+    }
+}
+
 pub fn cmd_run_wasm(
     file: Option<PathBuf>,
     rpkg_files: Vec<PathBuf>,
@@ -231,6 +288,15 @@ pub fn cmd_run_wasm(
     } else {
         user_wasm
     };
+
+    // Binaryen post-pass (DEFAULT-ON): rayzor's wasm_backend materializes every
+    // SSA value into a local (local.set/local.get round-trips) which wasmtime
+    // does NOT fully coalesce; wasm-opt's simplify-locals/coalesce-locals
+    // collapses them (measured: subDot 72->3 local.set), keeping v128 temps on
+    // the operand stack — a verified ~3x bit-exact speedup on the Q4 kernel.
+    // Set RAYZOR_WASM_NO_OPT to skip the pass; on any error we fall back to the
+    // unoptimized module (never fail the run).
+    let linked_wasm = maybe_wasm_opt(linked_wasm);
 
     eprintln!("Running ({:.1} KB)...", linked_wasm.len() as f64 / 1024.0);
 
@@ -319,6 +385,10 @@ pub fn cmd_build_wasm(
         println!("  warning: WASM runtime not found, output needs JS harness");
         user_wasm
     };
+
+    // Binaryen post-pass (DEFAULT-ON; same coalesce-locals win as the run path).
+    // Set RAYZOR_WASM_NO_OPT to skip; errors fall back to the unoptimized module.
+    let linked_wasm = maybe_wasm_opt(linked_wasm);
 
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
     // Ensure output directory exists

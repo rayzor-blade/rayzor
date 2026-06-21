@@ -46,6 +46,12 @@ rayzor-lsp = { path = "lsp" }
 anyhow = "1"
 walkdir = "2"
 libc = "0.2"
+# Binaryen wasm-opt post-pass (default-on). Bundles binaryen ~116 and compiles
+# it from source via cmake on first build (slow), so there is NO external
+# `wasm-opt` binary dependency. Used to coalesce the per-SSA-value
+# local.set/local.get round-trips the wasm_backend emits (wasmtime does not
+# fully coalesce them) — a verified ~3x bit-exact speedup on the Q4 kernel.
+wasm-opt = "0.116"
 
 # Workspace release profile. `lto = "thin"` enables cross-crate inlining so
 # `rayzor-runtime` hot-path callsites continue to inline through the per-arch
