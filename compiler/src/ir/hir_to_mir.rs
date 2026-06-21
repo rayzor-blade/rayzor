@@ -21851,19 +21851,43 @@ impl<'a> HirToMirContext<'a> {
                     // If underlying type is specified, use it
                     self.convert_type(*underlying_type)
                 } else {
-                    // No underlying type specified — check for SIMD vector types first
-                    let native_name = self.symbol_table.get_symbol(*symbol_id).and_then(|sym| {
-                        sym.native_name
+                    // No underlying type specified — check for SIMD vector types first.
+                    // Match on native_name OR qualified_name OR bare name: a coreType
+                    // SIMD abstract used as a FUNCTION PARAMETER resolves to an
+                    // Abstract whose symbol may not carry native_name in this view,
+                    // and the `is_systems_type` check below would otherwise claim it
+                    // (SIMD* are mir_wrapper classes) and return I64 — truncating the
+                    // 128-bit vector to a 64-bit param. So detect the vector identity
+                    // from any available name and return the real vector type.
+                    let type_names = self.symbol_table.get_symbol(*symbol_id).map(|sym| {
+                        let native = sym
+                            .native_name
                             .and_then(|nn| self.string_interner.get(nn))
-                            .map(|s| s.to_string())
+                            .unwrap_or("");
+                        let qualified = sym
+                            .qualified_name
+                            .and_then(|qn| self.string_interner.get(qn))
+                            .unwrap_or("");
+                        let bare = self.string_interner.get(sym.name).unwrap_or("");
+                        (native, qualified, bare)
                     });
-                    if let Some(ref nn) = native_name {
-                        match nn.as_str() {
-                            "rayzor::SIMD4f" => return IrType::vector(IrType::F32, 4),
-                            "rayzor::SIMD4i32" => return IrType::vector(IrType::I32, 4),
-                            "rayzor::SIMD16i8" => return IrType::vector(IrType::I8, 16),
-                            "rayzor::Atomic" => return IrType::Ptr(Box::new(IrType::I32)),
-                            _ => {}
+                    if let Some((native, qualified, bare)) = type_names {
+                        let is = |simd: &str| {
+                            native == format!("rayzor::{}", simd)
+                                || qualified == format!("rayzor.{}", simd)
+                                || bare == simd
+                        };
+                        if is("SIMD4f") {
+                            return IrType::vector(IrType::F32, 4);
+                        }
+                        if is("SIMD4i32") {
+                            return IrType::vector(IrType::I32, 4);
+                        }
+                        if is("SIMD16i8") {
+                            return IrType::vector(IrType::I8, 16);
+                        }
+                        if native == "rayzor::Atomic" {
+                            return IrType::Ptr(Box::new(IrType::I32));
                         }
                     }
 
