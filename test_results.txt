@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Sat Jun 20 17:15:59 BST 2026
+  Sun Jun 21 10:42:30 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -409,12 +409,13 @@ Running compiler/tests/haxe/test_conditional.hx [debug] [preset: Application]...
 rayzor
 done
 
---- test_copy [FAIL(exit=133)] ---
+--- test_copy [PASS] ---
 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
 3
 42
 3
 10
+done
 
 --- test_copy_clone_identity [PASS] ---
 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
@@ -650,11 +651,12 @@ Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
 hello world
 done
 
---- test_exception [CRASH(134/SIGABRT)] ---
+--- test_exception [FAIL(exit=133)] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
-
-thread 'main' (15036577) has overflowed its stack
-fatal runtime error: stack overflow, aborting
+basic error
+custom error
+WRONG
+42
 
 --- test_exception_method_parity [PASS] ---
 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
@@ -720,8 +722,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 world
 hello
-20
 10
+20
 30
 done
 
@@ -1356,7 +1358,7 @@ Done
 
 =========================================
   TOTAL:        142
-  PASSED:       140
+  PASSED:       141
   FAILED:       1
-  CRASHED:      1
+  CRASHED:      0
 =========================================
