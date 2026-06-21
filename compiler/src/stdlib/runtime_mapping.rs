@@ -3738,13 +3738,14 @@ impl StdlibMapping {
             map_method!(instance "rayzor_ds_QTensor", "matmulXTQ" => "QTensor_matmulXTQ",
                 params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
             // qt.matmulXTQChunk(x: Tensor, y: Tensor, nStart: Int, nEnd: Int): Int
-            // The Haxe-side NumaPool dispatch builds Y itself, splits the
+            // The Haxe-side WorkerPool dispatch builds Y itself, splits the
             // row range across workers, and calls this per chunk.
             map_method!(instance "rayzor_ds_QTensor", "matmulXTQChunk" => "QTensor_matmulXTQChunk",
                 params: 4, mir_wrapper, types: &[PtrVoid, PtrVoid, PtrVoid, I64, I64] => I64),
             // qt.matmulXTQThreaded(x: Tensor, threads: Int): Tensor
-            // Runtime-side fork-join entry point. Use this until the
-            // NumaPool-import cascade in nue.Linear is resolved.
+            // Runtime-side fork-join entry point; the established default while
+            // the WorkerPool.parallelRows band-loop path is re-verified post
+            // WorkerPool fix chain (an earlier nue.Linear import cascade).
             map_method!(instance "rayzor_ds_QTensor", "matmulXTQThreaded" => "QTensor_matmulXTQThreaded",
                 params: 2, mir_wrapper, types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
             // QTensor.fusedQkvMatmul(x: Tensor, qW: QTensor, kW: QTensor,
