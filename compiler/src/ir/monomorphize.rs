@@ -284,12 +284,31 @@ impl Monomorphizer {
                 if !generic_funcs.contains(func_id) {
                     return None;
                 }
+                let dbg_mono = std::env::var("RAYZOR_DUMP_MONO").is_ok();
                 // Use explicit type_args if available
                 if !type_args.is_empty() {
+                    if dbg_mono {
+                        if let Some(c) = module.functions.get(func_id) {
+                            eprintln!(
+                                "[mono] call->{:?} {} EXPLICIT type_args={:?}",
+                                func_id, c.name, type_args
+                            );
+                        }
+                    }
                     return Some((*func_id, type_args.clone()));
                 }
                 // Infer type_args from argument register types
                 let callee = module.functions.get(func_id)?;
+                if dbg_mono {
+                    let ptys: Vec<_> =
+                        callee.signature.parameters.iter().map(|p| p.ty.clone()).collect();
+                    eprintln!(
+                        "[mono] call->{:?} {} NO explicit type_args; type_params={:?} param_tys={:?}",
+                        func_id, callee.name,
+                        callee.signature.type_params.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                        ptys
+                    );
+                }
                 let mut inferred_args = Vec::new();
                 for type_param in &callee.signature.type_params {
                     let mut found = false;
@@ -308,6 +327,12 @@ impl Monomorphizer {
                     }
                     if !found {
                         // Can't infer all type params — skip
+                        if dbg_mono {
+                            eprintln!(
+                                "[mono]   -> cannot infer type_param '{}' (no TypeVar param matches); SKIP specialization",
+                                type_param.name
+                            );
+                        }
                         return None;
                     }
                 }

@@ -777,6 +777,12 @@ impl CraneliftBackend {
                         "[COMPILE_FAIL] Skipping function '{}' ({}): {}",
                         function.name, func_id, e
                     );
+                    if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                        eprintln!(
+                            "[COMPILE_FAIL] {:?} {} (qn={:?}): {}",
+                            func_id, function.name, function.qualified_name, e
+                        );
+                    }
                     failed_funcs.insert(*func_id);
                     // Define a trap stub so finalize_definitions doesn't panic
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
