@@ -18864,9 +18864,58 @@ impl<'a> HirToMirContext<'a> {
                         .map(|f| f.signature.parameters.len())
                         .unwrap_or(0);
 
+                    // Generic constructor specialization: a `new Foo<T1,T2>(...)`
+                    // call must carry the concrete type args so the monomorphizer
+                    // can specialize Foo.new. Untyped constructor params lower to
+                    // `*void`, which defeats the monomorphizer's TypeVar-based
+                    // argument inference (extract_generic_call), so without explicit
+                    // type_args the generic ctor template is left un-monomorphized
+                    // and trap-stubbed → SIGILL at runtime. This bit haxe.ds.TreeNode
+                    // (self-referential `left`/`right` + an in-ctor method call).
+                    // Prefer the explicit `new Foo<...>` args; fall back to the
+                    // class_type's own type_args (GenericInstance / Class).
+                    let ctor_type_args: Vec<IrType> = {
+                        let mut ta_ids: Vec<TypeId> = hir_type_args.to_vec();
+                        if ta_ids.is_empty() {
+                            if let Some(ti) = self.type_table.get(*class_type) {
+                                ta_ids = match &ti.kind {
+                                    crate::tast::TypeKind::GenericInstance { type_args, .. }
+                                    | crate::tast::TypeKind::Class { type_args, .. } => {
+                                        type_args.clone()
+                                    }
+                                    _ => Vec::new(),
+                                };
+                            }
+                        }
+                        let converted: Vec<IrType> =
+                            ta_ids.iter().map(|&t| self.convert_type(t)).collect();
+                        // Only request specialization when every arg is concrete; an
+                        // unresolved TypeVar means we're still inside a generic
+                        // context and the enclosing instantiation handles it.
+                        if converted.is_empty()
+                            || converted.iter().any(|t| matches!(t, IrType::TypeVar(_)))
+                        {
+                            Vec::new()
+                        } else {
+                            converted
+                        }
+                    };
+
                     // Constructor returns void, so we ignore the result
-                    self.builder
-                        .build_call_direct(constructor_func_id, arg_regs, IrType::Void);
+                    if ctor_type_args.is_empty() {
+                        self.builder.build_call_direct(
+                            constructor_func_id,
+                            arg_regs,
+                            IrType::Void,
+                        );
+                    } else {
+                        self.builder.build_call_direct_with_type_args(
+                            constructor_func_id,
+                            arg_regs,
+                            IrType::Void,
+                            ctor_type_args,
+                        );
+                    }
 
                     // Transfer ownership: constructor args that are heap-allocated
                     // are now owned by the new object (stored in its fields).
