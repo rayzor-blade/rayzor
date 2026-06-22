@@ -2958,6 +2958,7 @@ impl CompilationUnit {
         // Without this, every transient dependency-ordering failure surfaces
         // (e.g. `Cannot find name 'FPHelper'` from haxe.io.Input compiled
         // before haxe.io.FPHelper) even though the retry succeeds.
+        let first_pass_snapshot = self.collected_diagnostics.len();
         let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>, usize)> = Vec::new();
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
@@ -2971,29 +2972,38 @@ impl CompilationUnit {
             }
         }
 
-        // Retry failed files — their dependencies should now be registered
-        // from successful compilations in the first pass. If retry succeeds,
-        // discard the first-pass errors (transient dependency ordering).
-        // If retry also fails, keep both attempts' errors so the user sees
-        // the actual problem.
-        for (name, file_path, source, deps, pre_first_snapshot) in retry_queue {
-            let pre_retry_snapshot = self.collected_diagnostics.len();
-            if self.try_compile_import(&name, &file_path, &source, deps) {
-                // Retry succeeded: discard the first-pass errors. The retry
-                // path also pushed no errors (Ok branch), so truncating to
-                // pre_first_snapshot drops only the now-irrelevant noise.
-                self.collected_diagnostics.truncate(pre_first_snapshot);
-            } else {
-                // Retry also failed: keep retry's errors, but drop the
-                // first-pass noise — the retry's diagnostic is the real
-                // signal (final ordering, all deps in place).
-                let retry_errors: Vec<_> = self
-                    .collected_diagnostics
-                    .drain(pre_retry_snapshot..)
-                    .collect();
-                self.collected_diagnostics.truncate(pre_first_snapshot);
-                self.collected_diagnostics.extend(retry_errors);
+        // Retry failed files until a pass resolves nothing new. Their
+        // dependencies get registered as earlier files in the queue succeed —
+        // but a DEEP import chain (A imports B imports C, all failing the first
+        // pass on ordering) needs as many passes as its depth. The prior code
+        // did a SINGLE retry, so it cleared only one level: a long chain like
+        // `Main -> GGUFLoader -> GGUFReader.TensorInfo -> ...` left the tail
+        // stranded as an empty MIR module whose methods then trap as forward-ref
+        // stubs (udf #0xc11f / wasm unreachable) at unrelated call sites. Each
+        // pass discards transient ordering errors (truncate to
+        // first_pass_snapshot); only the survivors of a no-progress pass are
+        // surfaced as genuine failures. A failed attempt pushes no MIR (the
+        // pop+push is in try_compile_import's Ok branch), so re-attempting is
+        // safe and never duplicates a module.
+        let mut pending: Vec<(String, PathBuf, String, Vec<String>)> = retry_queue
+            .into_iter()
+            .map(|(n, p, s, d, _snap)| (n, p, s, d))
+            .collect();
+        loop {
+            self.collected_diagnostics.truncate(first_pass_snapshot);
+            let before = pending.len();
+            let mut next = Vec::new();
+            for (name, file_path, source, deps) in std::mem::take(&mut pending) {
+                if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
+                    next.push((name, file_path, source, deps));
+                }
             }
+            // No progress: the survivors are genuine failures; their errors
+            // (pushed after first_pass_snapshot during this pass) are kept.
+            if next.len() == before {
+                break;
+            }
+            pending = next;
         }
 
         // Fixup pass: resolve stale cross-module refs that couldn't be resolved during
@@ -3171,6 +3181,22 @@ impl CompilationUnit {
                 true
             }
             Err(errors) => {
+                // LOUD-FAIL: an imported module that fails to compile yields an
+                // empty MIR, so every call into it lowers to a forward-ref stub
+                // that traps (udf #0xc11f / wasm `unreachable`) at call time with
+                // NO diagnostic — surfacing as a SIGILL at an unrelated site in
+                // the importer (e.g. GGUFLoader.loadWithTokenizer). The
+                // collected-diagnostic path below does not reliably reach the
+                // `run` output, so print the failure directly here.
+                eprintln!(
+                    "error[IMPORT]: imported module `{}` failed to compile ({} error(s)); \
+                     calls into it will trap at runtime. First errors:",
+                    name,
+                    errors.len()
+                );
+                for e in errors.iter().take(8) {
+                    eprintln!("    {} ({}:{})", e.message, e.location.line, e.location.column);
+                }
                 // Surface import failures via the regular diagnostic
                 // pipeline. Previously these went only to debug-log and the
                 // caller saw "false" — so a parse/type error in an imported
