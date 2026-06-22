@@ -2406,23 +2406,45 @@ impl<'a> AstLowering<'a> {
                         // Register variants under the corrected enum symbol.
                         for variant in &enum_decl.constructors {
                             let variant_name = self.context.intern_string(&variant.name);
-                            let already_present = self
+                            // Look at any same-named symbol already in root scope.
+                            let existing_info = self
                                 .context
                                 .symbol_table
                                 .lookup_symbol(ScopeId::first(), variant_name)
-                                .is_some();
-                            if !already_present {
+                                .map(|e| (e.id, e.kind));
+                            // Reuse only a same-parent EnumVariant (avoid duplicates).
+                            let is_same_parent_variant = match existing_info {
+                                Some((eid, crate::tast::symbols::SymbolKind::EnumVariant)) => self
+                                    .context
+                                    .symbol_table
+                                    .find_parent_enum_for_constructor(eid)
+                                    == Some(existing_id),
+                                _ => false,
+                            };
+                            if !is_same_parent_variant {
+                                // ALWAYS create the variant symbol so it is findable via
+                                // all_symbols() and linked to its parent enum — even when its
+                                // name collides with a builtin TYPE (e.g. variant `Bool` vs the
+                                // builtin `Bool` Abstract). Previously this branch skipped on
+                                // any collision, so the variant was never created at all and a
+                                // `Bool(x)` constructor call silently resolved to the type,
+                                // producing a value-less return (W0020 -> SIGILL in nue's
+                                // GGUFReader.readValue). Only insert into the scope NAME-map
+                                // when the slot is free, so the builtin isn't clobbered; the
+                                // call-site collision fix redirects `Bool(args)` to the variant.
                                 let variant_symbol =
                                     self.context.symbol_table.create_enum_variant_in_scope(
                                         variant_name,
                                         ScopeId::first(),
                                         existing_id,
                                     );
-                                self.context
-                                    .scope_tree
-                                    .get_scope_mut(ScopeId::first())
-                                    .expect("Root scope should exist")
-                                    .add_symbol(variant_symbol, variant_name);
+                                if existing_info.is_none() {
+                                    self.context
+                                        .scope_tree
+                                        .get_scope_mut(ScopeId::first())
+                                        .expect("Root scope should exist")
+                                        .add_symbol(variant_symbol, variant_name);
+                                }
                             }
                         }
                     }
@@ -2469,18 +2491,34 @@ impl<'a> AstLowering<'a> {
                 // during pattern matching even before the enum is fully lowered
                 for variant in &enum_decl.constructors {
                     let variant_name = self.context.intern_string(&variant.name);
+                    // Is the bare name already taken (e.g. by the builtin `Bool`
+                    // Abstract type, or another enum's same-named arm)?
+                    let slot_taken = self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(ScopeId::first(), variant_name)
+                        .is_some();
                     let variant_symbol = self.context.symbol_table.create_enum_variant_in_scope(
                         variant_name,
                         ScopeId::first(),
                         enum_symbol,
                     );
 
-                    // Add variant to root scope for global resolution
-                    self.context
-                        .scope_tree
-                        .get_scope_mut(ScopeId::first())
-                        .expect("Root scope should exist")
-                        .add_symbol(variant_symbol, variant_name);
+                    // Standard Haxe keeps enum constructors in the ENUM's namespace, so
+                    // an arm named like a type (`MetaValue.Bool` vs builtin `Bool`) is
+                    // legal. Only insert the arm into the global root scope name-map when
+                    // the slot is FREE — otherwise we'd clobber the builtin type (breaking
+                    // `var x:Bool` / the arm's own `Bool` param type) which produced a
+                    // value-less return / W0020 SIGILL. The arm stays findable via
+                    // all_symbols() + parent-linked; a bare `Bool(x)` constructor call is
+                    // redirected to it at the call site (lower_call_expression collision fix).
+                    if !slot_taken {
+                        self.context
+                            .scope_tree
+                            .get_scope_mut(ScopeId::first())
+                            .expect("Root scope should exist")
+                            .add_symbol(variant_symbol, variant_name);
+                    }
                 }
             }
             TypeDeclaration::Typedef(typedef_decl) => {
@@ -9946,26 +9984,58 @@ impl<'a> AstLowering<'a> {
                         let mut is_variant =
                             symbol.kind == crate::tast::symbols::SymbolKind::EnumVariant;
 
-                        // Name collision fix: if we resolved to an Enum type but this is
-                        // a call with args (e.g., Error("oops")), search for an EnumVariant
-                        // with the same name whose parent enum's qualified name matches
-                        // a user import. This handles cases like Result.Error colliding
-                        // with haxe.io.Error enum type in the global scope.
+                        // Name collision fix: if we resolved to a TYPE but this is a call
+                        // with args (e.g., `Error("oops")`, `Bool(v != 0)`), search for an
+                        // EnumVariant with the same name. A type called with args is only
+                        // valid as an enum constructor, so a same-named variant must win.
+                        // Covers `Result.Error` vs the `haxe.io.Error` enum type AND
+                        // `MetaValue.Bool` vs the builtin `Bool` Abstract type (the variant
+                        // is shadowed in scope by the primitive; without this the
+                        // construction silently elides to a value-less return -> W0020 ->
+                        // SIGILL). Selection prefers an imported parent enum; falls back to
+                        // a single unambiguous candidate for same-file (unimported) enums.
                         if !is_variant
-                            && symbol.kind == crate::tast::symbols::SymbolKind::Enum
+                            && matches!(
+                                symbol.kind,
+                                crate::tast::symbols::SymbolKind::Enum
+                                    | crate::tast::symbols::SymbolKind::Abstract
+                                    | crate::tast::symbols::SymbolKind::Class
+                                    | crate::tast::symbols::SymbolKind::Interface
+                                    | crate::tast::symbols::SymbolKind::TypeAlias
+                            )
                             && !arg_exprs.is_empty()
                         {
                             let name = symbol.name;
-                            // Collect candidate variant symbols with matching name
-                            let candidates: Vec<_> = self
+                            // Match by NAME STRING, not InternedString id: the colliding
+                            // type symbol (e.g. builtin `Bool`) and the enum variant
+                            // (`MetaValue.Bool`) are interned in different contexts and get
+                            // different ids, so an id-only compare finds zero candidates.
+                            let name_str =
+                                self.context.string_interner.get(name).map(|s| s.to_string());
+                            // Collect all enum variants (id, name) owned, releasing the
+                            // symbol_table borrow before re-borrowing the interner.
+                            let all_variants: Vec<_> = self
                                 .context
                                 .symbol_table
                                 .all_symbols()
                                 .filter(|s| {
-                                    s.name == name
-                                        && s.kind == crate::tast::symbols::SymbolKind::EnumVariant
+                                    s.kind == crate::tast::symbols::SymbolKind::EnumVariant
                                 })
-                                .map(|s| s.id)
+                                .map(|s| (s.id, s.name))
+                                .collect();
+                            let candidates: Vec<_> = all_variants
+                                .into_iter()
+                                .filter(|(_, vn)| {
+                                    *vn == name
+                                        || (name_str.is_some()
+                                            && self
+                                                .context
+                                                .string_interner
+                                                .get(*vn)
+                                                .map(|s| s.to_string())
+                                                == name_str)
+                                })
+                                .map(|(id, _)| id)
                                 .collect();
 
                             // Build set of imported qualified names from user imports
@@ -9990,7 +10060,7 @@ impl<'a> AstLowering<'a> {
                             }
 
                             // Pick the candidate whose parent enum's qualified name is imported
-                            for candidate_id in candidates {
+                            for &candidate_id in &candidates {
                                 if let Some(parent_enum) = self
                                     .context
                                     .symbol_table
@@ -10024,6 +10094,60 @@ impl<'a> AstLowering<'a> {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+
+                            // Same-file / unimported enum: the import-based match above
+                            // didn't fire (the parent enum is declared in the same file as
+                            // its consumer, so it is never in `imported_qnames`). Dedupe the
+                            // candidates by their parent enum's qualified name — import
+                            // compilation registers the same variant in multiple contexts,
+                            // so raw `candidates.len()` is often >1 for one logical variant.
+                            // If all candidates share ONE parent enum, the variant is
+                            // unambiguous — prefer it. This is the `MetaValue.Bool` case.
+                            if !is_variant && !candidates.is_empty() {
+                                let mut parent_qns = std::collections::BTreeSet::new();
+                                for &c in &candidates {
+                                    if let Some(pe) = self
+                                        .context
+                                        .symbol_table
+                                        .find_parent_enum_for_constructor(c)
+                                    {
+                                        if let Some(ps) =
+                                            self.context.symbol_table.get_symbol(pe)
+                                        {
+                                            // Key by qualified name when set, else the
+                                            // bare enum name — a same-file enum's parent
+                                            // often has no qualified_name, and multiple
+                                            // registrations would otherwise look distinct.
+                                            let key = ps
+                                                .qualified_name
+                                                .or(Some(ps.name))
+                                                .and_then(|q| self.context.string_interner.get(q))
+                                                .map(|s| s.to_string())
+                                                .unwrap_or_else(|| format!("#{:?}", pe));
+                                            parent_qns.insert(key);
+                                        }
+                                    }
+                                }
+                                if parent_qns.len() == 1 {
+                                    let candidate_id = candidates[0];
+                                    if let Some(variant_sym) =
+                                        self.context.symbol_table.get_symbol(candidate_id)
+                                    {
+                                        resolved_id = candidate_id;
+                                        is_variant = true;
+                                        func_expr = TypedExpression {
+                                            kind: TypedExpressionKind::Variable {
+                                                symbol_id: resolved_id,
+                                            },
+                                            expr_type: variant_sym.type_id,
+                                            usage: func_expr.usage.clone(),
+                                            lifetime_id: func_expr.lifetime_id,
+                                            source_location: func_expr.source_location,
+                                            metadata: func_expr.metadata.clone(),
+                                        };
                                     }
                                 }
                             }
