@@ -151,6 +151,13 @@ pub struct CompilationUnit {
     /// Passed to user file's MIR lowering so it can resolve field access on imported classes
     import_field_index_map: BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
 
+    /// Last-attempt import-compile errors per module name. try_compile_import runs
+    /// once per retry pass, so its errors must NOT be printed inline (that
+    /// over-reports transient ordering failures a later pass resolves). They are
+    /// stashed here and only the genuine FINAL survivors are surfaced after the
+    /// retry loop converges.
+    last_import_errors: BTreeMap<String, Vec<String>>,
+
     /// Accumulated field class names from imported files (SymbolId -> qualified class name)
     /// Used by BLADE cache to serialize field entries with correct class names
     import_field_class_names: BTreeMap<crate::tast::SymbolId, String>,
@@ -553,6 +560,7 @@ impl CompilationUnit {
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
             import_field_index_map: BTreeMap::new(),
+            last_import_errors: BTreeMap::new(),
             import_field_class_names: BTreeMap::new(),
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
@@ -3002,7 +3010,7 @@ impl CompilationUnit {
             .into_iter()
             .map(|(n, p, s, d, _snap)| (n, p, s, d))
             .collect();
-        loop {
+        let final_failures: Vec<String> = loop {
             self.collected_diagnostics.truncate(first_pass_snapshot);
             let before = pending.len();
             let mut next = Vec::new();
@@ -3014,9 +3022,29 @@ impl CompilationUnit {
             // No progress: the survivors are genuine failures; their errors
             // (pushed after first_pass_snapshot during this pass) are kept.
             if next.len() == before {
-                break;
+                break next.into_iter().map(|(n, ..)| n).collect();
             }
             pending = next;
+        };
+
+        // LOUD-FAIL only the genuine FINAL failures — modules still unresolved
+        // after the retry loop converged. Transient first-pass ordering failures
+        // (a module compiled before its dependency) are NOT reported here, since
+        // a later pass resolved them. Each call into a truly-failed module lowers
+        // to a forward-ref trap stub (udf #0xc11f / wasm `unreachable`), so this
+        // is the difference between a clean run and a silent SIGILL.
+        for name in &final_failures {
+            if let Some(errs) = self.last_import_errors.get(name) {
+                eprintln!(
+                    "error[IMPORT]: imported module `{}` failed to compile ({} error(s)); \
+                     calls into it will trap at runtime. First errors:",
+                    name,
+                    errs.len()
+                );
+                for line in errs.iter().take(8) {
+                    eprintln!("    {}", line);
+                }
+            }
         }
 
         // Fixup pass: resolve stale cross-module refs that couldn't be resolved during
@@ -3197,19 +3225,20 @@ impl CompilationUnit {
                 // LOUD-FAIL: an imported module that fails to compile yields an
                 // empty MIR, so every call into it lowers to a forward-ref stub
                 // that traps (udf #0xc11f / wasm `unreachable`) at call time with
-                // NO diagnostic — surfacing as a SIGILL at an unrelated site in
-                // the importer (e.g. GGUFLoader.loadWithTokenizer). The
-                // collected-diagnostic path below does not reliably reach the
-                // `run` output, so print the failure directly here.
-                eprintln!(
-                    "error[IMPORT]: imported module `{}` failed to compile ({} error(s)); \
-                     calls into it will trap at runtime. First errors:",
-                    name,
-                    errors.len()
+                // NO diagnostic. Stash this attempt's errors keyed by module name
+                // — try_compile_import runs once per retry pass, so printing here
+                // would over-report transient ordering failures that a later pass
+                // resolves. The retry loop surfaces only the genuine FINAL
+                // survivors (see load_imports_efficiently) from this map.
+                self.last_import_errors.insert(
+                    name.to_string(),
+                    errors
+                        .iter()
+                        .map(|e| {
+                            format!("{} ({}:{})", e.message, e.location.line, e.location.column)
+                        })
+                        .collect(),
                 );
-                for e in errors.iter().take(8) {
-                    eprintln!("    {} ({}:{})", e.message, e.location.line, e.location.column);
-                }
                 // Surface import failures via the regular diagnostic
                 // pipeline. Previously these went only to debug-log and the
                 // caller saw "false" — so a parse/type error in an imported
