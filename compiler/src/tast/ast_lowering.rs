@@ -7781,6 +7781,26 @@ impl<'a> AstLowering<'a> {
                 field,
                 is_optional,
             } => {
+                // Char-literal magic: `'X'.code` inlines the character code at
+                // compile time (documented in String.hx: `"x".code` "inline the
+                // character code at compile time"). The receiver is a single-char
+                // string literal; fold it to the Int constant here so it never
+                // depends on resolving a `code` member on String (there is none).
+                // Without this, StringTools/EReg etc. fail to compile under import
+                // isolation (`'+'.code` falls through to String field resolution),
+                // and `case 'X'.code:` switch patterns require a constant.
+                if field == "code" {
+                    if let ExprKind::String(s) = &expr.kind {
+                        let mut chars = s.chars();
+                        if let (Some(c), None) = (chars.next(), chars.next()) {
+                            let int_expr = Expr {
+                                kind: ExprKind::Int(c as i64),
+                                span: expression.span,
+                            };
+                            return self.lower_expression(&int_expr);
+                        }
+                    }
+                }
                 return self.lower_field_expression(expression, expr, field, *is_optional);
             }
             ExprKind::Index { expr, index } => {
