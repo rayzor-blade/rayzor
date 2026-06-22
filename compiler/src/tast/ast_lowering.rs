@@ -11594,14 +11594,15 @@ impl<'a> AstLowering<'a> {
             let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
             let source_location = self.context.create_location_from_span(expression.span);
 
-            // For key-only iteration: value_var gets key type
-            // For key=>value iteration: value_var gets value type, key_var gets key type
+            // The loop variable always binds the VALUE: `for (v in map)` iterates map
+            // VALUES in Haxe (keys come from `for (k in map.keys())`), and
+            // `for (k => v in map)` binds v to the value and k to the key. Previously
+            // single-variable iteration bound the variable to the KEY type, so e.g.
+            // `for (v in stringIntMap) sum += v` typed v as String → `sum += v`
+            // compiled as string concat and the Int value was cast to a string
+            // pointer → SIGSEGV.
             let var_name = self.context.intern_string(var);
-            let var_type = if key_var.is_some() {
-                value_type_id
-            } else {
-                key_type_id
-            };
+            let var_type = value_type_id;
             let var_symbol = self.context.symbol_table.create_variable_with_type(
                 var_name,
                 loop_body_scope_id,

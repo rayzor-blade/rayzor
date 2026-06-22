@@ -29807,30 +29807,31 @@ impl<'a> HirToMirContext<'a> {
                 return;
             };
 
-            // Call keys_to_array to get a HaxeArray of keys
             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-            let keys_fn_name = if is_int_key {
-                "haxe_intmap_keys_to_array"
-            } else if is_string_key {
-                "haxe_stringmap_keys_to_array"
-            } else {
-                "haxe_objectmap_keys_to_array"
-            };
-            let keys_fn = self.get_or_register_extern_function(
-                keys_fn_name,
-                vec![ptr_void.clone()],
-                ptr_void.clone(),
-            );
-            let Some(keys_array) = self
-                .builder
-                .build_call_direct(keys_fn, vec![map_ptr], ptr_void)
-            else {
-                return;
-            };
 
-            // Check if this is key=>value iteration (Tuple pattern)
+            // key=>value iteration (Tuple pattern): iterate the keys array and look
+            // up each value via map.get(key).
             if let HirPattern::Tuple(sub_patterns) = pattern {
                 if sub_patterns.len() == 2 {
+                    let keys_fn_name = if is_int_key {
+                        "haxe_intmap_keys_to_array"
+                    } else if is_string_key {
+                        "haxe_stringmap_keys_to_array"
+                    } else {
+                        "haxe_objectmap_keys_to_array"
+                    };
+                    let keys_fn = self.get_or_register_extern_function(
+                        keys_fn_name,
+                        vec![ptr_void.clone()],
+                        ptr_void.clone(),
+                    );
+                    let Some(keys_array) = self.builder.build_call_direct(
+                        keys_fn,
+                        vec![map_ptr],
+                        ptr_void.clone(),
+                    ) else {
+                        return;
+                    };
                     self.lower_for_in_map_kv(
                         &sub_patterns[0],
                         &sub_patterns[1],
@@ -29847,8 +29848,31 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Key-only iteration: iterate over the keys array
-            self.lower_for_in_over_array(pattern, keys_array, key_type, body, label);
+            // Single-variable `for (v in map)` iterates VALUES in Haxe — NOT keys.
+            // (Keys are iterated with `for (k in map.keys())`.) Previously this bound
+            // the loop variable to the key, so `for (v in intMap) sum += v` summed the
+            // keys. Iterate a values array directly so the loop variable binds each
+            // value. (A keys-array + per-key map.get with a wildcard key dropped the
+            // string key temporary before the lookup and SIGSEGV'd on StringMap.)
+            let values_fn_name = if is_int_key {
+                "haxe_intmap_values_to_array"
+            } else if is_string_key {
+                "haxe_stringmap_values_to_array"
+            } else {
+                "haxe_objectmap_values_to_array"
+            };
+            let values_fn = self.get_or_register_extern_function(
+                values_fn_name,
+                vec![ptr_void.clone()],
+                ptr_void.clone(),
+            );
+            let Some(values_array) =
+                self.builder
+                    .build_call_direct(values_fn, vec![map_ptr], ptr_void)
+            else {
+                return;
+            };
+            self.lower_for_in_over_array(pattern, values_array, value_type, body, label);
             return;
         }
 
