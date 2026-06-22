@@ -3251,6 +3251,16 @@ impl<'a> TastToHirContext<'a> {
                 // stores to the global via global_symbol_map lookup.
                 HirLValue::Variable(*field_symbol)
             }
+            TypedExpressionKind::This { .. } => {
+                // In an abstract, `this` IS the underlying value, bound to param 0
+                // (SymbolId 0) in MIR — `HirExprKind::This` reads exactly
+                // symbol_map[SymbolId(0)]. `this = x` rebinds that register; the
+                // abstract underlying is by-value (by_ref:false), so the SSA rebind
+                // is the correct (and only) semantics — there is no caller aliasing.
+                // Fixes the in-method-body form of abstract `this = x` (e.g. Haxe's
+                // Int64.new) which previously hit "Invalid assignment target".
+                HirLValue::Variable(SymbolId::from_raw(0))
+            }
             _ => {
                 self.add_error("Invalid assignment target", expr.source_location);
                 // Return invalid symbol - this will be caught during validation
