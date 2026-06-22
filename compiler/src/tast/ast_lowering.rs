@@ -4218,10 +4218,20 @@ impl<'a> AstLowering<'a> {
         let underlying_type = match &abstract_decl.underlying {
             Some(underlying) => Some(self.lower_type(underlying)?),
             None => {
-                // Core types like @:coreType abstract Void {} don't have underlying types
-                // Check if this is a core type
-                let is_core_type = abstract_decl.meta.iter().any(|m| m.name == "coreType");
-                if is_core_type {
+                // @:coreType abstracts (e.g. `@:coreType abstract Void {}`) AND
+                // extern/@:native abstracts (e.g. `@:native("rayzor::Ptr") extern
+                // abstract Ptr<T>` — also Usize/Ref/Box) are OPAQUE: their
+                // representation lives in the native impl, not a Haxe underlying
+                // type. The stdlib-merge path tolerates the missing underlying,
+                // but the import-compile path used to hard-error here, so when a
+                // user file imported Ptr/Usize the module compiled to empty MIR
+                // and every call into it trapped (udf #0xc11f / wasm unreachable)
+                // at the importer's call sites. Treat them as opaque (None).
+                let is_opaque = abstract_decl
+                    .meta
+                    .iter()
+                    .any(|m| m.name == "coreType" || m.name == "native");
+                if is_opaque {
                     None
                 } else {
                     return Err(LoweringError::IncompleteImplementation {
