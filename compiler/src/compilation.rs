@@ -582,6 +582,19 @@ impl CompilationUnit {
     /// All file parsing should use this to ensure #if wasm etc. work consistently.
     fn preprocessor_config(&self) -> parser::preprocessor::PreprocessorConfig {
         let mut config = parser::preprocessor::PreprocessorConfig::default();
+        // rayzor is a native/JIT target — masquerade as Haxe's `eval` (macro
+        // interpreter) target for stdlib conditional compilation. `eval` is the
+        // closest existing Haxe target to rayzor's model, and selecting it makes
+        // the stdlib pick its native extern branches (`#if (flash||cpp||eval)`,
+        // `#if (neko||eval)`) while skipping the JS/Flash dynamic-init branches
+        // (`#if !eval`). Without it, e.g. Math.hx compiles its
+        // `Math.NaN = Number["NaN"]` JS bootstrap, which references the JS global
+        // `Number` and fails ("Cannot find name 'Number'") — Math then never
+        // registers, starving FPHelper/Int32/StringTools and any imported module
+        // that reads Math.POSITIVE_INFINITY or calls StringTools.*.
+        if std::env::var_os("RAYZOR_NO_EVAL_DEFINE").is_none() {
+            config.defines.insert("eval".to_string());
+        }
         for define in &self.config.extra_defines {
             config.defines.insert(define.clone());
         }
