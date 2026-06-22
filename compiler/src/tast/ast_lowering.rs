@@ -7592,12 +7592,45 @@ impl<'a> AstLowering<'a> {
                 let id_name = self.context.intern_string(name);
 
                 // Need to resolve symbol by walking up the scope hierarchy
-                let mut symbol_id =
-                    self.resolve_symbol_in_scope_hierarchy(id_name)
-                        .ok_or_else(|| LoweringError::UnresolvedSymbol {
+                let mut symbol_id = match self.resolve_symbol_in_scope_hierarchy(id_name) {
+                    Some(s) => s,
+                    None => {
+                        // Abstract-method implicit `this`: in an abstract, `this` IS the
+                        // underlying value, so a bare member name that isn't a local/param
+                        // is `this.<name>` — which dispatches to the underlying type's field
+                        // or the abstract's property getter. Synthesizing the field access
+                        // (rather than resolving the bare name to a storage-less property
+                        // symbol) reads the right slot AND is declaration-order-independent.
+                        // Without this, e.g. haxe.Int64.copy() reading bare `high`/`low`
+                        // (properties declared ~400 lines below) failed "Cannot find name".
+                        let in_abstract = self
+                            .context
+                            .class_context_stack
+                            .last()
+                            .and_then(|s| self.context.symbol_table.get_symbol(*s))
+                            .map(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract)
+                            .unwrap_or(false);
+                        if in_abstract {
+                            let this_expr = Expr {
+                                kind: ExprKind::This,
+                                span: expression.span,
+                            };
+                            let field_expr = Expr {
+                                kind: ExprKind::Field {
+                                    expr: Box::new(this_expr),
+                                    field: name.clone(),
+                                    is_optional: false,
+                                },
+                                span: expression.span,
+                            };
+                            return self.lower_expression(&field_expr);
+                        }
+                        return Err(LoweringError::UnresolvedSymbol {
                             name: name.clone(),
                             location: self.context.create_location_from_span(expression.span),
-                        })?;
+                        });
+                    }
+                };
 
                 // Enum-variant disambiguation. If the scope-walk found an enum
                 // variant but the expected arg type is a *different* enum,
