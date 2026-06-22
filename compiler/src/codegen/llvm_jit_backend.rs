@@ -1030,6 +1030,46 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Ok(())
     }
 
+    /// Verify the module, localizing failures to individual functions first.
+    ///
+    /// LLVM's module-level `verify()` builds its diagnostic via `llvm::Twine`, whose
+    /// printer dereferences instruction operands. When a function body contains a value
+    /// with a dangling/malformed operand (e.g. a mis-lowered generic constructor that a
+    /// tier-promoted function reaches), constructing that message crashes the process
+    /// (EXC_BAD_ACCESS in `Twine::printOneChild`) — before we ever see the error string.
+    ///
+    /// Per-function `verify(false)` runs the same analysis but returns a plain `bool`
+    /// without building the message, so it cannot hit that crash. We sweep every defined
+    /// function individually first; if any fail we report them by name and never invoke
+    /// the crashing module-level message path. Only when all functions pass individually
+    /// do we fall back to `module.verify()` for genuinely module-level issues (globals,
+    /// type tables) — which don't carry the dangling-operand hazard.
+    fn verify_module_localized(&self) -> Result<(), String> {
+        let mut bad: Vec<String> = Vec::new();
+        let mut func = self.module.get_first_function();
+        while let Some(f) = func {
+            // Declarations (no body) always "verify"; only check defined functions.
+            if f.count_basic_blocks() > 0 && !f.verify(false) {
+                bad.push(f.get_name().to_string_lossy().into_owned());
+            }
+            func = f.get_next_function();
+        }
+        if !bad.is_empty() {
+            return Err(format!(
+                "LLVM verification failed for {} function(s) (module-level verify suppressed to avoid the Twine printer crash): {}",
+                bad.len(),
+                bad.join(", ")
+            ));
+        }
+        // No individual function failed — surface any module-level error. This path is
+        // far less likely to hit the Twine crash (module-level issues concern globals and
+        // type tables, not dangling instruction operands).
+        if let Err(msg) = self.module.verify() {
+            return Err(format!("LLVM module verification failed: {}", msg.to_string()));
+        }
+        Ok(())
+    }
+
     /// Finalize compilation and create execution engine
     /// Call this after all modules have been compiled
     pub fn finalize(&mut self) -> Result<(), String> {
@@ -1061,18 +1101,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
-        // Verify the module before optimization
-        if let Err(msg) = self.module.verify() {
+        // Verify the module before optimization (localized: names the offending
+        // function without triggering LLVM's crashing Twine message builder).
+        if let Err(msg) = self.verify_module_localized() {
             // Print the module IR for debugging
             if std::env::var("RAYZOR_DUMP_LLVM_IR").is_ok() {
                 eprintln!("=== LLVM IR (verification failed) ===");
                 eprintln!("{}", self.module.print_to_string().to_string());
                 eprintln!("=== End LLVM IR ===");
             }
-            return Err(format!(
-                "LLVM module verification failed: {}",
-                msg.to_string()
-            ));
+            return Err(msg);
         }
 
         // Run LLVM optimization passes before JIT compilation
@@ -1122,12 +1160,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
-        // Verify module before JIT compilation
-        if let Err(msg) = self.module.verify() {
-            return Err(format!(
-                "LLVM module verification failed: {}",
-                msg.to_string()
-            ));
+        // Verify module before JIT compilation (localized; see verify_module_localized).
+        if let Err(msg) = self.verify_module_localized() {
+            return Err(msg);
         }
 
         // Register runtime symbols via LLVM's DynamicLibrary (process-level symbol table)
@@ -1205,12 +1240,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
-        // Verify module before compilation
-        if let Err(msg) = self.module.verify() {
-            return Err(format!(
-                "LLVM module verification failed: {}",
-                msg.to_string()
-            ));
+        // Verify module before compilation (localized; see verify_module_localized).
+        if let Err(msg) = self.verify_module_localized() {
+            return Err(msg);
         }
 
         // Get target machine with PIC mode for shared library
