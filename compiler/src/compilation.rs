@@ -3776,9 +3776,19 @@ impl CompilationUnit {
             crate::ir::IrFunctionId,
             (String, crate::ir::IrFunctionSignature),
         > = std::collections::BTreeMap::new();
+        // Candidates carry their FULL qualified name (3rd tuple element) so the
+        // stub->real match can disambiguate by qualified name. This is essential
+        // for constructors: every class's constructor has the bare name "new" and
+        // many share the signature `(*void)->void`, so a bare-name+signature match
+        // is ambiguous and was silently giving up — leaving e.g. a real
+        // `haxe.ds.BalancedTree.new` stranded behind its forward-ref trap stub.
         let mut real_funcs_by_bare_name: std::collections::BTreeMap<
             String,
-            Vec<(crate::ir::IrFunctionId, crate::ir::IrFunctionSignature)>,
+            Vec<(
+                crate::ir::IrFunctionId,
+                crate::ir::IrFunctionSignature,
+                String,
+            )>,
         > = std::collections::BTreeMap::new();
 
         fn is_empty_forward_ref_stub(func: &crate::ir::IrFunction) -> bool {
@@ -3806,7 +3816,7 @@ impl CompilationUnit {
                     real_funcs_by_bare_name
                         .entry(bare_function_name(qname).to_string())
                         .or_default()
-                        .push((*id, func.signature.clone()));
+                        .push((*id, func.signature.clone(), qname.to_string()));
                 }
             }
         }
@@ -3824,7 +3834,7 @@ impl CompilationUnit {
                     real_funcs_by_bare_name
                         .entry(bare_function_name(qname).to_string())
                         .or_default()
-                        .push((*id, func.signature.clone()));
+                        .push((*id, func.signature.clone(), qname.to_string()));
                 }
             }
         }
@@ -3862,15 +3872,35 @@ impl CompilationUnit {
             sig: &crate::ir::IrFunctionSignature,
             real_funcs_by_bare_name: &std::collections::BTreeMap<
                 String,
-                Vec<(crate::ir::IrFunctionId, crate::ir::IrFunctionSignature)>,
+                Vec<(
+                    crate::ir::IrFunctionId,
+                    crate::ir::IrFunctionSignature,
+                    String,
+                )>,
             >,
             skip_id: Option<crate::ir::IrFunctionId>,
         ) -> Option<crate::ir::IrFunctionId> {
             let bare_name = bare_function_name(name);
             let candidates = real_funcs_by_bare_name.get(bare_name)?;
+            // Qualified-name disambiguation FIRST. Constructors all share the bare
+            // name "new", so bare+sig is ambiguous across classes; prefer a real
+            // candidate whose FULL qualified name equals the stub's (the real
+            // `haxe.ds.BalancedTree.new` rather than some other class's `new`).
+            // The qname pins the class; the signature pins the overload. Take the
+            // first such match — duplicates of one qname+sig are interchangeable.
+            if let Some(real_id) = candidates.iter().find_map(|(cid, csig, cqname)| {
+                if Some(*cid) != skip_id && cqname == name && signatures_match(csig, sig) {
+                    Some(*cid)
+                } else {
+                    None
+                }
+            }) {
+                return Some(real_id);
+            }
+            // Fall back to a UNIQUE bare-name + signature match.
             let mut matches = candidates
                 .iter()
-                .filter_map(|(candidate_id, candidate_sig)| {
+                .filter_map(|(candidate_id, candidate_sig, _)| {
                     if Some(*candidate_id) == skip_id {
                         return None;
                     }
