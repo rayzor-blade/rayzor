@@ -12348,7 +12348,71 @@ impl<'a> HirToMirContext<'a> {
                             false
                         };
 
-                        if is_user_defined && !receiver_needs_special_dispatch {
+                        // A generic instance method imported from another module
+                        // resolves here to a cross-module forward-ref stub whose
+                        // FunctionKind is not UserDefined (the real impl arrives via
+                        // merge + fixup later). The is_user_defined gate would route
+                        // it to the fallback path below, which does NOT attach the
+                        // receiver's concrete type_args — so the monomorphizer can
+                        // never specialize the imported generic method, and its whole
+                        // call chain (e.g. an imported haxe.ds.BalancedTree.set ->
+                        // setLoop -> balance -> compare) reaches codegen as generic
+                        // trap stubs and SIGILLs. Route generic instance-method calls
+                        // through the type_args-aware block regardless of kind, as
+                        // long as the callee is not a genuine extern/intrinsic.
+                        let (callee_has_type_params, callee_is_externish) = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .map(|f| {
+                                (
+                                    !f.signature.type_params.is_empty(),
+                                    matches!(
+                                        f.kind,
+                                        crate::ir::functions::FunctionKind::ExternC
+                                            | crate::ir::functions::FunctionKind::Intrinsic
+                                    ),
+                                )
+                            })
+                            .unwrap_or((false, false));
+                        // A callee registered as an extern (e.g. the iterator-protocol
+                        // methods List.iterator / .keys, which lower to extern Imports
+                        // resolved at link time) must NOT take the receiver-type_args
+                        // route: attaching type_args would ask the monomorphizer to
+                        // specialize an extern that has no body, producing an
+                        // unresolvable `Import` symbol that makes finalize panic on the
+                        // whole module. Real cross-module methods (BalancedTree.set) are
+                        // not in extern_functions, so they still route correctly.
+                        let callee_is_externish = callee_is_externish
+                            || self.builder.module.extern_functions.contains_key(&func_id);
+                        // The callee may be a cross-module function not yet present
+                        // in this module (resolved to its eventual id but merged
+                        // later), so callee_has_type_params is unreliable here. Detect
+                        // genericity from the RECEIVER instead: a concrete generic
+                        // class instance (Class/GenericInstance carrying type_args).
+                        let receiver_is_generic_instance = *is_method
+                            && !args.is_empty()
+                            && {
+                                let rt = self.resolve_through_aliases(args[0].ty);
+                                self.type_table
+                                    .get(rt)
+                                    .map(|t| match &t.kind {
+                                        TypeKind::GenericInstance { type_args, .. }
+                                        | TypeKind::Class { type_args, .. } => {
+                                            !type_args.is_empty()
+                                        }
+                                        _ => false,
+                                    })
+                                    .unwrap_or(false)
+                            };
+                        let route_as_generic_method = *is_method
+                            && !callee_is_externish
+                            && (callee_has_type_params || receiver_is_generic_instance);
+
+                        if (is_user_defined || route_as_generic_method)
+                            && !receiver_needs_special_dispatch
+                        {
                             // Lower args and, for instance method
                             // calls, apply call-boundary materialization
                             // (class→iface fat-ptr wrap, anon coercion).
@@ -12402,13 +12466,21 @@ impl<'a> HirToMirContext<'a> {
                             // For generic class method calls, extract concrete type args
                             // from the receiver's type (e.g., Container<String>.get() → type_args=[String]).
                             // This enables the monomorphizer to specialize the function.
+                            //
+                            // The callee may be a cross-module function not yet merged
+                            // into this module, so its type_params are invisible here
+                            // (has_type_params is false). Fall back to the receiver
+                            // signal: a concrete generic-class instance receiver means
+                            // we still want to attach the receiver's type_args so the
+                            // monomorphizer can specialize the imported generic method.
                             let has_type_params = self
                                 .builder
                                 .module
                                 .functions
                                 .get(&func_id)
                                 .map(|f| !f.signature.type_params.is_empty())
-                                .unwrap_or(false);
+                                .unwrap_or(false)
+                                || (receiver_is_generic_instance && !callee_is_externish);
 
                             // Gather type_args: first from HIR call-site type_args, then from receiver's
                             // generic instance type_args, then from the converted HIR type_args computed
