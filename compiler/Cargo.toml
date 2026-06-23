@@ -69,9 +69,12 @@ rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-ba
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "24", optional = true }
 
-# LLVM backend (optional, for Tier 3 optimization and AOT)
-inkwell = { version = "0.5", features = ["llvm18-0"], optional = true}
-llvm-sys = { version = "180", optional = true }
+# LLVM backend (optional, for Tier 3 optimization and AOT).
+# LLVM 21.1 (matching the sibling Zyntax toolchain). LLVM 18 / llvm-sys 180 had a
+# static-link bug where Target::from_triple failed for every triple despite the
+# targets being registered, silently dropping the LLVM tier to a Cranelift fallback.
+inkwell = { version = "0.7.1", features = ["llvm21-1"], optional = true}
+llvm-sys = { version = "211", optional = true }
 regex = "1.12.3"
 
 
