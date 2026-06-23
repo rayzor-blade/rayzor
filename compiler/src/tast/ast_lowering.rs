@@ -13064,10 +13064,65 @@ impl<'a> AstLowering<'a> {
             let method_type_id = match self.context.symbol_table.get_symbol(method_symbol) {
                 Some(symbol) if symbol.type_id.is_valid() => symbol.type_id,
                 _ => {
-                    // Method symbol has no type info (placeholder for built-in methods).
+                    // Method symbol has no type info. This happens for true
+                    // built-ins (Array/String placeholders) AND for a method
+                    // that a cross-module / typedef receiver bound to a TYPELESS
+                    // PLACEHOLDER symbol — e.g. `bytes.sub(...)` where `bytes :
+                    // haxe.io.Bytes` (a typedef for rayzor.Bytes whose phantom
+                    // Class has an empty scope). Falling straight to
+                    // `infer_builtin_method_type` there silently decays the
+                    // return type to Dynamic (no Bytes arm), and a later
+                    // `.toString()` on that Dynamic mis-dispatches to an
+                    // arbitrary concrete class. So FIRST recover the real
+                    // DECLARED method from the receiver class via
+                    // `resolve_class_method_symbol` (which already handles the
+                    // typedef / phantom-class case and only returns a
+                    // valid-typed symbol) and use its declared return type.
+                    drop(type_table);
+                    let method_name_intern = self
+                        .context
+                        .symbol_table
+                        .get_symbol(method_symbol)
+                        .map(|s| s.name);
+                    let recv_class_symbol = {
+                        let tt = self.context.type_table.borrow();
+                        let mut cur = receiver_type;
+                        let mut found = None;
+                        for _ in 0..8 {
+                            match tt.get(cur).map(|ti| &ti.kind) {
+                                Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) => {
+                                    found = Some(*symbol_id);
+                                    break;
+                                }
+                                Some(crate::tast::core::TypeKind::TypeAlias {
+                                    target_type,
+                                    ..
+                                }) => cur = *target_type,
+                                Some(crate::tast::core::TypeKind::GenericInstance {
+                                    base_type,
+                                    ..
+                                }) => cur = *base_type,
+                                _ => break,
+                            }
+                        }
+                        found
+                    };
+                    if let (Some(mn), Some(cs)) = (method_name_intern, recv_class_symbol) {
+                        if let Some(real_method) = self.resolve_class_method_symbol(cs, mn) {
+                            let real_valid = real_method != method_symbol
+                                && self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(real_method)
+                                    .map_or(false, |s| s.type_id.is_valid());
+                            if real_valid {
+                                return self
+                                    .infer_method_call_return_type(real_method, receiver_type);
+                            }
+                        }
+                    }
                     // Use infer_builtin_method_type to get the method's function type,
                     // then extract the return type from it.
-                    drop(type_table);
                     let method_func_type =
                         self.infer_builtin_method_type(receiver_type, method_symbol)?;
                     let type_table = self.context.type_table.borrow();
@@ -15447,6 +15502,20 @@ impl<'a> AstLowering<'a> {
                                 .type_table
                                 .borrow_mut()
                                 .create_function_type(vec![string_type], array_of_strings))
+                        }
+                        // `rayzor.Bytes` is an `extern class` (compiler/haxe-std/rayzor/Bytes.hx)
+                        // reached via the `haxe.io.Bytes` typedef. Its method signatures'
+                        // return types are NOT established as symbol type_ids on import, so a
+                        // bound `sub`/`toString` symbol is typeless and decays here. Without
+                        // these arms the `_` fallback returns Dynamic, and a chained
+                        // `.toString()` then mis-dispatches to an unrelated class's toString.
+                        // Infer the declared return types: `sub`/`slice` yield the same Bytes
+                        // type as the receiver; `toString`/`getString` yield String.
+                        ("Bytes" | "rayzor_Bytes" | "haxe_io_Bytes", "sub" | "slice") => {
+                            Ok(receiver_type)
+                        }
+                        ("Bytes" | "rayzor_Bytes" | "haxe_io_Bytes", "toString" | "getString") => {
+                            Ok(type_table.string_type())
                         }
                         _ => Ok(type_table.dynamic_type()),
                     }
