@@ -3802,6 +3802,12 @@ impl CompilationUnit {
             name.rsplit('.').next().unwrap_or(name)
         }
 
+        fn effective_name(func: &crate::ir::IrFunction) -> String {
+            func.qualified_name
+                .clone()
+                .unwrap_or_else(|| func.name.clone())
+        }
+
         for m in &self.import_mir_modules {
             for (id, func) in &m.functions {
                 if is_empty_forward_ref_stub(func) {
@@ -3837,6 +3843,73 @@ impl CompilationUnit {
                         .push((*id, func.signature.clone(), qname.to_string()));
                 }
             }
+        }
+
+        // ---- Rebind runtime-intrinsic forward-ref stubs to their extern symbol ----
+        //
+        // `register_stdlib_mir_forward_ref` builds its stub with a *1-block*
+        // `Unreachable` cfg — `IrControlFlowGraph::new()` is NOT empty; it seeds
+        // one entry block whose default terminator is `Unreachable`. For a
+        // stdlib MIR *wrapper* the real body merges in later and replaces it.
+        // But some stubs name a C-ABI RUNTIME symbol (`haxe_bytes_sub`,
+        // `haxe_bytes_get`, `haxe_string_char_code_at_ptr`, …) registered in
+        // the JIT symbol table (runtime/src/plugin_impl.rs) — there is no Haxe
+        // body to merge. Codegen keys `is_extern` off `cfg.blocks.is_empty()`,
+        // so a 1-block stub is NOT recognised as an extern: it is skipped at
+        // definition and the finalize safety net installs a `udf #0xc11f` trap.
+        // A call into one (e.g. `GGUFReader.parse` → `Bytes.sub` →
+        // `haxe_bytes_sub`) then SIGILLs during GGUF load. The very same symbol
+        // also appears as a genuine 0-block extern in another module (that copy
+        // binds fine via `declare_function`'s `Import <name>` path) — the stub
+        // copy just needs the same shape. Clear the stub's cfg so `is_extern`
+        // holds and it binds to the runtime symbol like any extern.
+        //
+        // Gate strictly: only when the name ALSO exists as a true 0-block
+        // extern somewhere (proof it is a runtime-bound symbol) AND has no real
+        // (non-stub, non-empty) body anywhere (a real body means "redirect to
+        // it", handled by the CallDirect rewrite below — not "bind to symbol").
+        let mut extern_only_names: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut real_body_names: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        {
+            let mut scan = |m: &crate::ir::IrModule| {
+                for func in m.functions.values() {
+                    if func.cfg.blocks.is_empty() {
+                        extern_only_names.insert(effective_name(func));
+                    } else if !is_empty_forward_ref_stub(func) {
+                        real_body_names.insert(effective_name(func));
+                    }
+                }
+                for ext in m.extern_functions.values() {
+                    extern_only_names.insert(ext.name.clone());
+                }
+            };
+            for m in &self.import_mir_modules {
+                scan(m);
+            }
+            for m in &self.mir_modules {
+                scan(m);
+            }
+        }
+        let mut stub_ids_to_externize: std::collections::BTreeSet<crate::ir::IrFunctionId> =
+            std::collections::BTreeSet::new();
+        for (id, (name, _sig)) in stub_by_id.iter() {
+            if extern_only_names.contains(name) && !real_body_names.contains(name) {
+                stub_ids_to_externize.insert(*id);
+            }
+        }
+        // Drop the externized ids from the stub map so the CallDirect rewrite
+        // leaves their call sites pointing at the (now extern) function instead
+        // of trying to redirect them to another stub.
+        for id in &stub_ids_to_externize {
+            stub_by_id.remove(id);
+        }
+        if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() && !stub_ids_to_externize.is_empty() {
+            eprintln!(
+                "[rebind-extern] {} runtime-intrinsic stub(s) rebound to extern symbol",
+                stub_ids_to_externize.len()
+            );
         }
 
         // Apply the rewrite to BOTH import_mir_modules and mir_modules
@@ -4021,7 +4094,17 @@ impl CompilationUnit {
             }
         };
 
+        // Clear the cfg of every runtime-intrinsic stub picked above so codegen
+        // sees `is_extern` (empty blocks) and binds it to the runtime symbol.
+        let externize = |module: &mut crate::ir::IrModule| {
+            for (id, func) in module.functions.iter_mut() {
+                if stub_ids_to_externize.contains(id) {
+                    func.cfg.blocks.clear();
+                }
+            }
+        };
         for module in &mut self.import_mir_modules {
+            externize(module);
             rewrite_module(module);
         }
         // `mir_modules` is `Vec<Arc<IrModule>>` (sharable across the
@@ -4029,7 +4112,9 @@ impl CompilationUnit {
         // anyone else holds a handle; in the codegen-prep window only the
         // CompilationContext owns these handles, so this is in-place.
         for module in self.mir_modules.iter_mut() {
-            rewrite_module(std::sync::Arc::make_mut(module));
+            let m = std::sync::Arc::make_mut(module);
+            externize(m);
+            rewrite_module(m);
         }
     }
 
