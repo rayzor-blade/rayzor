@@ -399,8 +399,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         if inst_block != current_block {
             return None;
         }
-        let a = inst.get_operand(0)?.left()?.into_float_value();
-        let b = inst.get_operand(1)?.left()?.into_float_value();
+        let a = inst.get_operand(0)?.value()?.into_float_value();
+        let b = inst.get_operand(1)?.value()?.into_float_value();
         Some((a, b))
     }
 
@@ -424,7 +424,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .build_call(fma_func, &[a.into(), b.into(), c.into()], name)
             .map_err(|e| format!("Failed to build fma call: {}", e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or("fma intrinsic returned void")?
             .into_float_value();
         self.apply_fast_math(result);
@@ -721,7 +721,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .build_call(intrinsic_func, &params, "result")
             .map_err(|e| format!("Failed to build intrinsic call: {}", e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or("Intrinsic returned void unexpectedly")?;
 
         builder
@@ -2498,7 +2498,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
                     let ptr = malloc_result
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or("malloc did not return a value")?
                         .into_pointer_value();
 
@@ -2810,7 +2810,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .map_err(|e| format!("Failed to build indirect call: {}", e))?;
 
                 if let Some(dest) = dest {
-                    if let Some(result_val) = call_site.try_as_basic_value().left() {
+                    if let Some(result_val) = call_site.try_as_basic_value().basic() {
                         self.value_map.insert(*dest, result_val);
                     } else {
                         let placeholder = self.context.i8_type().const_int(0, false).into();
@@ -3029,7 +3029,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .build_call(malloc_fn, &[size_arg.into()], "env_malloc")
                         .map_err(|e| format!("Failed to malloc env: {}", e))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or("malloc did not return a value")?
                         .into_pointer_value();
 
@@ -3106,7 +3106,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .build_call(malloc_fn, &[closure_size.into()], "closure_malloc")
                     .map_err(|e| format!("Failed to malloc closure: {}", e))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or("malloc did not return a value")?
                     .into_pointer_value();
 
@@ -3475,7 +3475,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .build_call(malloc_fn, &[closure_size.into()], "fnref_closure_malloc")
                         .map_err(|e| format!("Failed to malloc function ref closure: {}", e))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or("malloc did not return a value")?
                         .into_pointer_value();
 
@@ -3912,7 +3912,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "sqrt")
                                 .map_err(|e| format!("sqrt call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("sqrt returned void")?
                                 .into_float_value()
                         }
@@ -3933,7 +3933,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "fabs")
                                 .map_err(|e| format!("fabs call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("fabs returned void")?
                                 .into_float_value()
                         }
@@ -3958,7 +3958,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "ceil")
                                 .map_err(|e| format!("ceil call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("ceil returned void")?
                                 .into_float_value()
                         }
@@ -3979,7 +3979,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "floor")
                                 .map_err(|e| format!("floor call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("floor returned void")?
                                 .into_float_value()
                         }
@@ -4000,7 +4000,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "trunc")
                                 .map_err(|e| format!("trunc call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("trunc returned void")?
                                 .into_float_value()
                         }
@@ -4021,7 +4021,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 .build_call(func, &[elem.into()], "round")
                                 .map_err(|e| format!("round call failed: {}", e))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .ok_or("round returned void")?
                                 .into_float_value()
                         }
@@ -4095,7 +4095,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .build_call(func, &[l.into(), r.into()], "minmax")
                         .map_err(|e| format!("MinMax call failed: {}", e))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or("minmax returned void")?;
                     result = self
                         .builder
@@ -4680,7 +4680,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
                 let haxe_str_ptr = result
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or("haxe_string_literal did not return a value")?;
 
                 Ok(haxe_str_ptr)
@@ -5722,7 +5722,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // Coerce to expected parameter type if needed
             let coerced = if let Some(expected_ty) = expected_params.get(i + param_offset) {
                 let actual_ty = val.get_type();
-                if actual_ty == *expected_ty {
+                // inkwell 0.7: function param types are BasicMetadataTypeEnum, so
+                // compare against the metadata-wrapped actual type.
+                if BasicMetadataTypeEnum::from(actual_ty) == *expected_ty {
                     val.into()
                 } else {
                     let cast_name = format!("arg_cast_{}", i);
@@ -5926,7 +5928,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // (Most uses will just use this pointer directly)
             Ok(Some(sret_ptr.into()))
         } else {
-            Ok(call_site.try_as_basic_value().left())
+            Ok(call_site.try_as_basic_value().basic())
         }
     }
 

@@ -61,4 +61,7 @@ rustflags = [
 # hit a "directory not found" error on first build, which is the
 # clear-message-to-install path.
 [env]
-LLVM_SYS_180_PREFIX = { value = "/opt/homebrew/opt/llvm@18", force = false }
+# LLVM 21.1 — homebrew's default `llvm` formula (matches the sibling Zyntax
+# toolchain: inkwell 0.7.1 / llvm-sys 211). `force = false` lets contributors
+# override with their own LLVM 21 path.
+LLVM_SYS_211_PREFIX = { value = "/opt/homebrew/opt/llvm", force = false }
