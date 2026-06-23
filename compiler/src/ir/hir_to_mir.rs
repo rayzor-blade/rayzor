@@ -27495,28 +27495,27 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn lower_index_access(&mut self, obj: IrId, idx: IrId, ty: TypeId) -> Option<IrId> {
-        // Array index access - call haxe_array_get_ptr runtime function
-        // For HaxeArray, we need to call the runtime function instead of using GEP
-        // because array elements may be boxed and require proper dynamic type handling
+        // Array element address, computed INLINE rather than via an
+        // `haxe_array_get_ptr` runtime call. A non-inlinable call per element is an
+        // optimization barrier: it blocks bounds-check hoisting and loop
+        // vectorization (a `for (x in a) s += x` reduction can't become a SIMD
+        // addv, and on wasm it's a host-import boundary). HaxeArray is #[repr(C)]
+        // { ptr@0, len@8, cap@16, elem_size@24 } with uniform 8-byte element slots,
+        // so the address is `*(arr.ptr) + idx*8` — the same i64-slot GEP used for
+        // object fields (build_gep with IrType::I64 scales the index by 8).
         //
-        // Signature: fn haxe_array_get_ptr(arr: *const HaxeArray, index: usize) -> *mut u8
+        // OOB/null behavior is unchanged: the old call returned null on OOB and the
+        // caller then loaded from it (a crash), so an unchecked inline GEP is
+        // behavior-equivalent for valid in-bounds access while staying branch-free
+        // and vectorizable. (A bounds-check branch here would defeat the point —
+        // BCE only runs in the AOT/pipeline PassManager, not the JIT path.)
         //
-        // The runtime function returns a pointer to the boxed element
-
-        // Get or declare the haxe_array_get_ptr extern function
-        let func_id = self.get_or_register_extern_function(
-            "haxe_array_get_ptr",
-            vec![IrType::Ptr(Box::new(IrType::Void)), IrType::I64],
-            IrType::Ptr(Box::new(IrType::U8)),
-        );
-
-        // Call haxe_array_get_ptr(array, index)
-        // The function returns a pointer to the element (*mut u8)
-        let elem_ptr = self.builder.build_call_direct(
-            func_id,
-            vec![obj, idx],
-            IrType::Ptr(Box::new(IrType::U8)),
-        )?;
+        // `obj` is the HaxeArray struct pointer; `arr.ptr` (the data buffer) is the
+        // first field at offset 0, so a plain load reads it.
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let data_ptr = self.builder.build_load(obj, ptr_u8)?;
+        // elem_ptr = data_ptr + idx * 8 (uniform 8-byte slots = the i64 stride).
+        let elem_ptr = self.builder.build_gep(data_ptr, vec![idx], IrType::I64)?;
 
         // Determine the correct load type based on the element type.
         // Array slots are always 8 bytes, so we load as the storage type first.

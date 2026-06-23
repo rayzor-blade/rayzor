@@ -714,7 +714,11 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["haxe_array_get_ptr", "haxe_array_set"])
+        // Array reads (`arr[i]`) are now lowered to an inline load+GEP+load
+        // sequence instead of an `haxe_array_get_ptr` call (so the loop can
+        // vectorize), so only the write path (`arr[i] = x`) still calls into the
+        // runtime. Execution-level check confirms the inline reads are correct.
+        .expect_mir_calls(vec!["haxe_array_set"])
         .expect_level(TestLevel::Execution),
     );
 
