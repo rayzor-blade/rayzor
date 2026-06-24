@@ -773,15 +773,49 @@ impl CompilationUnit {
     /// Source text alone is not enough: `extra_defines` changes `#if`
     /// lowering, so native and wasm builds of the same file must not share
     /// the same per-module artifact.
+    /// Identity hash of the USER PROGRAM being compiled (all user source
+    /// files: filename + content). A `.blade` module cache stores PROGRAM-
+    /// SPECIFIC state — the global function-id renumbering, class memory
+    /// layout, GENERATED reflection ctor wrappers, and inherited-field tables
+    /// are all assigned relative to the full module set of the program that
+    /// produced it. Folding this into every module's cache key (below) makes
+    /// a cached module reusable ONLY for the same program: re-running the same
+    /// program hits; any edit to a user source file (or a different program
+    /// entirely, e.g. the next test in the suite) misses and recompiles.
+    fn user_program_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        "rayzor-program-identity-v1".hash(&mut h);
+        for f in &self.user_files {
+            f.filename.hash(&mut h);
+            if let Some(src) = &f.input {
+                src.hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     fn hash_source_for_config(&self, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
-        "rayzor-blade-source-v3".hash(&mut hasher);
+        "rayzor-blade-source-v4".hash(&mut hasher);
         source.hash(&mut hasher);
         let mut defines = self.config.extra_defines.clone();
         defines.sort();
         defines.hash(&mut hasher);
+        // F6 cache-coherence: a cached module carries state assigned relative
+        // to the WHOLE program (id renumbering, class layout, reflection ctor
+        // wrappers, inherited fields). Two different programs that both import
+        // this module previously SHARED its cache and reused that stale state
+        // — surfacing as `Cannot find name 'root'` (inherited field on a fresh
+        // subclass of a cached parent), the `__reflect_ctor_wrap` W0020
+        // (Cast source undefined), or a load SIGSEGV. Key on the program so the
+        // cache is only reused when it is genuinely valid (same program, no
+        // user-source edits). Sound; trades cross-program incremental reuse for
+        // correctness (cache-on previously required a manual `.rayzor` scrub).
+        self.user_program_hash().hash(&mut hasher);
         // Fold in a content hash of the TRANSITIVE import set. The cache key was
         // previously the entry file's own bytes + defines only, so editing a
         // DEPENDENCY (a `.hx` imported by this entry, directly or transitively)
