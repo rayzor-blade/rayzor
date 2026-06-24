@@ -1801,7 +1801,8 @@ fn run_file(
     );
 
     // Snapshot the upgrade flag before moving `config` into the backend.
-    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry;
+    // `--llvm` forces a whole-module LLVM compile (was ignored in the feature build).
+    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || _llvm;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 

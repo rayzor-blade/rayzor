@@ -1090,6 +1090,45 @@ impl CompileCtx {
                 next_global_idx += 1;
             }
         }
+
+        // Second pass: register any global referenced by a Load/StoreGlobal that
+        // has NO entry in `module.globals`. Static fields (e.g.
+        // haxe.io.FPHelper.LN2) can be lowered to a real `StoreGlobal` in
+        // `__init__` while the backing `IrGlobal` is lost during the MIR
+        // pipeline / module merge — the global lives in a different builder
+        // module than the merged one that reaches the backend. Without an entry
+        // here the StoreGlobal handler fell back to `unwrap_or(0)`, aliasing the
+        // mutable `__stack_pointer` (index 0) and writing a stray (often f64)
+        // value into it → an invalid module. Collect them with a type inferred
+        // from the stored value so they get their own real global slot.
+        for module in modules {
+            for func in module.functions.values() {
+                for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        let (gid, value) = match inst {
+                            IrInstruction::StoreGlobal { global_id, value } => {
+                                (*global_id, Some(*value))
+                            }
+                            IrInstruction::LoadGlobal { global_id, .. } => (*global_id, None),
+                            _ => continue,
+                        };
+                        if self.ir_global_to_idx.contains_key(&gid) {
+                            continue;
+                        }
+                        // Infer the wasm type from the value being stored (the
+                        // global's true type), defaulting to i32 for loads /
+                        // unknown registers.
+                        let vt = value
+                            .and_then(|v| func.register_types.get(&v))
+                            .map(ir_type_to_wasm)
+                            .unwrap_or(ValType::I32);
+                        self.ir_global_to_idx.insert(gid, next_global_idx);
+                        self.user_globals.push((gid, vt, 0));
+                        next_global_idx += 1;
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1617,6 +1656,11 @@ struct FunctionLowerer<'a> {
     /// HaxeString to free immediately AFTER that instruction (its last use).
     /// Computed by `compute_string_free_points`.
     free_points: BTreeMap<(IrBlockId, usize), Vec<IrId>>,
+    /// Scratch local pair (per float ValType) reserved for the float-modulo
+    /// expansion (`a % b = a - floor(a/b)*b`). WASM has no float-rem
+    /// instruction, and the expansion needs each operand twice — but emission
+    /// is `&self`, so the locals are reserved here during `allocate_locals`.
+    float_rem_scratch: BTreeMap<ValType, (u32, u32)>,
 }
 
 /// A CFG shape recognised as a single reducible natural loop whose body is an
@@ -1658,6 +1702,7 @@ impl<'a> FunctionLowerer<'a> {
             block_index: BTreeMap::new(),
             saved_sp_local: 0,
             free_points: BTreeMap::new(),
+            float_rem_scratch: BTreeMap::new(),
         };
 
         // Early return for empty-body functions (extern stubs).
@@ -2049,14 +2094,33 @@ impl<'a> FunctionLowerer<'a> {
                                     | BinaryOp::FDiv
                                     | BinaryOp::FRem
                             );
-                            let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
-                            let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
-                            if lt == ValType::F64 || rt == ValType::F64 {
-                                Some(ValType::F64)
-                            } else if is_fop || lt == ValType::F32 || rt == ValType::F32 {
-                                Some(ValType::F32)
+                            // Bitwise/shift ops are INTEGER-ONLY: their result is
+                            // never a float even if an operand is (e.g. `x |
+                            // Math.round(f)` — Math.round returns f64). Emitting
+                            // i32.or/i32.and on f64 produces an invalid module, so
+                            // the result type must stay integer and the float
+                            // operand is truncated at emission.
+                            let is_bitwise = matches!(
+                                op,
+                                BinaryOp::And
+                                    | BinaryOp::Or
+                                    | BinaryOp::Xor
+                                    | BinaryOp::Shl
+                                    | BinaryOp::Shr
+                                    | BinaryOp::Ushr
+                            );
+                            if is_bitwise {
+                                None // integer result
                             } else {
-                                None // keep I32
+                                let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
+                                let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
+                                if lt == ValType::F64 || rt == ValType::F64 {
+                                    Some(ValType::F64)
+                                } else if is_fop || lt == ValType::F32 || rt == ValType::F32 {
+                                    Some(ValType::F32)
+                                } else {
+                                    None // keep I32
+                                }
                             }
                         }
 
@@ -2178,6 +2242,50 @@ impl<'a> FunctionLowerer<'a> {
                         self.set_local_type(reg, wt);
                     }
                 }
+            }
+        }
+
+        // Reserve scratch local pairs for the float-modulo expansion. WASM has
+        // no float-rem instruction; emission (which is `&self`) expands a float
+        // `a % b` to `a - floor(a/b)*b` and needs each operand twice, so the
+        // scratch locals must be allocated here. One pair per float ValType used
+        // by a float `Rem`/`FRem` (mirrors the emission op_ty selection).
+        let ir = self.ir_func;
+        let mut needed: Vec<ValType> = Vec::new();
+        for block in ir.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let IrInstruction::BinOp {
+                    op, left, right, dest,
+                } = inst
+                {
+                    if !matches!(op, BinaryOp::Rem | BinaryOp::FRem) {
+                        continue;
+                    }
+                    let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
+                    let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
+                    let dt = self.local_type_of(*dest).unwrap_or(ValType::I32);
+                    let op_ty = if dt == ValType::F64 || lt == ValType::F64 || rt == ValType::F64 {
+                        ValType::F64
+                    } else if matches!(op, BinaryOp::FRem)
+                        || dt == ValType::F32
+                        || lt == ValType::F32
+                        || rt == ValType::F32
+                    {
+                        ValType::F32
+                    } else {
+                        ValType::I32
+                    };
+                    if matches!(op_ty, ValType::F64 | ValType::F32) && !needed.contains(&op_ty) {
+                        needed.push(op_ty);
+                    }
+                }
+            }
+        }
+        for op_ty in needed {
+            if !self.float_rem_scratch.contains_key(&op_ty) {
+                let lb = self.alloc_scratch(op_ty);
+                let la = self.alloc_scratch(op_ty);
+                self.float_rem_scratch.insert(op_ty, (la, lb));
             }
         }
     }
@@ -3462,7 +3570,21 @@ impl<'a> FunctionLowerer<'a> {
                         | BinaryOp::FDiv
                         | BinaryOp::FRem
                 );
-                let op_ty = if dest_ty == ValType::F64
+                // Bitwise/shift ops are integer-only: never promote to float (a
+                // float operand is truncated to int below). i32.or/i32.and on an
+                // f64 operand makes the module invalid.
+                let is_bitwise = matches!(
+                    op,
+                    BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::Xor
+                        | BinaryOp::Shl
+                        | BinaryOp::Shr
+                        | BinaryOp::Ushr
+                );
+                let op_ty = if is_bitwise {
+                    ValType::I32
+                } else if dest_ty == ValType::F64
                     || left_ty == ValType::F64
                     || right_ty == ValType::F64
                 {
@@ -3483,7 +3605,38 @@ impl<'a> FunctionLowerer<'a> {
                 self.get_reg(f, *right);
                 self.emit_type_coerce(f, right_ty, op_ty);
 
-                self.emit_binop(f, *op, op_ty);
+                // Float modulo has no WASM instruction. Expand `a % b` to
+                // `a - floor(a/b) * b` (matching the native backend). Operands
+                // are on the stack as [a, b]; stash to scratch locals so we can
+                // reference them multiple times.
+                if matches!(op, BinaryOp::Rem | BinaryOp::FRem)
+                    && matches!(op_ty, ValType::F64 | ValType::F32)
+                    && self.float_rem_scratch.contains_key(&op_ty)
+                {
+                    // Float modulo via `a - floor(a/b)*b`. Scratch reserved in
+                    // allocate_locals (emission is &self). Stack is [a, b].
+                    let (la, lb) = self.float_rem_scratch[&op_ty];
+                    f.instruction(&Instruction::LocalSet(lb)); // pop b
+                    f.instruction(&Instruction::LocalSet(la)); // pop a
+                    f.instruction(&Instruction::LocalGet(la));
+                    f.instruction(&Instruction::LocalGet(la));
+                    f.instruction(&Instruction::LocalGet(lb));
+                    if op_ty == ValType::F64 {
+                        f.instruction(&Instruction::F64Div);
+                        f.instruction(&Instruction::F64Floor);
+                        f.instruction(&Instruction::LocalGet(lb));
+                        f.instruction(&Instruction::F64Mul);
+                        f.instruction(&Instruction::F64Sub);
+                    } else {
+                        f.instruction(&Instruction::F32Div);
+                        f.instruction(&Instruction::F32Floor);
+                        f.instruction(&Instruction::LocalGet(lb));
+                        f.instruction(&Instruction::F32Mul);
+                        f.instruction(&Instruction::F32Sub);
+                    }
+                } else {
+                    self.emit_binop(f, *op, op_ty);
+                }
 
                 // Coerce result to dest type
                 self.emit_type_coerce(f, op_ty, dest_ty);
@@ -3554,7 +3707,57 @@ impl<'a> FunctionLowerer<'a> {
                 // (the inference pass may have changed the local's type)
                 let actual_src_ty = self.reg_wasm_type(*src);
                 let target_ty = ir_type_to_wasm(to_ty);
-                self.emit_type_coerce(f, actual_src_ty, target_ty);
+                // Scalar <-> SIMD vector casts: emit_type_coerce only knows
+                // scalar↔scalar conversions and would silently emit nothing for
+                // (scalar, V128) / (V128, scalar), leaving the wrong type on the
+                // stack (e.g. `cast i32 to <16 x i8>` as in the SIMD16i8-backed
+                // Int64 helpers → an i32 stored into a v128 local → invalid
+                // module). A scalar→vector cast is a lane-broadcast (splat); a
+                // vector→scalar cast extracts lane 0. The lane shape comes from
+                // the Cast's IR type so it survives inlining.
+                if target_ty == ValType::V128 && actual_src_ty != ValType::V128 {
+                    let inst = match vec_element(to_ty) {
+                        IrType::F32 => Instruction::F32x4Splat,
+                        IrType::F64 => Instruction::F64x2Splat,
+                        IrType::I8 | IrType::U8 | IrType::Bool => Instruction::I8x16Splat,
+                        IrType::I16 | IrType::U16 => Instruction::I16x8Splat,
+                        IrType::I32 | IrType::U32 => Instruction::I32x4Splat,
+                        IrType::I64 | IrType::U64 => Instruction::I64x2Splat,
+                        _ => Instruction::I32x4Splat,
+                    };
+                    // Splat lanes consume a scalar of the matching width; coerce
+                    // the source scalar to the splat input type first.
+                    let splat_in = match inst {
+                        Instruction::F32x4Splat => ValType::F32,
+                        Instruction::F64x2Splat => ValType::F64,
+                        Instruction::I64x2Splat => ValType::I64,
+                        _ => ValType::I32,
+                    };
+                    self.emit_type_coerce(f, actual_src_ty, splat_in);
+                    f.instruction(&inst);
+                } else if actual_src_ty == ValType::V128 && target_ty != ValType::V128 {
+                    let (inst, lane_ty) = match vec_element(from_ty) {
+                        IrType::F32 => (Instruction::F32x4ExtractLane(0), ValType::F32),
+                        IrType::F64 => (Instruction::F64x2ExtractLane(0), ValType::F64),
+                        IrType::I8 => (Instruction::I8x16ExtractLaneS(0), ValType::I32),
+                        IrType::U8 | IrType::Bool => {
+                            (Instruction::I8x16ExtractLaneU(0), ValType::I32)
+                        }
+                        IrType::I16 => (Instruction::I16x8ExtractLaneS(0), ValType::I32),
+                        IrType::U16 => (Instruction::I16x8ExtractLaneU(0), ValType::I32),
+                        IrType::I32 | IrType::U32 => {
+                            (Instruction::I32x4ExtractLane(0), ValType::I32)
+                        }
+                        IrType::I64 | IrType::U64 => {
+                            (Instruction::I64x2ExtractLane(0), ValType::I64)
+                        }
+                        _ => (Instruction::I32x4ExtractLane(0), ValType::I32),
+                    };
+                    f.instruction(&inst);
+                    self.emit_type_coerce(f, lane_ty, target_ty);
+                } else {
+                    self.emit_type_coerce(f, actual_src_ty, target_ty);
+                }
                 self.set_reg(f, *dest);
             }
 
@@ -3686,13 +3889,29 @@ impl<'a> FunctionLowerer<'a> {
             // === StoreGlobal ===
             IrInstruction::StoreGlobal { global_id, value } => {
                 self.get_reg(f, *value);
-                let gidx = self
-                    .ctx
-                    .ir_global_to_idx
-                    .get(global_id)
-                    .copied()
-                    .unwrap_or(0);
-                f.instruction(&Instruction::GlobalSet(gidx));
+                // collect_globals registers every Store/LoadGlobal target, so a
+                // miss here means an unmapped global. Never fall back to index 0
+                // (the mutable __stack_pointer) — that silently corrupts the SP
+                // and produces an invalid module when the value isn't i32. Skip
+                // the store instead (drop the value off the stack).
+                match self.ctx.ir_global_to_idx.get(global_id).copied() {
+                    Some(gidx) => {
+                        // Coerce the value to the global's declared wasm type.
+                        let global_vt = self
+                            .ctx
+                            .user_globals
+                            .iter()
+                            .find(|(g, _, _)| g == global_id)
+                            .map(|(_, vt, _)| *vt)
+                            .unwrap_or(ValType::I32);
+                        let val_vt = self.reg_wasm_type(*value);
+                        self.emit_type_coerce(f, val_vt, global_vt);
+                        f.instruction(&Instruction::GlobalSet(gidx));
+                    }
+                    None => {
+                        f.instruction(&Instruction::Drop);
+                    }
+                }
             }
 
             // === GetElementPtr ===

@@ -4640,6 +4640,24 @@ impl CraneliftBackend {
                 let lane_count = vec_type.lane_count() as u8;
                 let is_float = vec_type.lane_type().is_float();
 
+                // Integer horizontal add: emit a pairwise-add reduction
+                // (`iadd_pairwise` log2(lanes) times, then a lane-0 extract)
+                // instead of the serial extract+iadd chain below. It is
+                // structured (the egraph leaves `iadd_pairwise` untouched) so it
+                // lowers to `addp`s — or a single `addv` on AArch64 with the
+                // upstream peephole (bytecodealliance/wasmtime#13717).
+                if matches!(op, crate::ir::BinaryOp::Add) && !is_float && lane_count > 1 {
+                    let mut v = vec_val;
+                    let mut n = lane_count;
+                    while n > 1 {
+                        v = builder.ins().iadd_pairwise(v, v);
+                        n /= 2;
+                    }
+                    let result = builder.ins().extractlane(v, 0);
+                    value_map.insert(*dest, result);
+                    return Ok(());
+                }
+
                 // Implement horizontal reduction by extracting lanes and combining
                 // Start with lane 0
                 let mut result = builder.ins().extractlane(vec_val, 0);
