@@ -213,6 +213,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Initialize LLVM once (thread-safe)
         init_llvm_once();
 
+        // Discard local value names. Under inkwell 0.7 / LLVM 21, LLVM's
+        // value-name uniquing path (ValueSymbolTable::makeUniqueName, hit on the
+        // 2nd reuse of a name like "cmp"/"load"/"cond_i1") faults on this JIT
+        // context — so naming a colliding local value SIGSEGVs in makeUniqueName.
+        // Discarding value names makes every setName for a non-global value a
+        // no-op (no symbol-table insert -> makeUniqueName never runs), which both
+        // sidesteps the crash and is LLVM's standard release-mode memory
+        // optimization. GlobalValue (function/global) names are preserved, so JIT
+        // symbol resolution in finalize() is unaffected.
+        unsafe {
+            llvm_sys::core::LLVMContextSetDiscardValueNames(context.raw(), 1);
+        }
+
         // Create module
         let module = context.create_module("rayzor_jit");
         let builder = context.create_builder();
@@ -1662,8 +1675,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .iter()
                     .zip(existing_params.iter())
                     .all(|(e, a)| {
-                        // Compare type kinds - a simple check
-                        format!("{:?}", e) == format!("{:?}", a)
+                        // Compare types by identity. inkwell type enums impl
+                        // PartialEq over the canonical LLVMTypeRef (types are
+                        // uniqued per-context), so `==` is exact. Do NOT compare
+                        // via `format!("{:?}", ..)`: the Debug impl calls
+                        // LLVMPrintTypeToString, which SIGBUSes under LLVM 21 /
+                        // inkwell 0.7 (TypePrinting::print) — that was the AOT
+                        // "rayzor-aot" thread crash.
+                        e == a
                     });
 
             if signatures_match {
@@ -2299,7 +2318,31 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 } else {
                     return Err(format!("Store ptr {:?} has unexpected type", ptr));
                 };
-                let value_val = self.get_value(*value)?;
+                let mut value_val = self.get_value(*value)?;
+                // If we're storing an integer that is WIDER than the alloca's
+                // allocated int type, truncate it to the slot width. A for-in
+                // accumulation can produce an i64 for an i32 slot (a spurious
+                // sext widening in MIR); storing 8 bytes into a 4-byte alloca is
+                // UB that the optimizer miscompiles — e.g. `for (x in new
+                // Range(1,6)) sum += x` summed 0 instead of 15. Narrower→wider
+                // is left alone (sign-extension intent is ambiguous and the slot
+                // is large enough).
+                if value_val.is_int_value() {
+                    if let Some(inst) = ptr_val.as_instruction() {
+                        if inst.get_opcode() == inkwell::values::InstructionOpcode::Alloca {
+                            if let Ok(BasicTypeEnum::IntType(slot_ty)) = inst.get_allocated_type() {
+                                let v = value_val.into_int_value();
+                                if v.get_type().get_bit_width() > slot_ty.get_bit_width() {
+                                    value_val = self
+                                        .builder
+                                        .build_int_truncate(v, slot_ty, "store_trunc")
+                                        .map_err(|e| format!("store truncate failed: {}", e))?
+                                        .into();
+                                }
+                            }
+                        }
+                    }
+                }
                 self.builder
                     .build_store(ptr_val, value_val)
                     .map_err(|e| format!("Failed to build store: {}", e))?;
@@ -2385,7 +2428,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         )
                         .map_err(|e| format!("Failed to cast select condition: {}", e))?
                 } else {
-                    cond_raw.into_int_value()
+                    // LLVM `select` requires an i1 condition. rayzor's Bool lowers
+                    // to i8, so a raw i8/iN condition trips the verifier ("Invalid
+                    // operands for select instruction! select i8 ..."). Narrow any
+                    // wider-than-i1 integer to i1 via `!= 0`.
+                    let ci = cond_raw.into_int_value();
+                    if ci.get_type().get_bit_width() == 1 {
+                        ci
+                    } else {
+                        self.builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                ci,
+                                ci.get_type().const_zero(),
+                                "select_cond_i1",
+                            )
+                            .map_err(|e| format!("Failed to narrow select cond to i1: {}", e))?
+                    }
                 };
                 let true_v = self.get_value(*true_val)?;
                 let false_v = self.get_value(*false_val)?;
@@ -3225,7 +3284,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         )
                         .map_err(|e| format!("Failed to cast select condition: {}", e))?
                 } else {
-                    cond_raw.into_int_value()
+                    // LLVM `select` requires an i1 condition. rayzor's Bool lowers
+                    // to i8, so a raw i8/iN condition trips the verifier ("Invalid
+                    // operands for select instruction! select i8 ..."). Narrow any
+                    // wider-than-i1 integer to i1 via `!= 0`.
+                    let ci = cond_raw.into_int_value();
+                    if ci.get_type().get_bit_width() == 1 {
+                        ci
+                    } else {
+                        self.builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                ci,
+                                ci.get_type().const_zero(),
+                                "select_cond_i1",
+                            )
+                            .map_err(|e| format!("Failed to narrow select cond to i1: {}", e))?
+                    }
                 };
                 let true_v = self.get_value(*true_val)?;
                 let false_v = self.get_value(*false_val)?;
@@ -3580,6 +3655,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 };
 
                 let result = if is_float {
+                    if !lhs.is_vector_value() || !rhs.is_vector_value() {
+                        return Err(format!(
+                            "VectorBinOp(float) operand not a vector: left {:?}={:?}, right {:?}={:?}, vec_ty={:?}",
+                            left, lhs.get_type(), right, rhs.get_type(), vec_ty
+                        ));
+                    }
                     let lhs_vec = lhs.into_vector_value();
                     let rhs_vec = rhs.into_vector_value();
                     match op {
@@ -3606,8 +3687,62 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         _ => return Err(format!("Unsupported float vector op: {:?}", op)),
                     }
                 } else {
+                    if !lhs.is_vector_value() {
+                        return Err(format!(
+                            "VectorBinOp(int) left {:?} is not a vector: {:?} (vec_ty={:?})",
+                            left, lhs.get_type(), vec_ty
+                        ));
+                    }
                     let lhs_vec = lhs.into_vector_value();
-                    let rhs_vec = rhs.into_vector_value();
+                    // A scalar rhs is a shift amount: MIR `shl/shr/ushr` carry a
+                    // scalar count, but LLVM vector shifts (like all vector
+                    // binops) require BOTH operands to be vectors of identical
+                    // type. Splat the scalar — coerced to the lane element type
+                    // — across all lanes. Cranelift splats internally; LLVM
+                    // doesn't, which is why this path used to panic.
+                    let rhs_vec = if rhs.is_vector_value() {
+                        rhs.into_vector_value()
+                    } else {
+                        let vt = lhs_vec.get_type();
+                        let elem_int = match vt.get_element_type() {
+                            BasicTypeEnum::IntType(it) => it,
+                            other => {
+                                return Err(format!(
+                                    "VectorBinOp(int) scalar rhs needs int lanes, got {:?}",
+                                    other
+                                ))
+                            }
+                        };
+                        let scalar = rhs.into_int_value();
+                        let (sw, ew) =
+                            (scalar.get_type().get_bit_width(), elem_int.get_bit_width());
+                        let coerced = if sw > ew {
+                            self.builder
+                                .build_int_truncate(scalar, elem_int, "shamt_trunc")
+                                .map_err(|e| format!("shift-amount truncate failed: {}", e))?
+                        } else if sw < ew {
+                            self.builder
+                                .build_int_z_extend(scalar, elem_int, "shamt_zext")
+                                .map_err(|e| format!("shift-amount zext failed: {}", e))?
+                        } else {
+                            scalar
+                        };
+                        let mut splat: BasicValueEnum = vt.get_undef().into();
+                        for i in 0..vt.get_size() {
+                            let idx = self.context.i32_type().const_int(i as u64, false);
+                            splat = self
+                                .builder
+                                .build_insert_element(
+                                    splat.into_vector_value(),
+                                    coerced,
+                                    idx,
+                                    "shamt_splat",
+                                )
+                                .map_err(|e| format!("shift-amount splat failed: {}", e))?
+                                .into();
+                        }
+                        splat.into_vector_value()
+                    };
                     match op {
                         BinaryOp::Add => self
                             .builder
@@ -3643,6 +3778,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             .builder
                             .build_xor(lhs_vec, rhs_vec, "vxor")
                             .map_err(|e| format!("Vector xor failed: {}", e))?
+                            .into(),
+                        // Lane-wise shifts. rhs_vec is the splatted shift amount.
+                        BinaryOp::Shl => self
+                            .builder
+                            .build_left_shift(lhs_vec, rhs_vec, "vshl")
+                            .map_err(|e| format!("Vector shl failed: {}", e))?
+                            .into(),
+                        // Shr = arithmetic (sign-extending); Ushr = logical.
+                        BinaryOp::Shr => self
+                            .builder
+                            .build_right_shift(lhs_vec, rhs_vec, true, "vshr")
+                            .map_err(|e| format!("Vector shr failed: {}", e))?
+                            .into(),
+                        BinaryOp::Ushr => self
+                            .builder
+                            .build_right_shift(lhs_vec, rhs_vec, false, "vushr")
+                            .map_err(|e| format!("Vector ushr failed: {}", e))?
                             .into(),
                         _ => return Err(format!("Unsupported int vector op: {:?}", op)),
                     }
@@ -4644,12 +4796,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             IrValue::F32(v) => Ok(self.context.f32_type().const_float(*v as f64).into()),
             IrValue::F64(v) => Ok(self.context.f64_type().const_float(*v).into()),
             IrValue::String(s) => {
-                // Create global string constant with the raw bytes
-                let global_str = self
-                    .builder
-                    .build_global_string_ptr(s, "str")
-                    .map_err(|e| format!("Failed to build global string: {}", e))?;
-                let str_ptr = global_str.as_pointer_value();
+                // Build the global byte array via const_string + add_global rather than
+                // builder.build_global_string_ptr. inkwell 0.7's build_global_string_ptr
+                // calls the DEPRECATED LLVMBuildGlobalStringPtr, which under LLVM 21
+                // leaves the new global with a DANGLING name pointer (the CString it
+                // passes is freed after the call) — corrupting the module's value symbol
+                // table so the next named insert crashes in makeUniqueName dereferencing
+                // the garbage. add_global copies the name; "" lets LLVM auto-number it.
+                let bytes = self.context.const_string(s.as_bytes(), false);
+                let global = self.module.add_global(bytes.get_type(), None, "");
+                global.set_initializer(&bytes);
+                global.set_constant(true);
+                global.set_linkage(inkwell::module::Linkage::Private);
+                let str_ptr = global.as_pointer_value();
                 let str_len = self.context.i64_type().const_int(s.len() as u64, false);
 
                 // Get or declare haxe_string_literal(ptr, len) -> *mut HaxeString
@@ -4674,7 +4833,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .build_call(
                         string_literal_fn,
                         &[str_ptr.into(), str_len.into()],
-                        "str_literal",
+                        "",
                     )
                     .map_err(|e| format!("Failed to call haxe_string_literal: {}", e))?;
 
@@ -5915,9 +6074,52 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             arg_values.push(default_value);
         }
 
+        if std::env::var("RAYZOR_DEBUG_LLVM_CALL").is_ok()
+            && llvm_func.get_name().to_str() == Ok("haxe_string_concat")
+        {
+            let pk: Vec<&str> = expected_params
+                .iter()
+                .map(|p| {
+                    if p.is_pointer_type() {
+                        "ptr"
+                    } else if p.is_int_type() {
+                        "int"
+                    } else if p.is_float_type() {
+                        "float"
+                    } else if p.is_struct_type() {
+                        "struct"
+                    } else {
+                        "?"
+                    }
+                })
+                .collect();
+            let ak: Vec<&str> = arg_values
+                .iter()
+                .map(|a| {
+                    if a.is_pointer_value() {
+                        "ptr"
+                    } else if a.is_int_value() {
+                        "int"
+                    } else if a.is_float_value() {
+                        "float"
+                    } else if a.is_struct_value() {
+                        "struct"
+                    } else {
+                        "?"
+                    }
+                })
+                .collect();
+            eprintln!(
+                "[concat-call] param_kinds={:?} arg_kinds={:?} fn_is_null={} fn_basic_blocks={}",
+                pk,
+                ak,
+                llvm_func.as_global_value().as_pointer_value().is_null(),
+                llvm_func.count_basic_blocks(),
+            );
+        }
         let call_site = self
             .builder
-            .build_call(*llvm_func, &arg_values, "call")
+            .build_call(*llvm_func, &arg_values, "")
             .map_err(|e| format!("Failed to build call: {}", e))?;
 
         // For sret functions, the return value is in the sret slot, not the call result

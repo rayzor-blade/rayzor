@@ -177,19 +177,69 @@ fn collect_wasm_host_functions(
     map
 }
 
-/// Run binaryen's `wasm-opt -O3 -all` on a wasm module.
+/// Locate the wasm-opt program to spawn.
 ///
-/// Uses the bundled `wasm-opt` crate (brson/wasm-opt-rs), which compiles
-/// binaryen from source — there is NO external `wasm-opt` binary dependency.
-/// The crate API is file-based, so we round-trip through a temp `.wasm` in/out.
+/// Resolution order:
+///   1. `RAYZOR_WASM_OPT_BIN` — a full path or bare name; used verbatim.
+///   2. The bundled `rayzor-wasm-opt` helper sitting NEXT TO the running
+///      `rayzor` binary (dev: `target/release/rayzor-wasm-opt`; installed:
+///      the same dir; `cargo install` puts both in `~/.cargo/bin`).
+///   3. `rayzor-wasm-opt` on `PATH` (bare name → `Command` searches PATH).
 ///
-/// `all_features()` is the equivalent of the CLI `-all` flag: it enables the
-/// full feature set (SIMD, RELAXED-SIMD — `i32x4.relaxed_dot` must survive,
-/// THREADS/atomics, BULK-MEMORY, NONTRAPPING-FLOAT-TO-INT, MUTABLE-GLOBALS,
-/// SIGN-EXT, ...), so the module is accepted and no relaxed-simd op is lowered
-/// away.
+/// If the chosen program can't be spawned, `wasm_opt_bytes` makes one last
+/// attempt with the legacy external `wasm-opt`, then the caller falls back to
+/// the unoptimized module. So this is a self-contained distribution by default
+/// (we ship `rayzor-wasm-opt`), with graceful degradation if it's missing.
+fn find_wasm_opt() -> PathBuf {
+    // 1. Explicit override wins, verbatim.
+    if let Ok(bin) = std::env::var("RAYZOR_WASM_OPT_BIN") {
+        if !bin.is_empty() {
+            return PathBuf::from(bin);
+        }
+    }
+
+    let exe_name = if cfg!(windows) {
+        "rayzor-wasm-opt.exe"
+    } else {
+        "rayzor-wasm-opt"
+    };
+
+    // 2. Sibling of the current rayzor binary (dev `target/release`, installed
+    //    bin dir, and `cargo install` ~/.cargo/bin all co-locate the two).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            let sibling = bin_dir.join(exe_name);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+
+    // 3. `rayzor-wasm-opt` on PATH (Command searches PATH for a bare name).
+    PathBuf::from("rayzor-wasm-opt")
+}
+
+/// Run binaryen's `wasm-opt -O3 -all` on a wasm module via the BUNDLED
+/// `rayzor-wasm-opt` helper binary (subprocess).
 ///
-/// Returns the optimized bytes, or an error if optimization failed.
+/// We must NOT link the `wasm-opt` crate (Binaryen) into `rayzor` itself:
+/// Binaryen EXPORTS ~1890 `llvm::` ADT symbols (incl.
+/// `llvm::SmallVectorBase::grow_pod`) under the same mangled names as LLVM 21
+/// (llvm-sys 211). The linker collapses each duplicate, so LLVM's own code
+/// (Module::print, SmallVector/StringRef, the Mangler) binds to Binaryen's
+/// vendored-older-LLVM implementations with an incompatible layout → garbage
+/// sizes (a 6.17 GB alloc in `Module::print`) → the LLVM JIT/AOT backend
+/// SIGSEGVs. The `wasm-opt-helper` workspace member keeps Binaryen behind a
+/// process boundary; we ship `rayzor-wasm-opt` next to `rayzor`.
+///
+/// `-all` enables the full feature set (SIMD, RELAXED-SIMD — `i32x4.relaxed_dot`
+/// must survive, THREADS/atomics, BULK-MEMORY, NONTRAPPING-FLOAT-TO-INT,
+/// MUTABLE-GLOBALS, SIGN-EXT, ...) so the module is accepted and no relaxed-simd
+/// op is lowered away. The bundled helper hardcodes this; the legacy `wasm-opt`
+/// fallback gets explicit `-O3 -all` flags.
+///
+/// Resolution is `find_wasm_opt()`. Returns the optimized bytes, or an error
+/// (caller falls back to the unoptimized module).
 fn wasm_opt_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -197,12 +247,49 @@ fn wasm_opt_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
     let outp = dir.join(format!("rayzor_wopt_out_{}.wasm", pid));
     std::fs::write(&inp, input).map_err(|e| format!("write temp: {}", e))?;
 
-    let result = wasm_opt::OptimizationOptions::new_opt_level_3()
-        .all_features()
-        .run(&inp, &outp)
-        .map_err(|e| format!("wasm-opt: {}", e));
+    // The bundled helper takes positional `<in> <out>` (it hardcodes
+    // `-O3 -all`). The legacy `wasm-opt` binary needs the explicit flags; we
+    // detect it by program filename so `RAYZOR_WASM_OPT_BIN=wasm-opt` keeps
+    // working.
+    let run = |program: &Path| -> std::io::Result<std::process::ExitStatus> {
+        let is_legacy = program
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("wasm-opt"))
+            .unwrap_or(false);
+        let mut cmd = std::process::Command::new(program);
+        if is_legacy {
+            cmd.arg("-O3").arg("-all").arg(&inp).arg("-o").arg(&outp);
+        } else {
+            cmd.arg(&inp).arg(&outp);
+        }
+        cmd.status()
+    };
 
-    let out = result.and_then(|()| std::fs::read(&outp).map_err(|e| format!("read temp: {}", e)));
+    let primary = find_wasm_opt();
+    let mut status = run(&primary);
+    let mut used = primary.clone();
+
+    // Last resort: if the primary wasn't already legacy `wasm-opt` and it wasn't
+    // found, try external `wasm-opt` on PATH before giving up.
+    if matches!(&status, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        && primary != Path::new("wasm-opt")
+    {
+        let legacy = PathBuf::from("wasm-opt");
+        status = run(&legacy);
+        used = legacy;
+    }
+
+    let out = match status {
+        Ok(s) if s.success() => std::fs::read(&outp).map_err(|e| format!("read temp: {}", e)),
+        Ok(s) => Err(format!("`{}` exited with {}", used.display(), s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
+            "no wasm-opt found (tried bundled `rayzor-wasm-opt` and `wasm-opt`; \
+             set RAYZOR_WASM_OPT_BIN to override)"
+                .to_string(),
+        ),
+        Err(e) => Err(format!("failed to spawn `{}`: {}", used.display(), e)),
+    };
 
     let _ = std::fs::remove_file(&inp);
     let _ = std::fs::remove_file(&outp);

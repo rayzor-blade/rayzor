@@ -107,11 +107,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build rayzor CLI
         run: cargo build -p rayzor --release
+      - name: Build rayzor-wasm-opt helper
+        # Bundled wasm optimizer. Compiles Binaryen from source (first build is
+        # slow, ~5-10 min). Kept a SEPARATE binary so Binaryen's ~1890 llvm::
+        # symbols never ODR-collide with LLVM 21 in the main rayzor bin; shipped
+        # alongside rayzor so wasm optimization needs no external binaryen.
+        run: cargo build -p rayzor-wasm-opt-helper --release
       - name: Upload CLI
         uses: actions/upload-artifact@v4
         with:
           name: rayzor-cli
-          path: target/release/rayzor
+          path: |
+            target/release/rayzor
+            target/release/rayzor-wasm-opt
 
   # =========================================================================
   # Pack multi-platform rpkg files and create GitHub release
@@ -128,7 +136,20 @@ jobs:
           path: artifacts/
 
       - name: Make CLI executable
-        run: chmod +x artifacts/rayzor-cli/rayzor
+        run: |
+          chmod +x artifacts/rayzor-cli/rayzor
+          chmod +x artifacts/rayzor-cli/rayzor-wasm-opt
+
+      # Bundle rayzor + rayzor-wasm-opt into one tarball so they unpack
+      # side-by-side — the CLI auto-finds the helper as a sibling of its own
+      # exe, so wasm optimization works with no external binaryen install.
+      - name: Bundle rayzor + rayzor-wasm-opt
+        run: |
+          mkdir -p rayzor-bin
+          cp artifacts/rayzor-cli/rayzor          rayzor-bin/
+          cp artifacts/rayzor-cli/rayzor-wasm-opt rayzor-bin/
+          tar -czf rayzor-macos-aarch64.tar.gz -C rayzor-bin rayzor rayzor-wasm-opt
+          ls -la rayzor-macos-aarch64.tar.gz
 
       # Pack rayzor-window.rpkg (all platforms)
       - name: Pack rayzor-window.rpkg
@@ -213,8 +234,16 @@ jobs:
             - macOS x86_64 (Intel)
             - Linux x86_64
             - Windows x86_64
+
+            ### CLI binaries
+
+            `rayzor-macos-aarch64.tar.gz` contains both `rayzor` and the bundled
+            `rayzor-wasm-opt` helper. Unpack them into the SAME directory (the
+            CLI auto-finds the helper next to its own executable) so wasm
+            optimization works with no external binaryen install.
           files: |
             rayzor-window.rpkg
             rayzor-gpu.rpkg
+            rayzor-macos-aarch64.tar.gz
           draft: false
           prerelease: false

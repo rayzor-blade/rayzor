@@ -1,0 +1,23 @@
+[package]
+name = "rayzor-wasm-opt-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone helper that links Binaryen (via the `wasm-opt` crate, which compiles
+# Binaryen from source). It is built as a SEPARATE BINARY (`rayzor-wasm-opt`) and
+# spawned as a subprocess by the main `rayzor` bin. It MUST stay a separate
+# crate/process: Binaryen exports ~1890 `llvm::` ADT symbols (incl.
+# llvm::SmallVectorBase::grow_pod) that ODR-collide with LLVM 21 (llvm-sys 211)
+# and corrupt the LLVM JIT/AOT backend (6GB-alloc SIGSEGV in Module::print) if
+# linked into `rayzor`. The process boundary is the whole point of this crate.
+#
+# The release LTO override lives in the WORKSPACE root Cargo.toml
+# ([profile.release.package.rayzor-wasm-opt-helper] lto = false) — per-crate
+# [profile.*] blocks are ignored by cargo in a workspace.
+[dependencies]
+wasm-opt = "0.116"
+
+[[bin]]
+name = "rayzor-wasm-opt"
+path = "src/main.rs"

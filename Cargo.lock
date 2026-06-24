@@ -2790,7 +2790,6 @@ dependencies = [
  "rayzor-plugin",
  "rayzor-runtime",
  "walkdir",
- "wasm-opt",
 ]
 
 [[package]]
@@ -2862,6 +2861,13 @@ version = "0.1.0"
 dependencies = [
  "half",
  "libm",
+]
+
+[[package]]
+name = "rayzor-wasm-opt-helper"
+version = "0.1.0"
+dependencies = [
+ "wasm-opt",
 ]
 
 [[package]]

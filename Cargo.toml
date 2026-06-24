@@ -10,7 +10,8 @@ members = [
     "window",
     "lsp",
     "plugin",
-    "nue-plugins"
+    "nue-plugins",
+    "wasm-opt-helper"
 ]
 # runtime-wasm is excluded from workspace — built separately for wasm32-wasip1
 exclude = [
@@ -46,12 +47,19 @@ rayzor-lsp = { path = "lsp" }
 anyhow = "1"
 walkdir = "2"
 libc = "0.2"
-# Binaryen wasm-opt post-pass (default-on). Bundles binaryen ~116 and compiles
-# it from source via cmake on first build (slow), so there is NO external
-# `wasm-opt` binary dependency. Used to coalesce the per-SSA-value
+# Binaryen wasm-opt post-pass (default-on): coalesces the per-SSA-value
 # local.set/local.get round-trips the wasm_backend emits (wasmtime does not
 # fully coalesce them) — a verified ~3x bit-exact speedup on the Q4 kernel.
-wasm-opt = "0.116"
+#
+# The bundled `wasm-opt = "0.116"` crate is deliberately NOT a dependency of
+# THIS bin — it compiles Binaryen into the binary, and Binaryen exports ~1890
+# `llvm::` ADT symbols (incl. llvm::SmallVectorBase::grow_pod) that ODR-collide
+# with LLVM 21 (llvm-sys 211) and corrupt the LLVM JIT/AOT backend (6GB-alloc
+# SIGSEGV in Module::print). Instead, the workspace member `wasm-opt-helper`
+# links Binaryen as a SEPARATE binary `rayzor-wasm-opt`; src/wasm_cmd.rs spawns
+# it as a subprocess (resolution: RAYZOR_WASM_OPT_BIN → `rayzor-wasm-opt` next
+# to the rayzor exe → `rayzor-wasm-opt`/`wasm-opt` on PATH; falls back to the
+# unoptimized module if none is found). Ship both binaries side-by-side.
 
 # Workspace release profile. `lto = "thin"` enables cross-crate inlining so
 # `rayzor-runtime` hot-path callsites continue to inline through the per-arch
@@ -69,6 +77,13 @@ lto = "thin"
 # that causes infinite loops in release builds when lowering TAST expressions.
 [profile.release.package.compiler]
 opt-level = 2
+
+# NOTE: the wasm-opt-helper crate links Binaryen (a large vendored C++ codebase)
+# and inherits the workspace `lto = "thin"`. There's nothing to cross-inline for
+# a standalone subprocess binary, so the LTO is wasted build time — but cargo
+# does NOT allow `lto` in a per-`package` profile override (only at profile
+# level), so we can't disable it just for this crate. It's a rare rebuild
+# (Binaryen is cached after the first compile), so we leave it.
 
 # Cranelift 0.133.0 isn't on crates.io yet — sourced from upstream
 # bytecodealliance/wasmtime `release-46.0.0` (the macOS cranelift-object
