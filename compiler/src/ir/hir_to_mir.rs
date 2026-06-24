@@ -21692,6 +21692,71 @@ impl<'a> HirToMirContext<'a> {
                 // Recursively collect variables from block expressions
                 self.collect_referenced_variables_in_block(block, vars);
             }
+            HirExprKind::Field { object, .. } => {
+                self.collect_referenced_variables_in_expr(object, vars);
+            }
+            HirExprKind::Index { object, index } => {
+                self.collect_referenced_variables_in_expr(object, vars);
+                self.collect_referenced_variables_in_expr(index, vars);
+            }
+            HirExprKind::New { args, .. } => {
+                for a in args {
+                    self.collect_referenced_variables_in_expr(a, vars);
+                }
+            }
+            HirExprKind::Cast { expr, .. }
+            | HirExprKind::TypeCheck { expr, .. }
+            | HirExprKind::Reification { expr } => {
+                self.collect_referenced_variables_in_expr(expr, vars);
+            }
+            HirExprKind::Untyped(inner) => {
+                self.collect_referenced_variables_in_expr(inner, vars);
+            }
+            HirExprKind::Lambda { body, .. } => {
+                self.collect_referenced_variables_in_expr(body, vars);
+            }
+            HirExprKind::MethodReference { receiver, .. } => {
+                self.collect_referenced_variables_in_expr(receiver, vars);
+            }
+            HirExprKind::Array { elements } => {
+                for e in elements {
+                    self.collect_referenced_variables_in_expr(e, vars);
+                }
+            }
+            HirExprKind::Map { entries } => {
+                for (k, v) in entries {
+                    self.collect_referenced_variables_in_expr(k, vars);
+                    self.collect_referenced_variables_in_expr(v, vars);
+                }
+            }
+            HirExprKind::ObjectLiteral { fields } => {
+                for (_, v) in fields {
+                    self.collect_referenced_variables_in_expr(v, vars);
+                }
+            }
+            // A variable mutated inside a try/catch/finally lowered as an
+            // EXPRESSION (HirExprKind::TryCatch wrapped in HirStatement::Expr —
+            // the common case for `try { x += 1; } catch (e) {}` in a block)
+            // must still be detected so an enclosing loop builds its phi.
+            // Without this the `_ => {}` dropped it: the loop-var collector saw
+            // only the bare counter, no phi for `x`, and the post-loop use hit
+            // "Argument not found in value_map".
+            HirExprKind::TryCatch {
+                try_expr,
+                catch_handlers,
+                finally_expr,
+            } => {
+                self.collect_referenced_variables_in_expr(try_expr, vars);
+                for h in catch_handlers {
+                    if let Some(g) = &h.guard {
+                        self.collect_referenced_variables_in_expr(g, vars);
+                    }
+                    self.collect_referenced_variables_in_expr(&h.body, vars);
+                }
+                if let Some(f) = finally_expr {
+                    self.collect_referenced_variables_in_expr(f, vars);
+                }
+            }
             _ => {}
         }
     }
