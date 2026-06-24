@@ -3717,9 +3717,22 @@ impl CraneliftBackend {
                     // Add environment parameter
                     sig.params.push(AbiParam::new(types::I64));
 
-                    // Add user parameters
+                    // Add user parameters. A `Void` parameter encodes Haxe's
+                    // `Void->T` — a ZERO-argument function — and is not a real
+                    // argument slot (e.g. `() -> ...` closures, the bodies of a
+                    // Mocha-style describe/it harness). Skip it, mirroring the
+                    // Void/INVALID return skip below: otherwise
+                    // mir_type_to_cranelift_static(Void) == INVALID and
+                    // AbiParam::new(INVALID) panics Cranelift ("INVALID
+                    // encountered") while building the indirect-call signature.
                     for param_ty in param_types {
+                        if matches!(param_ty, IrType::Void) {
+                            continue;
+                        }
                         let cl_ty = Self::mir_type_to_cranelift_static(param_ty)?;
+                        if cl_ty == types::INVALID {
+                            continue;
+                        }
                         sig.params.push(AbiParam::new(cl_ty));
                     }
                     Ok(())
