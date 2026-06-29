@@ -9193,6 +9193,116 @@ impl<'a> AstLowering<'a> {
     /// Lower a function call expression (ExprKind::Call).
     /// Extracted from lower_expression to reduce stack frame size.
     #[inline(never)]
+    /// Resolve a callee's formal parameter types for the Dynamic-boxing decision
+    /// ONLY. Kept separate from `resolve_callee_formal_param_types` (which feeds
+    /// lambda-param inference via `expected_arg_types`) so the import-aware
+    /// resolution used for boxing cannot influence closure-param inference — the
+    /// two concerns must not share a resolver.
+    ///
+    /// Handles `Class.method(...)` static calls (import-aware, so cross-module
+    /// callees resolve) and free / same-class `name(...)` calls. Returns None
+    /// for instance method calls (same-module boxing is still covered by
+    /// `maybe_materialize_for_call`).
+    fn boxing_param_types(&mut self, callee: &Expr) -> Option<Vec<TypeId>> {
+        match &callee.kind {
+            ExprKind::Ident(name) => {
+                let name_interned = self.context.string_interner.intern(name);
+                if let Some(sym) = self
+                    .context
+                    .symbol_table
+                    .lookup_symbol(self.context.current_scope, name_interned)
+                {
+                    if let Some(params) = self.function_param_types_from_symbol(sym.id) {
+                        return Some(params);
+                    }
+                }
+                let class_sym = *self.context.class_context_stack.last()?;
+                let method_sym = self.resolve_class_method_symbol(class_sym, name_interned)?;
+                self.function_param_types_from_symbol(method_sym)
+            }
+            ExprKind::Field {
+                expr: obj, field, ..
+            } => {
+                if let ExprKind::Ident(cls_name) = &obj.kind {
+                    let cls_name_interned = self.context.string_interner.intern(cls_name);
+                    let class_sym = self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(self.context.current_scope, cls_name_interned)
+                        .filter(|s| s.kind == crate::tast::symbols::SymbolKind::Class)
+                        .map(|s| s.id)
+                        .or_else(|| self.resolve_class_like_symbol_by_name(cls_name_interned));
+                    if let Some(cls_id) = class_sym {
+                        let method_name = self.context.string_interner.intern(field);
+                        if let Some(method_sym) =
+                            self.resolve_class_method_symbol(cls_id, method_name)
+                        {
+                            return self.function_param_types_from_symbol(method_sym);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// If `formal` is a genuine `Dynamic` parameter and `arg` is a primitive
+    /// VALUE type, wrap `arg` in an implicit cast to Dynamic so it is boxed
+    /// during lowering (a raw inline primitive handed to a `Dynamic` param is
+    /// read back as a bogus `DynamicValue` and crashes `Std.string`).
+    ///
+    /// Restricted to primitive value types (Int/Float/Bool) — these are the only
+    /// args that genuinely need boxing: stored inline, a raw primitive handed to
+    /// a `Dynamic` param is misread as a pointer. Reference types are left raw on
+    /// purpose: class/array/enum values are already pointers and are often FFI
+    /// handles (SIMD, quant, generics) that must reach the callee unwrapped, and
+    /// a raw String is consumed directly by `trace` and similar `Dynamic` sinks.
+    /// (Correct String→Dynamic for `Std.string` needs a tagged representation
+    /// that those sinks also accept; out of scope here.)
+    fn coerce_arg_to_dynamic_param(
+        &mut self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(formal_ty) = formal else {
+            return arg;
+        };
+        let should_box = {
+            let tt = self.context.type_table.borrow();
+            let formal_is_dyn =
+                matches!(tt.get(formal_ty).map(|t| &t.kind), Some(TypeKind::Dynamic));
+            formal_is_dyn
+                && matches!(
+                    tt.get(arg.expr_type).map(|t| &t.kind),
+                    Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+                )
+        };
+        if !should_box {
+            return arg;
+        }
+        // Implicit (is_safe) cast so hir_to_mir takes the boxing arm — an Unsafe
+        // cast to Dynamic is treated as a no-op reinterpret and would NOT box.
+        let loc = arg.source_location;
+        let kind = TypedExpressionKind::Cast {
+            expression: Box::new(arg),
+            target_type: formal_ty,
+            cast_kind: CastKind::Implicit,
+        };
+        let usage = self.determine_variable_usage(&kind);
+        let lifetime_id = self.assign_lifetime(&kind, &formal_ty);
+        let metadata = self.analyze_expression_metadata(&kind);
+        TypedExpression {
+            expr_type: formal_ty,
+            kind,
+            usage,
+            lifetime_id,
+            source_location: loc,
+            metadata,
+        }
+    }
+
     fn lower_call_expression(
         &mut self,
         expression: &Expr,
@@ -9261,6 +9371,34 @@ impl<'a> AstLowering<'a> {
                 result
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Box primitive value-type arguments passed to `Dynamic` parameters.
+        // Formal param types come from the import-aware `boxing_param_types`
+        // (covers cross-module STATIC calls that the lambda-hint resolver
+        // misses), falling back to the already-computed `expected_arg_types`
+        // (covers instance method calls and same-module callees). The latter is
+        // the UNMODIFIED lambda-hint resolver — reused read-only here so the
+        // boxing decision cannot affect closure inference.
+        let arg_exprs = {
+            let boxing_formals = if self.suppress_callee_hint {
+                None
+            } else {
+                self.boxing_param_types(expr)
+            };
+            if boxing_formals.is_none() && expected_arg_types.is_none() {
+                arg_exprs
+            } else {
+                let mut coerced: Vec<TypedExpression> = Vec::with_capacity(arg_exprs.len());
+                for (i, a) in arg_exprs.into_iter().enumerate() {
+                    let formal = boxing_formals
+                        .as_ref()
+                        .and_then(|f| f.get(i).copied())
+                        .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
+                    coerced.push(self.coerce_arg_to_dynamic_param(a, formal));
+                }
+                coerced
+            }
+        };
 
         // Check if this is a method call (field access being called)
         let kind = match &expr.kind {
