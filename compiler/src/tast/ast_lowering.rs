@@ -7117,6 +7117,53 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Look up a *data field* (not a method) by name on a class.
+    /// Methods live in `class_methods`; fields in `class_fields`. Used to tell a
+    /// closure-valued field apart from a method at a call site.
+    fn lookup_data_field(
+        &self,
+        class_sym: SymbolId,
+        field_name: InternedString,
+    ) -> Option<SymbolId> {
+        let fields = self.class_fields.get(&class_sym)?;
+        fields
+            .iter()
+            .find(|(n, _, _)| *n == field_name)
+            .map(|(_, sym, _)| *sym)
+    }
+
+    /// If `field_name` names a data field of *function* type on the class of
+    /// `receiver_type`, return `(field_symbol, function_type)`. This lets a call
+    /// `obj.fieldFn(args)` be lowered as an indirect call through the field value
+    /// (like `var f = obj.fieldFn; f(args)`) instead of a method dispatch — there
+    /// is no method body to dispatch to, so the method path traps at runtime.
+    fn resolve_function_typed_field(
+        &self,
+        receiver_type: TypeId,
+        field_name: InternedString,
+    ) -> Option<(SymbolId, TypeId)> {
+        let class_sym = self.resolve_type_to_class_symbol(receiver_type)?;
+        let field_sym = self.lookup_data_field(class_sym, field_name)?;
+        let sym = self.context.symbol_table.get_symbol(field_sym)?;
+        // A method would be SymbolKind::Function — that's the method path, not this.
+        if sym.kind == crate::tast::symbols::SymbolKind::Function {
+            return None;
+        }
+        let fn_type = sym.type_id;
+        let is_fn = self
+            .context
+            .type_table
+            .borrow()
+            .get(fn_type)
+            .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Function { .. }))
+            .unwrap_or(false);
+        if is_fn {
+            Some((field_sym, fn_type))
+        } else {
+            None
+        }
+    }
+
     /// Resolve a method symbol for a given receiver and method name
     fn resolve_method_symbol(
         &mut self,
@@ -9955,6 +10002,46 @@ impl<'a> AstLowering<'a> {
                     if let Ok(rewritten) = self.lower_expression(&synth) {
                         receiver_expr = rewritten;
                     }
+                }
+
+                // Closure-valued data field call: `obj.fieldFn(args)` where
+                // `fieldFn` is a *field* of function type (not a method). Lower it
+                // as an indirect call through the field value — the same shape as
+                // `var f = obj.fieldFn; f(args)`. Dispatching it as a method traps
+                // at runtime because there is no method body of that name.
+                if let Some((field_sym, fn_type)) =
+                    self.resolve_function_typed_field(receiver_expr.expr_type, method_name)
+                {
+                    let lifetime_id = receiver_expr.lifetime_id;
+                    let field_access = TypedExpression {
+                        kind: TypedExpressionKind::FieldAccess {
+                            object: Box::new(receiver_expr),
+                            field_symbol: field_sym,
+                            is_optional: is_optional_call,
+                        },
+                        expr_type: fn_type,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id,
+                        source_location: self.context.span_to_location(&expression.span),
+                        metadata: ExpressionMetadata::default(),
+                    };
+                    let kind = TypedExpressionKind::FunctionCall {
+                        function: Box::new(field_access),
+                        arguments: arg_exprs,
+                        type_arguments: Vec::new(),
+                    };
+                    let expr_type = self.infer_expression_type(&kind)?;
+                    let usage = self.determine_variable_usage(&kind);
+                    let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                    let metadata = self.analyze_expression_metadata(&kind);
+                    return Ok(TypedExpression {
+                        expr_type,
+                        kind,
+                        usage,
+                        lifetime_id,
+                        source_location: self.context.span_to_location(&expression.span),
+                        metadata,
+                    });
                 }
 
                 // First, try to resolve as a regular method on the receiver
