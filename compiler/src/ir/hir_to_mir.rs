@@ -8197,7 +8197,17 @@ impl<'a> HirToMirContext<'a> {
             .get_register_type(value_reg)
             .unwrap_or_else(|| self.convert_type(args[0].ty));
         let dynamic_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
-        let value_dyn = if actual_ty == dynamic_ptr_ty {
+        // A statically-`Dynamic` argument is ALREADY a Dynamic pointer, so use it
+        // directly. `box_value_for_dynamic` returns `None` for a Dynamic value
+        // (its "no boxing needed" signal); routing that through the `?` below
+        // would mis-read it as failure and drop the whole `typeof` result,
+        // emitting a "Return with no value" trap-stub (W0020) for any
+        // `Type.typeof(v)` where `v : Dynamic`. Concrete values still get boxed.
+        let arg_is_dynamic = matches!(
+            self.type_table.get(args[0].ty).map(|t| &t.kind),
+            Some(crate::tast::TypeKind::Dynamic)
+        );
+        let value_dyn = if arg_is_dynamic || actual_ty == dynamic_ptr_ty {
             value_reg
         } else {
             self.box_value_for_dynamic(value_reg, args[0].ty)?
