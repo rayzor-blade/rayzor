@@ -92,6 +92,55 @@ class Expect {
     }
 }
 
+/**
+ * String-typed assertions, from `Spec.expectStr(s)`.
+ *
+ * Kept separate from `Expect` (which takes `Dynamic`) on purpose: a String
+ * passed to a `Dynamic` parameter across a module boundary cannot be boxed
+ * safely (the boxing breaks type-specialized sinks like `trace`/`Sys.println`),
+ * so `Expect.toEqual` on a String value would crash. `StrExpect` carries the
+ * String with its concrete type the whole way, which works cross-module.
+ */
+class StrExpect {
+    var actual:String;
+
+    public function new(actual:String) {
+        this.actual = actual;
+    }
+
+    function fail(msg:String):Void {
+        throw msg;
+    }
+
+    /** Pass when `actual` equals `expected`. */
+    public function toEqual(expected:String):Void {
+        if (actual != expected) {
+            fail("expected \"" + expected + "\" but got \"" + actual + "\"");
+        }
+    }
+
+    /** Pass when `actual` differs from `expected`. */
+    public function notToEqual(expected:String):Void {
+        if (actual == expected) {
+            fail("expected string to differ from \"" + expected + "\"");
+        }
+    }
+
+    /** Pass when `actual` contains `needle` as a substring. */
+    public function toContain(needle:String):Void {
+        if (actual.indexOf(needle) < 0) {
+            fail("expected \"" + actual + "\" to contain \"" + needle + "\"");
+        }
+    }
+
+    /** Pass when `actual` is the empty string. */
+    public function toBeEmpty():Void {
+        if (actual != "") {
+            fail("expected empty string but got \"" + actual + "\"");
+        }
+    }
+}
+
 /** One registered test case. */
 class TestCase {
     public var suite:String;
@@ -186,9 +235,15 @@ class Spec {
         afterEachFn = fn;
     }
 
-    /** Start a fluent assertion on `value`. */
+    /** Start a fluent assertion on `value` (Int/Float/Bool/structural). For
+        String values use `expectStr` — see `StrExpect`. */
     public static function expect(value:Dynamic):Expect {
         return new Expect(value);
+    }
+
+    /** Start a String-typed assertion (use this instead of `expect` for Strings). */
+    public static function expectStr(value:String):StrExpect {
+        return new StrExpect(value);
     }
 
     static function tierMatches(tier:Int):Bool {

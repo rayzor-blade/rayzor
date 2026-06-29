@@ -15,6 +15,11 @@ class Main {
                 Spec.it("equal floats", () -> Spec.expect(1.5).toEqual(1.5));
             });
         });
+        Spec.describe("Strings", () -> {
+            Spec.it("equal", () -> Spec.expectStr("a" + "b").toEqual("ab"));
+            Spec.it("contains", () -> Spec.expectStr("hello world").toContain("world"));
+            Spec.it("differ", () -> Spec.expectStr("x").notToEqual("y"));
+        });
         var passing = Spec.run();
         if (passing != 0) { trace("SELFTEST FAIL: all-pass suite reported " + passing); Sys.exit(1); }
 
