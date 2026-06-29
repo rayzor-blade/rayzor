@@ -444,6 +444,41 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Ok(result)
     }
 
+    /// Build `llvm.vector.partial.reduce.add(acc<4xi32>, vec<16xi32>) -> <4xi32>`:
+    /// the portable partial-reduction LLVM's AArch64 backend folds to SDOT under
+    /// +dotprod (and x86 to vpdpbusd). Semantics: res[i] = acc[i] + vec[i] +
+    /// vec[i+4] + vec[i+8] + vec[i+12] — bit-identical to the manual 4-shuffle +
+    /// 3-add strided reduce it replaces. Returns Err if the intrinsic is absent on
+    /// this LLVM build so the caller can fall back to the manual form.
+    fn build_partial_reduce_add(
+        &self,
+        acc: inkwell::values::VectorValue<'ctx>,
+        vec: inkwell::values::VectorValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::VectorValue<'ctx>, String> {
+        use inkwell::intrinsics::Intrinsic;
+        // LLVM 21.1.2: the EXPERIMENTAL name is what the AArch64 backend folds to
+        // SDOT (verified via llc -mattr=+dotprod: experimental -> sdot, the
+        // non-experimental name -> smull). Not yet de-experimentalized in 21.1.
+        let intrinsic = Intrinsic::find("llvm.experimental.vector.partial.reduce.add")
+            .ok_or("llvm.experimental.vector.partial.reduce.add intrinsic not found")?;
+        let i32_ty = self.context.i32_type();
+        let acc_ty = i32_ty.vec_type(4);
+        let vec_ty = i32_ty.vec_type(16);
+        let func = intrinsic
+            .get_declaration(&self.module, &[acc_ty.into(), vec_ty.into()])
+            .ok_or("Failed to get llvm.vector.partial.reduce.add declaration")?;
+        let result = self
+            .builder
+            .build_call(func, &[acc.into(), vec.into()], name)
+            .map_err(|e| format!("Failed to build partial.reduce.add call: {}", e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("partial.reduce.add returned void")?
+            .into_vector_value();
+        Ok(result)
+    }
+
     /// Compile a single function (for tiered JIT)
     ///
     /// This is the main entry point for Tier 3 optimization.
@@ -3991,37 +4026,49 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_int_mul(a32, b32, "dot_mul")
                     .map_err(|e| format!("VectorDot mul failed: {}", e))?;
-                let c = |n: u64| i32_ty.const_int(n, false);
-                let masks = [
-                    VectorType::const_vector(&[c(0), c(4), c(8), c(12)]),
-                    VectorType::const_vector(&[c(1), c(5), c(9), c(13)]),
-                    VectorType::const_vector(&[c(2), c(6), c(10), c(14)]),
-                    VectorType::const_vector(&[c(3), c(7), c(11), c(15)]),
-                ];
-                let mut groups = Vec::with_capacity(4);
-                for (i, m) in masks.iter().enumerate() {
-                    groups.push(
+                // Prefer the portable llvm.vector.partial.reduce.add intrinsic, which
+                // LLVM's AArch64 backend folds to SDOT (x86 -> vpdpbusd). The manual
+                // strided shuffle-reduce below is the bit-identical fallback for LLVM
+                // builds lacking the intrinsic — but it does NOT fold to SDOT, so the
+                // intrinsic path is what closes the dot-throughput gap vs Cranelift.
+                let res = match self.build_partial_reduce_add(acc_v, mul, "dot_pr") {
+                    Ok(v) => v,
+                    Err(_e) => {
+                        if std::env::var("RAYZOR_DBG_PR").is_ok() {
+                            eprintln!("[VectorDot] partial.reduce.add unavailable -> fallback: {}", _e);
+                        }
+                        let c = |n: u64| i32_ty.const_int(n, false);
+                        let masks = [
+                            VectorType::const_vector(&[c(0), c(4), c(8), c(12)]),
+                            VectorType::const_vector(&[c(1), c(5), c(9), c(13)]),
+                            VectorType::const_vector(&[c(2), c(6), c(10), c(14)]),
+                            VectorType::const_vector(&[c(3), c(7), c(11), c(15)]),
+                        ];
+                        let mut groups = Vec::with_capacity(4);
+                        for (i, m) in masks.iter().enumerate() {
+                            groups.push(
+                                self.builder
+                                    .build_shuffle_vector(mul, mul, *m, &format!("dot_s{}", i))
+                                    .map_err(|e| format!("VectorDot shuffle failed: {}", e))?,
+                            );
+                        }
+                        let t0 = self
+                            .builder
+                            .build_int_add(groups[0], groups[1], "dot_t0")
+                            .map_err(|e| format!("VectorDot add failed: {}", e))?;
+                        let t1 = self
+                            .builder
+                            .build_int_add(groups[2], groups[3], "dot_t1")
+                            .map_err(|e| format!("VectorDot add failed: {}", e))?;
+                        let d = self
+                            .builder
+                            .build_int_add(t0, t1, "dot_d")
+                            .map_err(|e| format!("VectorDot add failed: {}", e))?;
                         self.builder
-                            .build_shuffle_vector(mul, mul, *m, &format!("dot_s{}", i))
-                            .map_err(|e| format!("VectorDot shuffle failed: {}", e))?,
-                    );
-                }
-                let t0 = self
-                    .builder
-                    .build_int_add(groups[0], groups[1], "dot_t0")
-                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
-                let t1 = self
-                    .builder
-                    .build_int_add(groups[2], groups[3], "dot_t1")
-                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
-                let d = self
-                    .builder
-                    .build_int_add(t0, t1, "dot_d")
-                    .map_err(|e| format!("VectorDot add failed: {}", e))?;
-                let res = self
-                    .builder
-                    .build_int_add(d, acc_v, "dot_res")
-                    .map_err(|e| format!("VectorDot acc add failed: {}", e))?;
+                            .build_int_add(d, acc_v, "dot_res")
+                            .map_err(|e| format!("VectorDot acc add failed: {}", e))?
+                    }
+                };
                 self.value_map.insert(*dest, res.into());
             }
 

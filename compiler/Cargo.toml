@@ -61,8 +61,8 @@ wit-component = "0.245"  # WASI P2 Component wrapping (core module → component
 # shares the patched cranelift and the Cranelift JIT compiles in. With
 # the old crates.io 43.0.2 (cranelift 0.130) the 0.133 patch made
 # wasmtime-cranelift unresolvable → Pulley interpreter → ~50x slowdown.
-wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1", optional = true }
-wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1", package = "wasmtime-wasi", optional = true }
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19", optional = true }
+wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19", package = "wasmtime-wasi", optional = true }
 
 # wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
 rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }
