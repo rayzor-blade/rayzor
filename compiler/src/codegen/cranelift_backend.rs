@@ -2770,7 +2770,7 @@ impl CraneliftBackend {
                     data_id
                 };
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let name_ptr = builder.ins().global_value(types::I64, gv);
+                let name_ptr = builder.ins().symbol_value(types::I64, gv);
                 let name_len = builder.ins().iconst(types::I64, var_name.len() as i64);
                 let line_val = builder.ins().iconst(types::I64, i64::from(location.line));
 
@@ -5156,7 +5156,7 @@ impl CraneliftBackend {
 
                 // Get pointer to the string data
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let str_ptr = builder.ins().global_value(types::I64, gv);
+                let str_ptr = builder.ins().symbol_value(types::I64, gv);
                 let str_len = builder.ins().iconst(types::I64, s.len() as i64);
 
                 // Get or declare haxe_string_literal runtime function

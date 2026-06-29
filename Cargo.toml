@@ -26,6 +26,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+# LLVM backend ON by default: the LLVM tier (auto-upgrade after main entry)
+# must be available without an opt-in flag. LLVM 21 is a required toolchain
+# dependency, not optional. `--no-default-features` still gives a Cranelift-only build.
+default = ["llvm-backend"]
 llvm-backend = ["compiler/llvm-backend"]
 # Heap + CPU profiler. Off by default; see rayzor-runtime's `profile`
 # feature for details. Activate with `cargo build --release --features profile`
@@ -94,10 +98,10 @@ opt-level = 2
 # and wasmtime silently falls back to the Pulley interpreter (~50x
 # slower). Drop this block once 0.133 lands on crates.io.
 [patch.crates-io]
-cranelift = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
-cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "8cb28bc7f984764dd06dd57d657e2ca130b1d4a1" }
+cranelift = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
+cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19" }
