@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
 
-use compile_helpers::{compile_haxe_to_mir, compile_haxe_to_mir_with_cache};
+use compile_helpers::compile_haxe_to_mir;
 
 #[derive(Parser)]
 #[command(name = "rayzor")]
@@ -1189,8 +1189,8 @@ fn run_file(
     file_arg: Option<PathBuf>,
     verbose: bool,
     stats: bool,
-    _tier: u8,
-    _llvm: bool,
+    tier: u8,
+    llvm: bool,
     preset: Preset,
     preset_override_toml: bool,
     tier_thresholds: Option<TierThresholds>,
@@ -1305,7 +1305,7 @@ fn run_file(
     });
 
     #[cfg(not(feature = "llvm-backend"))]
-    if _llvm {
+    if llvm {
         return Err(
             "LLVM backend not available. Recompile with --features llvm-backend".to_string(),
         );
@@ -1585,12 +1585,27 @@ fn run_file(
             h.begin_phase("compile");
         }
         let t_compile = std::time::Instant::now();
-        let (mut mir_module, compile_diagnostics) = compile_haxe_to_mir_with_cache(
+        // Auto-define the execution tier so tests / code can conditionally
+        // compile per backend with `#if jit` / `#if llvm` / `#if interp`.
+        // rayzor's JIT is tiered (interp→cranelift→llvm at runtime); `--tier`
+        // only sets the START tier, so the default `run` is still the JIT path.
+        // The tier label therefore reflects the backend the command targets:
+        // `--llvm`/`--tier 3` → llvm, the interpreter-only Embedded preset →
+        // interp, otherwise the default JIT path.
+        let tier_define: &str = if llvm || tier >= 3 {
+            "llvm"
+        } else if matches!(preset, Preset::Embedded) {
+            "interp"
+        } else {
+            "jit"
+        };
+        let compile_result = compile_helpers::compile_haxe_to_mir_with_defines_and_cache(
             &source,
             file.to_str().unwrap_or("unknown"),
             compiler_plugins,
             &rpkg_source_dirs,
             safety_warnings,
+            &[tier_define],
             cache_enabled,
             if cache_enabled {
                 Some(run_cache_dir.clone())
@@ -1598,6 +1613,8 @@ fn run_file(
                 None
             },
         )?;
+        let mut mir_module = compile_result.module;
+        let compile_diagnostics = compile_result.diagnostics;
         if let Some(ref h) = progress_handle {
             h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1802,7 +1819,7 @@ fn run_file(
 
     // Snapshot the upgrade flag before moving `config` into the backend.
     // `--llvm` forces a whole-module LLVM compile (was ignored in the feature build).
-    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || _llvm;
+    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 

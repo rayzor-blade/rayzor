@@ -30,6 +30,16 @@ class Main {
         var failing = Spec.run();
         if (failing != 1) { trace("SELFTEST FAIL: expected 1 failure, got " + failing); Sys.exit(1); }
 
+        // Tier conditional compilation: under `rayzor run` the `jit` symbol is
+        // defined, so this block compiles and runs; under another backend it is
+        // simply absent. Proves `#if jit` activates end-to-end.
+        #if jit
+        Spec.describe("TierJit", () -> {
+            Spec.it("jit-gated runs", () -> Spec.expect(1).toEqual(1));
+        });
+        if (Spec.run() != 0) { trace("SELFTEST FAIL: jit-gated block"); Sys.exit(1); }
+        #end
+
         trace("test_rayzor_spec OK");
     }
 }
