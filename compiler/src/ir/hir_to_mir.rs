@@ -12924,6 +12924,45 @@ impl<'a> HirToMirContext<'a> {
                         };
                         let receiver_class_hint = receiver_class_hint_owned.as_deref();
 
+                        // SIMD4f arithmetic METHODS (`a.add(b)` etc.) must compile
+                        // to the same single vector instruction as the OPERATORS
+                        // (`a + b`, lowered to VectorBinOp at ~19541). The default
+                        // method-call path routes them to a MIR wrapper that
+                        // mishandles the vector ABI and returns garbage (a SIMD4f
+                        // value carried as I64/Ptr(Void)). Emit VectorBinOp
+                        // directly. Restricted to rayzor_SIMD4f (f32x4); the i32x4
+                        // companion is excluded because integer VectorBinOp
+                        // miscompiles on the wasm backend.
+                        if receiver_class_hint == Some("rayzor_SIMD4f") && args.len() == 2 {
+                            let mname = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .and_then(|s| self.string_interner.get(s.name));
+                            let vbop = match mname {
+                                Some("add") => Some(BinaryOp::Add),
+                                Some("sub") => Some(BinaryOp::Sub),
+                                Some("mul") => Some(BinaryOp::Mul),
+                                Some("div") => Some(BinaryOp::Div),
+                                _ => None,
+                            };
+                            if let Some(bin_op) = vbop {
+                                let lhs_reg = self.lower_expression(&args[0])?;
+                                let rhs_reg = self.lower_expression(&args[1])?;
+                                let vec_ty = self
+                                    .builder
+                                    .get_register_type(lhs_reg)
+                                    .filter(|t| matches!(t, IrType::Vector { .. }))
+                                    .or_else(|| self.builder.get_register_type(rhs_reg))
+                                    .unwrap_or(IrType::Vector {
+                                        element: Box::new(IrType::F32),
+                                        count: 4,
+                                    });
+                                return self
+                                    .builder
+                                    .build_vector_binop(bin_op, lhs_reg, rhs_reg, vec_ty);
+                            }
+                        }
+
                         // Calculate actual param count (excluding the receiver) for overload disambiguation
                         // e.g., s.indexOf("World", 0) has args=[s, "World", 0], param_count=2
                         let param_count = args.len().saturating_sub(1);
