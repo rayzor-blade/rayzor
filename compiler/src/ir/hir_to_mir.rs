@@ -1827,6 +1827,89 @@ impl<'a> HirToMirContext<'a> {
             })
     }
 
+    /// Expand a class instance's allocation size to cover its full inheritance
+    /// chain. A subclass contains every field of its parent at the same slot
+    /// indices, so its allocation must be at least as large as the parent's.
+    ///
+    /// `register_class_metadata` computes a class's own size from the fields it
+    /// can see, but for an IMPORTED parent (e.g. `class MyException extends
+    /// haxe.Exception`) `collect_inherited_fields` may not have the parent's
+    /// fields available at registration time, leaving the subclass undersized.
+    /// Inherited-field writes (notably the `stack` field populated at `throw`,
+    /// resolved via `resolve_field_index_by_name` which DOES walk the parent
+    /// chain) then write past the allocation and corrupt the heap. Evaluated at
+    /// the `new` site — after all classes are registered — the parent's size is
+    /// reliably available, so we take the max over the chain. A larger
+    /// allocation is always safe (field indices are unchanged).
+    fn alloc_size_with_inheritance(
+        &self,
+        class_type: TypeId,
+        class_symbol: Option<SymbolId>,
+        own_size: u64,
+    ) -> u64 {
+        let mut size = own_size;
+        let mut cur_type = class_type;
+        let mut cur_sym = class_symbol;
+        let mut visited: BTreeSet<TypeId> = BTreeSet::new();
+        visited.insert(cur_type);
+        loop {
+            // Find the parent (`extends`) of the current class via its HIR decl,
+            // by type id first, then by symbol id.
+            let extends: Option<TypeId> = self
+                .current_hir_types
+                .get(&cur_type)
+                .and_then(|d| match d {
+                    HirTypeDecl::Class(c) => c.extends,
+                    _ => None,
+                })
+                .or_else(|| {
+                    cur_sym.and_then(|s| {
+                        self.current_hir_types.values().find_map(|d| match d {
+                            HirTypeDecl::Class(c) if c.symbol_id == s => c.extends,
+                            _ => None,
+                        })
+                    })
+                });
+            let Some(parent_type) = extends else { break };
+            if !visited.insert(parent_type) {
+                break;
+            }
+            let parent_sym = self.type_table.get(parent_type).and_then(|t| match &t.kind {
+                crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                _ => None,
+            });
+            // Parent's registered alloc size: by type id, by symbol-derived id,
+            // then by qualified/simple name.
+            let parent_size = self
+                .class_alloc_sizes
+                .get(&parent_type)
+                .copied()
+                .or_else(|| {
+                    parent_sym.and_then(|ps| {
+                        self.class_alloc_sizes
+                            .get(&TypeId::from_raw(ps.as_raw()))
+                            .copied()
+                    })
+                })
+                .or_else(|| {
+                    parent_sym
+                        .and_then(|ps| self.symbol_table.get_symbol(ps))
+                        .and_then(|s| {
+                            s.qualified_name
+                                .and_then(|n| self.string_interner.get(n))
+                                .or_else(|| self.string_interner.get(s.name))
+                        })
+                        .and_then(|name| self.class_alloc_sizes_by_name.get(name).copied())
+                });
+            if let Some(ps) = parent_size {
+                size = size.max(ps);
+            }
+            cur_type = parent_type;
+            cur_sym = parent_sym;
+        }
+        size
+    }
+
     /// Build a heap allocation (via malloc) for class instances
     /// This is used for class instances that may escape the current function
     fn build_heap_alloc(&mut self, size: u64) -> Option<IrId> {
@@ -5021,26 +5104,36 @@ impl<'a> HirToMirContext<'a> {
 
                     // Store to lvalue
                     if let Some(value) = final_value {
-                        // Dynamic↔typed coercion (box concrete→Dynamic, unbox Dynamic→concrete)
-                        let value = if let HirLValue::Variable(sym) = lhs {
-                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
-                                let target_ty = sym_info.type_id;
-                                if target_ty != TypeId::invalid() {
-                                    let after_box = self
-                                        .maybe_box_value(value, rhs.ty, target_ty)
-                                        .unwrap_or(value);
-                                    // Track boxing for Dynamic arithmetic safety
-                                    if after_box != value {
-                                        self.boxed_dynamic_symbols.insert(*sym);
-                                    }
-                                    self.maybe_unbox_value(after_box, rhs.ty, target_ty)
-                                        .unwrap_or(after_box)
-                                } else {
-                                    value
+                        // Dynamic↔typed coercion (box concrete→Dynamic, unbox Dynamic→concrete).
+                        // Applies to BOTH variable targets (`d = 60`) and field targets
+                        // (`obj.v = 60` where v:Dynamic) — the field's declared type comes
+                        // from its symbol. Without boxing on the field path, a primitive
+                        // written to a Dynamic field is stored raw and read back as a bogus
+                        // Dynamic pointer (Std.string garbles / crashes).
+                        let lhs_target_ty: Option<TypeId> = match lhs {
+                            HirLValue::Variable(sym) => self
+                                .symbol_table
+                                .get_symbol(*sym)
+                                .map(|s| s.type_id)
+                                .filter(|t| *t != TypeId::invalid()),
+                            HirLValue::Field { field, .. } => self
+                                .symbol_table
+                                .get_symbol(*field)
+                                .map(|s| s.type_id)
+                                .filter(|t| *t != TypeId::invalid()),
+                            _ => None,
+                        };
+                        let value = if let Some(target_ty) = lhs_target_ty {
+                            let after_box =
+                                self.maybe_box_value(value, rhs.ty, target_ty).unwrap_or(value);
+                            // Track boxing for Dynamic arithmetic safety (variable targets only).
+                            if after_box != value {
+                                if let HirLValue::Variable(sym) = lhs {
+                                    self.boxed_dynamic_symbols.insert(*sym);
                                 }
-                            } else {
-                                value
                             }
+                            self.maybe_unbox_value(after_box, rhs.ty, target_ty)
+                                .unwrap_or(after_box)
                         } else {
                             value
                         };
@@ -18817,16 +18910,13 @@ impl<'a> HirToMirContext<'a> {
                         self.class_alloc_sizes_by_name.get(class_name).copied()
                     })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
-                {
-                    let cn = actual_symbol_id
-                        .and_then(|sid| {
-                            self.symbol_table
-                                .get_symbol(sid)
-                                .and_then(|sym| self.string_interner.get(sym.name))
-                        })
-                        .unwrap_or("?");
-                    if cn.contains("Scale") {}
-                }
+                // Ensure the allocation covers inherited fields: a subclass of an
+                // imported class (e.g. MyException extends haxe.Exception) can be
+                // registered with an undersized `obj_size` because the parent's
+                // fields weren't available at registration; inherited-field writes
+                // (the `stack` field at `throw`) would then overflow the heap block.
+                let obj_size =
+                    self.alloc_size_with_inheritance(*class_type, actual_symbol_id, obj_size);
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
                 let obj_ptr = obj_ptr?;
@@ -24183,6 +24273,28 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(&param_type_id) = param_types.get(param_index) {
                     let resolved_param = self.resolve_through_aliases(param_type_id);
                     let resolved_arg = self.resolve_through_aliases(arg_expr.ty);
+
+                    // Concrete → Dynamic at the call boundary: box the value so the
+                    // callee receives a real DynamicValue. Without this a primitive
+                    // arg is passed as raw bits and read back as a bogus Dynamic
+                    // pointer (Std.string garbles / crashes). Mirrors Let/Assign
+                    // boxing and the Cast→Dynamic path.
+                    let param_is_dynamic = {
+                        let type_table = self.type_table;
+                        matches!(
+                            type_table.get(resolved_param).map(|t| &t.kind),
+                            Some(TypeKind::Dynamic)
+                        )
+                    };
+                    if param_is_dynamic {
+                        if let Some(boxed) =
+                            self.maybe_box_value(arg_reg, arg_expr.ty, param_type_id)
+                        {
+                            if boxed != arg_reg {
+                                return boxed;
+                            }
+                        }
+                    }
 
                     let param_is_anon = {
                         let type_table = self.type_table;
