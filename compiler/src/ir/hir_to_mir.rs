@@ -4801,7 +4801,16 @@ impl<'a> HirToMirContext<'a> {
                         // value is aliased. Transfer ownership from source to destination
                         // so the drop analysis doesn't free the source while the alias lives.
                         // Skip if interface wrapping already handled the transfer.
-                        if !wrapped_for_interface {
+                        //
+                        // CRITICAL: Skip entirely for @:derive(Copy) bindings. For a Copy
+                        // class, `var b = a` does NOT alias `a` — `emit_shallow_copy` already
+                        // produced an INDEPENDENT allocation and registered `b` to own it.
+                        // Running the transfer here would (1) `register_owned_value(b, a's id)`
+                        // while `b` already owns the fresh copy, which `register_owned_value`
+                        // treats as a reassignment and FREES the just-created copy mid-function
+                        // (use-after-free on the next `b.x = ...`), and (2) re-point `b` at
+                        // `a`'s storage, destroying Copy independence and un-tracking `a`.
+                        if !wrapped_for_interface && copy_class_sym.is_none() {
                             if let HirPattern::Variable {
                                 symbol: dst_symbol, ..
                             } = pattern
