@@ -3527,6 +3527,99 @@ impl<'a> FunctionLowerer<'a> {
     // Instruction lowering
     // ------------------------------------------------------------------
 
+    /// On wasm, `Bytes.getDouble/getInt32/get/getFloat` (and setters) compile to
+    /// host-import CALLS (`haxe_bytes_get_double`) that cross the wasm->host
+    /// boundary per access (~300ns vs ~6ns for a guest load — measured). `Bytes`
+    /// is guest-resident with the data pointer at offset 0 of the `HaxeBytes`
+    /// header, so emit inline guest loads/stores instead:
+    ///   getDouble(b,pos) = f64.load( i32.load(b) + pos )
+    /// Matched on the Bytes-specific accessor names only (low false-positive
+    /// risk; `getDouble` etc. are not used by other stdlib types). Returns true
+    /// if it emitted the inline form (caller then skips the host-call path).
+    fn try_inline_bytes_accessor(
+        &self,
+        f: &mut Function,
+        func_id: &IrFunctionId,
+        args: &[IrId],
+        dest: Option<IrId>,
+    ) -> bool {
+        let mut name: Option<&str> = None;
+        for m in self.ctx.all_module_funcs.iter() {
+            if let Some(n) = m.get(func_id) {
+                name = Some(n.as_str());
+                break;
+            }
+        }
+        let name = match name {
+            Some(n) => n,
+            None => return false,
+        };
+        let bare = name.rsplit(['.', '_']).next().unwrap_or(name);
+        // Classify the accessor by its Bytes-specific name (qualified or bare).
+        let m = |_b: &str, get: &str, snake: &str| -> bool {
+            bare == get || name == get || name.ends_with(snake)
+        };
+        let i32load_dataptr = MemArg { offset: 0, align: 2, memory_index: 0 };
+        let ma0 = MemArg { offset: 0, align: 0, memory_index: 0 };
+        // Reads: [bytes, pos] -> value
+        let read = |f: &mut Function, this: &Self, load: Instruction, promote: Option<Instruction>| {
+            this.get_reg(f, args[0]);
+            f.instruction(&Instruction::I32Load(i32load_dataptr));
+            this.get_reg(f, args[1]);
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&load);
+            if let Some(p) = promote {
+                f.instruction(&p);
+            }
+            if let Some(d) = dest {
+                this.set_reg(f, d);
+            }
+        };
+        // Writes: [bytes, pos, value] -> void
+        let write = |f: &mut Function, this: &Self, demote: Option<Instruction>, store: Instruction| {
+            this.get_reg(f, args[0]);
+            f.instruction(&Instruction::I32Load(i32load_dataptr));
+            this.get_reg(f, args[1]);
+            f.instruction(&Instruction::I32Add);
+            this.get_reg(f, args[2]);
+            if let Some(d) = demote {
+                f.instruction(&d);
+            }
+            f.instruction(&store);
+        };
+        if args.len() == 2 {
+            if m(bare, "getDouble", "_get_double") {
+                read(f, self, Instruction::F64Load(ma0), None);
+                return true;
+            }
+            if m(bare, "getInt32", "_get_int32") {
+                read(f, self, Instruction::I32Load(ma0), None);
+                return true;
+            }
+            if m(bare, "getFloat", "_get_float") {
+                read(f, self, Instruction::F32Load(ma0), Some(Instruction::F64PromoteF32));
+                return true;
+            }
+            // NOTE: deliberately NOT inlining bare `get`/`set` (single byte) —
+            // "_get"/"_set" suffixes also match haxe_array_get / stringmap_get etc.,
+            // which would corrupt non-Bytes calls. Only Bytes-unique typed names.
+        } else if args.len() == 3 {
+            if m(bare, "setDouble", "_set_double") {
+                write(f, self, None, Instruction::F64Store(ma0));
+                return true;
+            }
+            if m(bare, "setInt32", "_set_int32") {
+                write(f, self, None, Instruction::I32Store(ma0));
+                return true;
+            }
+            if m(bare, "setFloat", "_set_float") {
+                write(f, self, Some(Instruction::F32DemoteF64), Instruction::F32Store(ma0));
+                return true;
+            }
+        }
+        false
+    }
+
     fn emit_instruction(&self, f: &mut Function, inst: &IrInstruction) {
         match inst {
             // === Const ===
@@ -4014,6 +4107,12 @@ impl<'a> FunctionLowerer<'a> {
                 args,
                 ..
             } => {
+                // Inline Bytes scalar accessors (getDouble/get/getInt32/getFloat
+                // + setters) as guest loads/stores instead of crossing the
+                // wasm->host boundary per access (~46x faster, measured).
+                if self.try_inline_bytes_accessor(f, func_id, args, *dest) {
+                    return;
+                }
                 // Load args with type coercion to match callee signature
                 let callee_params = self.ctx.func_param_types.get(func_id);
                 let has_implicit_env = self.ctx.functions_with_env.contains(func_id);
