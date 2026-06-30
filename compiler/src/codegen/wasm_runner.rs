@@ -1866,6 +1866,20 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     config.memory_guard_size(1 << 25); // 32 MiB
     config.memory_may_move(false);
     let engine = Engine::new(&config).map_err(|e| format!("Engine config failed: {}", e))?;
+    // Dump the cwasm (this engine's exact cranelift output) for aarch64 disasm.
+    if let Some(path) = std::env::var_os("RAYZOR_WASM_CWASM_DUMP") {
+        match engine.precompile_module(wasm_bytes) {
+            Ok(cwasm) => {
+                let _ = std::fs::write(&path, &cwasm);
+                eprintln!(
+                    "[wasm-runner] cwasm dumped to {} ({} KB)",
+                    path.to_string_lossy(),
+                    cwasm.len() / 1024
+                );
+            }
+            Err(e) => eprintln!("[wasm-runner] cwasm dump failed: {}", e),
+        }
+    }
     let _compile_t0 = std::time::Instant::now();
     let module =
         Module::new(&engine, wasm_bytes).map_err(|e| format!("WASM compilation failed: {}", e))?;
