@@ -7222,6 +7222,38 @@ impl<'a> AstLowering<'a> {
         if has_type {
             return;
         }
+
+        // `QTensor.fusedQkvMatmul(x, qW, kW, vW, threads): Array<Tensor>` —
+        // the declaring stdlib extern file (`rayzor/ds/QTensor.hx`) can be
+        // TAST-lowered AFTER a dependent that calls this static (lazy
+        // stdlib load ordering), so no typed declaration symbol exists yet
+        // to copy from at the call site. Without a type, the call's result
+        // decayed and `triple.length`/`triple[i]` on the returned array
+        // mis-dispatched (garbage Q/K/V through the fused decode path,
+        // intermittent SIGSEGV). Same accepted pattern as the
+        // `infer_builtin_method_type` stdlib arms: pin the declared
+        // signature for this known extern static.
+        if class_name == Some("QTensor") && method_name_str == Some("fusedQkvMatmul") {
+            let tensor_ty = self.resolve_type_by_name("Tensor").ok();
+            let qtensor_ty = self.resolve_type_by_name("QTensor").ok();
+            if let (Some(tensor_ty), Some(qtensor_ty)) = (tensor_ty, qtensor_ty) {
+                let int_ty = self.context.type_table.borrow().int_type();
+                let arr_tensor = self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_array_type(tensor_ty);
+                let fn_ty = self.context.type_table.borrow_mut().create_function_type(
+                    vec![tensor_ty, qtensor_ty, qtensor_ty, qtensor_ty, int_ty],
+                    arr_tensor,
+                );
+                self.context
+                    .symbol_table
+                    .update_symbol_type(method_symbol, fn_ty);
+                return;
+            }
+        }
+
     }
 
     /// Look up a *data field* (not a method) by name on a class.
