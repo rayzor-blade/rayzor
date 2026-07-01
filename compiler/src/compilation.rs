@@ -2989,8 +2989,23 @@ impl CompilationUnit {
                         }
                         continue; // Check for more ready files
                     }
-                    // No ready files — break one cycle by emitting the first stuck file
-                    if let Some(name) = stuck.keys().next().cloned() {
+                    // No ready file — break a cycle by emitting the one with the
+                    // FEWEST still-unemitted stuck-deps (ties: name order). This
+                    // emits leaf-like dependencies first so a constructor's
+                    // callee (e.g. `LlamaModel`, built by `LlamaArch.build` via
+                    // `new LlamaModel()`) lands before its caller — otherwise the
+                    // caller can't resolve the callee's constructor and leaves the
+                    // object unconstructed.
+                    let victim = stuck
+                        .iter()
+                        .map(|(name, deps)| {
+                            let outstanding =
+                                deps.iter().filter(|d| !emitted.contains(*d)).count();
+                            (outstanding, name.clone())
+                        })
+                        .min()
+                        .map(|(_, name)| name);
+                    if let Some(name) = victim {
                         compile_order.push(name.clone());
                         emitted.insert(name.clone());
                         stuck.remove(&name);

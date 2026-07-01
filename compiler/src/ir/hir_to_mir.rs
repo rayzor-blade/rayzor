@@ -5455,6 +5455,28 @@ impl<'a> HirToMirContext<'a> {
                         if did_wrap {
                             return Some(wrapped);
                         }
+                        // Cross-module: the returned value's type may not resolve
+                        // to a Class here (arrives Unknown/Placeholder), so
+                        // `maybe_wrap_for_interface` can't wrap `return newC()`
+                        // for an interface return. Recover the class by name and
+                        // wrap via the name-based fat-ptr build (mirrors the
+                        // call-arg path). Without this, a raw class object is
+                        // returned where the caller expects an interface fat
+                        // pointer (`LlamaArch.build():Module` → `new LlamaModel()`).
+                        if let Some(iface_sym) = self.get_interface_symbol(fn_ret_ty) {
+                            if !self.interface_wrapped_args.contains(&val) {
+                                if let Some(class_fqn) = self.new_arg_class_fqn(e) {
+                                    if let Some(w) = self
+                                        .wrap_new_class_as_interface_by_name(
+                                            val, &class_fqn, iface_sym,
+                                        )
+                                    {
+                                        self.interface_wrapped_args.insert(w);
+                                        return Some(w);
+                                    }
+                                }
+                            }
+                        }
 
                         // Numeric promotion: `function foo():Float { return x; }`
                         // where x is an Int (e.g. bound from an enum variant
@@ -19314,8 +19336,28 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                } else {
-                    // eprintln!("WARNING: Constructor not found for TypeId {:?}", class_type);
+                } else if let Some(ctor_fn) =
+                    self.resolve_cross_module_constructor_by_name(actual_symbol_id, final_class_name)
+                {
+                    // Cross-module: the class's constructor isn't in this
+                    // context's `constructor_map`/`constructor_name_map` but is
+                    // resolvable by FQN (`<class>.new`) in the shared name map.
+                    // Call it so the object is constructed rather than left with
+                    // default-null fields.
+                    let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len() + 1);
+                    arg_regs.push(obj_ptr);
+                    for a in args.iter() {
+                        if let Some(reg) = self.lower_expression(a) {
+                            arg_regs.push(reg);
+                        }
+                    }
+                    self.builder
+                        .build_call_direct(ctor_fn, arg_regs, IrType::Void);
+                    for arg in args.iter() {
+                        if let HirExprKind::Variable { symbol, .. } = &arg.kind {
+                            self.owned_heap_values.remove(symbol);
+                        }
+                    }
                 }
 
                 if let Some(class_name) = final_class_name {
@@ -20741,19 +20783,33 @@ impl<'a> HirToMirContext<'a> {
                     ) => {
                         let src_iface_sym = *src_iface_sym;
                         let tgt_iface_sym = *tgt_iface_sym;
-                        let src_method_count = self
-                            .interface_method_names
-                            .get(&src_iface_sym)
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        let tgt_method_count = self
-                            .interface_method_names
-                            .get(&tgt_iface_sym)
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        if src_method_count >= tgt_method_count {
-                            // Source vtable covers the target's slots —
-                            // existing pass-through behaviour is fine.
+                        // Pass-through is only correct when the target's method
+                        // slots are a PREFIX of the source's (same names, same
+                        // order) — i.e. the source vtable already holds each
+                        // target method at the same index. A method-COUNT test
+                        // is wrong for a sub-interface with its OWN methods:
+                        // `Module` (forward, parameters) → `CausalLanguageModel`
+                        // (forwardIds, resetCache) has equal counts but disjoint
+                        // slots, so pass-through would dispatch `resetCache`
+                        // through `Module`'s `parameters` slot. Rebuild unless
+                        // the names line up as a prefix.
+                        let target_is_prefix = match (
+                            self.interface_method_names.get(&src_iface_sym),
+                            self.interface_method_names.get(&tgt_iface_sym),
+                        ) {
+                            (Some(src_names), Some(tgt_names)) => {
+                                tgt_names.len() <= src_names.len()
+                                    && tgt_names
+                                        .iter()
+                                        .zip(src_names.iter())
+                                        .all(|(t, s)| t == s)
+                            }
+                            // Same interface (src == tgt) is trivially a prefix.
+                            _ => src_iface_sym == tgt_iface_sym,
+                        };
+                        if src_iface_sym == tgt_iface_sym || target_is_prefix {
+                            // Source vtable covers the target's slots at the same
+                            // indices — existing pass-through behaviour is fine.
                             let value_reg = self.lower_expression(expr)?;
                             self.builder.build_cast(value_reg, from_type, to_type)
                         } else {
@@ -26900,6 +26956,45 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Resolve an imported class's constructor by fully-qualified name when it
+    /// isn't in this context's `constructor_map`/`constructor_name_map` (the
+    /// class compiled in another module). Looks up `<class_fqn>.new` in the
+    /// stable name-keyed `external_function_name_map`. Returns None if the
+    /// class name is unknown or the constructor isn't visible yet — the caller
+    /// then leaves the object unconstructed (unchanged prior behaviour).
+    fn resolve_cross_module_constructor_by_name(
+        &self,
+        actual_symbol_id: Option<SymbolId>,
+        final_class_name: Option<&str>,
+    ) -> Option<IrFunctionId> {
+        // Prefer the recovered class symbol's qualified name; fall back to the
+        // bare class name qualified by the current module's package.
+        let fqn = actual_symbol_id
+            .and_then(|sid| self.symbol_table.get_symbol(sid))
+            .and_then(|s| {
+                s.qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                let bare = final_class_name?;
+                if bare.contains('.') {
+                    return Some(bare.to_string());
+                }
+                let pkg = self
+                    .current_class_symbol
+                    .and_then(|s| self.symbol_table.get_symbol(s))
+                    .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n)))
+                    .and_then(|qn| qn.rsplit_once('.').map(|(p, _)| p.to_string()));
+                match pkg {
+                    Some(p) if !p.is_empty() => Some(format!("{}.{}", p, bare)),
+                    _ => Some(bare.to_string()),
+                }
+            })?;
+        let key = format!("{}.new", fqn);
+        self.external_function_name_map.get(&key).copied()
     }
 
     /// Resolve a property/field on a receiver whose type stayed unresolved
@@ -35866,6 +35961,25 @@ impl<'a> HirToMirContext<'a> {
             IrType::Void,
         );
 
+        // Map field name → declared target type (from the anon typedef), so a
+        // class value assigned to an interface-typed field is wrapped in the
+        // interface fat pointer (invariant: interface-typed anon fields hold a
+        // fat pointer, never a raw class object).
+        let field_target_types: BTreeMap<String, TypeId> = {
+            let type_table = self.type_table;
+            match type_table.get(resolved_ty).map(|t| &t.kind) {
+                Some(TypeKind::Anonymous { fields: anon_fields }) => anon_fields
+                    .iter()
+                    .filter_map(|af| {
+                        self.string_interner
+                            .get(af.name)
+                            .map(|n| (n.to_string(), af.type_id))
+                    })
+                    .collect(),
+                _ => BTreeMap::new(),
+            }
+        };
+
         // Emit: handle = rayzor_anon_new(shape_id, total_field_count)
         let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
         let field_count_val = self
@@ -35878,7 +35992,7 @@ impl<'a> HirToMirContext<'a> {
         )?;
 
         // Lower each field value and store at its sorted index
-        for (sorted_idx, (_, source)) in named_fields.iter().enumerate() {
+        for (sorted_idx, (field_name, source)) in named_fields.iter().enumerate() {
             let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
 
             match source {
@@ -35886,7 +36000,22 @@ impl<'a> HirToMirContext<'a> {
                     // Literal field — lower the expression
                     let field_expr = &fields[*orig_idx].1;
                     let field_val = self.lower_expression(field_expr)?;
-                    let val_as_i64 = self.coerce_to_i64(field_val, field_expr.ty)?;
+                    // Wrap a class value into an interface fat pointer when the
+                    // field's declared type is that interface.
+                    let (field_val, field_val_ty) = if let Some(&target_ty) =
+                        field_target_types.get(field_name)
+                    {
+                        let (wrapped, did_wrap) =
+                            self.maybe_wrap_for_interface(field_val, field_expr.ty, target_ty);
+                        if did_wrap {
+                            (wrapped, target_ty)
+                        } else {
+                            (field_val, field_expr.ty)
+                        }
+                    } else {
+                        (field_val, field_expr.ty)
+                    };
+                    let val_as_i64 = self.coerce_to_i64(field_val, field_val_ty)?;
                     self.builder.build_call_direct(
                         anon_set_id,
                         vec![handle, idx_val, val_as_i64],
