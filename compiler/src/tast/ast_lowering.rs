@@ -442,6 +442,16 @@ pub struct LoweringContext<'a> {
     /// hint is harmless because the New site re-runs through type checking
     /// against the declared variable type either way.
     pub expected_new_type_hint: Option<TypeId>,
+    /// The enclosing function/method's declared return type, set before its
+    /// body is lowered (mirrors `switch_discriminant_type`). Used to
+    /// disambiguate a bare enum-variant identifier (`return F32;`) when
+    /// MULTIPLE imported enums declare a variant with the same name —
+    /// `resolve_symbol_in_scope_hierarchy` is a plain first-match scope
+    /// walk with no type awareness, so e.g. `rayzor.ds.DType.F32` (index 0,
+    /// unboxed) and `nue.loader.GGUFReader.MetaValue.F32` (index 8, boxed
+    /// with a Float payload) collide and whichever got registered first
+    /// wins — silently returning the wrong enum's boxed/garbage value.
+    pub expected_return_type: Option<TypeId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -471,6 +481,7 @@ impl<'a> LoweringContext<'a> {
             current_package: None,
             switch_discriminant_type: None,
             expected_new_type_hint: None,
+            expected_return_type: None,
         }
     }
 
@@ -5474,6 +5485,18 @@ impl<'a> AstLowering<'a> {
         let prev_static = self.in_static_method;
         self.in_static_method = is_static_method;
 
+        // Pre-lower an explicit return-type annotation (cheap — `lower_type`
+        // just resolves a type reference) so bare enum-variant identifiers
+        // in `return` statements can disambiguate against it (see
+        // `expected_return_type` doc comment). Reused below as the final
+        // `return_type` when present, so this isn't wasted work.
+        let prev_expected_return = self.context.expected_return_type;
+        let annotated_return_type = match &func.return_type {
+            Some(ret_type) => Some(self.lower_type(ret_type)?),
+            None => None,
+        };
+        self.context.expected_return_type = annotated_return_type;
+
         // Process body first (we need it to infer return type if not specified)
         let (body, body_statements_for_inference) = if let Some(body_expr) = &func.body {
             let typed_expr = self.lower_expression(body_expr)?;
@@ -5490,13 +5513,16 @@ impl<'a> AstLowering<'a> {
         } else {
             (Vec::new(), Vec::new())
         };
+        self.context.expected_return_type = prev_expected_return;
 
         // Restore static method flag
         self.in_static_method = prev_static;
 
-        // Process return type - if not specified, infer from body
-        let return_type = if let Some(ret_type) = &func.return_type {
-            self.lower_type(ret_type)?
+        // Process return type - if not specified, infer from body.
+        // Reuse the pre-lowered annotation from above instead of calling
+        // `lower_type` again (avoids doing the resolution twice).
+        let return_type = if let Some(ret_type) = annotated_return_type {
+            ret_type
         } else {
             // Try to infer return type from return statements in the body.
             // Use the unwrapped block statements for inference since the body
@@ -7749,7 +7775,20 @@ impl<'a> AstLowering<'a> {
                 // and `MetaValue.F32` in scope would otherwise pick the first
                 // one the scope walk found (which is often the wrong one).
                 // See bugs_dtype_enum_cross_file_pointer.
-                let prefer = self.expected_arg_type_stack.last().copied().flatten();
+                //
+                // Falls back to `expected_return_type` (the enclosing
+                // function's declared return type) when there's no
+                // in-progress call argument — covers `return F32;` inside a
+                // function declared `:DType`, which otherwise hits the same
+                // collision (confirmed: `nue`'s `inferDType():DType` with
+                // `return F32;` resolved to `MetaValue.F32`, a boxed variant
+                // from an unrelated 13-variant enum, instead of `DType.F32`).
+                let prefer = self
+                    .expected_arg_type_stack
+                    .last()
+                    .copied()
+                    .flatten()
+                    .or(self.context.expected_return_type);
                 if let Some(expected_ty) = prefer {
                     let needs_reresolve = {
                         let sym = self.context.symbol_table.get_symbol(symbol_id);
