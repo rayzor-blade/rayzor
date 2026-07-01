@@ -27511,7 +27511,6 @@ impl<'a> HirToMirContext<'a> {
                 type_table.get(resolved_receiver_ty).map(|t| &t.kind),
                 Some(TypeKind::Anonymous { .. })
             );
-
             if is_anon {
                 // Get field name and find its sorted index + actual type from the anonymous struct
                 let field_name = self
@@ -36497,32 +36496,68 @@ impl<'a> HirToMirContext<'a> {
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
                 Some(TypeKind::Placeholder { name }) => {
-                    // Try to resolve Placeholder by searching for a class with matching name
+                    // Try to resolve Placeholder by searching for a class OR a
+                    // typedef with a matching name. A cross-module structural
+                    // typedef (`typedef Loaded = { var m:Base; ... }`) decays
+                    // to a Placeholder just like a class does; without the
+                    // TypeAlias arm this loop only ever finds a same-named
+                    // Class (if one coincidentally exists) or gives up,
+                    // leaving field access on the typedef unable to recognise
+                    // it as Anonymous and falling through to class-field GEP.
                     if let Some(name_str) = self.string_interner.get(*name) {
                         // Search for "rayzor.Bytes" → match class "Bytes" with qualified "rayzor.Bytes"
                         // Also try bare name: "rayzor.Bytes" → "Bytes"
                         let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
                         let mut found = None;
+                        let mut found_alias_target = None;
                         for (tid, ti) in type_table.iter() {
-                            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
-                                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
-                                    let sym_name = self.string_interner.get(sym.name).unwrap_or("");
-                                    let sym_qname = sym
-                                        .qualified_name
-                                        .and_then(|qn| self.string_interner.get(qn));
-                                    let matches = sym_qname.map_or(false, |qn| qn == name_str)
-                                        || sym_name == name_str
-                                        || sym_name == bare_name
-                                        || sym_qname.map_or(false, |qn| qn == bare_name);
-                                    if matches {
-                                        found = Some(tid);
-                                        break;
+                            match &ti.kind {
+                                TypeKind::Class { symbol_id, .. } => {
+                                    if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                                        let sym_name =
+                                            self.string_interner.get(sym.name).unwrap_or("");
+                                        let sym_qname = sym
+                                            .qualified_name
+                                            .and_then(|qn| self.string_interner.get(qn));
+                                        let matches = sym_qname.map_or(false, |qn| qn == name_str)
+                                            || sym_name == name_str
+                                            || sym_name == bare_name
+                                            || sym_qname.map_or(false, |qn| qn == bare_name);
+                                        if matches {
+                                            found = Some(tid);
+                                            break;
+                                        }
                                     }
                                 }
+                                TypeKind::TypeAlias {
+                                    symbol_id,
+                                    target_type,
+                                    ..
+                                } => {
+                                    if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                                        let sym_name =
+                                            self.string_interner.get(sym.name).unwrap_or("");
+                                        let sym_qname = sym
+                                            .qualified_name
+                                            .and_then(|qn| self.string_interner.get(qn));
+                                        let matches = sym_qname.map_or(false, |qn| qn == name_str)
+                                            || sym_name == name_str
+                                            || sym_name == bare_name
+                                            || sym_qname.map_or(false, |qn| qn == bare_name);
+                                        if matches && found_alias_target.is_none() {
+                                            found_alias_target = Some(*target_type);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         if let Some(resolved_tid) = found {
                             current = resolved_tid;
+                        } else if let Some(target_tid) = found_alias_target {
+                            // Continue resolving through the typedef's target
+                            // (e.g. straight to the Anonymous struct type).
+                            current = target_tid;
                         } else {
                             break;
                         }
