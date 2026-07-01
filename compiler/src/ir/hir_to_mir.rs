@@ -3067,6 +3067,30 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
+        // A bodyless declaration (e.g. an `extern class Tensor` method like
+        // `addInto`) lands here with no HIR statements to lower, so it's
+        // registered as an empty forward-ref placeholder. `IrFunction::new`
+        // defaults `kind` to `UserDefined` — correct for a genuine forward
+        // reference to a user function, but WRONG when the name is actually
+        // a known stdlib MIR-wrapper (e.g. `Tensor_addInto`): `own_func_ids`
+        // (compilation.rs) uses `kind != MirWrapper` to decide whether this
+        // file's own compile "owns" the function and must PROTECT it from
+        // the stdlib merge's by-name replacement. A wrongly-`UserDefined`
+        // stdlib-wrapper stub gets protected, survives the merge as
+        // permanently empty, and traps (`brk`, TrapCode::user(1)) the first
+        // time it's called. A file that declares/references the extern
+        // method but never itself CALLS it never reaches the call-site-side
+        // fixup in `register_stdlib_mir_forward_ref`, so the tag must be
+        // set correctly here too, at creation, via the same name-based
+        // stdlib lookup used elsewhere.
+        if hir_func.body.is_none() {
+            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                if self.stdlib_mapping.is_mir_wrapper_function(&func.name) {
+                    func.kind = crate::ir::FunctionKind::MirWrapper;
+                }
+            }
+        }
+
         if hir_func.is_keep {
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 func.attributes
@@ -3169,6 +3193,17 @@ impl<'a> HirToMirContext<'a> {
 
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
+
+        // See the identical guard in `register_function_signature` for why
+        // a bodyless stdlib-mapped extern method must be retagged
+        // `MirWrapper` here at creation, not left to a later call-site fixup.
+        if hir_func.body.is_none() {
+            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                if self.stdlib_mapping.is_mir_wrapper_function(&func.name) {
+                    func.kind = crate::ir::FunctionKind::MirWrapper;
+                }
+            }
+        }
 
         if hir_func.is_keep {
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
@@ -6960,9 +6995,24 @@ impl<'a> HirToMirContext<'a> {
         mut param_types: Vec<IrType>,
         mut return_type: IrType,
     ) -> IrFunctionId {
-        // Check if already registered
-        for (func_id, func) in &self.builder.module.functions {
+        // Check if already registered. A bodyless `extern class` method
+        // declaration (e.g. `Tensor.addInto`) is registered FIRST by
+        // `register_function_signature`, which defaults new IrFunctions to
+        // `FunctionKind::UserDefined` (functions.rs IrFunction::new) — it
+        // has no concept of "this is a stdlib MIR-wrapper name". When a
+        // call site THEN resolves the same name through here, the empty
+        // stub is reused as-is, still tagged UserDefined. That tag makes
+        // `own_func_ids` (compilation.rs) treat it as genuine user code and
+        // PROTECT it from the stdlib merge's by-name replacement — so the
+        // permanently-empty stub survives to codegen and traps at runtime
+        // (`brk`, TrapCode::user(1)) the first time it's called, instead of
+        // being replaced by the real body (e.g. `build_tensor_add_into`).
+        // Retagging here, at the one place that KNOWS this name is a
+        // stdlib MIR wrapper, closes the gap regardless of which pass
+        // registered the placeholder first.
+        for (func_id, func) in self.builder.module.functions.iter_mut() {
             if func.name == name {
+                func.kind = FunctionKind::MirWrapper;
                 return *func_id;
             }
         }

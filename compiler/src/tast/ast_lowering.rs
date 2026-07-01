@@ -3386,6 +3386,28 @@ impl<'a> AstLowering<'a> {
                             .add_symbol_flags(sym, crate::tast::symbols::SymbolFlags::STATIC);
                     }
 
+                    // Set qualified_name NOW, at pre-registration, not only when
+                    // the body is lowered later (`lower_function_from_field`
+                    // does call `update_symbol_qualified_name`, but only for
+                    // the method it's actively lowering — this pre-registration
+                    // symbol is what cross-module CALL SITES resolve against
+                    // first). Without this, two same-named static methods in
+                    // different classes (e.g. `Linear.fromQuant` vs
+                    // `Embedding.fromQuant`) both carry `qualified_name=None`
+                    // when a caller in a THIRD module resolves them, so the
+                    // HIR-to-MIR fallback (`resolve_method_function_id` /
+                    // `stdlib_function_name_map`, both keyed by bare name when
+                    // qualified_name is absent) collides on the bare name
+                    // `fromQuant` — whichever module's real body was merged in
+                    // LAST silently wins for BOTH call sites, so a caller of
+                    // one class's method invokes the OTHER class's method
+                    // with mismatched arguments (confirmed: `Linear.fromQuant`
+                    // calls resolved to `Embedding.fromQuant`'s compiled body,
+                    // producing garbage/misaligned fields on the returned
+                    // object — silent corruption, not a crash at the call
+                    // site itself).
+                    self.context.update_symbol_qualified_name(sym);
+
                     sym
                 };
 

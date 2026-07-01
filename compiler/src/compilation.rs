@@ -5810,6 +5810,11 @@ impl CompilationUnit {
             // (b) generated MIR wrappers for stdlib calls — let stdlib merge replace these
             let mut merged_import_func_ids: std::collections::BTreeSet<IrFunctionId> =
                 own_func_ids.clone();
+            // Used below to veto protecting a stdlib MIR-wrapper stub by name
+            // (see the comment at its use site). Built once here — the
+            // earlier `stdlib_mapping` local was already moved into
+            // `lower_hir_to_mir_with_function_map` by this point.
+            let stdlib_mapping_for_merge = self.compiler_plugin_registry.build_combined_mapping();
             // Sort import modules by name for deterministic merge order.
             // Sorting ensures the merged MIR is identical regardless of resolver order.
             self.import_mir_modules.sort_by(|a, b| a.name.cmp(&b.name));
@@ -5825,7 +5830,23 @@ impl CompilationUnit {
                 for (func_id, func) in import_module.functions {
                     // Only protect source-level declarations (methods, constructors).
                     // MIR wrappers (not in import_own_func_ids) can be replaced by stdlib.
-                    if self.import_own_func_ids.contains(&func_id) {
+                    //
+                    // `import_own_func_ids` is keyed by renumbered IrFunctionId, computed
+                    // independently per import module via its own local-id arithmetic
+                    // (`old_id + import_base`). A stdlib MIR-wrapper stub for a bodyless
+                    // `extern class` method (e.g. `Tensor.addInto` -> `Tensor_addInto`) can
+                    // land on a renumbered id that coincidentally collides with an unrelated
+                    // genuine "own" declaration from another import — confirmed via
+                    // `RAYZOR_DBG_LOAD` tracing: `Tensor_addInto`'s renumbered id showed up
+                    // `kind=MirWrapper` yet was still `protected=true`, and its name never
+                    // appeared in the `own_func_ids` filter's input set at all, so the
+                    // protection wasn't coming from THIS function's own membership. Guard
+                    // against that class of ID collision with a NAME-based veto: never
+                    // protect an id whose function is a known stdlib MIR-wrapper name,
+                    // regardless of why the id ended up in `import_own_func_ids`.
+                    let is_known_stdlib_wrapper =
+                        stdlib_mapping_for_merge.is_mir_wrapper_function(&func.name);
+                    if self.import_own_func_ids.contains(&func_id) && !is_known_stdlib_wrapper {
                         merged_import_func_ids.insert(func_id);
                     }
                     mir_module.functions.insert(func_id, func);
