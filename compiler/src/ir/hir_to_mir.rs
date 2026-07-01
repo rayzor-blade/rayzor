@@ -138,6 +138,16 @@ pub struct HirToMirContext<'a> {
     /// Loop context for break/continue
     loop_stack: Vec<LoopContext>,
 
+    /// Stack of loop-carried symbol sets — one entry per active loop whose
+    /// body drop-scope is on `drop_scope_stack`. A symbol is loop-carried when
+    /// it is declared in an ENCLOSING scope but assigned inside the loop body
+    /// (so its value flows out through the loop-carried / exit phi). Its owned
+    /// heap value must NOT be freed by the loop-body `exit_drop_scope` — doing
+    /// so is a use-after-free, because the phi keeps the (freed) pointer live
+    /// past the loop (e.g. `for (x in arr) b = x; b.ifaceMethod()` where the
+    /// interface fat-pointer wrapper for `b` was freed at loop-body exit).
+    loop_carried_symbols: Vec<BTreeSet<SymbolId>>,
+
     /// Current HIR module being processed
     current_module: Option<String>,
 
@@ -617,6 +627,7 @@ struct SavedLoweringState {
     // from inheriting (and freeing) the parent function's owned values
     owned_heap_values: BTreeMap<SymbolId, IrId>,
     drop_scope_stack: Vec<Vec<(SymbolId, IrId)>>,
+    loop_carried_symbols: Vec<BTreeSet<SymbolId>>,
     temp_heap_values: Vec<IrId>,
     reassigned_in_scope: BTreeSet<SymbolId>,
     current_drop_points: Option<DropPoints>,
@@ -654,6 +665,7 @@ impl<'a> HirToMirContext<'a> {
             external_function_name_map: BTreeMap::new(),
             block_map: BTreeMap::new(),
             loop_stack: Vec::new(),
+            loop_carried_symbols: Vec::new(),
             current_module: Some(module_name),
             current_class_symbol: None,
             errors: Vec::new(),
@@ -869,7 +881,7 @@ impl<'a> HirToMirContext<'a> {
     /// Exit a scope, emitting Free instructions for all owned heap values in that scope
     fn exit_drop_scope(&mut self) {
         if let Some(scope) = self.drop_scope_stack.pop() {
-            for (symbol, _scope_ir_id) in scope {
+            for (symbol, scope_ir_id) in scope {
                 // Get the CURRENT value from owned_heap_values, not the stale scope entry.
                 // The scope entry might have an old IrId if the variable was reassigned.
                 let current_ir_id = match self.owned_heap_values.get(&symbol).copied() {
@@ -885,6 +897,31 @@ impl<'a> HirToMirContext<'a> {
                     if drop_points.lambda_captures.contains(&symbol) {
                         continue;
                     }
+                }
+
+                // Loop-carried escape: if this symbol was declared in an enclosing
+                // scope and merely assigned inside the loop body, its value flows
+                // out through the loop-carried / exit phi and is read AFTER the
+                // loop. Freeing it here (at loop-body exit) is a use-after-free.
+                // Defer the free: keep it owned and re-register the ownership in
+                // the enclosing scope so it is dropped when THAT scope exits
+                // (the loop-exit code repoints owned_heap_values to the exit phi,
+                // which dominates the post-loop reads).
+                if self
+                    .loop_carried_symbols
+                    .last()
+                    .map_or(false, |s| s.contains(&symbol))
+                {
+                    if std::env::var("RAYZOR_DBG_LOOPCARRY").is_ok() {
+                        eprintln!(
+                            "[RAYZOR_LOOPCARRY_SKIP_FREE] deferring free of loop-carried {:?}",
+                            symbol
+                        );
+                    }
+                    if let Some(enclosing) = self.drop_scope_stack.last_mut() {
+                        enclosing.push((symbol, scope_ir_id));
+                    }
+                    continue;
                 }
 
                 // Free this value if not terminated
@@ -3697,6 +3734,9 @@ impl<'a> HirToMirContext<'a> {
         // 3. Lower the original body into the inner function
         {
             let saved_state = self.save_state();
+            // Per-function isolation: the inner body lowers its own loops with a
+            // fresh loop-carried stack; don't consult the parent's.
+            self.loop_carried_symbols.clear();
 
             self.builder.current_function = Some(inner_context.func_id);
             self.builder.current_block = Some(inner_context.entry_block);
@@ -8576,7 +8616,8 @@ impl<'a> HirToMirContext<'a> {
         // class from `kind`, which a Let-result expression cannot, so no
         // double-wrap.
         if let Some(iface_sym) = self.get_interface_symbol(expr.ty) {
-            if let Some(class_sym) = self.extract_underlying_class_symbol(expr) {
+            let underlying = self.extract_underlying_class_symbol(expr);
+            if let Some(class_sym) = underlying {
                 if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
                     if let Some(wrapped) =
                         self.wrap_in_interface_fat_ptr(result, class_sym, iface_sym)
@@ -18388,6 +18429,32 @@ impl<'a> HirToMirContext<'a> {
                     (false, None)
                 };
 
+                // Cross-module `new C()` where C is an imported user class often
+                // arrives with `class_type` as a Placeholder (the class metadata
+                // wasn't resolved in THIS lowering context), so `actual_symbol_id`
+                // is None. That degrades the allocation to a bare 16-byte block
+                // with a ZERO class-id header, NO constructor call, and NO
+                // interface fat-ptr wrap — the exact shape that made
+                // `ArchRegistry.withDefaults`'s `new LlamaArch()` produce a
+                // headerless object whose later interface dispatch read garbage
+                // (Void-tagged receiver → SIGSEGV). Recover the class SymbolId by
+                // name (Placeholder name or the HIR class name), mirroring the
+                // interface machinery's name-based lazy resolution. This restores
+                // the proper alloc size, header id, ctor call, and iface wrap.
+                let actual_symbol_id = actual_symbol_id.or_else(|| {
+                    let placeholder_name = type_table.get(*class_type).and_then(|t| {
+                        if let crate::tast::TypeKind::Placeholder { name } = &t.kind {
+                            self.string_interner.get(*name)
+                        } else {
+                            None
+                        }
+                    });
+                    let by_name = placeholder_name.or_else(|| {
+                        hir_class_name.and_then(|interned| self.string_interner.get(interned))
+                    });
+                    by_name.and_then(|name| self.lookup_class_symbol_by_name(name))
+                });
+
                 // SPECIAL CASE: Abstract type constructors
                 // If this is an abstract type, treat this as a simple value wrap (no allocation).
                 if is_abstract {
@@ -18979,7 +19046,20 @@ impl<'a> HirToMirContext<'a> {
                     // any offset transformation here would just have to be
                     // mirrored on the comparison side. Keeping the id raw
                     // makes both sides agree by construction.
-                    let runtime_type_id = self.runtime_type_id(*class_type) as i64;
+                    //
+                    // If `class_type` is a Placeholder (cross-module import),
+                    // `runtime_type_id` returns 0. Prefer the name-recovered
+                    // `actual_symbol_id`'s deterministic id so the header
+                    // carries the real class id (needed for is/cast/vtable and
+                    // for the interface fat-ptr wrap to find the vtable).
+                    let raw_type_id = self.runtime_type_id(*class_type);
+                    let runtime_type_id = if raw_type_id != 0 {
+                        raw_type_id
+                    } else {
+                        actual_symbol_id
+                            .and_then(|sid| self.deterministic_class_type_id(sid))
+                            .unwrap_or(raw_type_id)
+                    } as i64;
                     if let Some(type_id_const) =
                         self.builder.build_const(IrValue::I64(runtime_type_id))
                     {
@@ -20364,6 +20444,44 @@ impl<'a> HirToMirContext<'a> {
                             .or(Some(value_reg))
                     }
 
+                    // Cross-module `(class : Interface)` where the SOURCE type
+                    // didn't resolve to a Class in this MIR-lowering context
+                    // (arrives Unknown/Placeholder — the class metadata wasn't
+                    // imported here). The typechecker still promoted this to a
+                    // Class→Interface cast (Bug #2's TAST promotion), and the
+                    // value register IS a raw class object we can wrap: recover
+                    // the source class SymbolId by NAME from the inner
+                    // expression. Without this, the cast is a silent no-op and
+                    // the raw pointer flows into an interface slot → later
+                    // vtable dispatch reads garbage (the nue `new LlamaArch()` →
+                    // ArchBuilder registration path).
+                    (src, Some(TypeKind::Interface { symbol_id: tgt_sym, .. }))
+                        if !matches!(src, Some(TypeKind::Class { .. })
+                            | Some(TypeKind::Interface { .. }))
+                            && self.recover_cast_src_class_by_name(expr).is_some() =>
+                    {
+                        let tgt_sym = *tgt_sym;
+                        let src_sym = self
+                            .recover_cast_src_class_by_name(expr)
+                            .expect("guarded by is_some above");
+                        let value_reg = self.lower_expression(expr)?;
+                        if self.interface_wrapped_args.contains(&value_reg) {
+                            Some(value_reg)
+                        } else if self.interface_vtables.contains_key(&(src_sym, tgt_sym))
+                            || self.interface_method_names.contains_key(&tgt_sym)
+                        {
+                            match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
+                                Some(fat_ptr) => {
+                                    self.interface_wrapped_args.insert(fat_ptr);
+                                    Some(fat_ptr)
+                                }
+                                None => Some(value_reg),
+                            }
+                        } else {
+                            Some(value_reg)
+                        }
+                    }
+
                     // Class → Class safe cast: runtime downcast via object header
                     (
                         Some(TypeKind::Class {
@@ -20418,15 +20536,32 @@ impl<'a> HirToMirContext<'a> {
                         let src_sym = *src_sym;
                         let tgt_sym = *tgt_sym;
 
-                        // Check at compile time if this class implements the interface
-                        if self.interface_vtables.contains_key(&(src_sym, tgt_sym)) {
-                            // Known to implement — wrap in fat pointer here.
-                            // Cannot defer to Let handler because SafeCast's result type
-                            // is the interface type, so Let would see Interface→Interface
-                            // instead of Class→Interface.
+                        // Wrap in fat pointer if the class implements the iface.
+                        // Cannot defer to the Let handler because SafeCast's
+                        // result type is the interface type, so Let would see
+                        // Interface→Interface instead of Class→Interface.
+                        //
+                        // Presence in `interface_vtables` is the fast check, but
+                        // cross-module the eager (class, iface) pair is often
+                        // missing here (built lazily). `wrap_in_interface_fat_ptr`
+                        // has a name-based lazy-build fallback, so ATTEMPT the
+                        // wrap whenever the interface is known to have methods
+                        // in this context; only fall back to null when we can't
+                        // build a vtable at all (class genuinely doesn't
+                        // implement it). Returning null on a valid cross-module
+                        // implementer was the SIGSEGV root for a plain
+                        // `param:Interface` arg — the raw class pointer flowed
+                        // through and dispatch read past the object.
+                        let known_implements =
+                            self.interface_vtables.contains_key(&(src_sym, tgt_sym))
+                                || self.interface_method_names.contains_key(&tgt_sym);
+                        if known_implements {
                             let value_reg = self.lower_expression(expr)?;
                             match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
-                                Some(fat_ptr) => Some(fat_ptr),
+                                Some(fat_ptr) => {
+                                    self.interface_wrapped_args.insert(fat_ptr);
+                                    Some(fat_ptr)
+                                }
                                 None => Some(value_reg),
                             }
                         } else {
@@ -21731,6 +21866,10 @@ impl<'a> HirToMirContext<'a> {
             body.statements.len()
         );
         self.builder.switch_to_block(body_block);
+        // Track loop-carried symbols so the body's exit_drop_scope does not free
+        // values that escape via the exit phi (see lower_for_in_over_array).
+        self.loop_carried_symbols
+            .push(phi_nodes.keys().copied().collect());
         self.enter_drop_scope(); // Enter scope for loop body allocations
         self.lower_block(body);
         debug!("[lower_while_loop] Body lowered");
@@ -21741,6 +21880,7 @@ impl<'a> HirToMirContext<'a> {
             block_id
         } else {
             warn!("[lower_while_loop] NO CURRENT BLOCK after body lowering - early return!");
+            self.loop_carried_symbols.pop();
             return;
         };
 
@@ -21789,6 +21929,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_branch(cond_block);
             }
         }
+        self.loop_carried_symbols.pop();
 
         // Lower the update block (e.g., i++ for range loops)
         if let (Some(upd_block), Some(upd_body)) = (update_block, continue_update) {
@@ -23658,6 +23799,34 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        // A non-`*u8` pointer register (e.g. `*void`) here is NOT a boxed
+        // `DynamicValue*` — genuine boxes are always `*u8`. It is a
+        // switch-as-expression result temp holding a RAW primitive payload:
+        // an enum Int/Float variant read straight out of the `{tag, payload}`
+        // struct, surfaced through an untyped `*void` temp because the enum's
+        // variant/discriminant type was lost (e.g. a cross-module `Map<_,Enum>`
+        // whose element type resolved to Dynamic, so the or-pattern's bound
+        // variable never got a concrete type). Calling `haxe_unbox_int_ptr` on
+        // it would dereference the raw integer value → SIGSEGV. Recover the raw
+        // bits and cast to the target primitive instead.
+        if matches!(&val_ir, Some(IrType::Ptr(inner)) if !matches!(inner.as_ref(), IrType::U8)) {
+            let raw = self.builder.build_bitcast(value, IrType::I64)?;
+            return match target_ir {
+                IrType::I32 => self.builder.build_cast(raw, IrType::I64, IrType::I32),
+                IrType::I64 => Some(raw),
+                IrType::Bool => self.builder.build_cast(raw, IrType::I64, IrType::Bool),
+                // Float payloads are stored as their raw f64 bit pattern, so
+                // reinterpret (bitcast) rather than integer-convert.
+                IrType::F64 => self.builder.build_bitcast(value, IrType::F64),
+                IrType::F32 => self
+                    .builder
+                    .build_bitcast(value, IrType::F64)
+                    .and_then(|f| self.builder.build_cast(f, IrType::F64, IrType::F32)),
+                _ => None,
+            };
+        }
+
         let is_ptr = matches!(val_ir, Some(IrType::Ptr(_)));
         if is_ptr {
             return match target_ir {
@@ -23715,6 +23884,59 @@ impl<'a> HirToMirContext<'a> {
         }
 
         None
+    }
+
+    /// Whether an `Optional<T>` inner type `T` is a genuine primitive *value*
+    /// type that needs int/float boxing to distinguish `null` from `0`/`false`
+    /// (`Int`, `Float`, `Bool`, `Char`, or an abstract resolving to one of
+    /// those). Returns `false` for reference/handle types — `Enum`, `Class`,
+    /// `Interface`, `Array`, `Map`, `String`, `Function`, pointer-sized
+    /// abstracts (Usize/Ptr/Ref/Box), etc. — which are already nullable and
+    /// must NOT be int-boxed (boxing them corrupts the value). `TypeParameter`
+    /// is handled separately upstream, so it is not boxable here.
+    fn optional_inner_is_boxable_primitive(&self, inner_type: TypeId) -> bool {
+        use crate::tast::TypeKind;
+        let mut ty = inner_type;
+        // Resolve through abstracts / aliases (bounded to avoid cycles).
+        for _ in 0..8 {
+            let kind = match self.type_table.get(ty).map(|t| t.kind.clone()) {
+                Some(k) => k,
+                None => return false,
+            };
+            match kind {
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Char => return true,
+                TypeKind::Abstract {
+                    underlying,
+                    symbol_id,
+                    ..
+                } => {
+                    // Pointer-sized abstracts (Usize/Ptr/Ref/Box) and SIMD
+                    // vectors carry machine addresses / wide registers; never
+                    // int-box them even if a stray underlying is present.
+                    let name = self
+                        .symbol_table
+                        .get_symbol(symbol_id)
+                        .and_then(|sym| self.string_interner.get(sym.name))
+                        .unwrap_or("");
+                    if matches!(
+                        name,
+                        "Usize" | "Ptr" | "Ref" | "Box" | "SIMD4f" | "SIMD4i32" | "SIMD16i8"
+                            | "Atomic"
+                    ) {
+                        return false;
+                    }
+                    match underlying {
+                        Some(u) => ty = u,
+                        None => return false,
+                    }
+                }
+                TypeKind::TypeAlias { target_type, .. } => {
+                    ty = target_type;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn maybe_box_for_optional(
@@ -23783,6 +24005,19 @@ impl<'a> HirToMirContext<'a> {
             return self
                 .builder
                 .build_call_direct(box_func, vec![v64, tag_reg], ptr_u8);
+        }
+
+        // Only box genuine primitive *value* types. An IR-type check alone is
+        // not enough: an Enum lowers to `I64` (a tagged reference) and a
+        // pointer-sized abstract (Usize/Ptr/Ref/Box) also lowers to `I64`, yet
+        // these are reference/handle values that are ALREADY nullable and must
+        // NEVER be int-boxed — boxing them as Int corrupts the value (e.g.
+        // `Map<K,EnumT>.get` returning an enum pointer that the subsequent
+        // `switch` then reads as an int-box, getting the wrong variant tag).
+        // Decide purely from the TAST type kind (resolving abstracts through
+        // their underlying primitive). Only Int/Float/Bool/Char are boxable.
+        if !self.optional_inner_is_boxable_primitive(inner_type) {
+            return None;
         }
 
         let inner_ir = self.convert_type(inner_type);
@@ -24400,7 +24635,18 @@ impl<'a> HirToMirContext<'a> {
                     // missed the (class, interface) pair (e.g. the interface
                     // was declared in a later-loaded file).
                     if let Some(iface_sym) = self.get_interface_symbol(resolved_param) {
-                        if let Some(class_sym) = self.get_class_symbol(resolved_arg) {
+                        // Prefer the arg's static class; if the typechecker
+                        // promoted it to the interface (class erased), recover
+                        // the concrete class from the value register's class
+                        // hint (raw, unwrapped class object).
+                        let class_sym = self
+                            .get_class_symbol(resolved_arg)
+                            .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
+                        if let Some(class_sym) = class_sym {
+                            // Don't double-wrap an already-fat interface value.
+                            if self.interface_wrapped_args.contains(&arg_reg) {
+                                return arg_reg;
+                            }
                             if let Some(wrapped) =
                                 self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
                             {
@@ -24435,10 +24681,32 @@ impl<'a> HirToMirContext<'a> {
                     .cloned()
                 {
                     if let Some(Some(param_name)) = names.get(param_index) {
-                        if let Some(class_sym) = self.get_class_symbol(arg_expr.ty) {
+                        // The arg's static type is usually the concrete class,
+                        // but the typechecker often PROMOTES it to the
+                        // interface at the call boundary (or when it flows
+                        // through an interface-typed local), erasing the class
+                        // from `arg_expr.ty`. In that case the value register
+                        // still holds a RAW class object (never wrapped),
+                        // recoverable from `register_class_hints` /
+                        // `monomorphized_var_types`. Try the type first, then
+                        // fall back to the register/symbol class hint. Without
+                        // this, a cross-module call to a plain `param:Interface`
+                        // with a promoted-to-interface arg stores the raw class
+                        // pointer and SIGSEGVs on the first vtable dispatch.
+                        let class_sym = self
+                            .get_class_symbol(arg_expr.ty)
+                            .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
+                        if let Some(class_sym) = class_sym {
                             if let Some(iface_sym) =
                                 self.lookup_interface_symbol_by_qualified_name(param_name)
                             {
+                                // Already a fat pointer (e.g. produced by a
+                                // Class→Interface cast upstream)? Don't
+                                // double-wrap — that would nest fat pointers
+                                // and make `this` the inner wrapper.
+                                if self.interface_wrapped_args.contains(&arg_reg) {
+                                    return arg_reg;
+                                }
                                 // Drop any pre-cached vtable for this
                                 // (class, iface) pair before wrapping: the
                                 // cached entry may carry method SymbolIds
@@ -24469,6 +24737,45 @@ impl<'a> HirToMirContext<'a> {
         arg_reg
     }
 
+    /// Recover the source class SymbolId of a `Cast(inner → Interface)` when
+    /// `inner.ty` didn't resolve to a Class in this MIR-lowering context
+    /// (cross-module: the class arrives as Unknown/Placeholder). Uses the inner
+    /// expression's class NAME — the `New` node's `class_name`, or a variable's
+    /// resolved class — and looks it up by name in this context's symbol table.
+    fn recover_cast_src_class_by_name(&self, inner: &HirExpr) -> Option<SymbolId> {
+        // Fast path: the type already resolves to a class.
+        if let Some(sid) = self.get_class_symbol(inner.ty) {
+            return Some(sid);
+        }
+        match &inner.kind {
+            HirExprKind::New {
+                class_name,
+                class_type,
+                ..
+            } => {
+                // Placeholder class_type may still carry the name.
+                let name = class_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| {
+                        self.type_table.get(*class_type).and_then(|t| {
+                            if let TypeKind::Placeholder { name } = &t.kind {
+                                self.string_interner.get(*name)
+                            } else {
+                                None
+                            }
+                        })
+                    })?;
+                self.lookup_class_symbol_by_name(name)
+            }
+            HirExprKind::Variable { symbol, .. } => self
+                .monomorphized_var_types
+                .get(symbol)
+                .and_then(|name| self.lookup_class_symbol_by_name(name)),
+            HirExprKind::Cast { expr: e, .. } => self.recover_cast_src_class_by_name(e),
+            _ => None,
+        }
+    }
+
     /// Find the current-context Interface SymbolId for a qualified name
     /// (e.g. `"nue.Module"` or bare `"Module"`). Used as the lookup half
     /// of the cross-file Path 3 fallback in `maybe_materialize_for_call`
@@ -24494,6 +24801,83 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(false);
             if matches {
                 return Some(sid);
+            }
+        }
+        None
+    }
+
+    /// Find the current-context Class SymbolId for a (possibly qualified)
+    /// class name. Mirror of `lookup_interface_symbol_by_qualified_name` for
+    /// the class side. Used to recover the concrete class of an
+    /// interface-promoted call argument whose value register still holds a
+    /// raw class object.
+    fn lookup_class_symbol_by_name(&self, name: &str) -> Option<SymbolId> {
+        // Accept a bare or qualified name; compare against both the symbol's
+        // qualified name and its bare name, and also the trailing segment of a
+        // qualified hint (e.g. hint "nue.arch.LlamaArch" vs symbol "LlamaArch").
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        for i in 0..self.symbol_table.len() {
+            let sid = SymbolId::from_raw(i as u32);
+            let Some(sym) = self.symbol_table.get_symbol(sid) else {
+                continue;
+            };
+            if !matches!(sym.kind, crate::tast::SymbolKind::Class) {
+                continue;
+            }
+            let qn_match = sym
+                .qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .map(|qn| qn == name || qn == bare)
+                .unwrap_or(false);
+            let bare_match = self
+                .string_interner
+                .get(sym.name)
+                .map(|n| n == name || n == bare)
+                .unwrap_or(false);
+            if qn_match || bare_match {
+                return Some(sid);
+            }
+        }
+        None
+    }
+
+    /// Recover the concrete class SymbolId of a call argument whose static
+    /// type was promoted to an interface (so `get_class_symbol(arg.ty)`
+    /// returns None) but whose value register still holds a RAW, unwrapped
+    /// class object. The class name is tracked on the object's register by the
+    /// `New` lowering (`register_class_hints`) and, for variables, propagated
+    /// to `monomorphized_var_types`. Returns None when the class can't be
+    /// recovered (then wrapping is skipped and the value is passed as-is).
+    fn recover_arg_concrete_class(
+        &self,
+        arg_expr: &HirExpr,
+        arg_reg: IrId,
+    ) -> Option<SymbolId> {
+        // Only attempt recovery when the arg IS interface-typed (the promoted
+        // case). If it's already a class the primary path handled it, and if
+        // it's neither we must not guess.
+        self.get_interface_symbol(arg_expr.ty)?;
+
+        // 1) Register-level class hint (set on raw `new C()` object pointers).
+        if let Some(name) = self.register_class_hints.get(&arg_reg).cloned() {
+            if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
+                return Some(sid);
+            }
+        }
+        // 2) Variable → concrete class via the symbol's mapped register hint
+        //    or its monomorphized-type record.
+        if let HirExprKind::Variable { symbol, .. } = &arg_expr.kind {
+            if let Some(sym_reg) = self.symbol_map.get(symbol).copied() {
+                if let Some(name) = self.register_class_hints.get(&sym_reg).cloned() {
+                    if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
+                        return Some(sid);
+                    }
+                }
+            }
+            if let Some(name) = self.monomorphized_var_types.get(symbol).cloned() {
+                if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
+                    return Some(sid);
+                }
             }
         }
         None
@@ -29956,7 +30340,11 @@ impl<'a> HirToMirContext<'a> {
             continue_phi_nodes: BTreeMap::new(),
         });
 
-        // Lower the body statements
+        // Lower the body statements. Track loop-carried symbols so the body's
+        // exit_drop_scope does not free values that escape via the exit phi
+        // (see lower_for_in_over_array for the use-after-free rationale).
+        self.loop_carried_symbols
+            .push(phi_nodes.keys().copied().collect());
         self.enter_drop_scope(); // Enter scope for loop body allocations
         self.lower_block(body);
 
@@ -29964,6 +30352,7 @@ impl<'a> HirToMirContext<'a> {
         let body_end_block = if let Some(block_id) = self.builder.current_block() {
             block_id
         } else {
+            self.loop_carried_symbols.pop();
             self.loop_stack.pop();
             return;
         };
@@ -29973,6 +30362,7 @@ impl<'a> HirToMirContext<'a> {
             self.exit_drop_scope(); // Free loop body allocations before condition check
             self.builder.build_branch(cond_block);
         }
+        self.loop_carried_symbols.pop();
 
         // Build condition block
         self.builder.switch_to_block(cond_block);
@@ -30510,6 +30900,10 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Lower loop body
+        // Track loop-carried symbols so the body's exit_drop_scope does not free
+        // values that escape via the exit phi (see lower_for_in_over_array).
+        self.loop_carried_symbols
+            .push(phi_nodes.keys().copied().collect());
         self.enter_drop_scope();
         self.lower_block(body);
 
@@ -30534,6 +30928,7 @@ impl<'a> HirToMirContext<'a> {
         // Increment counter
         if !self.is_terminated() {
             self.exit_drop_scope();
+            self.loop_carried_symbols.pop();
             let Some(idx_to_inc) = self.builder.build_load(counter_ptr, IrType::I64) else {
                 self.loop_stack.pop();
                 return;
@@ -30551,6 +30946,8 @@ impl<'a> HirToMirContext<'a> {
             };
             self.builder.build_store(counter_ptr, next_val);
             self.builder.build_branch(loop_cond_block);
+        } else {
+            self.loop_carried_symbols.pop();
         }
 
         // Pop loop context
@@ -31105,6 +31502,11 @@ impl<'a> HirToMirContext<'a> {
             _ => {}
         }
 
+        // Track loop-carried symbols (stored back to slots below) so the body's
+        // exit_drop_scope does not free values that escape via the slot and are
+        // read after the loop (see lower_for_in_over_array).
+        self.loop_carried_symbols
+            .push(var_slots.keys().copied().collect());
         // Lower the loop body
         self.enter_drop_scope();
         self.lower_block(body);
@@ -31121,6 +31523,7 @@ impl<'a> HirToMirContext<'a> {
         } else {
             self.exit_drop_scope();
         }
+        self.loop_carried_symbols.pop();
 
         self.loop_stack.pop();
 
@@ -31382,6 +31785,10 @@ impl<'a> HirToMirContext<'a> {
             self.symbol_map.insert(*symbol, map_value);
         }
 
+        // Track loop-carried symbols so the body's exit_drop_scope does not free
+        // values that escape via the exit phi (see lower_for_in_over_array).
+        self.loop_carried_symbols
+            .push(phi_nodes.keys().copied().collect());
         // Lower the loop body
         self.enter_drop_scope();
         self.lower_block(body);
@@ -31405,6 +31812,7 @@ impl<'a> HirToMirContext<'a> {
         // Increment index
         if !self.is_terminated() {
             self.exit_drop_scope();
+            self.loop_carried_symbols.pop();
             let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
                 self.loop_stack.pop();
                 return;
@@ -31422,6 +31830,8 @@ impl<'a> HirToMirContext<'a> {
             };
             self.builder.build_store(index_ptr, next_val);
             self.builder.build_branch(loop_cond_block);
+        } else {
+            self.loop_carried_symbols.pop();
         }
 
         self.loop_stack.pop();
@@ -31625,7 +32035,10 @@ impl<'a> HirToMirContext<'a> {
             _ => {}
         }
 
-        // Lower the loop body
+        // Lower the loop body. Track loop-carried symbols so the body's
+        // exit_drop_scope does not free values that escape via the exit phi.
+        self.loop_carried_symbols
+            .push(phi_nodes.keys().copied().collect());
         self.enter_drop_scope();
         self.lower_block(body);
 
@@ -31648,6 +32061,7 @@ impl<'a> HirToMirContext<'a> {
         // Increment index
         if !self.is_terminated() {
             self.exit_drop_scope();
+            self.loop_carried_symbols.pop();
             let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
                 self.loop_stack.pop();
                 return;
@@ -31665,6 +32079,10 @@ impl<'a> HirToMirContext<'a> {
             };
             self.builder.build_store(index_ptr, next_index);
             self.builder.build_branch(loop_cond_block);
+        } else {
+            // Terminated body (break/return/continue) skipped exit_drop_scope;
+            // keep the loop-carried stack balanced.
+            self.loop_carried_symbols.pop();
         }
 
         self.loop_stack.pop();
@@ -33089,6 +33507,7 @@ impl<'a> HirToMirContext<'a> {
             // Save drop tracking state so lambda bodies don't inherit parent's owned values
             owned_heap_values: self.owned_heap_values.clone(),
             drop_scope_stack: self.drop_scope_stack.clone(),
+            loop_carried_symbols: self.loop_carried_symbols.clone(),
             temp_heap_values: self.temp_heap_values.clone(),
             reassigned_in_scope: self.reassigned_in_scope.clone(),
             current_drop_points: self.current_drop_points.clone(),
@@ -33109,6 +33528,7 @@ impl<'a> HirToMirContext<'a> {
         // Restore drop tracking state
         self.owned_heap_values = state.owned_heap_values;
         self.drop_scope_stack = state.drop_scope_stack;
+        self.loop_carried_symbols = state.loop_carried_symbols;
         self.temp_heap_values = state.temp_heap_values;
         self.reassigned_in_scope = state.reassigned_in_scope;
         self.current_drop_points = state.current_drop_points;
@@ -33221,6 +33641,8 @@ impl<'a> HirToMirContext<'a> {
         // Per-function isolation: lambda body has its own SSA register namespace;
         // saved_state already snapshotted strict_move_locals for restore on exit.
         self.strict_move_locals.clear();
+        // Lambda body lowers its own loops with a fresh loop-carried stack.
+        self.loop_carried_symbols.clear();
         self.current_env_layout = env_layout.clone();
 
         // Clear drop tracking state for the lambda body.

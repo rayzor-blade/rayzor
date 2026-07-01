@@ -3428,14 +3428,27 @@ impl<'a> TastToHirContext<'a> {
         &mut self,
         arg: HirExpr,
         receiver_type: TypeId,
-        _method_symbol: SymbolId,
-        _param_index: usize,
+        method_symbol: SymbolId,
+        param_index: usize,
         source_location: SourceLocation,
     ) -> HirExpr {
-        // Extract the receiver's element/first-type-arg.
-        let element_type = {
+        // Determine the target interface type for this argument slot.
+        //
+        //   (a) Container receivers (Array<I>, generic first-arg): the element
+        //       type — covers `push`/`unshift`/`set` where the param is `T`.
+        //   (b) Plain methods `m(p:I)`: the method symbol's Function-type
+        //       parameter at `param_index`. This is the case a plain
+        //       `register(name, builder:Builder)` needs — WITHOUT it the class
+        //       arg is passed as a raw pointer and later interface dispatch
+        //       reads past the object → SIGSEGV (cross-module especially,
+        //       where the call-site fat-ptr wrap has no param-iface info).
+        let method_ty = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .map(|s| s.type_id);
+        let target_iface_type = {
             let type_table = self.type_table.borrow();
-            match type_table.get(receiver_type).map(|t| &t.kind) {
+            let from_container = match type_table.get(receiver_type).map(|t| &t.kind) {
                 Some(crate::tast::TypeKind::Array { element_type }) => Some(*element_type),
                 Some(crate::tast::TypeKind::GenericInstance { type_args, .. })
                     if !type_args.is_empty() =>
@@ -3443,37 +3456,50 @@ impl<'a> TastToHirContext<'a> {
                     Some(type_args[0])
                 }
                 _ => None,
-            }
+            };
+            from_container.or_else(|| {
+                // Method Function-type params. `param_index` is the ORIGINAL
+                // argument index (0-based, receiver excluded), which matches
+                // the declared parameter list.
+                method_ty.and_then(|mt| match type_table.get(mt).map(|t| &t.kind) {
+                    Some(crate::tast::TypeKind::Function { params, .. }) => {
+                        params.get(param_index).copied()
+                    }
+                    _ => None,
+                })
+            })
         };
-        let Some(element_type) = element_type else {
+        let Some(target_iface_type) = target_iface_type else {
             return arg;
         };
 
-        // Check: element_type is Interface, arg.ty is Class implementing it.
-        let (elem_is_iface, arg_is_class) = {
+        // Check: target is Interface, arg.ty is Class implementing it.
+        let (tgt_is_iface, arg_is_class) = {
             let type_table = self.type_table.borrow();
-            let elem_iface = matches!(
-                type_table.get(element_type).map(|t| &t.kind),
+            let tgt_iface = matches!(
+                type_table.get(target_iface_type).map(|t| &t.kind),
                 Some(crate::tast::TypeKind::Interface { .. })
             );
             let arg_class = matches!(
                 type_table.get(arg.ty).map(|t| &t.kind),
                 Some(crate::tast::TypeKind::Class { .. })
             );
-            (elem_iface, arg_class)
+            (tgt_iface, arg_class)
         };
-        if !elem_is_iface || !arg_is_class {
+        if !tgt_is_iface || !arg_is_class {
             return arg;
         }
 
-        // Wrap in Cast(arg → interface).
+        // Wrap in Cast(arg → interface). MIR's Class→Interface Cast arm emits
+        // the fat-pointer wrap, and keeps the arg's HIR type the CLASS inside
+        // the cast so the wrap's class identity survives.
         HirExpr::new(
             HirExprKind::Cast {
                 expr: Box::new(arg),
-                target: element_type,
+                target: target_iface_type,
                 is_safe: true,
             },
-            element_type,
+            target_iface_type,
             self.current_lifetime,
             source_location,
         )
