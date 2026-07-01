@@ -694,6 +694,13 @@ enum TypeSubstitutionResult {
         symbol_id: SymbolId,
         type_args: Vec<TypeId>,
     },
+    /// Need to create an `Optional<T>` (`Null<T>`) with this substituted inner
+    /// type — e.g. `Map<K,V>.get` returns `Null<V>`; without this the inner
+    /// stays an abstract `V`, and the caller boxes the value with an
+    /// unresolved type tag (corrupting enum/reference values).
+    NeedOptional {
+        inner_type: TypeId,
+    },
 }
 
 impl<'a> AstLowering<'a> {
@@ -5856,6 +5863,35 @@ impl<'a> AstLowering<'a> {
                     // Create appropriate type based on symbol kind
                     match symbol_kind {
                         crate::tast::SymbolKind::Class => {
+                            // `@:multiType` resolution when `Map` resolved to a
+                            // stale `Class` placeholder. The root `Map.hx`
+                            // typedef (`typedef Map<K,V> = haxe.ds.Map<K,V>`)
+                            // is pre-registered as a `SymbolKind::Class`
+                            // placeholder, and that kind is never upgraded to
+                            // `TypeAlias` once its body is lowered. When a user
+                            // module is compiled BEFORE `haxe/ds/Map.hx` (the
+                            // case for cross-module imports), the only `Map`
+                            // symbol visible is this Class placeholder, so the
+                            // TypeAlias / Abstract multiType arms below are
+                            // never reached and a `Map<K,V>` field annotation
+                            // keeps the abstract type. Every `get`/`set` then
+                            // dispatches to the default `BalancedTree`
+                            // implementer (which fails to monomorphize
+                            // cross-module → trap stub → SIGILL). Resolve the
+                            // multiType here too so the field/param/return type
+                            // becomes the concrete container regardless of the
+                            // symbol's (possibly stale) kind or compile order.
+                            if path.name == "Map"
+                                && (path.package.is_empty()
+                                    || path.package == vec!["haxe".to_string(), "ds".to_string()])
+                                && type_arg_ids.len() == 2
+                            {
+                                if let Some(resolved) =
+                                    self.resolve_multitype_map_to_concrete(&type_arg_ids)
+                                {
+                                    return Ok(resolved);
+                                }
+                            }
                             // Check if this class already has a type from pre-registration
                             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                                 if symbol.type_id.is_valid() && type_arg_ids.is_empty() {
@@ -5889,6 +5925,32 @@ impl<'a> AstLowering<'a> {
                             .borrow_mut()
                             .create_enum_type(symbol_id, type_arg_ids)),
                         crate::tast::SymbolKind::TypeAlias => {
+                            // `@:multiType` resolution through a typedef. The
+                            // standard library exposes `Map` two ways:
+                            //   - `haxe.ds.Map<K, V>` — the `@:multiType`
+                            //     abstract, resolved in the Abstract arm below.
+                            //   - `Map<K, V> = haxe.ds.Map<K, V>` — a typedef
+                            //     in the root `Map.hx`.
+                            // Same-module the bare `Map` binds to the abstract;
+                            // cross-module it binds to the typedef and lands
+                            // HERE. Without resolving the multiType through the
+                            // alias, the field/return/param keeps an abstract
+                            // `Map` type, every member call (`get`/`set`)
+                            // dispatches to the default `BalancedTree`
+                            // implementer (which fails to monomorphize
+                            // cross-module → trap stub → SIGILL), and the
+                            // construction never routes through `StringMap`.
+                            if path.name == "Map"
+                                && (path.package.is_empty()
+                                    || path.package == vec!["haxe".to_string(), "ds".to_string()])
+                                && type_arg_ids.len() == 2
+                            {
+                                if let Some(resolved) =
+                                    self.resolve_multitype_map_to_concrete(&type_arg_ids)
+                                {
+                                    return Ok(resolved);
+                                }
+                            }
                             // For type aliases, we need to get the target type
                             let target_type = type_resolution::resolve_type_alias(
                                 self.context.type_table,
@@ -8107,8 +8169,30 @@ impl<'a> AstLowering<'a> {
                             tt.get(base_class_type_id).map(|t| &t.kind),
                             Some(crate::tast::core::TypeKind::Abstract { .. })
                         ) && type_path.name == "Map";
+                        // Is the hint itself a Map-family type? Cross-module,
+                        // the field annotation `Map<K, V>` may NOT have been
+                        // resolved to a concrete (StringMap / …) — the hint
+                        // arrives as the *abstract* `Map` (or its TypeAlias)
+                        // still carrying `[K, V]`, and `base_class_type_id`
+                        // for `new Map()` may resolve to a TypeAlias rather
+                        // than the Abstract, so `base_is_abstract_map` is
+                        // false. Recognising the Map family on the hint side
+                        // lets us recover `[K, V]` regardless of how the base
+                        // resolved. Without this the New site has zero args,
+                        // multiType resolution bails, and the construction
+                        // falls through to `BalancedTree` (which fails to
+                        // monomorphize cross-module → trap stub → SIGILL).
+                        let hint_map_kind = hint_parts.as_ref().and_then(|(s, _)| {
+                            self.context
+                                .symbol_table
+                                .get_symbol(*s)
+                                .and_then(|sym| self.context.string_interner.get(sym.name))
+                                .map(|n| n.to_string())
+                        });
+                        let constructing_map = type_path.name == "Map";
                         drop(tt);
                         if let Some((hint_sym, hint_args)) = hint_parts {
+                            let hint_name = hint_map_kind.as_deref().unwrap_or("");
                             if Some(hint_sym) == base_sym && !hint_args.is_empty() {
                                 type_args = hint_args;
                             } else if base_is_abstract_map && hint_args.len() == 1 {
@@ -8126,6 +8210,28 @@ impl<'a> AstLowering<'a> {
                                 // `Map<K, V>` resolved to `ObjectMap<K, V>`
                                 // / `EnumValueMap<K, V>` — both keep arity 2.
                                 type_args = hint_args;
+                            } else if constructing_map
+                                && matches!(hint_name, "Map" | "EnumValueMap" | "ObjectMap")
+                                && hint_args.len() == 2
+                            {
+                                // Cross-module fallback: hint is the abstract
+                                // `Map<K, V>` (or an arity-2 concrete) still
+                                // carrying both args. Use them directly so
+                                // multiType resolution below picks the right
+                                // concrete container from K's kind.
+                                type_args = hint_args;
+                            } else if constructing_map
+                                && matches!(hint_name, "StringMap" | "IntMap")
+                                && hint_args.len() == 1
+                            {
+                                // Cross-module: hint is an arity-1 concrete
+                                // (StringMap<V> / IntMap<V>); recover K from
+                                // the concrete's class identity.
+                                if let Some(k_ty) =
+                                    self.recover_map_key_type_from_concrete(hint_sym)
+                                {
+                                    type_args = vec![k_ty, hint_args[0]];
+                                }
                             }
                         }
                     }
@@ -13423,6 +13529,11 @@ impl<'a> AstLowering<'a> {
                 .type_table
                 .borrow_mut()
                 .create_class_type(symbol_id, type_args)),
+            TypeSubstitutionResult::NeedOptional { inner_type } => Ok(self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_optional_type(inner_type)),
         }
     }
 
@@ -13478,6 +13589,58 @@ impl<'a> AstLowering<'a> {
                     .or_else(|| self.class_type_params.get(symbol_id).cloned())
                     .unwrap_or_default();
                 if params.is_empty() {
+                    // The class's TypeParameter list was never registered for
+                    // this `class_symbol` — this happens for stdlib extern
+                    // containers (StringMap / IntMap / ObjectMap) produced by
+                    // `@:multiType` Map resolution, whose declaration was
+                    // lowered in a *different* ast_lowering instance, so neither
+                    // the per-instance `class_type_params` map nor the shared
+                    // SymbolTable mirror has them. Without params we cannot do
+                    // symbol/name-based substitution, but the receiver still
+                    // carries concrete `type_args`. For a return type that is a
+                    // bare (or Optional-wrapped) TypeParameter — e.g.
+                    // `StringMap<V>.get : Null<V>` — fall back to a positional
+                    // substitution against the *last* type_arg (the value type
+                    // for every Map container, and the sole arg for
+                    // single-parameter containers). Leaving it abstract makes
+                    // `maybe_box_for_optional` box the value with a placeholder
+                    // type tag, corrupting enum/reference results.
+                    if !type_args.is_empty() {
+                        // Peel an optional Optional wrapper to find a bare
+                        // TypeParameter return.
+                        let bare_tp = match type_table.get(return_type).map(|i| &i.kind) {
+                            Some(crate::tast::core::TypeKind::TypeParameter { .. }) => true,
+                            Some(crate::tast::core::TypeKind::Optional { inner_type }) => matches!(
+                                type_table.get(*inner_type).map(|i| &i.kind),
+                                Some(crate::tast::core::TypeKind::TypeParameter { .. })
+                            ),
+                            _ => false,
+                        };
+                        if bare_tp {
+                            let concrete = *type_args.last().unwrap();
+                            return match type_table.get(return_type).map(|i| &i.kind) {
+                                Some(crate::tast::core::TypeKind::Optional { .. }) => {
+                                    // Reuse an existing `Optional<concrete>` if present.
+                                    for (tid, tinfo) in type_table.iter() {
+                                        if let crate::tast::core::TypeKind::Optional {
+                                            inner_type: ex,
+                                        } = &tinfo.kind
+                                        {
+                                            if *ex == concrete {
+                                                return TypeSubstitutionResult::DirectSubstitution(
+                                                    tid,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    TypeSubstitutionResult::NeedOptional {
+                                        inner_type: concrete,
+                                    }
+                                }
+                                _ => TypeSubstitutionResult::DirectSubstitution(concrete),
+                            };
+                        }
+                    }
                     return TypeSubstitutionResult::NoChange(return_type);
                 }
                 (params, type_args.clone())
@@ -13560,7 +13723,8 @@ impl<'a> AstLowering<'a> {
                             changed = true;
                         }
                         TypeSubstitutionResult::NeedGenericInstance { .. }
-                        | TypeSubstitutionResult::NeedClassInstance { .. } => {
+                        | TypeSubstitutionResult::NeedClassInstance { .. }
+                        | TypeSubstitutionResult::NeedOptional { .. } => {
                             // Would need to create nested type - for now just use the original
                             // This is a limitation, but handles most common cases
                             new_type_args.push(*arg);
@@ -13602,7 +13766,8 @@ impl<'a> AstLowering<'a> {
                             changed = true;
                         }
                         TypeSubstitutionResult::NeedGenericInstance { .. }
-                        | TypeSubstitutionResult::NeedClassInstance { .. } => {
+                        | TypeSubstitutionResult::NeedClassInstance { .. }
+                        | TypeSubstitutionResult::NeedOptional { .. } => {
                             new_type_args.push(*arg);
                         }
                     }
@@ -13614,6 +13779,35 @@ impl<'a> AstLowering<'a> {
                     };
                 }
                 TypeSubstitutionResult::NoChange(return_type)
+            }
+            // `Null<V>` (e.g. `Map<K,V>.get` return) — substitute the inner type
+            // so the result is `Optional<concrete>` rather than `Optional<V>`.
+            // Leaving it abstract makes the caller box the value via
+            // `haxe_box_typed_ptr` with an unresolved (0) tag, which boxes
+            // enum/reference values as Int and corrupts the subsequent match.
+            crate::tast::core::TypeKind::Optional { inner_type } => {
+                let inner = *inner_type;
+                match self.compute_type_substitution(inner, receiver_type, type_table) {
+                    TypeSubstitutionResult::DirectSubstitution(new_inner) => {
+                        // Reuse an existing `Optional<new_inner>` if present.
+                        for (tid, tinfo) in type_table.iter() {
+                            if let crate::tast::core::TypeKind::Optional {
+                                inner_type: ex,
+                            } = &tinfo.kind
+                            {
+                                if *ex == new_inner {
+                                    return TypeSubstitutionResult::DirectSubstitution(tid);
+                                }
+                            }
+                        }
+                        TypeSubstitutionResult::NeedOptional {
+                            inner_type: new_inner,
+                        }
+                    }
+                    // Nested creation (Optional<GenericInstance<V>> etc.) — keep
+                    // the original; the common Map<K,V>.get case is the bare-V path.
+                    _ => TypeSubstitutionResult::NoChange(return_type),
+                }
             }
             _ => TypeSubstitutionResult::NoChange(return_type),
         }
@@ -14290,8 +14484,17 @@ impl<'a> AstLowering<'a> {
                 let prev_scope = self.context.current_scope;
                 self.context.current_scope = case_scope;
 
-                // Bind pattern variables in the new scope
-                let var_bindings = self.bind_pattern_variables(first_pattern)?;
+                // Bind pattern variables in the new scope. For an or-pattern
+                // (`case U8(x)|I8(x)|..`), bind from an alternative whose
+                // payloads are all concrete rather than the first: a
+                // cross-module-imported enum can leave a leading variant's
+                // payload Dynamic while later ones are concrete, and binding
+                // `x` from the Dynamic one poisons its type → the
+                // switch-as-expression result temp becomes `*void` and the
+                // raw payload is spuriously `haxe_unbox_int_ptr`'d at return
+                // → SIGSEGV. The case VALUE still matches `first_pattern`.
+                let bind_pattern = self.pick_concrete_binding_pattern(case, first_pattern);
+                let var_bindings = self.bind_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
                 let case_expr =
@@ -14374,8 +14577,17 @@ impl<'a> AstLowering<'a> {
                 let prev_scope = self.context.current_scope;
                 self.context.current_scope = case_scope;
 
-                // Bind pattern variables in the new scope
-                let var_bindings = self.bind_pattern_variables(first_pattern)?;
+                // Bind pattern variables in the new scope. For an or-pattern
+                // (`case U8(x)|I8(x)|..`), bind from an alternative whose
+                // payloads are all concrete rather than the first: a
+                // cross-module-imported enum can leave a leading variant's
+                // payload Dynamic while later ones are concrete, and binding
+                // `x` from the Dynamic one poisons its type → the
+                // switch-as-expression result temp becomes `*void` and the
+                // raw payload is spuriously `haxe_unbox_int_ptr`'d at return
+                // → SIGSEGV. The case VALUE still matches `first_pattern`.
+                let bind_pattern = self.pick_concrete_binding_pattern(case, first_pattern);
+                let var_bindings = self.bind_pattern_variables(bind_pattern)?;
 
                 // For constructor patterns, create the constructor expression
                 let case_expr =
@@ -14665,11 +14877,26 @@ impl<'a> AstLowering<'a> {
                 Ok(vec![(interned_name, var_symbol)])
             }
             Pattern::Or(patterns) => {
-                // For OR patterns, all branches must bind the same variables
-                // This is a complex case - for now just bind variables from the first branch
+                // All alternatives bind the same variables, but their payload
+                // types can differ: a cross-module-imported enum can leave an
+                // early variant's payload Dynamic while later alternatives are
+                // concrete (e.g. `U8(x:Dynamic)|I8(x:Int)|..|I64(x:Int)`).
+                // Binding from the FIRST alternative alone types `x` Dynamic,
+                // which forces the switch-as-expression result temp to `*void`
+                // and a spurious `haxe_unbox_int_ptr` of the raw payload at
+                // return → SIGSEGV. Prefer the first alternative whose payloads
+                // all resolve to concrete types so `x` gets a value type; fall
+                // back to the first alternative when none are concrete.
+                let mut chosen_idx = 0;
+                for (i, p) in patterns.iter().enumerate() {
+                    if self.constructor_pattern_payloads_concrete(p) {
+                        chosen_idx = i;
+                        break;
+                    }
+                }
                 let mut bindings = Vec::new();
-                if let Some(first_pattern) = patterns.first() {
-                    bindings = self.bind_pattern_variables(first_pattern)?;
+                if let Some(p) = patterns.get(chosen_idx) {
+                    bindings = self.bind_pattern_variables(p)?;
                 }
                 // TODO: Validate that all branches bind the same variables
                 Ok(bindings)
@@ -14684,6 +14911,72 @@ impl<'a> AstLowering<'a> {
                 Ok(vec![])
             }
         }
+    }
+
+    /// Pick which pattern to bind an or-pattern's variables from. Scans the
+    /// case's patterns (expanding an `Or` into its alternatives) and returns
+    /// the first alternative whose constructor payloads are all concrete,
+    /// falling back to `default` when none qualify. Keeps a bound variable from
+    /// being typed `Dynamic` off a leading cross-module variant.
+    fn pick_concrete_binding_pattern<'p>(
+        &mut self,
+        case: &'p parser::Case,
+        default: &'p parser::Pattern,
+    ) -> &'p parser::Pattern {
+        let mut candidates: Vec<&'p parser::Pattern> = Vec::new();
+        for p in &case.patterns {
+            match p {
+                parser::Pattern::Or(alts) => candidates.extend(alts.iter()),
+                other => candidates.push(other),
+            }
+        }
+        for c in candidates {
+            if self.constructor_pattern_payloads_concrete(c) {
+                return c;
+            }
+        }
+        default
+    }
+
+    /// True if `p` is a constructor pattern whose every destructured payload
+    /// resolves to a concrete (non-Dynamic/Unknown/invalid) type. Used to pick
+    /// a well-typed alternative when binding an or-pattern's variables, so a
+    /// cross-module enum whose leading variant lost its payload type to Dynamic
+    /// doesn't poison the bound variable's type (see `Pattern::Or` above).
+    fn constructor_pattern_payloads_concrete(&mut self, p: &parser::Pattern) -> bool {
+        let (path, params) = match p {
+            parser::Pattern::Constructor { path, params } if !params.is_empty() => (path, params),
+            _ => return false,
+        };
+        let ctor_name = self.context.intern_string(&path.name);
+        let ctor_sym = match self
+            .resolve_enum_constructor_from_discriminant(ctor_name)
+            .or_else(|| self.resolve_symbol_in_scope_hierarchy(ctor_name))
+        {
+            Some(s) => s,
+            None => return false,
+        };
+        let ctor_type_id = match self.context.symbol_table.get_symbol(ctor_sym) {
+            Some(sym) if sym.type_id != TypeId::invalid() => sym.type_id,
+            _ => return false,
+        };
+        let type_table = self.context.type_table.borrow();
+        let tparams = match type_table.get(ctor_type_id).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Function { params, .. }) => params.clone(),
+            _ => return false,
+        };
+        if tparams.len() < params.len() {
+            return false;
+        }
+        (0..params.len()).all(|i| {
+            let tid = tparams[i];
+            tid != TypeId::invalid()
+                && !matches!(
+                    type_table.get(tid).map(|t| &t.kind),
+                    None | Some(crate::tast::core::TypeKind::Dynamic)
+                        | Some(crate::tast::core::TypeKind::Unknown)
+                )
+        })
     }
 
     /// Try to resolve an enum constructor using the switch discriminant type
