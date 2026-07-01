@@ -1766,17 +1766,42 @@ fn run_file(
         .map(|(id, _)| *id)
         .ok_or("No main function found")?;
 
-    // Find __vtable_init__ and __init__ functions (if present)
-    let vtable_init_func_id = mir_module
+    // Find __vtable_init__ and __init__ functions (if present).
+    //
+    // Each COMPILED FILE emits its OWN `__vtable_init__`/`__init__` (a
+    // per-module bootstrap, not a single program-wide symbol) — after the
+    // stdlib/import merge, `mir_module.functions` can hold dozens of
+    // same-named copies (e.g. one per file that declares an
+    // interface-implementing class or a static field initializer).
+    // `.find()` only grabs the FIRST one (lowest IrFunctionId, i.e.
+    // whichever file happened to compile earliest) and silently drops the
+    // rest. For `__vtable_init__` specifically this meant a class's
+    // (class, interface) vtable-slot registrations from any file OTHER
+    // than the first-found one never ran, leaving `IFACE_VTABLE_REGISTRY`
+    // (runtime/src/type_system.rs) without that entry — an interface-to-
+    // interface cast that needs to rebuild a fat pointer via
+    // `haxe_iface_fat_ptr_build` then finds no registry entry and returns
+    // null, which the caller dereferences → SIGSEGV. Root-caused via
+    // lldb + RAYZOR_IFACE_DEBUG showing `haxe_iface_vtable_set_slot` was
+    // reached for some classes but nue's `LlamaModel` never registered a
+    // `CausalLanguageModel` vtable at all despite `__vtable_init__`
+    // containing that exact registration code (confirmed present in the
+    // MIR dump). Collect and run EVERY same-named copy — registration
+    // (vtable slots, static-once initializers) is idempotent/order-
+    // independent per (class, iface) or per (global) key, so running all
+    // copies is safe and matches the actual multi-file program shape.
+    let vtable_init_func_ids: Vec<_> = mir_module
         .functions
         .iter()
-        .find(|(_, f)| f.name == "__vtable_init__")
-        .map(|(id, _)| *id);
-    let module_init_func_id = mir_module
+        .filter(|(_, f)| f.name == "__vtable_init__")
+        .map(|(id, _)| *id)
+        .collect();
+    let module_init_func_ids: Vec<_> = mir_module
         .functions
         .iter()
-        .find(|(_, f)| f.name == "__init__")
-        .map(|(id, _)| *id);
+        .filter(|(_, f)| f.name == "__init__")
+        .map(|(id, _)| *id)
+        .collect();
 
     // Get runtime symbols
     let plugin = rayzor_runtime::get_plugin();
@@ -1839,15 +1864,18 @@ fn run_file(
         let _ = handle.join();
     }
 
-    // Execute init functions before main
-    if let Some(vtable_init_id) = vtable_init_func_id {
+    // Execute init functions before main. Run EVERY per-file copy (see the
+    // comment where these lists are built) — vtable-slot registration and
+    // static initializers must all run regardless of which file wins the
+    // deduped name in Cranelift's symbol table.
+    for vtable_init_id in &vtable_init_func_ids {
         backend
-            .execute_function(vtable_init_id, vec![])
+            .execute_function(*vtable_init_id, vec![])
             .map_err(|e| format!("vtable init failed: {}", e))?;
     }
-    if let Some(init_id) = module_init_func_id {
+    for init_id in &module_init_func_ids {
         backend
-            .execute_function(init_id, vec![])
+            .execute_function(*init_id, vec![])
             .map_err(|e| format!("module init failed: {}", e))?;
     }
 

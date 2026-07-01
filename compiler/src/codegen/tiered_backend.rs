@@ -1610,7 +1610,42 @@ impl TieredBackend {
         CraneliftBackend::register_enum_rtti_from_modules(&module_refs);
         CraneliftBackend::register_class_rtti_from_modules(&module_refs);
 
-        self.run_startup_hooks_interpreter(&modules_to_init)?;
+        // `__vtable_init__` calls `haxe_iface_vtable_set_slot` with a
+        // FUNCTION POINTER argument (the interface method's dispatch thunk)
+        // that later gets called INDIRECTLY by compiled code rebuilding a
+        // wider interface fat pointer (`haxe_iface_fat_ptr_build`, used by
+        // an interface-to-interface cast whose target has methods the
+        // source fat pointer's vtable doesn't cover). The interpreter's
+        // `fn_ref` value is a tagged IrFunctionId (see `NanBoxedValue::
+        // from_func_id` in mir_interpreter.rs), not a real machine-code
+        // address — running `__vtable_init__` through the interpreter would
+        // register that placeholder as if it were a callable pointer, and
+        // compiled code would later `blr` through it and crash on a tiny
+        // garbage address. The interpreter also has no dispatch arm for
+        // `haxe_iface_vtable_set_slot` at all (falls through to the
+        // "unknown extern → forgiving default" path and silently no-ops),
+        // so today the registry entry is simply MISSING for any class whose
+        // vtable-init only ever ran interpreted — same crash, different
+        // proximate cause (null instead of garbage).
+        //
+        // In JIT mode (`!start_interpreted`, the default for `rayzor run`)
+        // real Cranelift-compiled function pointers are available almost
+        // immediately anyway (`execute_function` compiles all modules on
+        // its very next step if this is the first call). Compile eagerly
+        // here and run the NATIVE startup hooks instead, so `fn_ref`
+        // resolves to the actual compiled thunk address before any
+        // `__vtable_init__` body executes. Interpreter-first configs keep
+        // the interpreted path — cross-interface casts needing a vtable
+        // rebuild in a pure-interpreter run remain a known gap, not a new
+        // regression from this fix.
+        if !self.start_interpreted {
+            if self.function_pointers.read().unwrap().is_empty() {
+                self.compile_all_modules_jit()?;
+            }
+            self.run_startup_hooks_native(&modules_to_init)?;
+        } else {
+            self.run_startup_hooks_interpreter(&modules_to_init)?;
+        }
 
         *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
         Ok(())
