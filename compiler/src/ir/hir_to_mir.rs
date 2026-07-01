@@ -5826,6 +5826,13 @@ impl<'a> HirToMirContext<'a> {
                                         | "rand"
                                         | "fromFloat32"
                                         | "wrapQ4KM"
+                                        // Bytes factory methods return `Bytes`; tag the
+                                        // result so cross-module `var b = Bytes.ofString(s)`
+                                        // keeps a class handle for later `b.length` etc.
+                                        | "ofString"
+                                        | "alloc"
+                                        | "ofData"
+                                        | "ofHex"
                                 );
                                 if returns_same_class {
                                     // Resolve to the canonical runtime-mapping class name. This
@@ -9125,6 +9132,54 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
+                // Recover an invalid receiver type (cross-module the typechecker
+                // can leave a local unresolved, e.g. `var b = Bytes.ofString(s)`)
+                // from the object variable's symbol type, then a class hint —
+                // an unresolved receiver has no class handle for field dispatch.
+                let receiver_ty = if receiver_ty == TypeId::invalid() {
+                    let from_symbol = if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                        self.symbol_table
+                            .get_symbol(*symbol)
+                            .map(|s| s.type_id)
+                            .filter(|t| *t != TypeId::invalid())
+                    } else {
+                        None
+                    };
+                    // Class name from either a register hint or the object
+                    // variable's tracked stdlib class (`monomorphized_var_types`,
+                    // set by `detect_stdlib_class_from_call` for factory results
+                    // like `Bytes.ofString`).
+                    let hint_name: Option<String> = self
+                        .register_class_hints
+                        .get(&obj_reg)
+                        .cloned()
+                        .or_else(|| {
+                            if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                                self.monomorphized_var_types.get(symbol).cloned()
+                            } else {
+                                None
+                            }
+                        });
+                    from_symbol
+                        .or_else(|| {
+                            let hint = hint_name.as_deref()?;
+                            let bare = hint.rsplit(':').next().unwrap_or(hint);
+                            let bare = bare.rsplit('.').next().unwrap_or(bare);
+                            self.class_type_to_symbol
+                                .iter()
+                                .find(|(_ty, sym)| {
+                                    self.symbol_table
+                                        .get_symbol(**sym)
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                        .map_or(false, |n| n == hint || n == bare)
+                                })
+                                .map(|(ty, _)| *ty)
+                        })
+                        .unwrap_or(receiver_ty)
+                } else {
+                    receiver_ty
+                };
+
                 // When receiver is Dynamic but has a class hint (e.g., from @:derive(Clone)),
                 // resolve receiver_ty to the actual class type for correct GEP field access.
                 let receiver_ty = {
@@ -9155,6 +9210,20 @@ impl<'a> HirToMirContext<'a> {
                         receiver_ty
                     }
                 };
+
+                // Reference-class property on an unresolved receiver: when the
+                // local's type stayed invalid cross-module but a class hint
+                // survives (e.g. `Bytes.ofString(...)` result), resolve the
+                // property directly against the stdlib mapping by class name so
+                // it doesn't fall through to a same-named getter on an
+                // unrelated class.
+                if receiver_ty == TypeId::invalid() {
+                    if let Some(result) =
+                        self.try_stdlib_property_by_hint(obj_reg, &object.kind, *field, expr.ty)
+                    {
+                        return Some(result);
+                    }
+                }
 
                 let result = self.lower_field_access(obj_reg, *field, receiver_ty, expr.ty);
                 debug!(
@@ -10957,6 +11026,24 @@ impl<'a> HirToMirContext<'a> {
                                         arg_regs,
                                         actual_return_type.clone(),
                                     );
+
+                                    // Tag a static factory result with its class so a
+                                    // cross-module `var b = Bytes.ofString(s)` keeps a
+                                    // class handle when the local's own type stays
+                                    // unresolved. Applies when the factory returns the
+                                    // same reference class (a `PtrVoid`/`Ptr` handle).
+                                    if let Some(reg) = call_result {
+                                        if matches!(
+                                            self.builder.get_register_type(reg),
+                                            Some(IrType::Ptr(_))
+                                        ) {
+                                            if let Some(hint) =
+                                                self.static_factory_return_class(sc_class_name, sc_method_name)
+                                            {
+                                                self.register_class_hints.insert(reg, hint);
+                                            }
+                                        }
+                                    }
 
                                     // Handle returns_raw_value: cast raw U64 to appropriate type
                                     if returns_raw_value {
@@ -26788,6 +26875,115 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Best-effort class/type name for a field-access receiver type. Handles
+    /// Class (qualified or bare name), Placeholder (unresolved cross-module
+    /// extern, carries the name), and TypeAlias. Returns None for anonymous /
+    /// primitive / genuinely-unknown receivers (the caller then skips the
+    /// owner-class guard rather than guessing).
+    fn receiver_type_class_name(&self, receiver_ty: TypeId) -> Option<String> {
+        let type_table = self.type_table;
+        match type_table.get(receiver_ty).map(|t| &t.kind) {
+            Some(TypeKind::Class { symbol_id, .. }) => self
+                .symbol_table
+                .get_symbol(*symbol_id)
+                .and_then(|s| {
+                    s.qualified_name
+                        .and_then(|n| self.string_interner.get(n))
+                        .or_else(|| self.string_interner.get(s.name))
+                })
+                .map(|s| s.to_string()),
+            Some(TypeKind::Placeholder { name }) => {
+                self.string_interner.get(*name).map(|s| s.to_string())
+            }
+            Some(TypeKind::TypeAlias { target_type, .. }) => {
+                self.receiver_type_class_name(*target_type)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a property/field on a receiver whose type stayed unresolved
+    /// cross-module, using a surviving class hint (register hint from a factory
+    /// result, or the object variable's tracked stdlib class). Maps the hint to
+    /// the stdlib class and emits the mapped runtime getter directly. Returns
+    /// None when no hint is available or the class exposes no such property.
+    fn try_stdlib_property_by_hint(
+        &mut self,
+        obj_reg: IrId,
+        object_kind: &HirExprKind,
+        field: SymbolId,
+        field_ty: TypeId,
+    ) -> Option<IrId> {
+        // Receiver class hint: register-level first, then the object variable.
+        let hint = self
+            .register_class_hints
+            .get(&obj_reg)
+            .cloned()
+            .or_else(|| {
+                if let HirExprKind::Variable { symbol, .. } = object_kind {
+                    self.monomorphized_var_types.get(symbol).cloned()
+                } else {
+                    None
+                }
+            })?;
+        let bare = hint.rsplit(':').next().unwrap_or(&hint);
+        let bare = bare.rsplit('.').next().unwrap_or(bare).to_string();
+
+        let field_name = self
+            .symbol_table
+            .get_symbol(field)
+            .and_then(|s| self.string_interner.get(s.name))?
+            .to_string();
+
+        // Candidate stdlib class names for the mapping lookup.
+        let candidates = [bare.clone(), format!("haxe_io_{}", bare)];
+        let runtime_name = candidates.iter().find_map(|cls| {
+            self.stdlib_mapping
+                .find_by_name(cls, &field_name)
+                .map(|(_, call)| call.runtime_name)
+        })?;
+
+        let field_kind = self.type_table.get(field_ty).map(|t| t.kind.clone());
+        let result_type = match field_kind {
+            Some(crate::tast::TypeKind::Int) => IrType::I32,
+            Some(crate::tast::TypeKind::Float) => IrType::F64,
+            Some(crate::tast::TypeKind::Bool) => IrType::Bool,
+            _ => IrType::Ptr(Box::new(IrType::Void)),
+        };
+        let func_id = self.get_or_register_extern_function(
+            runtime_name,
+            vec![IrType::Ptr(Box::new(IrType::Void))],
+            result_type.clone(),
+        );
+        self.builder.build_call_direct(func_id, vec![obj_reg], result_type)
+    }
+
+    /// Class name a static factory method returns, for tagging its result
+    /// register so later member access resolves even when the binding's type
+    /// stayed unresolved cross-module. Returns the receiver's `length`/`get`/…
+    /// owner class (bare name) for the reference classes that expose a factory.
+    fn static_factory_return_class(&self, class_name: &str, method: &str) -> Option<String> {
+        let bare = class_name.rsplit('.').next().unwrap_or(class_name);
+        let bare = bare.strip_prefix("haxe_io_").unwrap_or(bare);
+        match (bare, method) {
+            ("Bytes", "ofString" | "alloc" | "ofData" | "ofHex") => Some("Bytes".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Compare two class names for the owner-class property guard, tolerating
+    /// qualified-vs-bare differences across compilation contexts (e.g.
+    /// `haxe.io.Bytes` vs `Bytes`, `StringBuf` vs `haxe.StringBuf`). Matches
+    /// on the trailing name segment.
+    fn class_names_match(a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let a_last = a.rsplit('.').next().unwrap_or(a);
+        let b_last = b.rsplit('.').next().unwrap_or(b);
+        a_last == b_last
+    }
+
     fn lower_field_access(
         &mut self,
         obj: IrId,
@@ -27083,6 +27279,14 @@ impl<'a> HirToMirContext<'a> {
             // can shadow the real definition when iteration order surfaces them first.
             // See bugs_known.md for the StringBuf.length cross-test contamination case.
             let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
+
+            // Keep the name-based match from crossing class boundaries: a
+            // candidate whose owner class is known to differ from the receiver's
+            // belongs to an unrelated class. Owner from `field_class_names`
+            // (forwarded from imports); both unknown falls through, preserving
+            // the original cross-module fallback.
+            let receiver_class_name = self.receiver_type_class_name(receiver_ty);
+
             let mut method_match: Option<crate::tast::PropertyAccessInfo> = None;
             let mut default_match: Option<crate::tast::PropertyAccessInfo> = None;
             for (sym_id, info) in &self.property_access_map {
@@ -27092,6 +27296,13 @@ impl<'a> HirToMirContext<'a> {
                 };
                 if sym_name != field_name {
                     continue;
+                }
+                if let (Some(owner), Some(recv)) =
+                    (self.field_class_names.get(sym_id), receiver_class_name.as_ref())
+                {
+                    if !Self::class_names_match(owner, recv) {
+                        continue;
+                    }
                 }
                 match info.getter {
                     crate::tast::PropertyAccessor::Method(_) => {
@@ -39261,6 +39472,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
     external_interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
     external_function_param_iface_names: BTreeMap<IrFunctionId, Vec<Option<String>>>,
+    external_field_class_names: BTreeMap<SymbolId, String>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
@@ -39309,6 +39521,10 @@ pub fn lower_hir_to_mir_with_function_map(
     context.interface_method_return_types = external_interface_method_return_types;
     context.interface_extends = external_interface_extends;
     context.interface_vtables = external_interface_vtables;
+    // Seed imported field→owner-class names so the property-getter name-based
+    // fallback in `lower_field_access` can reject cross-class matches (e.g.
+    // `Bytes.length` must not resolve to `StringBuf.get_length`).
+    context.field_class_names = external_field_class_names;
 
     // Also populate from the TypeId-keyed map + symbol table.
     for (&type_id, &size) in &context.class_alloc_sizes {
