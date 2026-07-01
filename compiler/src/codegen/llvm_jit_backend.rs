@@ -1377,9 +1377,36 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .ok_or("Execution engine not initialized")?;
         let trace_startup = std::env::var_os("RAYZOR_LLVM_TRACE_STARTUP").is_some();
 
+        // Every contributing FILE emits its own `__vtable_init__` / `__init__`
+        // (not a single program-wide symbol) — after the stdlib/import merge
+        // `module.functions` can hold many same-named copies. `.find()` only
+        // grabbed the first, silently dropping every other file's vtable-slot
+        // registrations and static initializers (mirrors the identical fix
+        // already applied in cranelift_backend.rs's `call_main` and
+        // tiered_backend.rs's startup hooks — this LLVM entry point was the
+        // one left behind). Concretely this meant `IFACE_VTABLE_REGISTRY`
+        // (runtime/src/type_system.rs) never got a class's (class, iface)
+        // vtable unless that class's file happened to be the first one whose
+        // init function was found, so an interface-to-interface cast that
+        // needs `haxe_iface_fat_ptr_build` to rebuild a fat pointer for a
+        // class registered by a LATER file got a null/garbage pointer back —
+        // SIGSEGV on the next dispatch through it.
         for init_name in ["__vtable_init__", "__init__"] {
-            if let Some(init_func) = module.functions.values().find(|f| f.name == init_name) {
-                let func_name = Self::mangle_function_name(&init_func.name);
+            let init_funcs: Vec<_> = module
+                .functions
+                .iter()
+                .filter(|(_, f)| f.name == init_name)
+                .collect();
+            for (init_func_id, init_func) in init_funcs {
+                // Must match the per-func_id-unique name `declare_function`
+                // gave this copy (see the comment there) — the bare mangled
+                // name would only resolve whichever copy happened to be
+                // declared first.
+                let func_name = format!(
+                    "{}_{}",
+                    Self::mangle_function_name(&init_func.name),
+                    init_func_id.0
+                );
                 let fn_ptr = engine.get_function_address(&func_name).map_err(|e| {
                     format!(
                         "Failed to get {} function '{}': {}",
@@ -1612,7 +1639,38 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     ) -> Result<FunctionValue<'ctx>, String> {
         // Use function's actual name for LLVM (unique across modules)
         // Mangle the name to be LLVM-safe (replace :: with _)
-        let func_name = Self::mangle_function_name(&function.name);
+        //
+        // `__vtable_init__` / `__init__` are NOT unique program-wide symbols
+        // despite the name — every compiled FILE emits its own copy (a
+        // per-file bootstrap: vtable-slot registration for that file's
+        // interface-implementing classes, static-field initializers for
+        // that file's globals). Below, the "reuse an existing same-name
+        // same-signature LLVM function" fast path would otherwise collapse
+        // ALL of them into the first one declared, silently discarding
+        // every other file's init BODY (not just its call site — the LLVM
+        // function is never even emitted for files 2..N since `declare_
+        // function` short-circuits before reaching the body-lowering
+        // pass). That starved `IFACE_VTABLE_REGISTRY`
+        // (runtime/src/type_system.rs) of any (class, iface) pair whose
+        // registration lived in a non-first file, so an interface-to-
+        // interface cast needing `haxe_iface_fat_ptr_build` to rebuild a
+        // wider fat pointer got a null/garbage vtable lookup back — SIGSEGV
+        // on the next indirect call through it (confirmed via lldb: nue's
+        // `LlamaModel`/`CausalLanguageModel` cast, MIR proved the
+        // registration code IS emitted in `LlamaModel.hx`'s own
+        // `__vtable_init__`, but it was never the first-declared copy).
+        // Force a per-func_id-unique LLVM name for these two names so every
+        // file's copy gets its own real function.
+        let is_per_file_init = matches!(function.name.as_str(), "__vtable_init__" | "__init__");
+        let func_name = if is_per_file_init {
+            format!(
+                "{}_{}",
+                Self::mangle_function_name(&function.name),
+                func_id.0
+            )
+        } else {
+            Self::mangle_function_name(&function.name)
+        };
 
         // If this function is ExternC or uses C calling convention (no env param), treat it as extern
         let is_c_abi = function.kind == crate::ir::functions::FunctionKind::ExternC
