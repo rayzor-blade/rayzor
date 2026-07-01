@@ -709,9 +709,7 @@ enum TypeSubstitutionResult {
     /// type — e.g. `Map<K,V>.get` returns `Null<V>`; without this the inner
     /// stays an abstract `V`, and the caller boxes the value with an
     /// unresolved type tag (corrupting enum/reference values).
-    NeedOptional {
-        inner_type: TypeId,
-    },
+    NeedOptional { inner_type: TypeId },
 }
 
 impl<'a> AstLowering<'a> {
@@ -1340,9 +1338,7 @@ impl<'a> AstLowering<'a> {
             let tt = self.context.type_table.borrow();
             !matches!(
                 tt.get(*t).map(|ty| &ty.kind),
-                None | Some(TypeKind::Dynamic)
-                    | Some(TypeKind::Unknown)
-                    | Some(TypeKind::Error)
+                None | Some(TypeKind::Dynamic) | Some(TypeKind::Unknown) | Some(TypeKind::Error)
             )
         });
         match concrete {
@@ -2432,11 +2428,12 @@ impl<'a> AstLowering<'a> {
                                 .map(|e| (e.id, e.kind));
                             // Reuse only a same-parent EnumVariant (avoid duplicates).
                             let is_same_parent_variant = match existing_info {
-                                Some((eid, crate::tast::symbols::SymbolKind::EnumVariant)) => self
-                                    .context
-                                    .symbol_table
-                                    .find_parent_enum_for_constructor(eid)
-                                    == Some(existing_id),
+                                Some((eid, crate::tast::symbols::SymbolKind::EnumVariant)) => {
+                                    self.context
+                                        .symbol_table
+                                        .find_parent_enum_for_constructor(eid)
+                                        == Some(existing_id)
+                                }
                                 _ => false,
                             };
                             if !is_same_parent_variant {
@@ -10435,17 +10432,18 @@ impl<'a> AstLowering<'a> {
                             // type symbol (e.g. builtin `Bool`) and the enum variant
                             // (`MetaValue.Bool`) are interned in different contexts and get
                             // different ids, so an id-only compare finds zero candidates.
-                            let name_str =
-                                self.context.string_interner.get(name).map(|s| s.to_string());
+                            let name_str = self
+                                .context
+                                .string_interner
+                                .get(name)
+                                .map(|s| s.to_string());
                             // Collect all enum variants (id, name) owned, releasing the
                             // symbol_table borrow before re-borrowing the interner.
                             let all_variants: Vec<_> = self
                                 .context
                                 .symbol_table
                                 .all_symbols()
-                                .filter(|s| {
-                                    s.kind == crate::tast::symbols::SymbolKind::EnumVariant
-                                })
+                                .filter(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
                                 .map(|s| (s.id, s.name))
                                 .collect();
                             let candidates: Vec<_> = all_variants
@@ -10539,9 +10537,7 @@ impl<'a> AstLowering<'a> {
                                         .symbol_table
                                         .find_parent_enum_for_constructor(c)
                                     {
-                                        if let Some(ps) =
-                                            self.context.symbol_table.get_symbol(pe)
-                                        {
+                                        if let Some(ps) = self.context.symbol_table.get_symbol(pe) {
                                             // Key by qualified name when set, else the
                                             // bare enum name — a same-file enum's parent
                                             // often has no qualified_name, and multiple
@@ -13879,9 +13875,8 @@ impl<'a> AstLowering<'a> {
                     TypeSubstitutionResult::DirectSubstitution(new_inner) => {
                         // Reuse an existing `Optional<new_inner>` if present.
                         for (tid, tinfo) in type_table.iter() {
-                            if let crate::tast::core::TypeKind::Optional {
-                                inner_type: ex,
-                            } = &tinfo.kind
+                            if let crate::tast::core::TypeKind::Optional { inner_type: ex } =
+                                &tinfo.kind
                             {
                                 if *ex == new_inner {
                                     return TypeSubstitutionResult::DirectSubstitution(tid);

@@ -1911,10 +1911,13 @@ impl<'a> HirToMirContext<'a> {
             if !visited.insert(parent_type) {
                 break;
             }
-            let parent_sym = self.type_table.get(parent_type).and_then(|t| match &t.kind {
-                crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                _ => None,
-            });
+            let parent_sym = self
+                .type_table
+                .get(parent_type)
+                .and_then(|t| match &t.kind {
+                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                });
             // Parent's registered alloc size: by type id, by symbol-derived id,
             // then by qualified/simple name.
             let parent_size = self
@@ -5199,8 +5202,9 @@ impl<'a> HirToMirContext<'a> {
                             _ => None,
                         };
                         let value = if let Some(target_ty) = lhs_target_ty {
-                            let after_box =
-                                self.maybe_box_value(value, rhs.ty, target_ty).unwrap_or(value);
+                            let after_box = self
+                                .maybe_box_value(value, rhs.ty, target_ty)
+                                .unwrap_or(value);
                             // Track boxing for Dynamic arithmetic safety (variable targets only).
                             if after_box != value {
                                 if let HirLValue::Variable(sym) = lhs {
@@ -5501,11 +5505,9 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(iface_sym) = self.get_interface_symbol(fn_ret_ty) {
                             if !self.interface_wrapped_args.contains(&val) {
                                 if let Some(class_fqn) = self.new_arg_class_fqn(e) {
-                                    if let Some(w) = self
-                                        .wrap_new_class_as_interface_by_name(
-                                            val, &class_fqn, iface_sym,
-                                        )
-                                    {
+                                    if let Some(w) = self.wrap_new_class_as_interface_by_name(
+                                        val, &class_fqn, iface_sym,
+                                    ) {
                                         self.interface_wrapped_args.insert(w);
                                         return Some(w);
                                     }
@@ -11109,9 +11111,10 @@ impl<'a> HirToMirContext<'a> {
                                             self.builder.get_register_type(reg),
                                             Some(IrType::Ptr(_))
                                         ) {
-                                            if let Some(hint) =
-                                                self.static_factory_return_class(sc_class_name, sc_method_name)
-                                            {
+                                            if let Some(hint) = self.static_factory_return_class(
+                                                sc_class_name,
+                                                sc_method_name,
+                                            ) {
                                                 self.register_class_hints.insert(reg, hint);
                                             }
                                         }
@@ -12703,21 +12706,17 @@ impl<'a> HirToMirContext<'a> {
                         // later), so callee_has_type_params is unreliable here. Detect
                         // genericity from the RECEIVER instead: a concrete generic
                         // class instance (Class/GenericInstance carrying type_args).
-                        let receiver_is_generic_instance = *is_method
-                            && !args.is_empty()
-                            && {
-                                let rt = self.resolve_through_aliases(args[0].ty);
-                                self.type_table
-                                    .get(rt)
-                                    .map(|t| match &t.kind {
-                                        TypeKind::GenericInstance { type_args, .. }
-                                        | TypeKind::Class { type_args, .. } => {
-                                            !type_args.is_empty()
-                                        }
-                                        _ => false,
-                                    })
-                                    .unwrap_or(false)
-                            };
+                        let receiver_is_generic_instance = *is_method && !args.is_empty() && {
+                            let rt = self.resolve_through_aliases(args[0].ty);
+                            self.type_table
+                                .get(rt)
+                                .map(|t| match &t.kind {
+                                    TypeKind::GenericInstance { type_args, .. }
+                                    | TypeKind::Class { type_args, .. } => !type_args.is_empty(),
+                                    _ => false,
+                                })
+                                .unwrap_or(false)
+                        };
                         let route_as_generic_method = *is_method
                             && !callee_is_externish
                             && (callee_has_type_params || receiver_is_generic_instance);
@@ -19338,7 +19337,9 @@ impl<'a> HirToMirContext<'a> {
                         if ta_ids.is_empty() {
                             if let Some(ti) = self.type_table.get(*class_type) {
                                 ta_ids = match &ti.kind {
-                                    crate::tast::TypeKind::GenericInstance { type_args, .. }
+                                    crate::tast::TypeKind::GenericInstance {
+                                        type_args, ..
+                                    }
                                     | crate::tast::TypeKind::Class { type_args, .. } => {
                                         type_args.clone()
                                     }
@@ -19362,11 +19363,8 @@ impl<'a> HirToMirContext<'a> {
 
                     // Constructor returns void, so we ignore the result
                     if ctor_type_args.is_empty() {
-                        self.builder.build_call_direct(
-                            constructor_func_id,
-                            arg_regs,
-                            IrType::Void,
-                        );
+                        self.builder
+                            .build_call_direct(constructor_func_id, arg_regs, IrType::Void);
                     } else {
                         self.builder.build_call_direct_with_type_args(
                             constructor_func_id,
@@ -19386,8 +19384,8 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                } else if let Some(ctor_fn) =
-                    self.resolve_cross_module_constructor_by_name(actual_symbol_id, final_class_name)
+                } else if let Some(ctor_fn) = self
+                    .resolve_cross_module_constructor_by_name(actual_symbol_id, final_class_name)
                 {
                     // Cross-module: the class's constructor isn't in this
                     // context's `constructor_map`/`constructor_name_map` but is
@@ -19403,6 +19401,40 @@ impl<'a> HirToMirContext<'a> {
                     }
                     self.builder
                         .build_call_direct(ctor_fn, arg_regs, IrType::Void);
+                    for arg in args.iter() {
+                        if let HirExprKind::Variable { symbol, .. } = &arg.kind {
+                            self.owned_heap_values.remove(symbol);
+                        }
+                    }
+                } else if let Some(ctor_key) =
+                    self.cross_module_constructor_fqn_key(actual_symbol_id, final_class_name)
+                {
+                    // Cross-module, class compiles LATER in this import pass
+                    // (cycle-breaker / retry ordering), so its constructor isn't
+                    // resolvable by name yet either. Emit the call against a
+                    // named forward-ref stub; `fixup_stale_cross_module_refs`
+                    // redirects it to the real constructor by qualified name
+                    // once every module is loaded. Silently emitting NO call
+                    // here left the object zero-initialized.
+                    let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len() + 1);
+                    arg_regs.push(obj_ptr);
+                    for a in args.iter() {
+                        if let Some(reg) = self.lower_expression(a) {
+                            arg_regs.push(reg);
+                        }
+                    }
+                    let param_types: Vec<IrType> = arg_regs
+                        .iter()
+                        .map(|r| {
+                            self.builder
+                                .get_register_type(*r)
+                                .unwrap_or(IrType::Ptr(Box::new(IrType::Void)))
+                        })
+                        .collect();
+                    let stub_id =
+                        self.register_stdlib_mir_forward_ref(&ctor_key, param_types, IrType::Void);
+                    self.builder
+                        .build_call_direct(stub_id, arg_regs, IrType::Void);
                     for arg in args.iter() {
                         if let HirExprKind::Variable { symbol, .. } = &arg.kind {
                             self.owned_heap_values.remove(symbol);
@@ -20634,11 +20666,16 @@ impl<'a> HirToMirContext<'a> {
                     // the raw pointer flows into an interface slot → later
                     // vtable dispatch reads garbage (the nue `new LlamaArch()` →
                     // ArchBuilder registration path).
-                    (src, Some(TypeKind::Interface { symbol_id: tgt_sym, .. }))
-                        if !matches!(src, Some(TypeKind::Class { .. })
-                            | Some(TypeKind::Interface { .. }))
-                            && (self.recover_cast_src_class_by_name(expr).is_some()
-                                || self.new_arg_class_fqn(expr).is_some()) =>
+                    (
+                        src,
+                        Some(TypeKind::Interface {
+                            symbol_id: tgt_sym, ..
+                        }),
+                    ) if !matches!(
+                        src,
+                        Some(TypeKind::Class { .. }) | Some(TypeKind::Interface { .. })
+                    ) && (self.recover_cast_src_class_by_name(expr).is_some()
+                        || self.new_arg_class_fqn(expr).is_some()) =>
                     {
                         let tgt_sym = *tgt_sym;
                         let src_sym = self.recover_cast_src_class_by_name(expr);
@@ -20660,9 +20697,9 @@ impl<'a> HirToMirContext<'a> {
                         } else if let Some(class_fqn) = self.new_arg_class_fqn(expr) {
                             // Fully-imported class not present here: wrap by NAME
                             // via forward-ref dispatch thunks (order-independent).
-                            match self.wrap_new_class_as_interface_by_name(
-                                value_reg, &class_fqn, tgt_sym,
-                            ) {
+                            match self
+                                .wrap_new_class_as_interface_by_name(value_reg, &class_fqn, tgt_sym)
+                            {
                                 Some(fat_ptr) => {
                                     self.interface_wrapped_args.insert(fat_ptr);
                                     Some(fat_ptr)
@@ -20849,10 +20886,7 @@ impl<'a> HirToMirContext<'a> {
                         ) {
                             (Some(src_names), Some(tgt_names)) => {
                                 tgt_names.len() <= src_names.len()
-                                    && tgt_names
-                                        .iter()
-                                        .zip(src_names.iter())
-                                        .all(|(t, s)| t == s)
+                                    && tgt_names.iter().zip(src_names.iter()).all(|(t, s)| t == s)
                             }
                             // Same interface (src == tgt) is trivially a prefix.
                             _ => src_iface_sym == tgt_iface_sym,
@@ -24126,7 +24160,13 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or("");
                     if matches!(
                         name,
-                        "Usize" | "Ptr" | "Ref" | "Box" | "SIMD4f" | "SIMD4i32" | "SIMD16i8"
+                        "Usize"
+                            | "Ptr"
+                            | "Ref"
+                            | "Box"
+                            | "SIMD4f"
+                            | "SIMD4i32"
+                            | "SIMD16i8"
                             | "Atomic"
                     ) {
                         return false;
@@ -24872,11 +24912,9 @@ impl<'a> HirToMirContext<'a> {
                             // independent). Derive the class FQN from the `new`
                             // expression + this module's package.
                             if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
-                                if let Some(wrapped) = self
-                                    .wrap_new_class_as_interface_by_name(
-                                        arg_reg, &class_fqn, iface_sym,
-                                    )
-                                {
+                                if let Some(wrapped) = self.wrap_new_class_as_interface_by_name(
+                                    arg_reg, &class_fqn, iface_sym,
+                                ) {
                                     self.interface_wrapped_args.insert(wrapped);
                                     return wrapped;
                                 }
@@ -25085,10 +25123,7 @@ impl<'a> HirToMirContext<'a> {
         // If the class symbol is resolvable, use its qualified name.
         if let Some(sid) = self.lookup_class_symbol_by_name(bare) {
             if let Some(sym) = self.symbol_table.get_symbol(sid) {
-                if let Some(qn) = sym
-                    .qualified_name
-                    .and_then(|n| self.string_interner.get(n))
-                {
+                if let Some(qn) = sym.qualified_name.and_then(|n| self.string_interner.get(n)) {
                     return Some(qn.to_string());
                 }
             }
@@ -25122,11 +25157,7 @@ impl<'a> HirToMirContext<'a> {
     /// `New` lowering (`register_class_hints`) and, for variables, propagated
     /// to `monomorphized_var_types`. Returns None when the class can't be
     /// recovered (then wrapping is skipped and the value is passed as-is).
-    fn recover_arg_concrete_class(
-        &self,
-        arg_expr: &HirExpr,
-        arg_reg: IrId,
-    ) -> Option<SymbolId> {
+    fn recover_arg_concrete_class(&self, arg_expr: &HirExpr, arg_reg: IrId) -> Option<SymbolId> {
         // Attempt recovery when the arg's static type isn't a resolvable
         // concrete Class implementing the callee interface — i.e. the
         // typechecker promoted it to the interface, or (cross-module) it
@@ -27014,13 +27045,14 @@ impl<'a> HirToMirContext<'a> {
     /// stable name-keyed `external_function_name_map`. Returns None if the
     /// class name is unknown or the constructor isn't visible yet — the caller
     /// then leaves the object unconstructed (unchanged prior behaviour).
-    fn resolve_cross_module_constructor_by_name(
+    /// Qualified constructor key (`<class_fqn>.new`) for a cross-module `new`.
+    /// Prefers the recovered class symbol's qualified name; falls back to the
+    /// bare class name qualified by the current module's package.
+    fn cross_module_constructor_fqn_key(
         &self,
         actual_symbol_id: Option<SymbolId>,
         final_class_name: Option<&str>,
-    ) -> Option<IrFunctionId> {
-        // Prefer the recovered class symbol's qualified name; fall back to the
-        // bare class name qualified by the current module's package.
+    ) -> Option<String> {
         let fqn = actual_symbol_id
             .and_then(|sid| self.symbol_table.get_symbol(sid))
             .and_then(|s| {
@@ -27043,7 +27075,15 @@ impl<'a> HirToMirContext<'a> {
                     _ => Some(bare.to_string()),
                 }
             })?;
-        let key = format!("{}.new", fqn);
+        Some(format!("{}.new", fqn))
+    }
+
+    fn resolve_cross_module_constructor_by_name(
+        &self,
+        actual_symbol_id: Option<SymbolId>,
+        final_class_name: Option<&str>,
+    ) -> Option<IrFunctionId> {
+        let key = self.cross_module_constructor_fqn_key(actual_symbol_id, final_class_name)?;
         self.external_function_name_map.get(&key).copied()
     }
 
@@ -27100,7 +27140,8 @@ impl<'a> HirToMirContext<'a> {
             vec![IrType::Ptr(Box::new(IrType::Void))],
             result_type.clone(),
         );
-        self.builder.build_call_direct(func_id, vec![obj_reg], result_type)
+        self.builder
+            .build_call_direct(func_id, vec![obj_reg], result_type)
     }
 
     /// Class name a static factory method returns, for tagging its result
@@ -27442,9 +27483,10 @@ impl<'a> HirToMirContext<'a> {
                 if sym_name != field_name {
                     continue;
                 }
-                if let (Some(owner), Some(recv)) =
-                    (self.field_class_names.get(sym_id), receiver_class_name.as_ref())
-                {
+                if let (Some(owner), Some(recv)) = (
+                    self.field_class_names.get(sym_id),
+                    receiver_class_name.as_ref(),
+                ) {
                     if !Self::class_names_match(owner, recv) {
                         continue;
                     }
@@ -27579,10 +27621,10 @@ impl<'a> HirToMirContext<'a> {
                         .values()
                         .any(|(cty, _)| *cty == resolved_receiver_ty);
                     if !has_own_fields {
-                        if let Some(qname) = self
-                            .symbol_table
-                            .get_symbol(*symbol_id)
-                            .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n)))
+                        if let Some(qname) =
+                            self.symbol_table.get_symbol(*symbol_id).and_then(|s| {
+                                s.qualified_name.and_then(|n| self.string_interner.get(n))
+                            })
                         {
                             if let Some(anon_target) =
                                 self.find_typedef_anonymous_target_by_name(qname)
@@ -31067,11 +31109,10 @@ impl<'a> HirToMirContext<'a> {
                         vec![ptr_void.clone()],
                         ptr_void.clone(),
                     );
-                    let Some(keys_array) = self.builder.build_call_direct(
-                        keys_fn,
-                        vec![map_ptr],
-                        ptr_void.clone(),
-                    ) else {
+                    let Some(keys_array) =
+                        self.builder
+                            .build_call_direct(keys_fn, vec![map_ptr], ptr_void.clone())
+                    else {
                         return;
                     };
                     self.lower_for_in_map_kv(
@@ -35047,7 +35088,10 @@ impl<'a> HirToMirContext<'a> {
                 // Tier 2/3: driven by interface_method_names (forwarded and
                 // stable). Resolve each method's SymbolId if available; leave
                 // None otherwise (name-based resolution handles those slots).
-                let method_names = self.interface_method_names.get(&interface_symbol).cloned()?;
+                let method_names = self
+                    .interface_method_names
+                    .get(&interface_symbol)
+                    .cloned()?;
                 let mut all_resolved = true;
                 let entries: Vec<Option<SymbolId>> = method_names
                     .iter()
@@ -35109,13 +35153,12 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_store(fat_ptr, obj_as_i64);
 
         // Class FQN (used for name-based cross-module method resolution below).
-        let class_fqn: Option<String> =
-            self.symbol_table.get_symbol(class_symbol).and_then(|s| {
-                s.qualified_name
-                    .and_then(|n| self.string_interner.get(n))
-                    .or_else(|| self.string_interner.get(s.name))
-                    .map(|s| s.to_string())
-            });
+        let class_fqn: Option<String> = self.symbol_table.get_symbol(class_symbol).and_then(|s| {
+            s.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(s.name))
+                .map(|s| s.to_string())
+        });
         // Interface method NAMES in vtable order — the stable, drift-proof
         // handle for name-based resolution (SymbolIds drift across contexts).
         let iface_method_names: Vec<Option<String>> = self
@@ -35167,9 +35210,8 @@ impl<'a> HirToMirContext<'a> {
                 let dispatch_func_id = self
                     .ensure_vtable_dispatch_thunk(func_id)
                     .or_else(|| {
-                        method_sym_opt.and_then(|ms| {
-                            self.ensure_cross_module_dispatch_thunk(ms, func_id)
-                        })
+                        method_sym_opt
+                            .and_then(|ms| self.ensure_cross_module_dispatch_thunk(ms, func_id))
                     })
                     .unwrap_or(func_id);
                 let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
@@ -35240,8 +35282,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;
         // Record by name so subsequent slots reuse this stub.
-        self.external_function_name_map
-            .insert(thunk_name, thunk_id);
+        self.external_function_name_map.insert(thunk_name, thunk_id);
         Some(thunk_id)
     }
 
@@ -36050,7 +36091,9 @@ impl<'a> HirToMirContext<'a> {
         let field_target_types: BTreeMap<String, TypeId> = {
             let type_table = self.type_table;
             match type_table.get(resolved_ty).map(|t| &t.kind) {
-                Some(TypeKind::Anonymous { fields: anon_fields }) => anon_fields
+                Some(TypeKind::Anonymous {
+                    fields: anon_fields,
+                }) => anon_fields
                     .iter()
                     .filter_map(|af| {
                         self.string_interner
@@ -36084,19 +36127,18 @@ impl<'a> HirToMirContext<'a> {
                     let field_val = self.lower_expression(field_expr)?;
                     // Wrap a class value into an interface fat pointer when the
                     // field's declared type is that interface.
-                    let (field_val, field_val_ty) = if let Some(&target_ty) =
-                        field_target_types.get(field_name)
-                    {
-                        let (wrapped, did_wrap) =
-                            self.maybe_wrap_for_interface(field_val, field_expr.ty, target_ty);
-                        if did_wrap {
-                            (wrapped, target_ty)
+                    let (field_val, field_val_ty) =
+                        if let Some(&target_ty) = field_target_types.get(field_name) {
+                            let (wrapped, did_wrap) =
+                                self.maybe_wrap_for_interface(field_val, field_expr.ty, target_ty);
+                            if did_wrap {
+                                (wrapped, target_ty)
+                            } else {
+                                (field_val, field_expr.ty)
+                            }
                         } else {
                             (field_val, field_expr.ty)
-                        }
-                    } else {
-                        (field_val, field_expr.ty)
-                    };
+                        };
                     let val_as_i64 = self.coerce_to_i64(field_val, field_val_ty)?;
                     self.builder.build_call_direct(
                         anon_set_id,
@@ -39619,9 +39661,7 @@ enum MirBinaryOp {
 /// `sum`/`get`/`set` methods map to different MIR wrappers.
 fn simd_vector_class(ty: &IrType) -> &'static str {
     match ty {
-        IrType::Vector { element, .. }
-            if matches!(element.as_ref(), IrType::I32 | IrType::U32) =>
-        {
+        IrType::Vector { element, .. } if matches!(element.as_ref(), IrType::I32 | IrType::U32) => {
             "rayzor_SIMD4i32"
         }
         IrType::Vector { element, count }
