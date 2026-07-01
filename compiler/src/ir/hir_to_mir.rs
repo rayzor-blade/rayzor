@@ -20458,19 +20458,32 @@ impl<'a> HirToMirContext<'a> {
                     (src, Some(TypeKind::Interface { symbol_id: tgt_sym, .. }))
                         if !matches!(src, Some(TypeKind::Class { .. })
                             | Some(TypeKind::Interface { .. }))
-                            && self.recover_cast_src_class_by_name(expr).is_some() =>
+                            && (self.recover_cast_src_class_by_name(expr).is_some()
+                                || self.new_arg_class_fqn(expr).is_some()) =>
                     {
                         let tgt_sym = *tgt_sym;
-                        let src_sym = self
-                            .recover_cast_src_class_by_name(expr)
-                            .expect("guarded by is_some above");
+                        let src_sym = self.recover_cast_src_class_by_name(expr);
                         let value_reg = self.lower_expression(expr)?;
                         if self.interface_wrapped_args.contains(&value_reg) {
                             Some(value_reg)
-                        } else if self.interface_vtables.contains_key(&(src_sym, tgt_sym))
-                            || self.interface_method_names.contains_key(&tgt_sym)
-                        {
+                        } else if let Some(src_sym) = src_sym.filter(|s| {
+                            self.interface_vtables.contains_key(&(*s, tgt_sym))
+                                || self.interface_method_names.contains_key(&tgt_sym)
+                        }) {
+                            // In-context (or forwardable) class symbol available.
                             match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
+                                Some(fat_ptr) => {
+                                    self.interface_wrapped_args.insert(fat_ptr);
+                                    Some(fat_ptr)
+                                }
+                                None => Some(value_reg),
+                            }
+                        } else if let Some(class_fqn) = self.new_arg_class_fqn(expr) {
+                            // Fully-imported class not present here: wrap by NAME
+                            // via forward-ref dispatch thunks (order-independent).
+                            match self.wrap_new_class_as_interface_by_name(
+                                value_reg, &class_fqn, tgt_sym,
+                            ) {
                                 Some(fat_ptr) => {
                                     self.interface_wrapped_args.insert(fat_ptr);
                                     Some(fat_ptr)
@@ -24658,6 +24671,23 @@ impl<'a> HirToMirContext<'a> {
                                 self.interface_wrapped_args.insert(wrapped);
                                 return wrapped;
                             }
+                        } else if !self.interface_wrapped_args.contains(&arg_reg) {
+                            // Class fully imported & compiled AFTER this file, so
+                            // it has no SymbolId / vtable / functions here. Wrap
+                            // by NAME using forward-ref dispatch thunks that
+                            // dedupe with the real ones at merge (order-
+                            // independent). Derive the class FQN from the `new`
+                            // expression + this module's package.
+                            if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
+                                if let Some(wrapped) = self
+                                    .wrap_new_class_as_interface_by_name(
+                                        arg_reg, &class_fqn, iface_sym,
+                                    )
+                                {
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    return wrapped;
+                                }
+                            }
                         }
                     }
                 }
@@ -24841,6 +24871,57 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Derive the fully-qualified class name of a `new C()` (or a wrapping
+    /// Cast/variable) argument, for the name-based interface fat-ptr wrap when
+    /// the class isn't resolvable in this context. Prefers the class's own
+    /// qualified name if the symbol is present; otherwise qualifies the bare
+    /// `new` name with THIS module's package (same-package classes share it —
+    /// e.g. `new LlamaArch()` in `nue.arch.ArchRegistry` → `nue.arch.LlamaArch`).
+    fn new_arg_class_fqn(&self, arg_expr: &HirExpr) -> Option<String> {
+        let bare = match &arg_expr.kind {
+            HirExprKind::New { class_name, .. } => {
+                class_name.and_then(|n| self.string_interner.get(n))?
+            }
+            HirExprKind::Cast { expr, .. } => return self.new_arg_class_fqn(expr),
+            _ => return None,
+        };
+        // Already qualified?
+        if bare.contains('.') {
+            return Some(bare.to_string());
+        }
+        // If the class symbol is resolvable, use its qualified name.
+        if let Some(sid) = self.lookup_class_symbol_by_name(bare) {
+            if let Some(sym) = self.symbol_table.get_symbol(sid) {
+                if let Some(qn) = sym
+                    .qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                {
+                    return Some(qn.to_string());
+                }
+            }
+        }
+        // Qualify with the enclosing class's package (same-package sibling
+        // class shares it). Prefer the enclosing class's qualified name (e.g.
+        // `nue.arch.ArchRegistry` → package `nue.arch`) over `current_module`,
+        // which may be truncated (`nue.ArchRegistry`) and yield the wrong
+        // package — a wrong package produces a thunk name that DOESN'T dedupe
+        // with the real one at merge (empty stub → SIGTRAP).
+        let enclosing_pkg = self
+            .current_class_symbol
+            .and_then(|s| self.symbol_table.get_symbol(s))
+            .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n)))
+            .and_then(|qn| qn.rsplit_once('.').map(|(p, _)| p.to_string()))
+            .or_else(|| {
+                self.current_module
+                    .as_deref()
+                    .and_then(|m| m.rsplit_once('.').map(|(p, _)| p.to_string()))
+            });
+        match enclosing_pkg {
+            Some(pkg) if !pkg.is_empty() => Some(format!("{}.{}", pkg, bare)),
+            _ => Some(bare.to_string()),
+        }
+    }
+
     /// Recover the concrete class SymbolId of a call argument whose static
     /// type was promoted to an interface (so `get_class_symbol(arg.ty)`
     /// returns None) but whose value register still holds a RAW, unwrapped
@@ -24853,11 +24934,37 @@ impl<'a> HirToMirContext<'a> {
         arg_expr: &HirExpr,
         arg_reg: IrId,
     ) -> Option<SymbolId> {
-        // Only attempt recovery when the arg IS interface-typed (the promoted
-        // case). If it's already a class the primary path handled it, and if
-        // it's neither we must not guess.
-        self.get_interface_symbol(arg_expr.ty)?;
+        // Attempt recovery when the arg's static type isn't a resolvable
+        // concrete Class implementing the callee interface — i.e. the
+        // typechecker promoted it to the interface, or (cross-module) it
+        // arrives Unknown/Placeholder because the class metadata wasn't
+        // imported into this context. Both cases leave the value register
+        // holding a RAW class object we can wrap. Bail only when the arg is a
+        // concrete Class (the primary path already handles it) or a primitive
+        // (never wrappable) — otherwise we may guess a class from the New/
+        // variable name below.
+        let arg_kind_ok = {
+            let tt = self.type_table;
+            match tt.get(arg_expr.ty).map(|t| &t.kind) {
+                // Interface-promoted, or cross-module-unresolved: recover.
+                Some(TypeKind::Interface { .. })
+                | Some(TypeKind::Unknown)
+                | Some(TypeKind::Placeholder { .. })
+                | Some(TypeKind::Dynamic) => true,
+                // Concrete class or anything else: don't guess here.
+                _ => false,
+            }
+        };
+        if !arg_kind_ok {
+            return None;
+        }
 
+        // 0) Direct `new C()` arg — recover the class by name from the New node
+        //    (its class_type may be Unknown/Placeholder cross-module, but its
+        //    class_name survives). Also chase a wrapping Cast.
+        if let Some(sid) = self.recover_cast_src_class_by_name(arg_expr) {
+            return Some(sid);
+        }
         // 1) Register-level class hint (set on raw `new C()` object pointers).
         if let Some(name) = self.register_class_hints.get(&arg_reg).cloned() {
             if let Some(sid) = self.lookup_class_symbol_by_name(&name) {
@@ -34529,42 +34636,57 @@ impl<'a> HirToMirContext<'a> {
         class_symbol: SymbolId,
         interface_symbol: SymbolId,
     ) -> Option<IrId> {
-        let vtable = self
+        // Resolve the method SymbolId vtable. Three tiers:
+        //  (1) eager (class, iface) vtable from register_class_metadata;
+        //  (2) lazy build from `class_method_symbols`/`class_method_by_name`;
+        //  (3) name-only: when neither the vtable nor the class's method
+        //      symbols are in THIS context (a fully-imported class the
+        //      importer never lowered — e.g. `new LlamaArch()` in
+        //      `ArchRegistry.withDefaults`), fall back to just the interface
+        //      method NAMES. We can't fill method-symbol slots, but the slot
+        //      loop resolves each slot's function by `<class_fqn>.<method>`
+        //      via the stable name-keyed `external_function_name_map`, so the
+        //      symbols aren't actually needed.
+        let vtable: Vec<Option<SymbolId>> = self
             .interface_vtables
             .get(&(class_symbol, interface_symbol))
             .cloned()
+            .and_then(|syms| {
+                // If every slot resolves, use it; else fall through to lazy.
+                Some(syms.into_iter().map(Some).collect::<Vec<_>>())
+            })
             .or_else(|| {
-                // Lazy build: when the (class, interface) pair didn't get a
-                // vtable during `register_class_metadata` — typically because
-                // the interface was compiled in a later file and the class's
-                // own metadata pass saw `implements I` as a `Placeholder`
-                // type — reconstruct the vtable from the symbol table.
-                //
-                // We can do this entirely from data already in the shared
-                // symbol table + the accumulated `interface_method_names`:
-                // walk each interface method name, find a class method with
-                // the same name, push its symbol. Same shape as the eager
-                // path in `register_class_metadata`. Insert the new vtable
-                // so subsequent wraps in the same context are O(1).
-                let method_names = self
-                    .interface_method_names
-                    .get(&interface_symbol)
-                    .cloned()?;
-                let mut entries: Vec<SymbolId> = Vec::with_capacity(method_names.len());
-                for mname in &method_names {
-                    let method_sym = self
-                        .class_method_symbols
-                        .get(&(class_symbol, *mname))
-                        .copied()
-                        .or_else(|| {
-                            self.class_method_by_name
-                                .get(&(class_symbol, *mname))
-                                .copied()
-                        })?;
-                    entries.push(method_sym);
+                // Tier 2/3: driven by interface_method_names (forwarded and
+                // stable). Resolve each method's SymbolId if available; leave
+                // None otherwise (name-based resolution handles those slots).
+                let method_names = self.interface_method_names.get(&interface_symbol).cloned()?;
+                let mut all_resolved = true;
+                let entries: Vec<Option<SymbolId>> = method_names
+                    .iter()
+                    .map(|mname| {
+                        let s = self
+                            .class_method_symbols
+                            .get(&(class_symbol, *mname))
+                            .copied()
+                            .or_else(|| {
+                                self.class_method_by_name
+                                    .get(&(class_symbol, *mname))
+                                    .copied()
+                            });
+                        if s.is_none() {
+                            all_resolved = false;
+                        }
+                        s
+                    })
+                    .collect();
+                // Cache only fully-resolved vtables (partial ones would poison
+                // the O(1) fast path with wrong slots).
+                if all_resolved {
+                    self.interface_vtables.insert(
+                        (class_symbol, interface_symbol),
+                        entries.iter().map(|e| e.unwrap()).collect(),
+                    );
                 }
-                self.interface_vtables
-                    .insert((class_symbol, interface_symbol), entries.clone());
                 Some(entries)
             })?;
         let method_count = vtable.len();
@@ -34598,17 +34720,54 @@ impl<'a> HirToMirContext<'a> {
         };
         self.builder.build_store(fat_ptr, obj_as_i64);
 
+        // Class FQN (used for name-based cross-module method resolution below).
+        let class_fqn: Option<String> =
+            self.symbol_table.get_symbol(class_symbol).and_then(|s| {
+                s.qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(s.name))
+                    .map(|s| s.to_string())
+            });
+        // Interface method NAMES in vtable order — the stable, drift-proof
+        // handle for name-based resolution (SymbolIds drift across contexts).
+        let iface_method_names: Vec<Option<String>> = self
+            .interface_method_names
+            .get(&interface_symbol)
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|n| self.string_interner.get(*n).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         // Store function pointers for each interface method.
         // Cross-file vtables (the class lives in one file, the constructor
         // call lives in another) need to find the method's IrFunctionId in
         // `external_function_map` — the per-context `function_map` only has
         // functions lowered in *this* file.
-        for (i, method_sym) in vtable.iter().enumerate() {
-            let func_id_opt = self
-                .function_map
-                .get(method_sym)
-                .copied()
-                .or_else(|| self.external_function_map.get(method_sym).copied());
+        for (i, method_sym_opt) in vtable.iter().enumerate() {
+            // Resolve this slot's function IrFunctionId. Prefer the SymbolId
+            // path (when the method symbol resolved), then fall back to the
+            // FQN-keyed name lookup for imported classes whose method SymbolIds
+            // aren't present in this context.
+            let func_id_opt = method_sym_opt
+                .and_then(|method_sym| {
+                    self.function_map
+                        .get(&method_sym)
+                        .copied()
+                        .or_else(|| self.external_function_map.get(&method_sym).copied())
+                })
+                // FQN-keyed fallback: cross-module, the method SymbolId drifts
+                // or is absent, so `function_map`/`external_function_map`
+                // (SymbolId-keyed) miss an imported class's method. Resolve by
+                // constructing `<class_fqn>.<method_name>` and looking it up in
+                // the stable name-keyed `external_function_name_map`.
+                .or_else(|| {
+                    let fqn = class_fqn.as_ref()?;
+                    let mname = iface_method_names.get(i)?.as_ref()?;
+                    let key = format!("{}.{}", fqn, mname);
+                    self.external_function_name_map.get(&key).copied()
+                });
             if let Some(func_id) = func_id_opt {
                 // Slots MUST hold dispatch thunks, never raw methods: the
                 // CallIndirect lowering on every backend uses the closure
@@ -34619,7 +34778,11 @@ impl<'a> HirToMirContext<'a> {
                 // (Tokenizer.encode returning [] in llama-chat).
                 let dispatch_func_id = self
                     .ensure_vtable_dispatch_thunk(func_id)
-                    .or_else(|| self.ensure_cross_module_dispatch_thunk(*method_sym, func_id))
+                    .or_else(|| {
+                        method_sym_opt.and_then(|ms| {
+                            self.ensure_cross_module_dispatch_thunk(ms, func_id)
+                        })
+                    })
                     .unwrap_or(func_id);
                 let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
                 let offset_val = self
@@ -34634,6 +34797,142 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        Some(fat_ptr)
+    }
+
+    /// Register (or reuse) a NAME-keyed forward reference to a vtable dispatch
+    /// thunk, given the target method's fully-qualified name. Used when the
+    /// method's class is fully imported and NOT present in this lowering
+    /// context (no SymbolId, no compiled function yet — e.g. a `new C()` in a
+    /// sibling file compiled before `C`), so neither the SymbolId-keyed maps
+    /// nor `external_function_name_map` can resolve it. The thunk name is
+    /// deterministic (`__vtable_dispatch_thunk__<sanitized_fqn>`), identical to
+    /// what `C`'s own context emits, so the empty stub DEDUPES with the real
+    /// thunk at the LLVM declare/merge pass — the fat-pointer slot then points
+    /// at the real dispatcher regardless of compile order.
+    fn forward_ref_dispatch_thunk_by_name(&mut self, method_fqn: &str) -> Option<IrFunctionId> {
+        let sanitized: String = method_fqn
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let thunk_name = format!("__vtable_dispatch_thunk__{}", sanitized);
+        // Reuse if this context already has the (real or stub) thunk by name.
+        if let Some(&existing) = self.external_function_name_map.get(&thunk_name) {
+            return Some(existing);
+        }
+        for (func_id, func) in &self.builder.module.functions {
+            if func.name == thunk_name {
+                return Some(*func_id);
+            }
+        }
+        // Minimal empty stub named exactly like the real thunk. Only its NAME
+        // matters for the fat-ptr slot (it stores the function's address); the
+        // real dispatcher's body/signature take over at merge dedup. Give it a
+        // permissive `(env, this) -> i64` Haxe-CC signature so the stub is
+        // self-consistent if ever called before merge (it won't be for a
+        // proper cross-module import).
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let sig = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8)
+            .param("this".to_string(), ptr_void)
+            .returns(IrType::I64)
+            .calling_convention(CallingConvention::Haxe)
+            .build();
+        let stub_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let thunk_id = self
+            .builder
+            .start_function(stub_symbol, thunk_name.clone(), sig);
+        // Leave the body empty (forward declaration) — merge supplies the real
+        // one. Finish and restore the builder cursor.
+        self.builder.finish_function();
+        self.builder.current_function = saved_current_function;
+        self.builder.current_block = saved_current_block;
+        // Record by name so subsequent slots reuse this stub.
+        self.external_function_name_map
+            .insert(thunk_name, thunk_id);
+        Some(thunk_id)
+    }
+
+    /// Wrap a raw class object as an interface fat pointer when the class is
+    /// NOT resolvable in this lowering context (fully imported, compiled after
+    /// this file, so it has no SymbolId / vtable / compiled methods here). We
+    /// know only the class's fully-qualified name and the interface. Build the
+    /// `{obj, thunk…}` fat pointer, resolving each method slot to a NAME-keyed
+    /// forward-ref dispatch thunk (`<class_fqn>.<method>`) that dedupes with
+    /// the real thunk at merge. This is the order-independent counterpart to
+    /// `wrap_in_interface_fat_ptr` for the cross-module `new C()` case.
+    fn wrap_new_class_as_interface_by_name(
+        &mut self,
+        obj_reg: IrId,
+        class_fqn: &str,
+        interface_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let method_names: Vec<String> = self
+            .interface_method_names
+            .get(&interface_symbol)?
+            .iter()
+            .filter_map(|n| self.string_interner.get(*n).map(|s| s.to_string()))
+            .collect();
+        if method_names.is_empty() {
+            return None;
+        }
+        let method_count = method_names.len();
+        let fat_ptr_size = ((1 + method_count) * 8) as u64;
+        let malloc_fn = self.get_or_register_extern_function(
+            "malloc",
+            vec![IrType::U64],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let size_reg = self.builder.build_const(IrValue::U64(fat_ptr_size))?;
+        let fat_ptr = self.builder.build_call_direct(
+            malloc_fn,
+            vec![size_reg],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
+        // obj at slot 0
+        let obj_as_i64 = {
+            let obj_ty = self
+                .builder
+                .get_register_type(obj_reg)
+                .unwrap_or(IrType::I64);
+            if matches!(obj_ty, IrType::Ptr(_)) {
+                self.builder.build_bitcast(obj_reg, IrType::I64)?
+            } else {
+                obj_reg
+            }
+        };
+        self.builder.build_store(fat_ptr, obj_as_i64);
+        // method thunks at slots 1..N
+        for (i, mname) in method_names.iter().enumerate() {
+            let method_fqn = format!("{}.{}", class_fqn, mname);
+            // Prefer a real thunk/function already present by name; else a
+            // name-keyed forward-ref stub that dedupes at merge.
+            let thunk_id = self
+                .external_function_name_map
+                .get(&format!(
+                    "__vtable_dispatch_thunk__{}",
+                    method_fqn
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                        .collect::<String>()
+                ))
+                .copied()
+                .or_else(|| self.forward_ref_dispatch_thunk_by_name(&method_fqn))?;
+            let fn_ref = self.builder.build_function_ref(thunk_id)?;
+            let offset_val = self
+                .builder
+                .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
+            let slot_ptr = self.builder.build_ptr_add(
+                fat_ptr,
+                offset_val,
+                IrType::Ptr(Box::new(IrType::U8)),
+            )?;
+            self.builder.build_store(slot_ptr, fn_ref);
+        }
         Some(fat_ptr)
     }
 
