@@ -1,4 +1,4 @@
-//! `rayzor-wasm-opt` — a self-contained `wasm-opt -O3 -all` helper.
+//! `rayzor-wasm-opt` — a self-contained `wasm-opt -O2 -all` helper.
 //!
 //! This is a SEPARATE BINARY spawned as a subprocess by the main `rayzor`
 //! binary (see `src/wasm_cmd.rs::find_wasm_opt` / `wasm_opt_bytes`). It exists
@@ -11,8 +11,9 @@
 //!
 //! Usage:  `rayzor-wasm-opt <input.wasm> <output.wasm>`
 //!
-//! Runs `OptimizationOptions::new_opt_level_3().all_features()` — the same
-//! `-O3 -all` the old external `wasm-opt` invocation used. `all_features()`
+//! Runs `OptimizationOptions::new_opt_level_2().all_features()` — `-O2 -all`
+//! (NOT -O3: an O3-only aggressive pass miscompiles the relaxed-SIMD
+//! relaxed_dot on constant inputs; O2 is correct, same Q4 perf). `all_features()`
 //! sets `FeatureBaseline::All`, so RELAXED-SIMD stays enabled and
 //! `i32x4.relaxed_dot` (the Q4 dot kernel → AArch64 SDOT) is NOT lowered away,
 //! plus SIMD / THREADS / BULK-MEMORY / NONTRAPPING-FTOI / MUTABLE-GLOBALS /
@@ -38,9 +39,13 @@ fn main() -> ExitCode {
     let infile = Path::new(&args[1]);
     let outfile = Path::new(&args[2]);
 
-    // `-O3 -all`. `run()` reads `infile` and writes `outfile` directly (the
-    // crate API is file-path based, not in-memory bytes).
-    match OptimizationOptions::new_opt_level_3()
+    // `-O2 -all`. NOT -O3: an O3-only aggressive pass miscompiles the
+    // relaxed-SIMD `i32x4.relaxed_dot_i8x16_i7x16_add_s` on constant inputs
+    // (test_simd16i8_bitops: and/or/shifts all fold to 0x04040404; xor and any
+    // runtime-data dot are unaffected). -O2 fixes it with no measurable perf
+    // loss on the Q4 kernel (0.96ms either way, bit-exact). `run()` reads
+    // `infile` and writes `outfile` directly (the crate API is path-based).
+    match OptimizationOptions::new_opt_level_2()
         .all_features()
         .run(infile, outfile)
     {
