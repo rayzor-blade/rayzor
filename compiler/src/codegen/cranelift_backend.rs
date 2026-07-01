@@ -2482,7 +2482,7 @@ impl CraneliftBackend {
             // regs, and AArch64 regalloc panics in gen_move (GPR<->FPR move).
             crate::ir::IrType::Vector { .. } => Self::mir_type_to_cranelift_static(&phi_node.ty)
                 .unwrap_or(cranelift_codegen::ir::types::I64),
-            _ => cranelift_codegen::ir::types::I64,                         // Default
+            _ => cranelift_codegen::ir::types::I64, // Default
         };
 
         // Get the current block

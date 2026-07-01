@@ -300,8 +300,12 @@ impl Monomorphizer {
                 // Infer type_args from argument register types
                 let callee = module.functions.get(func_id)?;
                 if dbg_mono {
-                    let ptys: Vec<_> =
-                        callee.signature.parameters.iter().map(|p| p.ty.clone()).collect();
+                    let ptys: Vec<_> = callee
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect();
                     eprintln!(
                         "[mono] call->{:?} {} NO explicit type_args; type_params={:?} param_tys={:?}",
                         func_id, callee.name,

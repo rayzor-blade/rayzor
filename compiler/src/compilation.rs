@@ -2999,8 +2999,7 @@ impl CompilationUnit {
                     let victim = stuck
                         .iter()
                         .map(|(name, deps)| {
-                            let outstanding =
-                                deps.iter().filter(|d| !emitted.contains(*d)).count();
+                            let outstanding = deps.iter().filter(|d| !emitted.contains(*d)).count();
                             (outstanding, name.clone())
                         })
                         .min()
@@ -5877,11 +5876,7 @@ impl CompilationUnit {
                         continue;
                     }
                     if func.cfg.blocks.is_empty()
-                        || func
-                            .cfg
-                            .blocks
-                            .values()
-                            .all(|b| b.instructions.is_empty())
+                        || func.cfg.blocks.values().all(|b| b.instructions.is_empty())
                     {
                         thunk_stubs.push((func.name.clone(), *func_id));
                     } else {
@@ -5889,10 +5884,8 @@ impl CompilationUnit {
                         thunk_real.entry(func.name.clone()).or_insert(*func_id);
                     }
                 }
-                let mut thunk_replacements: std::collections::BTreeMap<
-                    IrFunctionId,
-                    IrFunctionId,
-                > = std::collections::BTreeMap::new();
+                let mut thunk_replacements: std::collections::BTreeMap<IrFunctionId, IrFunctionId> =
+                    std::collections::BTreeMap::new();
                 for (name, stub_id) in &thunk_stubs {
                     if let Some(&real_id) = thunk_real.get(name) {
                         if real_id != *stub_id {

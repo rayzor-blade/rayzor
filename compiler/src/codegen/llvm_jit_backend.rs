@@ -1113,7 +1113,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // far less likely to hit the Twine crash (module-level issues concern globals and
         // type tables, not dangling instruction operands).
         if let Err(msg) = self.module.verify() {
-            return Err(format!("LLVM module verification failed: {}", msg.to_string()));
+            return Err(format!(
+                "LLVM module verification failed: {}",
+                msg.to_string()
+            ));
         }
         Ok(())
     }
@@ -3783,7 +3786,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     if !lhs.is_vector_value() {
                         return Err(format!(
                             "VectorBinOp(int) left {:?} is not a vector: {:?} (vec_ty={:?})",
-                            left, lhs.get_type(), vec_ty
+                            left,
+                            lhs.get_type(),
+                            vec_ty
                         ));
                     }
                     let lhs_vec = lhs.into_vector_value();
@@ -4093,7 +4098,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     Ok(v) => v,
                     Err(_e) => {
                         if std::env::var("RAYZOR_DBG_PR").is_ok() {
-                            eprintln!("[VectorDot] partial.reduce.add unavailable -> fallback: {}", _e);
+                            eprintln!(
+                                "[VectorDot] partial.reduce.add unavailable -> fallback: {}",
+                                _e
+                            );
                         }
                         let c = |n: u64| i32_ty.const_int(n, false);
                         let masks = [
@@ -4935,11 +4943,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 // Call haxe_string_literal(ptr, len) -> *mut HaxeString
                 let result = self
                     .builder
-                    .build_call(
-                        string_literal_fn,
-                        &[str_ptr.into(), str_len.into()],
-                        "",
-                    )
+                    .build_call(string_literal_fn, &[str_ptr.into(), str_len.into()], "")
                     .map_err(|e| format!("Failed to call haxe_string_literal: {}", e))?;
 
                 let haxe_str_ptr = result
