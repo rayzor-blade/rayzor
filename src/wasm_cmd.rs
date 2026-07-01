@@ -248,9 +248,11 @@ fn wasm_opt_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
     std::fs::write(&inp, input).map_err(|e| format!("write temp: {}", e))?;
 
     // The bundled helper takes positional `<in> <out>` (it hardcodes
-    // `-O3 -all`). The legacy `wasm-opt` binary needs the explicit flags; we
+    // `-O2 -all`). The legacy `wasm-opt` binary needs the explicit flags; we
     // detect it by program filename so `RAYZOR_WASM_OPT_BIN=wasm-opt` keeps
-    // working.
+    // working. NOTE `-O2` not `-O3`: an O3-only pass miscompiles the
+    // relaxed-SIMD relaxed_dot on constant inputs (see wasm-opt-helper) with no
+    // perf gain over O2 on the Q4 kernel.
     let run = |program: &Path| -> std::io::Result<std::process::ExitStatus> {
         let is_legacy = program
             .file_name()
@@ -259,7 +261,7 @@ fn wasm_opt_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
             .unwrap_or(false);
         let mut cmd = std::process::Command::new(program);
         if is_legacy {
-            cmd.arg("-O3").arg("-all").arg(&inp).arg("-o").arg(&outp);
+            cmd.arg("-O2").arg("-all").arg(&inp).arg("-o").arg(&outp);
         } else {
             cmd.arg(&inp).arg(&outp);
         }
