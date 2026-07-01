@@ -5819,6 +5819,74 @@ impl CompilationUnit {
                 }
             }
 
+            // Resolve name-keyed forward-ref dispatch-thunk stubs. A file that
+            // constructs an imported class as an interface (e.g.
+            // `ArchRegistry.withDefaults` doing `new LlamaArch()` when
+            // `LlamaArch` compiles AFTER it) emits an EMPTY
+            // `__vtable_dispatch_thunk__<class>_<method>` stub as a placeholder,
+            // trusting the real thunk (same name, from the class's own module)
+            // to be merged in. Both now coexist by different ids; the stub's
+            // `FunctionRef` in the fat-ptr slot still points at the EMPTY stub
+            // (calling it traps — SIGTRAP). Redirect every ref from an empty
+            // `__vtable_dispatch_thunk__*` stub to the real, non-empty
+            // same-named thunk, then drop the stub. Order-independent: works
+            // regardless of which file compiled first.
+            {
+                let mut thunk_real: std::collections::BTreeMap<String, IrFunctionId> =
+                    std::collections::BTreeMap::new();
+                let mut thunk_stubs: Vec<(String, IrFunctionId)> = Vec::new();
+                for (func_id, func) in &mir_module.functions {
+                    if !func.name.starts_with("__vtable_dispatch_thunk__") {
+                        continue;
+                    }
+                    if func.cfg.blocks.is_empty()
+                        || func
+                            .cfg
+                            .blocks
+                            .values()
+                            .all(|b| b.instructions.is_empty())
+                    {
+                        thunk_stubs.push((func.name.clone(), *func_id));
+                    } else {
+                        // Prefer the first real (non-empty) definition per name.
+                        thunk_real.entry(func.name.clone()).or_insert(*func_id);
+                    }
+                }
+                let mut thunk_replacements: std::collections::BTreeMap<
+                    IrFunctionId,
+                    IrFunctionId,
+                > = std::collections::BTreeMap::new();
+                for (name, stub_id) in &thunk_stubs {
+                    if let Some(&real_id) = thunk_real.get(name) {
+                        if real_id != *stub_id {
+                            thunk_replacements.insert(*stub_id, real_id);
+                        }
+                    }
+                }
+                if !thunk_replacements.is_empty() {
+                    for (_, caller_func) in mir_module.functions.iter_mut() {
+                        for block in caller_func.cfg.blocks.values_mut() {
+                            for instr in &mut block.instructions {
+                                match instr {
+                                    IrInstruction::CallDirect { func_id, .. }
+                                    | IrInstruction::FunctionRef { func_id, .. }
+                                    | IrInstruction::MakeClosure { func_id, .. } => {
+                                        if let Some(&new_id) = thunk_replacements.get(func_id) {
+                                            *func_id = new_id;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    // Drop the now-unreferenced empty stubs.
+                    for stub_id in thunk_replacements.keys() {
+                        mir_module.functions.remove(stub_id);
+                    }
+                }
+            }
+
             // CRITICAL FIX: Renumber stdlib function IDs to avoid collisions with user functions
             // Each MIR module starts function IDs from 0, so when merging stdlib and user modules,
             // IDs will collide. For example:
