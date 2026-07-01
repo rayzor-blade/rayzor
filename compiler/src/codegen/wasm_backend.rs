@@ -1661,6 +1661,11 @@ struct FunctionLowerer<'a> {
     /// instruction, and the expansion needs each operand twice — but emission
     /// is `&self`, so the locals are reserved here during `allocate_locals`.
     float_rem_scratch: BTreeMap<ValType, (u32, u32)>,
+    /// IrId -> defining instruction. Used by the static-offset load peephole
+    /// to decompose `base + const` addresses and hoist the constant into the
+    /// wasm load/store MemArg.offset (so cranelift shares the base across
+    /// offsets instead of baking each displacement into the i32 address).
+    addr_defs: BTreeMap<IrId, &'a IrInstruction>,
 }
 
 /// A CFG shape recognised as a single reducible natural loop whose body is an
@@ -1703,11 +1708,23 @@ impl<'a> FunctionLowerer<'a> {
             saved_sp_local: 0,
             free_points: BTreeMap::new(),
             float_rem_scratch: BTreeMap::new(),
+            addr_defs: BTreeMap::new(),
         };
 
         // Early return for empty-body functions (extern stubs).
         if ir_func.cfg.blocks.is_empty() {
             return low.build_body();
+        }
+
+        // Map each register to its defining instruction (for the static-offset
+        // load peephole). Instructions live in `ir_func` (&'a), so the refs
+        // outlive emission.
+        for block in ir_func.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let Some(d) = inst.dest() {
+                    low.addr_defs.insert(d, inst);
+                }
+            }
         }
 
         // Map parameter registers.
@@ -2255,7 +2272,10 @@ impl<'a> FunctionLowerer<'a> {
         for block in ir.cfg.blocks.values() {
             for inst in &block.instructions {
                 if let IrInstruction::BinOp {
-                    op, left, right, dest,
+                    op,
+                    left,
+                    right,
+                    dest,
                 } = inst
                 {
                     if !matches!(op, BinaryOp::Rem | BinaryOp::FRem) {
@@ -3031,7 +3051,9 @@ impl<'a> FunctionLowerer<'a> {
             if let IrTerminator::Branch { target } = &block.terminator {
                 self.emit_phi_set(&mut f, b, *target);
             } else {
-                return Err(format!("entry-chain block {b} is not an unconditional branch"));
+                return Err(format!(
+                    "entry-chain block {b} is not an unconditional branch"
+                ));
             }
             let _ = i;
         }
@@ -3559,34 +3581,44 @@ impl<'a> FunctionLowerer<'a> {
         let m = |_b: &str, get: &str, snake: &str| -> bool {
             bare == get || name == get || name.ends_with(snake)
         };
-        let i32load_dataptr = MemArg { offset: 0, align: 2, memory_index: 0 };
-        let ma0 = MemArg { offset: 0, align: 0, memory_index: 0 };
+        let i32load_dataptr = MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        };
+        let ma0 = MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        };
         // Reads: [bytes, pos] -> value
-        let read = |f: &mut Function, this: &Self, load: Instruction, promote: Option<Instruction>| {
-            this.get_reg(f, args[0]);
-            f.instruction(&Instruction::I32Load(i32load_dataptr));
-            this.get_reg(f, args[1]);
-            f.instruction(&Instruction::I32Add);
-            f.instruction(&load);
-            if let Some(p) = promote {
-                f.instruction(&p);
-            }
-            if let Some(d) = dest {
-                this.set_reg(f, d);
-            }
-        };
+        let read =
+            |f: &mut Function, this: &Self, load: Instruction, promote: Option<Instruction>| {
+                this.get_reg(f, args[0]);
+                f.instruction(&Instruction::I32Load(i32load_dataptr));
+                this.get_reg(f, args[1]);
+                f.instruction(&Instruction::I32Add);
+                f.instruction(&load);
+                if let Some(p) = promote {
+                    f.instruction(&p);
+                }
+                if let Some(d) = dest {
+                    this.set_reg(f, d);
+                }
+            };
         // Writes: [bytes, pos, value] -> void
-        let write = |f: &mut Function, this: &Self, demote: Option<Instruction>, store: Instruction| {
-            this.get_reg(f, args[0]);
-            f.instruction(&Instruction::I32Load(i32load_dataptr));
-            this.get_reg(f, args[1]);
-            f.instruction(&Instruction::I32Add);
-            this.get_reg(f, args[2]);
-            if let Some(d) = demote {
-                f.instruction(&d);
-            }
-            f.instruction(&store);
-        };
+        let write =
+            |f: &mut Function, this: &Self, demote: Option<Instruction>, store: Instruction| {
+                this.get_reg(f, args[0]);
+                f.instruction(&Instruction::I32Load(i32load_dataptr));
+                this.get_reg(f, args[1]);
+                f.instruction(&Instruction::I32Add);
+                this.get_reg(f, args[2]);
+                if let Some(d) = demote {
+                    f.instruction(&d);
+                }
+                f.instruction(&store);
+            };
         if args.len() == 2 {
             if m(bare, "getDouble", "_get_double") {
                 read(f, self, Instruction::F64Load(ma0), None);
@@ -3597,7 +3629,12 @@ impl<'a> FunctionLowerer<'a> {
                 return true;
             }
             if m(bare, "getFloat", "_get_float") {
-                read(f, self, Instruction::F32Load(ma0), Some(Instruction::F64PromoteF32));
+                read(
+                    f,
+                    self,
+                    Instruction::F32Load(ma0),
+                    Some(Instruction::F64PromoteF32),
+                );
                 return true;
             }
             // NOTE: deliberately NOT inlining bare `get`/`set` (single byte) —
@@ -3613,7 +3650,12 @@ impl<'a> FunctionLowerer<'a> {
                 return true;
             }
             if m(bare, "setFloat", "_set_float") {
-                write(f, self, Some(Instruction::F32DemoteF64), Instruction::F32Store(ma0));
+                write(
+                    f,
+                    self,
+                    Some(Instruction::F32DemoteF64),
+                    Instruction::F32Store(ma0),
+                );
                 return true;
             }
         }
@@ -3869,9 +3911,9 @@ impl<'a> FunctionLowerer<'a> {
 
             // === Load ===
             IrInstruction::Load { dest, ptr, ty } => {
-                self.get_reg(f, *ptr);
+                let off = self.emit_addr(f, *ptr);
                 let ma = MemArg {
-                    offset: 0,
+                    offset: off,
                     align: 0,
                     memory_index: 0,
                 };
@@ -3915,10 +3957,10 @@ impl<'a> FunctionLowerer<'a> {
                 value,
                 store_ty,
             } => {
-                self.get_reg(f, *ptr);
+                let off = self.emit_addr(f, *ptr);
                 self.get_reg(f, *value);
                 let ma = MemArg {
-                    offset: 0,
+                    offset: off,
                     align: 0,
                     memory_index: 0,
                 };
@@ -4995,9 +5037,9 @@ impl<'a> FunctionLowerer<'a> {
 
             // Load 16 bytes from memory into a v128
             IrInstruction::VectorLoad { dest, ptr, .. } => {
-                self.get_reg(f, *ptr);
+                let off = self.emit_addr(f, *ptr);
                 let ma = MemArg {
-                    offset: 0,
+                    offset: off,
                     align: 0,
                     memory_index: 0,
                 };
@@ -5007,10 +5049,10 @@ impl<'a> FunctionLowerer<'a> {
 
             // Store v128 to 16 bytes of memory
             IrInstruction::VectorStore { ptr, value, .. } => {
-                self.get_reg(f, *ptr);
+                let off = self.emit_addr(f, *ptr);
                 self.get_reg(f, *value);
                 let ma = MemArg {
-                    offset: 0,
+                    offset: off,
                     align: 0,
                     memory_index: 0,
                 };
@@ -5710,6 +5752,128 @@ impl<'a> FunctionLowerer<'a> {
     fn set_reg(&self, f: &mut Function, id: IrId) {
         let idx = self.reg_to_local.get(&id).copied().unwrap_or(0);
         f.instruction(&Instruction::LocalSet(idx));
+    }
+
+    // --- Static-offset load/store peephole -------------------------------
+    //
+    // rayzor bakes a load's constant displacement into the i32 address (the
+    // load uses MemArg.offset 0). cranelift then cannot recover it: the const
+    // is inside `uextend(i32 addr)` and `uextend(x+c) != uextend(x)+c` under
+    // i32 wrap, so it stays a per-load `add base,#c` and the shared base is
+    // never CSE'd. Hoisting the constant into the wasm MemArg.offset (added in
+    // the 33-bit effective address, no wrap) lets cranelift share `base+idx`
+    // across offsets (and the amode CSE in wasmtime fold them). Safe because
+    // rayzor addresses are in-bounds (< heap size < 2^32, no wrap) — the same
+    // assumption LLVM makes when it emits `v128.load offset=N`.
+
+    /// Recurse a raw-byte `Add` tree, collecting non-constant leaf registers
+    /// into `leaves` and summing constant addends into `off`. Returns true if
+    /// `reg` was a recognised `Add`/`Const` node (so the caller must NOT also
+    /// treat `reg` itself as a leaf), false if `reg` is opaque (a leaf).
+    fn decompose_address(
+        &self,
+        reg: IrId,
+        depth: u32,
+        leaves: &mut Vec<IrId>,
+        off: &mut u64,
+    ) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match self.addr_defs.get(&reg) {
+            Some(IrInstruction::BinOp {
+                op: BinaryOp::Add,
+                left,
+                right,
+                ..
+            }) => {
+                if !self.decompose_address(*left, depth + 1, leaves, off) {
+                    leaves.push(*left);
+                }
+                if !self.decompose_address(*right, depth + 1, leaves, off) {
+                    leaves.push(*right);
+                }
+                true
+            }
+            Some(IrInstruction::Const { value, .. }) => match const_as_offset(value) {
+                Some(c) => {
+                    *off += c as u64;
+                    true
+                }
+                None => false,
+            },
+            // See through the value-preserving address wrappers (on wasm32
+            // Int/Usize/Ptr are all i32, so these are bit-identity): the
+            // constant displacement is hidden behind `Usize.fromInt`/
+            // `Ptr.fromRaw` calls that the inliner leaves in.
+            Some(IrInstruction::CallDirect { func_id, args, .. }) if args.len() == 1 => {
+                if self.is_addr_identity_wrapper(func_id) {
+                    self.decompose_address(args[0], depth + 1, leaves, off)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// True for `Usize.fromInt` / `Ptr.fromRaw` — single-arg, value-preserving
+    /// i32->i32 conversions on wasm32 that we can recurse through when peeling
+    /// a constant address displacement.
+    fn is_addr_identity_wrapper(&self, func_id: &IrFunctionId) -> bool {
+        match self.callee_name(func_id) {
+            Some(name) => {
+                let bare = name.rsplit(['.', '_']).next().unwrap_or(name);
+                (bare == "fromInt" && name.contains("Usize"))
+                    || (bare == "fromRaw" && name.contains("Ptr"))
+            }
+            None => false,
+        }
+    }
+
+    /// If `ptr`'s address has a constant displacement, return
+    /// `(non-const leaves, offset)` with `address == sum(leaves) + offset`.
+    fn peel_addr_offset(&self, ptr: IrId) -> Option<(Vec<IrId>, u64)> {
+        let mut leaves = Vec::new();
+        let mut off: u64 = 0;
+        if !self.decompose_address(ptr, 0, &mut leaves, &mut off) {
+            return None;
+        }
+        if off == 0 || off > u32::MAX as u64 || leaves.is_empty() {
+            return None;
+        }
+        Some((leaves, off))
+    }
+
+    /// Push a load/store address, hoisting any constant displacement into the
+    /// returned `MemArg.offset`. Falls back to `get_reg(ptr)` (offset 0).
+    fn emit_addr(&self, f: &mut Function, ptr: IrId) -> u64 {
+        if let Some((leaves, off)) = self.peel_addr_offset(ptr) {
+            self.get_reg(f, leaves[0]);
+            for &leaf in &leaves[1..] {
+                self.get_reg(f, leaf);
+                f.instruction(&Instruction::I32Add);
+            }
+            off
+        } else {
+            self.get_reg(f, ptr);
+            0
+        }
+    }
+}
+
+/// Extract a non-negative integer constant (a byte offset) as a `u32`.
+fn const_as_offset(v: &IrValue) -> Option<u32> {
+    match v {
+        IrValue::I8(x) if *x >= 0 => Some(*x as u32),
+        IrValue::U8(x) => Some(*x as u32),
+        IrValue::I16(x) if *x >= 0 => Some(*x as u32),
+        IrValue::U16(x) => Some(*x as u32),
+        IrValue::I32(x) if *x >= 0 => Some(*x as u32),
+        IrValue::U32(x) => Some(*x),
+        IrValue::I64(x) if *x >= 0 && *x <= u32::MAX as i64 => Some(*x as u32),
+        IrValue::U64(x) if *x <= u32::MAX as u64 => Some(*x as u32),
+        _ => None,
     }
 }
 
