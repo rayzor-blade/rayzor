@@ -16035,6 +16035,13 @@ impl<'a> AstLowering<'a> {
                         ("Bytes" | "rayzor_Bytes" | "haxe_io_Bytes", "toString" | "getString") => {
                             Ok(type_table.string_type())
                         }
+                        // `free` returns Void (the native `haxe_bytes_free` binding
+                        // takes no return value). Without this arm the `_` fallback
+                        // types the call as Dynamic, so the caller allocates a
+                        // result register the callee never fills.
+                        ("Bytes" | "rayzor_Bytes" | "haxe_io_Bytes", "free") => {
+                            Ok(type_table.void_type())
+                        }
                         _ => Ok(type_table.dynamic_type()),
                     }
                 }

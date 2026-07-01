@@ -2659,6 +2659,9 @@ impl StdlibMapping {
             // bytes.length: Int
             map_method!(instance "rayzor_Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
+            // bytes.free(): Void — release the backing buffer
+            map_method!(instance "rayzor_Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
+                types: &[IrTypeDescriptor::PtrVoid]),
             // Instance methods
             // bytes.get(pos: Int): Int
             map_method!(instance "rayzor_Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
@@ -2734,6 +2737,8 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
             map_method!(instance "haxe_io_Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
+            map_method!(instance "haxe_io_Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
+                types: &[IrTypeDescriptor::PtrVoid]),
             map_method!(instance "haxe_io_Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             map_method!(instance "haxe_io_Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
@@ -2781,6 +2786,8 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
             map_method!(instance "Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
+            map_method!(instance "Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
+                types: &[IrTypeDescriptor::PtrVoid]),
             map_method!(instance "Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             map_method!(instance "Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
