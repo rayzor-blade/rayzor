@@ -5572,6 +5572,7 @@ impl CompilationUnit {
             self.import_interface_extends.clone(),
             self.import_interface_vtables.clone(),
             self.import_function_param_iface_names.clone(),
+            self.import_field_class_names.clone(),
         )
         .map_err(|errors| {
             errors
