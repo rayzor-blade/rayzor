@@ -27505,12 +27505,45 @@ impl<'a> HirToMirContext<'a> {
         // If receiver is an anonymous type (or a typedef alias to one),
         // use rayzor_anon_get_field_by_index
         {
-            let resolved_receiver_ty = self.resolve_through_aliases(receiver_ty);
+            let mut resolved_receiver_ty = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table;
-            let is_anon = matches!(
+            let mut is_anon = matches!(
                 type_table.get(resolved_receiver_ty).map(|t| &t.kind),
                 Some(TypeKind::Anonymous { .. })
             );
+            // Cross-module: a structural typedef return (e.g.
+            // `function load():LoadedModel` where
+            // `typedef LoadedModel = {model:..., tokenizer:..., metadata:...}`)
+            // can decay to a synthetic Class carrying the typedef's qualified
+            // name instead of resolving to its real Anonymous target — no
+            // Placeholder involved, so `resolve_through_aliases` never sees
+            // it. Detect that pattern (a Class with no fields of its own) and
+            // recover the target by finding a same-named TypeAlias whose
+            // target IS Anonymous elsewhere in the shared type table.
+            if !is_anon {
+                if let Some(TypeKind::Class { symbol_id, .. }) =
+                    type_table.get(resolved_receiver_ty).map(|t| &t.kind)
+                {
+                    let has_own_fields = self
+                        .field_index_map
+                        .values()
+                        .any(|(cty, _)| *cty == resolved_receiver_ty);
+                    if !has_own_fields {
+                        if let Some(qname) = self
+                            .symbol_table
+                            .get_symbol(*symbol_id)
+                            .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n)))
+                        {
+                            if let Some(anon_target) =
+                                self.find_typedef_anonymous_target_by_name(qname)
+                            {
+                                resolved_receiver_ty = anon_target;
+                                is_anon = true;
+                            }
+                        }
+                    }
+                }
+            }
             if is_anon {
                 // Get field name and find its sorted index + actual type from the anonymous struct
                 let field_name = self
@@ -36485,6 +36518,41 @@ impl<'a> HirToMirContext<'a> {
 
     /// Resolve a TypeId through TypeAlias chains to find the underlying type.
     /// Returns the resolved TypeId (following aliases), or the original if not an alias.
+    /// Find a `TypeAlias` in the shared type table whose qualified name
+    /// matches `qname` and whose target resolves (directly, or through
+    /// further aliases) to `Anonymous`. Used to recover a structural
+    /// typedef's real field list when the receiver's own type decayed to a
+    /// synthetic same-named Class (see `lower_field_access`). The typedef
+    /// declaration is shared program-wide even though the DECAYED receiver
+    /// type is context-local, so this lookup is order-independent.
+    fn find_typedef_anonymous_target_by_name(&self, qname: &str) -> Option<TypeId> {
+        let type_table = self.type_table;
+        for (_tid, ti) in type_table.iter() {
+            if let TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                ..
+            } = &ti.kind
+            {
+                let matches = self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n)))
+                    == Some(qname);
+                if matches {
+                    let resolved = self.resolve_through_aliases(*target_type);
+                    if matches!(
+                        type_table.get(resolved).map(|t| &t.kind),
+                        Some(TypeKind::Anonymous { .. })
+                    ) {
+                        return Some(resolved);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
         let type_table = self.type_table;
         let mut current = type_id;

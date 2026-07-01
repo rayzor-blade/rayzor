@@ -13067,17 +13067,18 @@ impl<'a> AstLowering<'a> {
                     .get_symbol(*field_symbol)
                     .map(|s| s.name);
                 if let Some(name) = want_name {
-                    let type_table = self.context.type_table.borrow();
                     // Walk through TypeAlias chains so typedef-wrapped
                     // anons (`typedef Inner = {x:Int}`) participate in
                     // this lookup too.
                     let mut current = object.expr_type;
                     let mut hops = 0;
                     while hops < 8 {
-                        let Some(t) = type_table.get(current) else {
-                            break;
+                        let kind = {
+                            let type_table = self.context.type_table.borrow();
+                            type_table.get(current).map(|t| t.kind.clone())
                         };
-                        match &t.kind {
+                        let Some(kind) = kind else { break };
+                        match &kind {
                             crate::tast::core::TypeKind::Anonymous { fields } => {
                                 if let Some(field) = fields.iter().find(|f| f.name == name) {
                                     return Ok(field.type_id);
@@ -13087,6 +13088,32 @@ impl<'a> AstLowering<'a> {
                             crate::tast::core::TypeKind::TypeAlias { target_type, .. } => {
                                 current = *target_type;
                                 hops += 1;
+                            }
+                            crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                                // Cross-module decay: this Class may actually be a
+                                // structural typedef whose real Anonymous target
+                                // lives elsewhere in the shared type table (see
+                                // find_typedef_anonymous_target_by_qname). Recover
+                                // it by qualified name before giving up.
+                                let qname = self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(*symbol_id)
+                                    .and_then(|s| {
+                                        s.qualified_name
+                                            .and_then(|n| self.context.string_interner.get(n))
+                                    })
+                                    .map(|s| s.to_string());
+                                if let Some(qname) = qname {
+                                    if let Some(anon_ty) =
+                                        self.find_typedef_anonymous_target_by_qname(&qname)
+                                    {
+                                        current = anon_ty;
+                                        hops += 1;
+                                        continue;
+                                    }
+                                }
+                                break;
                             }
                             _ => break,
                         }
@@ -15785,6 +15812,62 @@ impl<'a> AstLowering<'a> {
             mutability: crate::tast::symbols::Mutability::Immutable, // Function parameters are immutable by default in Haxe
             source_location: self.context.span_to_location(&param.span),
         })
+    }
+
+    /// Find a `TypeAlias` symbol in the shared type table whose qualified
+    /// name matches `qname` and whose target resolves (directly, or through
+    /// further aliases) to `Anonymous`. Mirrors
+    /// `hir_to_mir::find_typedef_anonymous_target_by_name` one layer up, at
+    /// TAST type inference: a cross-module structural typedef reference
+    /// (e.g. a field typed `metadata:ModelMetadata` where `ModelMetadata`
+    /// is itself `typedef ModelMetadata = {...}`) can resolve to a bare
+    /// synthetic `Class` symbol instead of the real `TypeAlias`/`Anonymous`
+    /// chain (see `resolve_type_reference`'s TypeAlias arms). Without this
+    /// recovery, `infer_expression_type`'s `FieldAccess` shape-read loop
+    /// can't recognise the receiver as Anonymous and falls through to the
+    /// Dynamic fallback in `infer_builtin_method_type`.
+    fn find_typedef_anonymous_target_by_qname(&self, qname: &str) -> Option<TypeId> {
+        let type_table = self.context.type_table.borrow();
+        for (_tid, ti) in type_table.iter() {
+            if let crate::tast::core::TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                ..
+            } = &ti.kind
+            {
+                let matches = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| {
+                        s.qualified_name
+                            .and_then(|n| self.context.string_interner.get(n))
+                    })
+                    == Some(qname);
+                if matches {
+                    let mut resolved = *target_type;
+                    let mut hops = 0;
+                    while hops < 8 {
+                        match type_table.get(resolved).map(|t| &t.kind) {
+                            Some(crate::tast::core::TypeKind::TypeAlias {
+                                target_type, ..
+                            }) => {
+                                resolved = *target_type;
+                                hops += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    if matches!(
+                        type_table.get(resolved).map(|t| &t.kind),
+                        Some(crate::tast::core::TypeKind::Anonymous { .. })
+                    ) {
+                        return Some(resolved);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Infer the type of built-in methods like Array.push, String.charAt, etc.

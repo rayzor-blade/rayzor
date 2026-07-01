@@ -738,6 +738,21 @@ impl<'a> TypeResolver<'a> {
                                     .type_table
                                     .borrow_mut()
                                     .create_enum_type(symbol.id, type_args),
+                                SymbolKind::TypeAlias if symbol.type_id.is_valid() => {
+                                    // Reuse the typedef's already-resolved TypeAlias
+                                    // TypeId (set by lower_typedef_declaration when the
+                                    // typedef's own declaration was lowered). Without
+                                    // this arm, a typedef used as a FIELD TYPE inside
+                                    // another typedef (e.g. `metadata:ModelMetadata`
+                                    // where `ModelMetadata` is itself a structural
+                                    // typedef) fell to the `_` catch-all and got
+                                    // wrapped in a bare synthetic Class instead of
+                                    // its real Anonymous target — field access on
+                                    // that field then couldn't recognise it as
+                                    // Anonymous and decayed to the Dynamic/reflect
+                                    // fallback.
+                                    symbol.type_id
+                                }
                                 _ => {
                                     // For other symbol kinds, create a class type for now
                                     self.type_table
@@ -792,6 +807,12 @@ impl<'a> TypeResolver<'a> {
                                                 .type_table
                                                 .borrow_mut()
                                                 .create_abstract_type(symbol.id, None, vec![]),
+                                            // See the forward_references branch above for
+                                            // why a TypeAlias must reuse its own resolved
+                                            // type_id instead of falling into create_class_type.
+                                            SymbolKind::TypeAlias if symbol.type_id.is_valid() => {
+                                                symbol.type_id
+                                            }
                                             _ => self
                                                 .type_table
                                                 .borrow_mut()
@@ -840,6 +861,12 @@ impl<'a> TypeResolver<'a> {
                                         .type_table
                                         .borrow_mut()
                                         .create_abstract_type(symbol.id, None, type_args),
+                                    // See the forward_references branch above for
+                                    // why a TypeAlias must reuse its own resolved
+                                    // type_id instead of falling into create_class_type.
+                                    SymbolKind::TypeAlias if symbol.type_id.is_valid() => {
+                                        symbol.type_id
+                                    }
                                     _ => self
                                         .type_table
                                         .borrow_mut()
