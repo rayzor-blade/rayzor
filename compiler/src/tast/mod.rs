@@ -16,6 +16,7 @@ pub mod null_safety_analysis;
 pub mod package_access;
 pub mod scopes;
 pub mod send_sync_validator;
+pub mod sig_index;
 pub mod source_extractor;
 pub mod span_conversion;
 pub mod stdlib_loader;

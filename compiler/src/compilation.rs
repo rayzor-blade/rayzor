@@ -71,6 +71,11 @@ pub struct CompilationUnit {
     /// Cache of types that failed to load on-demand (to avoid repeated attempts)
     pub failed_type_loads: BTreeSet<String>,
 
+    /// Declared static-method signatures of every parsed class/abstract,
+    /// shared into each per-file AstLowering so a call site can type a
+    /// not-yet-lowered class's static from its declaration (no decay).
+    static_sig_index: Rc<RefCell<crate::tast::sig_index::StaticSigIndex>>,
+
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
     compiled_files: BTreeMap<String, TypedFile>,
@@ -545,6 +550,9 @@ impl CompilationUnit {
             import_resolver,
             config,
             failed_type_loads: BTreeSet::new(),
+            static_sig_index: Rc::new(RefCell::new(
+                crate::tast::sig_index::StaticSigIndex::default(),
+            )),
             compiled_files: BTreeMap::new(),
             pipeline,
             mir_modules: Vec::new(),
@@ -611,13 +619,18 @@ impl CompilationUnit {
 
     /// Parse a file with the compilation unit's preprocessor defines.
     fn parse_file(&self, filename: &str, source: &str) -> Result<parser::HaxeFile, String> {
-        parser::haxe_parser::parse_haxe_file_with_config(
-            filename,
-            source,
-            true,
-            true,
-            &self.preprocessor_config(),
-        )
+        let config = self.preprocessor_config();
+        let file = parser::haxe_parser::parse_haxe_file_with_config(
+            filename, source, true, true, &config,
+        )?;
+        // Every canonical parse feeds the static-signature index so call
+        // sites can type not-yet-lowered statics from their declarations.
+        {
+            let mut index = self.static_sig_index.borrow_mut();
+            index.preprocessor = config;
+            index.index_file(&file);
+        }
+        Ok(file)
     }
 
     /// Load standard library files
@@ -5277,6 +5290,10 @@ impl CompilationUnit {
         // the uncached path to pull in a different symbol/method set than the
         // cached path, which changes bundle contents and breaks DeltaBlue parity.
         lowering.set_skip_stdlib_loading(true);
+
+        // Declared-static-signature index: lets call sites type statics whose
+        // declaring file lowers later (no untyped-placeholder decay).
+        lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
 
         // Seed class_fields from previously compiled files.
         // Only seed classes that have actual fields — empty entries interfere with

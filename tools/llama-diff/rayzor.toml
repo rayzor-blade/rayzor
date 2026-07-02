@@ -4,3 +4,6 @@ entry = "DumpLayers.hx"
 
 [build]
 class-paths = [".", "../../nue/"]
+# Same plugin load as llama-chat's manifest — DumpLayers exercises the same
+# forward path (Q8 KV / flash kernels resolve from nue-plugins).
+native-libs = ["../../target/release/libnue_plugins.dylib"]
