@@ -7686,13 +7686,31 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        // Strategy 3: class scope fallback
+        // Strategy 3: class scope fallback. A pre-registered class's
+        // `scope_id` can be the ROOT scope (no class scope exists until its
+        // file lowers), where a same-named static of an UNRELATED class also
+        // lives — verify ownership by qualified name before accepting
+        // (`Linear.fromQuant` must not resolve to `nue.Embedding.fromQuant`).
         if let Some(sym) = self
             .context
             .symbol_table
             .lookup_symbol(class_sym.scope_id, method_name)
         {
-            return Some(sym.id);
+            let owned_elsewhere = (|| {
+                let sym_qn = self.context.string_interner.get(sym.qualified_name?)?;
+                let class_qn = self
+                    .context
+                    .string_interner
+                    .get(class_sym.qualified_name?)?;
+                let (owner, _) = sym_qn.rsplit_once('.')?;
+                let class_bare = class_qn.rsplit('.').next().unwrap_or(class_qn);
+                let owner_bare = owner.rsplit('.').next().unwrap_or(owner);
+                Some(owner != class_qn && owner_bare != class_bare)
+            })()
+            .unwrap_or(false);
+            if !owned_elsewhere {
+                return Some(sym.id);
+            }
         }
 
         // Strategy 4: phantom-class fallback. BLADE can produce a Class symbol
@@ -13735,6 +13753,10 @@ impl<'a> AstLowering<'a> {
                                     base_type,
                                     ..
                                 }) => cur = *base_type,
+                                // `Null<C>.method()` — the declaring class is C.
+                                Some(crate::tast::core::TypeKind::Optional {
+                                    inner_type, ..
+                                }) => cur = *inner_type,
                                 _ => break,
                             }
                         }

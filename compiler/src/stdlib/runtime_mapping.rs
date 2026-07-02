@@ -345,6 +345,21 @@ impl StdlibMapping {
             .find(|(sig, _)| self.class_matches(class, &sig.class) && sig.method == method)
     }
 
+    /// Find a mapping by method name alone, accepted only when EXACTLY ONE
+    /// entry carries that name (a globally unique method name identifies its
+    /// contract without knowing the class — never a pick among candidates).
+    pub fn find_unique_by_method(
+        &self,
+        method: &str,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        let mut it = self.mappings.iter().filter(|(sig, _)| sig.method == method);
+        let first = it.next()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some((first.0, first.1))
+    }
+
     /// Find a stdlib method mapping by class, method name, AND parameter count
     /// This enables overloaded mappings where the same method has different implementations
     /// based on the number of arguments (e.g., indexOf with 1 vs 2 params)

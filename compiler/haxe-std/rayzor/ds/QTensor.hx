@@ -84,6 +84,14 @@ extern class QTensor {
     @:native("qtensor_requant_q6k_to_q4km")
     public function requantQ6KToQ4KM():QTensor;
 
+    /** Cheap @:shared handle clone (Arc refcount bump). No @:native — the
+        call routes through the @:derive(Clone)/@:shared intercept; this
+        declaration exists so the RETURN TYPE is known at any compile order. */
+    public function clone():QTensor;
+
+    /** Disjoint-storage deep copy. */
+    public function deepClone():QTensor;
+
     /** Number of rows in this 2-D matrix. */
     @:native("qtensor_rows")
     public function rows():Int;

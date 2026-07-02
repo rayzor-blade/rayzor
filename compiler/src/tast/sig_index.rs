@@ -27,6 +27,9 @@ pub struct StaticMethodSig {
 struct ClassSigs {
     statics: BTreeMap<String, StaticMethodSig>,
     instances: BTreeMap<String, StaticMethodSig>,
+    /// Declared non-static `var`/`final`/`property` count — the object's
+    /// field-slot count for allocating a `new` that lowers before the class.
+    instance_field_count: usize,
 }
 
 impl ClassSigs {
@@ -105,18 +108,24 @@ impl StaticSigIndex {
 
     fn index_fields(&mut self, package: &str, class_name: &str, fields: &[parser::ClassField]) {
         let qname = Self::qualify(package, class_name);
+        let fresh = !self.classes.contains_key(&qname);
         let entry = self.classes.entry(qname.clone()).or_default();
         for field in fields {
+            let is_static = field
+                .modifiers
+                .iter()
+                .any(|m| matches!(m, parser::Modifier::Static));
             let parser::ClassFieldKind::Function(func) = &field.kind else {
+                // Data field: var/final/property. First declaration wins
+                // (mirrors the or_insert method tables).
+                if !is_static && fresh {
+                    entry.instance_field_count += 1;
+                }
                 continue;
             };
             if func.name == "new" {
                 continue;
             }
-            let is_static = field
-                .modifiers
-                .iter()
-                .any(|m| matches!(m, parser::Modifier::Static));
             let table = if is_static {
                 &mut entry.statics
             } else {
@@ -222,6 +231,39 @@ impl StaticSigIndex {
                 .unwrap_or_default();
             if let [only] = candidates.as_slice() {
                 return self.classes[*only].table(is_static).get(method).cloned();
+            }
+        }
+        None
+    }
+
+    /// Declared instance-field count for `class_name` (qualified or unique
+    /// bare name; follows typedef aliases; parses the declaring file on
+    /// demand). Used for object allocation when a `new` lowers before the
+    /// class does.
+    pub fn instance_field_count(
+        &mut self,
+        class_name: &str,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<usize> {
+        let mut name = class_name.to_string();
+        for _ in 0..4 {
+            self.ensure_indexed(&name, resolve_file);
+            if let Some(class) = self.classes.get(&name) {
+                return Some(class.instance_field_count);
+            }
+            match self.aliases.get(&name) {
+                Some(target) => name = target.clone(),
+                None => break,
+            }
+        }
+        if !class_name.contains('.') {
+            let candidates: Vec<&String> = self
+                .bare_to_qualified
+                .get(class_name)
+                .map(|set| set.iter().collect())
+                .unwrap_or_default();
+            if let [only] = candidates.as_slice() {
+                return self.classes.get(*only).map(|c| c.instance_field_count);
             }
         }
         None
