@@ -605,6 +605,15 @@ pub struct LoweringError {
     pub location: SourceLocation,
 }
 
+/// Outcome of resolving a field's (class, slot) by bare name. `Ambiguous`
+/// carries candidates that DISAGREE on the slot — consuming callers must
+/// hard-fail rather than pick one; existence probes may treat it as "found".
+enum FieldIndexResolution {
+    None,
+    Unique(TypeId, u32),
+    Ambiguous(Vec<(TypeId, u32)>),
+}
+
 /// Context for lambda function generation (Two-Pass Architecture)
 struct LambdaContext {
     /// The function ID of the lambda
@@ -14580,7 +14589,36 @@ impl<'a> HirToMirContext<'a> {
                                             }
                                         }
 
-                                        // Take the first match (highest priority class)
+                                        // No priority guessing: if the candidates still name more
+                                        // than one distinct runtime function (same-target aliases
+                                        // like rayzor_Bytes.get / haxe_io_Bytes.get are NOT
+                                        // ambiguous), the receiver's type is unresolved and any
+                                        // pick would silently call an unrelated class's method.
+                                        {
+                                            let mut distinct: Vec<&str> = filtered_classes
+                                                .iter()
+                                                .map(|(_, _, call)| call.runtime_name)
+                                                .collect();
+                                            distinct.sort_unstable();
+                                            distinct.dedup();
+                                            if distinct.len() > 1 {
+                                                let candidates = filtered_classes
+                                                    .iter()
+                                                    .map(|(class, _, _)| *class)
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                self.add_error(
+                                                    &format!(
+                                                        "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved. Annotate the receiver's type so the call resolves to one class",
+                                                        method_name, actual_param_count, candidates
+                                                    ),
+                                                    expr.source_location,
+                                                );
+                                                return None;
+                                            }
+                                        }
+
+                                        // A unique runtime target remains — dispatch to it.
                                         if let Some(&(class_name, _sig, runtime_call)) =
                                             filtered_classes.first()
                                         {
@@ -15834,15 +15872,25 @@ impl<'a> HirToMirContext<'a> {
                                                     )
                                                 {
                                                     // CHECK: Is this a MIR wrapper function or a true extern?
-                                                    // We check this by asking get_stdlib_mir_wrapper_signature - if it knows about
-                                                    // this function, it's a MIR wrapper. If not, it's an extern.
-                                                    // This keeps all the knowledge about MIR wrappers centralized.
+                                                    // The mapping's `is_mir_wrapper` flag decides — having
+                                                    // explicit type info does NOT (typed extern intrinsics
+                                                    // like `haxe_bytes_get` carry signatures too; routing
+                                                    // them here creates a body-less forward-ref stub that
+                                                    // traps at runtime).
                                                     if let Some((
-                                                        mir_param_types,
-                                                        mir_return_type,
-                                                    )) = self.get_stdlib_mir_wrapper_signature(
-                                                        runtime_func,
-                                                    ) {
+                                                        _mir_param_types,
+                                                        _mir_return_type,
+                                                    )) = self
+                                                        .get_stdlib_mir_wrapper_signature(
+                                                            runtime_func,
+                                                        )
+                                                        .filter(|_| {
+                                                            self.stdlib_mapping
+                                                                .is_mir_wrapper_function(
+                                                                    runtime_func,
+                                                                )
+                                                        })
+                                                    {
                                                         debug!(
                                                         "[QUALIFIED NAME PATH] Detected MIR wrapper: {}",
                                                         runtime_func
@@ -16360,12 +16408,19 @@ impl<'a> HirToMirContext<'a> {
                                                     let runtime_func = mapping.runtime_name;
 
                                                     // CHECK: Is this a MIR wrapper or an extern?
+                                                    // Gate on the mapping's `is_mir_wrapper` flag —
+                                                    // typed extern intrinsics carry signatures too,
+                                                    // and a forward-ref stub for one never gets a
+                                                    // body (traps at runtime).
                                                     if let Some((
                                                         mir_param_types,
                                                         mir_return_type,
-                                                    )) = self.get_stdlib_mir_wrapper_signature(
-                                                        &runtime_func,
-                                                    ) {
+                                                    )) = self
+                                                        .get_stdlib_mir_wrapper_signature(
+                                                            &runtime_func,
+                                                        )
+                                                        .filter(|_| mapping.is_mir_wrapper)
+                                                    {
                                                         debug!(
                                                         "[FALLBACK PATH] Detected MIR wrapper: {}",
                                                         runtime_func
@@ -27353,17 +27408,21 @@ impl<'a> HirToMirContext<'a> {
                 .get(receiver_ty)
                 .map_or(false, |t| matches!(t.kind, TypeKind::Placeholder { .. }))
         };
+        // Existence PROBE only (gates stdlib property dispatch): ambiguity
+        // still means "a user field of this name exists" — the erroring
+        // resolver is reserved for callers that consume the slot.
         let is_known_user_field = !receiver_is_placeholder
             && (self.field_index_map.contains_key(&field)
-                || self
-                    .resolve_field_index_by_name(
+                || !matches!(
+                    self.resolve_field_index_candidates(
                         self.symbol_table
                             .get_symbol(field)
                             .map(|s| s.name)
                             .unwrap_or_default(),
                         receiver_ty,
-                    )
-                    .is_some());
+                    ),
+                    FieldIndexResolution::None
+                ));
 
         let field_name_debug = self
             .symbol_table
@@ -27458,53 +27517,113 @@ impl<'a> HirToMirContext<'a> {
 
         // Check if this is a property with a custom getter
         // Try direct SymbolId lookup first, then fall back to name-based matching
-        let property_info_owned = self.property_access_map.get(&field).cloned().or_else(|| {
+        let mut property_info_owned = self.property_access_map.get(&field).cloned();
+        if property_info_owned.is_none() {
             // Name-based fallback: SymbolIds may differ between import and user modules.
             // Prefer entries with `Method(...)` getters over `Default` — orphan entries
             // from prior BLADE cache loads (with empty class_name and Default getter)
             // can shadow the real definition when iteration order surfaces them first.
             // See bugs_known.md for the StringBuf.length cross-test contamination case.
-            let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
+            if let Some(field_name) = self.symbol_table.get_symbol(field).map(|s| s.name) {
+                // Keep the name-based match from crossing class boundaries: a
+                // candidate whose owner class is known to differ from the receiver's
+                // belongs to an unrelated class. Owner from `field_class_names`
+                // (forwarded from imports); both unknown falls through to the
+                // ambiguity check below — a UNIQUE getter target may still
+                // dispatch, but multiple distinct targets with unconfirmed
+                // ownership is a guess and hard-fails (E0802).
+                let receiver_class_name = self.receiver_type_class_name(receiver_ty);
 
-            // Keep the name-based match from crossing class boundaries: a
-            // candidate whose owner class is known to differ from the receiver's
-            // belongs to an unrelated class. Owner from `field_class_names`
-            // (forwarded from imports); both unknown falls through, preserving
-            // the original cross-module fallback.
-            let receiver_class_name = self.receiver_type_class_name(receiver_ty);
-
-            let mut method_match: Option<crate::tast::PropertyAccessInfo> = None;
-            let mut default_match: Option<crate::tast::PropertyAccessInfo> = None;
-            for (sym_id, info) in &self.property_access_map {
-                let sym_name = match self.symbol_table.get_symbol(*sym_id) {
-                    Some(s) => s.name,
-                    None => continue,
-                };
-                if sym_name != field_name {
-                    continue;
-                }
-                if let (Some(owner), Some(recv)) = (
-                    self.field_class_names.get(sym_id),
-                    receiver_class_name.as_ref(),
-                ) {
-                    if !Self::class_names_match(owner, recv) {
+                let mut method_matches: Vec<(Option<String>, crate::tast::PropertyAccessInfo)> =
+                    Vec::new();
+                let mut default_match: Option<crate::tast::PropertyAccessInfo> = None;
+                for (sym_id, info) in &self.property_access_map {
+                    let sym_name = match self.symbol_table.get_symbol(*sym_id) {
+                        Some(s) => s.name,
+                        None => continue,
+                    };
+                    if sym_name != field_name {
                         continue;
                     }
-                }
-                match info.getter {
-                    crate::tast::PropertyAccessor::Method(_) => {
-                        method_match = Some(info.clone());
-                        break;
+                    if let (Some(owner), Some(recv)) = (
+                        self.field_class_names.get(sym_id),
+                        receiver_class_name.as_ref(),
+                    ) {
+                        if !Self::class_names_match(owner, recv) {
+                            continue;
+                        }
                     }
-                    _ => {
-                        if default_match.is_none() {
-                            default_match = Some(info.clone());
+                    match info.getter {
+                        crate::tast::PropertyAccessor::Method(_) => {
+                            method_matches
+                                .push((self.field_class_names.get(sym_id).cloned(), info.clone()));
+                        }
+                        _ => {
+                            if default_match.is_none() {
+                                default_match = Some(info.clone());
+                            }
                         }
                     }
                 }
+                // A candidate whose owner is POSITIVELY confirmed to be the
+                // receiver's class beats unconfirmed ones.
+                if let Some(recv) = receiver_class_name.as_ref() {
+                    let confirmed: Vec<_> = method_matches
+                        .iter()
+                        .filter(|(owner, _)| {
+                            owner
+                                .as_ref()
+                                .is_some_and(|o| Self::class_names_match(o, recv))
+                        })
+                        .cloned()
+                        .collect();
+                    if !confirmed.is_empty() {
+                        method_matches = confirmed;
+                    }
+                }
+                // Same getter method name = same target; only distinct targets
+                // are ambiguous.
+                let mut getter_names: Vec<_> = method_matches
+                    .iter()
+                    .filter_map(|(_, info)| match &info.getter {
+                        crate::tast::PropertyAccessor::Method(g) => Some(*g),
+                        _ => None,
+                    })
+                    .collect();
+                getter_names.sort_unstable();
+                getter_names.dedup();
+                if getter_names.len() > 1 {
+                    let field_str = self
+                        .string_interner
+                        .get(field_name)
+                        .unwrap_or("<unknown>")
+                        .to_string();
+                    let owners = method_matches
+                        .iter()
+                        .map(|(owner, _)| owner.as_deref().unwrap_or("<unknown class>"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let loc = self
+                        .symbol_table
+                        .get_symbol(field)
+                        .map(|s| s.definition_location)
+                        .unwrap_or(SourceLocation::unknown());
+                    self.add_error(
+                        &format!(
+                            "E0802: ambiguous property access: `{}` matches getters on multiple classes ({}) and the receiver's class could not be confirmed. Annotate the receiver's type",
+                            field_str, owners
+                        ),
+                        loc,
+                    );
+                    return None;
+                }
+                property_info_owned = method_matches
+                    .into_iter()
+                    .next()
+                    .map(|(_, info)| info)
+                    .or(default_match);
             }
-            method_match.or(default_match)
-        });
+        }
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
                 crate::tast::PropertyAccessor::Method(getter_method_name) => {
@@ -28056,12 +28175,64 @@ impl<'a> HirToMirContext<'a> {
     /// have the same field name (e.g., both StringBuf.length and List.length).
     /// Returns (class_type_id, field_index) or None if not found.
     fn resolve_field_index_by_name(
-        &self,
+        &mut self,
         field_name: InternedString,
         receiver_ty: TypeId,
     ) -> Option<(TypeId, u32)> {
+        match self.resolve_field_index_candidates(field_name, receiver_ty) {
+            FieldIndexResolution::None => None,
+            FieldIndexResolution::Unique(class_ty, idx) => Some((class_ty, idx)),
+            FieldIndexResolution::Ambiguous(matches) => {
+                // Candidates disagree on the slot and the receiver's class is
+                // unresolvable — any pick would silently read the wrong slot.
+                let target_name_str = self
+                    .string_interner
+                    .get(field_name)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let owners = matches
+                    .iter()
+                    .map(|&(class_ty, idx)| {
+                        let type_table = self.type_table;
+                        let name = self
+                            .resolve_type_class_name_with(&type_table, class_ty)
+                            .unwrap_or_else(|| "<unknown class>".to_string());
+                        format!("{} (slot {})", name, idx)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let loc = self
+                    .symbol_table
+                    .find_symbols(|s| s.name == field_name)
+                    .first()
+                    .map(|s| s.definition_location)
+                    .unwrap_or(SourceLocation::unknown());
+                self.add_error(
+                    &format!(
+                        "E0803: ambiguous field access: `{}` exists on multiple classes ({}) and the receiver's class could not be resolved. Annotate the receiver's type",
+                        target_name_str, owners
+                    ),
+                    loc,
+                );
+                None
+            }
+        }
+    }
+
+    /// Candidate resolution behind `resolve_field_index_by_name`, with no
+    /// error reporting — usable as a pure existence PROBE (does any class
+    /// declare this field?) where ambiguity must not fail the compile.
+    fn resolve_field_index_candidates(
+        &self,
+        field_name: InternedString,
+        receiver_ty: TypeId,
+    ) -> FieldIndexResolution {
         let mut all_matches: Vec<(TypeId, u32)> = Vec::new();
-        let target_name_str = self.string_interner.get(field_name).unwrap_or("<unknown>");
+        let target_name_str = self
+            .string_interner
+            .get(field_name)
+            .unwrap_or("<unknown>")
+            .to_string();
         for (_sym, &(class_ty, idx)) in &self.field_index_map {
             if let Some(sym_info) = self.symbol_table.get_symbol(*_sym) {
                 // Compare by InternedString ID first (fast), then by string content (handles
@@ -28089,7 +28260,7 @@ impl<'a> HirToMirContext<'a> {
                 target_name_str,
                 self.field_index_map.len()
             );
-            return None;
+            return FieldIndexResolution::None;
         }
 
         if all_matches.len() == 1 {
@@ -28097,7 +28268,7 @@ impl<'a> HirToMirContext<'a> {
             // Without this check, String.length could incorrectly match StringBuf.length.
             let (match_class_ty, match_idx) = all_matches[0];
             if match_class_ty == receiver_ty {
-                return Some((match_class_ty, match_idx));
+                return FieldIndexResolution::Unique(match_class_ty, match_idx);
             }
             // Fall through to disambiguation logic which checks type chains
         }
@@ -28129,7 +28300,7 @@ impl<'a> HirToMirContext<'a> {
             // Check if resolved type directly matches a candidate's class_type_id
             for &(class_ty, idx) in &all_matches {
                 if class_ty == resolved {
-                    return Some((class_ty, idx));
+                    return FieldIndexResolution::Unique(class_ty, idx);
                 }
             }
 
@@ -28146,7 +28317,7 @@ impl<'a> HirToMirContext<'a> {
                     let candidate_sym = self.class_type_to_symbol.get(&class_ty);
                     if let Some(&csym) = candidate_sym {
                         if csym == recv_sym {
-                            return Some((class_ty, idx));
+                            return FieldIndexResolution::Unique(class_ty, idx);
                         }
                     }
                 }
@@ -28166,7 +28337,7 @@ impl<'a> HirToMirContext<'a> {
                     self.resolve_type_class_name_with(&type_table, class_ty)
                 };
                 if candidate_name.as_ref() == Some(recv_name) {
-                    return Some((class_ty, idx));
+                    return FieldIndexResolution::Unique(class_ty, idx);
                 }
             }
         }
@@ -28196,7 +28367,7 @@ impl<'a> HirToMirContext<'a> {
             })
             .unwrap_or(false);
         if receiver_is_stdlib_property_target {
-            return None;
+            return FieldIndexResolution::None;
         }
 
         // If the receiver resolves to an EXTERN class (registered via @:native
@@ -28219,10 +28390,26 @@ impl<'a> HirToMirContext<'a> {
             .map(|s| s.flags.contains(SymbolFlags::EXTERN))
             .unwrap_or(false);
         if receiver_is_extern_class {
-            return None;
+            return FieldIndexResolution::None;
         }
 
-        Some(all_matches[0])
+        // A single surviving candidate may dispatch (generic returns
+        // legitimately land here with a receiver_ty matching no concrete
+        // class), and candidates that AGREE on the field index are the same
+        // declaration re-registered across contexts (e.g. a typedef'd
+        // anonymous struct — one anon TypeId per importing module). Only
+        // candidates with DIFFERENT indexes are a bare-name guess across
+        // unrelated classes — Ambiguous, never first-match (the pick would
+        // silently read the wrong slot).
+        let mut distinct_indexes: Vec<u32> = all_matches.iter().map(|&(_, idx)| idx).collect();
+        distinct_indexes.sort_unstable();
+        distinct_indexes.dedup();
+        if distinct_indexes.len() > 1 {
+            return FieldIndexResolution::Ambiguous(all_matches);
+        }
+
+        let (class_ty, idx) = all_matches[0];
+        FieldIndexResolution::Unique(class_ty, idx)
     }
 
     /// Check if any class in field_index_map has a field with the same name.

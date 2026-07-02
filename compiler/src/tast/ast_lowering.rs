@@ -113,6 +113,12 @@ pub enum LoweringError {
         feature: String,
         location: SourceLocation,
     },
+    /// A bare name matches multiple unrelated declarations and no context
+    /// disambiguates — resolving to any one of them would be a guess.
+    AmbiguousSymbol {
+        message: String,
+        location: SourceLocation,
+    },
 }
 
 impl fmt::Display for LoweringError {
@@ -205,6 +211,13 @@ impl fmt::Display for LoweringError {
                     f,
                     "Incomplete implementation for '{}' at {}:{}:{}",
                     feature, location.file_id, location.line, location.column
+                )
+            }
+            LoweringError::AmbiguousSymbol { message, location } => {
+                write!(
+                    f,
+                    "{} at {}:{}:{}",
+                    message, location.file_id, location.line, location.column
                 )
             }
         }
@@ -334,6 +347,15 @@ impl LoweringError {
                 location: location.clone(),
                 category: ErrorCategory::TypeError,
                 suggestion: Some("This feature is planned for a future release".to_string()),
+                related_errors: vec![],
+            },
+            LoweringError::AmbiguousSymbol { message, location } => CompilationError {
+                message: message.clone(),
+                location: location.clone(),
+                category: ErrorCategory::SymbolError,
+                suggestion: Some(
+                    "Qualify the name (Enum.Variant / annotate the type) so a single declaration matches".to_string(),
+                ),
                 related_errors: vec![],
             },
         }
@@ -622,6 +644,10 @@ pub struct AstLowering<'a> {
     class_fields: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
     /// Skip internal stdlib loading (used when CompilationUnit handles it)
     skip_stdlib_loading: bool,
+    /// Program-wide declared static signatures (shared from CompilationUnit).
+    /// Lets `ensure_known_static_method_type` type a static whose declaring
+    /// file hasn't lowered yet from its parsed declaration.
+    static_sig_index: Option<std::rc::Rc<RefCell<crate::tast::sig_index::StaticSigIndex>>>,
     /// Skip pre-registration pass (used when CompilationUnit has already pre-registered all files)
     skip_pre_registration: bool,
     /// Collected errors during lowering (for error recovery)
@@ -1401,6 +1427,7 @@ impl<'a> AstLowering<'a> {
             class_methods: BTreeMap::new(),
             class_fields: BTreeMap::new(),
             skip_stdlib_loading: false,
+            static_sig_index: None,
             skip_pre_registration: false,
             collected_errors: Vec::new(),
             empty_array_inferred: std::collections::BTreeMap::new(),
@@ -1425,6 +1452,15 @@ impl<'a> AstLowering<'a> {
     /// Set whether to skip pre-registration pass (for CompilationUnit with two-pass compilation)
     pub fn set_skip_pre_registration(&mut self, skip: bool) {
         self.skip_pre_registration = skip;
+    }
+
+    /// Share the program-wide declared-static-signature index (from
+    /// CompilationUnit) for on-demand typing of cross-file statics.
+    pub fn set_static_sig_index(
+        &mut self,
+        index: std::rc::Rc<RefCell<crate::tast::sig_index::StaticSigIndex>>,
+    ) {
+        self.static_sig_index = Some(index);
     }
 
     /// Seed class_fields from previously compiled files so that cross-file
@@ -7223,37 +7259,96 @@ impl<'a> AstLowering<'a> {
             return;
         }
 
-        // `QTensor.fusedQkvMatmul(x, qW, kW, vW, threads): Array<Tensor>` —
-        // the declaring stdlib extern file (`rayzor/ds/QTensor.hx`) can be
-        // TAST-lowered AFTER a dependent that calls this static (lazy
-        // stdlib load ordering), so no typed declaration symbol exists yet
-        // to copy from at the call site. Without a type, the call's result
-        // decayed and `triple.length`/`triple[i]` on the returned array
-        // mis-dispatched (garbage Q/K/V through the fused decode path,
-        // intermittent SIGSEGV). Same accepted pattern as the
-        // `infer_builtin_method_type` stdlib arms: pin the declared
-        // signature for this known extern static.
-        if class_name == Some("QTensor") && method_name_str == Some("fusedQkvMatmul") {
-            let tensor_ty = self.resolve_type_by_name("Tensor").ok();
-            let qtensor_ty = self.resolve_type_by_name("QTensor").ok();
-            if let (Some(tensor_ty), Some(qtensor_ty)) = (tensor_ty, qtensor_ty) {
-                let int_ty = self.context.type_table.borrow().int_type();
-                let arr_tensor = self
-                    .context
-                    .type_table
-                    .borrow_mut()
-                    .create_array_type(tensor_ty);
-                let fn_ty = self.context.type_table.borrow_mut().create_function_type(
-                    vec![tensor_ty, qtensor_ty, qtensor_ty, qtensor_ty, int_ty],
-                    arr_tensor,
-                );
+        // General on-demand signature resolution. A static's declaring file
+        // can TAST-lower AFTER a call site that references it (import /
+        // convergence ordering), so the symbol resolved here is an untyped
+        // pre-registration or placeholder — and an untyped factory return
+        // decays the whole downstream chain into guessed dynamic dispatch.
+        // Recover the DECLARED signature from the parsed AST via the
+        // program-wide sig index (parsing the declaring file on demand if it
+        // hasn't been seen yet), mirroring the per-class pre-registration
+        // loop in `lower_class_declaration`.
+        if let Some(sig) = self.resolve_declared_method_sig(class_symbol, method_name, true) {
+            self.apply_declared_sig(method_symbol, &sig);
+            self.context
+                .symbol_table
+                .add_symbol_flags(method_symbol, crate::tast::symbols::SymbolFlags::STATIC);
+            return;
+        }
+    }
+
+    /// Declared signature for `class_symbol::method_name` from the parsed-AST
+    /// sig index: the class's qualified name first (following typedef
+    /// aliases), then its bare name — accepted only when a UNIQUE indexed
+    /// class declares the method, never a pick among candidates.
+    fn resolve_declared_method_sig(
+        &mut self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+        is_static: bool,
+    ) -> Option<crate::tast::sig_index::StaticMethodSig> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        let (qname, bare): (Option<String>, Option<String>) = {
+            let sym = self.context.symbol_table.get_symbol(class_symbol)?;
+            (
+                sym.qualified_name
+                    .and_then(|q| self.context.string_interner.get(q))
+                    .map(str::to_string),
                 self.context
-                    .symbol_table
-                    .update_symbol_type(method_symbol, fn_ty);
-                return;
+                    .string_interner
+                    .get(sym.name)
+                    .map(str::to_string),
+            )
+        };
+        let method = self.context.string_interner.get(method_name)?.to_string();
+        let resolver: &super::namespace::NamespaceResolver = self.context.namespace_resolver;
+        let resolve_file = |q: &str| resolver.resolve_qualified_path_to_file_force(q);
+        let mut index = index.borrow_mut();
+        if let Some(q) = &qname {
+            if let Some(sig) = index.resolve(q, &method, is_static, &resolve_file) {
+                return Some(sig);
             }
         }
+        if let Some(b) = &bare {
+            if qname.as_ref() != Some(b) {
+                if let Some(sig) = index.resolve(b, &method, is_static, &resolve_file) {
+                    return Some(sig);
+                }
+            }
+        }
+        None
+    }
 
+    /// Lower a declared signature's AST type hints into a function type
+    /// (unannotated positions become Dynamic, mirroring the per-class
+    /// pre-registration loop) and stamp it on `method_symbol`.
+    fn apply_declared_sig(
+        &mut self,
+        method_symbol: SymbolId,
+        sig: &crate::tast::sig_index::StaticMethodSig,
+    ) -> TypeId {
+        let dynamic_type = self.context.type_table.borrow().dynamic_type();
+        let param_types: Vec<TypeId> = sig
+            .params
+            .iter()
+            .map(|hint| match hint {
+                Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
+                None => dynamic_type,
+            })
+            .collect();
+        let return_type = match &sig.return_type {
+            Some(t) => self.lower_type(t).unwrap_or(dynamic_type),
+            None => dynamic_type,
+        };
+        let fn_ty = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type(param_types, return_type);
+        self.context
+            .symbol_table
+            .update_symbol_type(method_symbol, fn_ty);
+        fn_ty
     }
 
     /// Look up a *data field* (not a method) by name on a class.
@@ -7899,6 +7994,69 @@ impl<'a> AstLowering<'a> {
                             }
                         }
                     }
+                } else {
+                    // No expected type disambiguates this bare identifier. If it
+                    // resolved to an enum VARIANT and a same-named variant exists
+                    // on a DIFFERENT enum, the scope walk's pick is a guess
+                    // (whichever module registered first) — hard-fail instead
+                    // of silently building the wrong enum's value.
+                    let is_variant = self
+                        .context
+                        .symbol_table
+                        .get_symbol(symbol_id)
+                        .map(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
+                        .unwrap_or(false);
+                    if is_variant {
+                        let variant_name = self
+                            .context
+                            .symbol_table
+                            .get_symbol(symbol_id)
+                            .map(|s| s.name);
+                        let mut parent_enum_names: Vec<String> = Vec::new();
+                        if let Some(vname) = variant_name {
+                            let same_named = self.context.symbol_table.find_symbols(|s| {
+                                s.kind == crate::tast::symbols::SymbolKind::EnumVariant
+                                    && s.name == vname
+                            });
+                            for v in same_named {
+                                let parent = self
+                                    .context
+                                    .symbol_table
+                                    .find_parent_enum_for_constructor(v.id);
+                                let Some(parent) = parent else { continue };
+                                let Some(psym) = self.context.symbol_table.get_symbol(parent)
+                                else {
+                                    continue;
+                                };
+                                // Identity = qualified name when present, else bare
+                                // name: the same source enum re-registered across
+                                // contexts must not count twice.
+                                let pname = psym
+                                    .qualified_name
+                                    .or(Some(psym.name))
+                                    .and_then(|n| self.context.string_interner.get(n))
+                                    .unwrap_or("?")
+                                    .to_string();
+                                if !parent_enum_names.contains(&pname) {
+                                    parent_enum_names.push(pname);
+                                }
+                            }
+                        }
+                        if parent_enum_names.len() > 1 {
+                            let candidates = parent_enum_names
+                                .iter()
+                                .map(|p| format!("{}.{}", p, name))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(LoweringError::AmbiguousSymbol {
+                                message: format!(
+                                    "E0804: ambiguous enum variant `{}`: matches {} and no expected type disambiguates. Qualify it with the enum name",
+                                    name, candidates
+                                ),
+                                location: self.context.create_location_from_span(expression.span),
+                            });
+                        }
+                    }
                 }
 
                 // Check if this symbol is an instance VAR field of the current class
@@ -8011,7 +8169,18 @@ impl<'a> AstLowering<'a> {
                     }
                 } else {
                     let left_expr = self.lower_expression(left)?;
-                    let right_expr = self.lower_expression(right)?;
+                    // For ==/!= the LHS's static type is the expected type of
+                    // the RHS — disambiguates a bare enum-variant comparand
+                    // (`v == Red` with `v:ColorA`).
+                    let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::NotEq);
+                    if is_eq {
+                        self.expected_arg_type_stack.push(Some(left_expr.expr_type));
+                    }
+                    let right_result = self.lower_expression(right);
+                    if is_eq {
+                        self.expected_arg_type_stack.pop();
+                    }
+                    let right_expr = right_result?;
                     let typed_op = self.lower_binary_operator(op)?;
 
                     TypedExpressionKind::BinaryOp {
@@ -8098,7 +8267,13 @@ impl<'a> AstLowering<'a> {
                 let value_expr = {
                     let prev_hint = self.context.expected_new_type_hint;
                     self.context.expected_new_type_hint = Some(target_expr.expr_type);
+                    // The LHS's static type is also the expected type of the
+                    // RHS — disambiguates a bare enum-variant RHS
+                    // (`v = Red` with `v:ColorA`).
+                    self.expected_arg_type_stack
+                        .push(Some(target_expr.expr_type));
                     let result = self.lower_expression(right);
+                    self.expected_arg_type_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     result?
                 };
@@ -9100,7 +9275,13 @@ impl<'a> AstLowering<'a> {
                 let initializer = if let Some(init_expr) = expr {
                     let prev_hint = self.context.expected_new_type_hint;
                     self.context.expected_new_type_hint = declared_type;
+                    // The annotation is also the expected type of the whole
+                    // initializer — lets a bare enum-variant identifier
+                    // (`var v:ColorA = Red`) disambiguate against same-named
+                    // variants on other enums.
+                    self.expected_arg_type_stack.push(declared_type);
                     let result = self.lower_expression(init_expr);
+                    self.expected_arg_type_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     result?
                 } else {
@@ -9209,7 +9390,12 @@ impl<'a> AstLowering<'a> {
 
                 // Final variables must have an initializer
                 let initializer = if let Some(init_expr) = expr {
-                    self.lower_expression(init_expr)?
+                    // Annotation = expected type of the initializer (bare
+                    // enum-variant disambiguation, mirroring `var`).
+                    self.expected_arg_type_stack.push(declared_type);
+                    let result = self.lower_expression(init_expr);
+                    self.expected_arg_type_stack.pop();
+                    result?
                 } else {
                     return Err(LoweringError::IncompleteImplementation {
                         feature: "Final declaration without initializer".to_string(),
@@ -13565,6 +13751,28 @@ impl<'a> AstLowering<'a> {
                             if real_valid {
                                 return self
                                     .infer_method_call_return_type(real_method, receiver_type);
+                            }
+                        }
+                        // No typed declaration symbol exists anywhere yet (the
+                        // receiver class's file TAST-lowers later). Recover the
+                        // DECLARED signature from the parsed AST via the sig
+                        // index and type this symbol from it, so the call's
+                        // return doesn't decay to Dynamic (whose later member
+                        // dispatch guesses among same-named methods).
+                        if let Some(sig) = self.resolve_declared_method_sig(cs, mn, false) {
+                            let fn_ty = self.apply_declared_sig(method_symbol, &sig);
+                            let ret = {
+                                let tt = self.context.type_table.borrow();
+                                match tt.get(fn_ty).map(|i| &i.kind) {
+                                    Some(crate::tast::core::TypeKind::Function {
+                                        return_type,
+                                        ..
+                                    }) => Some(*return_type),
+                                    _ => None,
+                                }
+                            };
+                            if let Some(ret) = ret {
+                                return Ok(ret);
                             }
                         }
                     }

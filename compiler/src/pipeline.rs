@@ -1762,6 +1762,14 @@ impl HaxeCompilationPipeline {
                 format!("Internal compiler error: {}", message),
                 Some("Please report this issue to the compiler developers".to_string()),
             ),
+
+            LoweringError::AmbiguousSymbol { message, .. } => (
+                message.clone(),
+                Some(
+                    "Qualify the name (Enum.Variant / annotate the type) so a single declaration matches"
+                        .to_string(),
+                ),
+            ),
         }
     }
 
@@ -1773,9 +1781,9 @@ impl HaxeCompilationPipeline {
         use crate::tast::ast_lowering::LoweringError;
 
         match error {
-            LoweringError::UnresolvedSymbol { .. } | LoweringError::DuplicateSymbol { .. } => {
-                ErrorCategory::SymbolError
-            }
+            LoweringError::UnresolvedSymbol { .. }
+            | LoweringError::DuplicateSymbol { .. }
+            | LoweringError::AmbiguousSymbol { .. } => ErrorCategory::SymbolError,
 
             LoweringError::UnresolvedType { .. }
             | LoweringError::GenericParameterError { .. }
@@ -1812,6 +1820,7 @@ impl HaxeCompilationPipeline {
             LoweringError::LifetimeError { location, .. } => location.clone(),
             LoweringError::OwnershipError { location, .. } => location.clone(),
             LoweringError::IncompleteImplementation { location, .. } => location.clone(),
+            LoweringError::AmbiguousSymbol { location, .. } => location.clone(),
             /* // TODO: Add these when error variants are added
             LoweringError::TypeResolution { location, .. } => location.clone(),
             LoweringError::ConstraintViolation { location, .. } => location.clone(),
