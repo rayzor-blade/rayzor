@@ -195,6 +195,14 @@ extern class Tensor {
     @:native("tensor_slice")
     public function slice(dim:Int, start:Int, end:Int):Tensor;
 
+    /** Cheap @:shared handle clone (Arc refcount bump). No @:native — the
+        call routes through the @:derive(Clone)/@:shared intercept; this
+        declaration exists so the RETURN TYPE is known at any compile order. */
+    public function clone():Tensor;
+
+    /** Disjoint-storage deep copy (cross-thread mutation patterns). */
+    public function deepClone():Tensor;
+
     // --- Arithmetic (elementwise, return new tensor) ---
 
     /** Element-wise addition */

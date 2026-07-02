@@ -399,6 +399,13 @@ pub struct HirToMirContext<'a> {
     /// fallback for classes compiled in separate units (e.g., stdlib Exception).
     class_alloc_sizes_by_name: BTreeMap<String, u64>,
 
+    /// Parsed-AST declaration index (shared from CompilationUnit). Supplies
+    /// the declared instance-field count for a `new C(...)` whose class
+    /// compiles later than this module — the arg-count guess under-allocates
+    /// (ctor default params / fields set post-ctor overflow the block).
+    static_sig_index:
+        Option<std::rc::Rc<std::cell::RefCell<crate::tast::sig_index::StaticSigIndex>>>,
+
     /// Maps class registration TypeId → class SymbolId. Survives type_table overwrites.
     /// Used for field disambiguation when multiple classes have same-named fields.
     class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
@@ -734,6 +741,7 @@ impl<'a> HirToMirContext<'a> {
             raw_anon_symbols: BTreeSet::new(),
             class_alloc_sizes: BTreeMap::new(),
             class_alloc_sizes_by_name: BTreeMap::new(),
+            static_sig_index: None,
             class_type_to_symbol: BTreeMap::new(),
             field_class_names: BTreeMap::new(),
             override_methods: BTreeSet::new(),
@@ -1683,6 +1691,27 @@ impl<'a> HirToMirContext<'a> {
             .map(|s| s.definition_location)
             .unwrap_or(SourceLocation::unknown());
 
+        // Reject a candidate whose qualified name POSITIVELY names a class
+        // other than the receiver's before it can enter the lone-name pool —
+        // `Linear.fromQuant` must never bind to `nue.Embedding.fromQuant`
+        // just because Linear's body hasn't compiled yet. (The lone-name
+        // guard `func_not_other_class` can't see qnames of ids that live in
+        // other modules; the SYMBOL qname is always available here.)
+        let class_short_for_reject = class_name_hint.and_then(|n| n.rsplit('.').next());
+        let sym_other_class = |this: &Self, sym: SymbolId| -> bool {
+            let (Some(short), Some(qn)) = (
+                class_short_for_reject,
+                this.symbol_table
+                    .get_symbol(sym)
+                    .and_then(|s| s.qualified_name)
+                    .and_then(|q| this.string_interner.get(q)),
+            ) else {
+                return false;
+            };
+            let parts: Vec<&str> = qn.split('.').collect();
+            parts.len() >= 2 && parts[parts.len() - 2] != short
+        };
+
         let mut name_matches = BTreeSet::new();
 
         for (candidate_sym, &func_id) in &self.function_map {
@@ -1690,7 +1719,9 @@ impl<'a> HirToMirContext<'a> {
                 if sym_info.name != method_name {
                     continue;
                 }
-                name_matches.insert(func_id);
+                if !sym_other_class(self, *candidate_sym) {
+                    name_matches.insert(func_id);
+                }
                 if self.symbol_belongs_to_class_hierarchy(*candidate_sym, class_symbol) {
                     return Some(func_id);
                 }
@@ -1715,7 +1746,9 @@ impl<'a> HirToMirContext<'a> {
                 if sym_info.name != method_name {
                     continue;
                 }
-                name_matches.insert(func_id);
+                if !sym_other_class(self, *candidate_sym) {
+                    name_matches.insert(func_id);
+                }
                 if self.symbol_belongs_to_class_hierarchy(*candidate_sym, class_symbol) {
                     return Some(func_id);
                 }
@@ -9411,8 +9444,6 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.call_label = Some("CALL_START".to_string());
                 let result_type = self.convert_type(expr.ty);
 
-                // (debug removed)
-
                 // Update the caller's shadow-stack frame to this call-site line/col so
                 // the trace shows WHERE the call was made, not the function definition line.
                 let call_loc = expr.source_location;
@@ -16182,12 +16213,34 @@ impl<'a> HirToMirContext<'a> {
                                                     .stdlib_mapping
                                                     .is_mir_wrapper_class(class_name)
                                                 {
-                                                    // Use lowercase class name to match stdlib MIR wrapper naming convention
-                                                    let mir_func_name = format!(
-                                                        "{}_{}",
-                                                        class_name.to_lowercase(),
-                                                        method_name
-                                                    );
+                                                    // The mapping is the source of truth for the
+                                                    // wrapper's name — synthesizing it by the
+                                                    // `{class.lowercase()}_{method}` convention
+                                                    // produces a body-less stub whenever the real
+                                                    // entry differs (`QTensor_requantQ6KToQ4KM` vs
+                                                    // `qtensor_requantQ6KToQ4KM` → trap at call).
+                                                    // The class here was inferred from the RETURN
+                                                    // type, which differs from the declaring class
+                                                    // for non-factory methods (QTensor.gatherRowsQ6K
+                                                    // returns Tensor) — a globally unique method
+                                                    // name still identifies the entry.
+                                                    let mir_func_name = self
+                                                        .stdlib_mapping
+                                                        .find_by_name(class_name, method_name)
+                                                        .or_else(|| {
+                                                            self.stdlib_mapping
+                                                                .find_unique_by_method(method_name)
+                                                        })
+                                                        .map(|(_, call)| {
+                                                            call.runtime_name.to_string()
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            format!(
+                                                                "{}_{}",
+                                                                class_name.to_lowercase(),
+                                                                method_name
+                                                            )
+                                                        });
                                                     debug!(
                                                     "[STDLIB MIR] Detected stdlib MIR function: {}",
                                                     mir_func_name
@@ -19237,6 +19290,25 @@ impl<'a> HirToMirContext<'a> {
                                 .or_else(|| self.string_interner.get(sym.name))
                         })?;
                         self.class_alloc_sizes_by_name.get(class_name).copied()
+                    })
+                    // Fallback: declared instance-field count from the parsed
+                    // AST (class compiles later than this module — no layout
+                    // registered anywhere yet).
+                    .or_else(|| {
+                        let index = self.static_sig_index.as_ref()?.clone();
+                        let sym_id = actual_symbol_id?;
+                        let sym = self.symbol_table.get_symbol(sym_id)?;
+                        let qname = sym.qualified_name.and_then(|n| self.string_interner.get(n));
+                        let bare = self.string_interner.get(sym.name);
+                        let mut index = index.borrow_mut();
+                        let no_parse = |_: &str| -> Option<std::path::PathBuf> { None };
+                        let count = qname
+                            .and_then(|q| index.instance_field_count(q, &no_parse))
+                            .or_else(|| {
+                                bare.filter(|b| qname != Some(*b))
+                                    .and_then(|b| index.instance_field_count(b, &no_parse))
+                            })?;
+                        Some((count as u64 + 1) * 8)
                     })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
                 // Ensure the allocation covers inherited fields: a subclass of an
@@ -39982,6 +40054,9 @@ pub fn lower_hir_to_mir_with_function_map(
     external_interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
     external_function_param_iface_names: BTreeMap<IrFunctionId, Vec<Option<String>>>,
     external_field_class_names: BTreeMap<SymbolId, String>,
+    static_sig_index: Option<
+        std::rc::Rc<std::cell::RefCell<crate::tast::sig_index::StaticSigIndex>>,
+    >,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
@@ -39993,6 +40068,7 @@ pub fn lower_hir_to_mir_with_function_map(
         symbol_table,
         stdlib_mapping,
     );
+    context.static_sig_index = static_sig_index;
 
     // Set the external function maps (by SymbolId and by qualified name)
     context.external_function_map = external_functions;

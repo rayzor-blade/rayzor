@@ -5604,6 +5604,7 @@ impl CompilationUnit {
             self.import_interface_vtables.clone(),
             self.import_function_param_iface_names.clone(),
             self.import_field_class_names.clone(),
+            Some(Rc::clone(&self.static_sig_index)),
         )
         .map_err(|errors| {
             errors
