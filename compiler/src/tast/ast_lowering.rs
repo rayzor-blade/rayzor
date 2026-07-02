@@ -7552,12 +7552,32 @@ impl<'a> AstLowering<'a> {
             None
         };
         {
+            // A TYPED receiver extends the lexical-match-trap guard: a lone
+            // same-named method on an UNRELATED class must not win either
+            // (`gate:Linear` + `.forward` in SwiGLU.hx found only
+            // SwiGLU.forward here — Linear lowers later — and the call
+            // self-bound into infinite recursion). Only candidates whose
+            // class matches the receiver's may enter; none matching falls
+            // through to the qualified placeholder below.
+            let receiver_bare_for_filter = self
+                .get_class_name_for_type(receiver.expr_type)
+                .map(|c| c.rsplit('.').next().unwrap_or(&c).to_string());
             let mut found: Option<(SymbolId, SymbolId)> = None; // (class_sym, method_sym)
             let mut ambiguous = false;
             let mut all_matches: Vec<(SymbolId, SymbolId)> = Vec::new();
             for (class_sym, methods) in &self.class_methods {
                 if Some(*class_sym) == current_class {
                     continue;
+                }
+                if let Some(rb) = receiver_bare_for_filter.as_deref() {
+                    let owner_bare = self
+                        .context
+                        .symbol_table
+                        .get_symbol(*class_sym)
+                        .and_then(|s| self.context.string_interner.get(s.name));
+                    if owner_bare.is_some_and(|o| o != rb) {
+                        continue;
+                    }
                 }
                 if let Some((_, method_symbol, _)) =
                     methods.iter().find(|(name, _, _)| *name == method_name)

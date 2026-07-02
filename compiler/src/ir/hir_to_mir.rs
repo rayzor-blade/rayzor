@@ -942,10 +942,7 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 // Free this value if not terminated
-                if !self.is_terminated() {
-                    self.maybe_emit_drop_call(current_ir_id);
-                    self.builder.build_free(current_ir_id);
-                }
+                self.emit_tracked_free(current_ir_id, true);
 
                 // Remove from owned_heap_values since it's been freed
                 self.owned_heap_values.remove(&symbol);
@@ -1002,8 +999,7 @@ impl<'a> HirToMirContext<'a> {
         // on the returned object's captured field.
         for (symbol, ir_id) in to_free {
             if !self.is_terminated() && self.get_drop_class_for_ir(ir_id).is_some() {
-                self.maybe_emit_drop_call(ir_id);
-                self.builder.build_free(ir_id);
+                self.emit_tracked_free(ir_id, true);
                 trace!(
                     "Drop: Freed {:?} ({:?}) in cleanup_all_scopes (Drop class)",
                     symbol,
@@ -1047,10 +1043,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         for ir_id in to_free {
-            if !self.is_terminated() {
-                self.maybe_emit_drop_call(ir_id);
-                self.builder.build_free(ir_id);
-            }
+            self.emit_tracked_free(ir_id, true);
         }
     }
 
@@ -1059,15 +1052,12 @@ impl<'a> HirToMirContext<'a> {
     fn register_owned_value(&mut self, symbol: SymbolId, ir_id: IrId) {
         // Check if this variable already owns a heap value
         if let Some(old_ir_id) = self.owned_heap_values.get(&symbol).copied() {
-            // REASSIGNMENT: Free the old value immediately.
-            // This is always safe because the old value's IrId dominates the current block:
-            // - If from initial assignment: that block dominates all subsequent blocks
-            // - If from phi node: phi is in loop header which dominates loop body
-            if !self.is_terminated() {
-                // @:derive(Drop) — call drop() before Free
-                self.maybe_emit_drop_call(old_ir_id);
-                self.builder.build_free(old_ir_id);
-            }
+            // REASSIGNMENT: free the old value — but only when its
+            // definition dominates this block. `var x; if c { x = A }
+            // else { x = B }` lowers the arms sequentially, so the else
+            // arm sees A in the tracker even though A never runs on this
+            // path; freeing it here freed a live unrelated object.
+            self.emit_tracked_free(old_ir_id, true);
 
             // DON'T update scope entries - this caused dominator issues.
             // The scope tracks the ORIGINAL declaration which may be from a different block.
@@ -1339,7 +1329,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Emit Free for each variable at its last use
         for (symbol, ir_id) in to_drop {
-            self.builder.build_free(ir_id);
+            self.emit_tracked_free(ir_id, false);
             // Remove from owned_heap_values since it's been freed
             self.owned_heap_values.remove(&symbol);
         }
@@ -5441,9 +5431,7 @@ impl<'a> HirToMirContext<'a> {
                                         if let Some(old_ir_id) =
                                             self.owned_heap_values.remove(&symbol)
                                         {
-                                            if !self.is_terminated() {
-                                                self.builder.build_free(old_ir_id);
-                                            }
+                                            self.emit_tracked_free(old_ir_id, false);
                                         }
                                         self.reassigned_in_scope.insert(symbol);
                                     }
@@ -17358,14 +17346,53 @@ impl<'a> HirToMirContext<'a> {
                                 // Call-site symbol has no qualified name (common for cross-class
                                 // static method calls in multi-class files, e.g., Body.Jupiter()).
                                 // Fall back to searching function_map by bare name.
+                                // Never the currently-compiling function (a lone
+                                // same-named local — e.g. `.forward` inside a
+                                // forward — would self-bind into infinite
+                                // recursion), and for method calls never a
+                                // candidate whose class positively differs from
+                                // the receiver's.
+                                let recv_class_bare: Option<String> =
+                                    if *is_method && !args.is_empty() {
+                                        let type_table = self.type_table;
+                                        type_table
+                                            .get(args[0].ty)
+                                            .and_then(|ti| match &ti.kind {
+                                                TypeKind::Class { symbol_id, .. } => {
+                                                    Some(*symbol_id)
+                                                }
+                                                _ => None,
+                                            })
+                                            .and_then(|sid| self.symbol_table.get_symbol(sid))
+                                            .and_then(|s| self.string_interner.get(s.name))
+                                            .map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    };
                                 if let Some(func_name) = self.string_interner.get(sym_info.name) {
                                     for (func_sym, &func_id) in &self.function_map {
                                         if *func_sym == *symbol {
                                             continue;
                                         }
+                                        if Some(func_id) == self.builder.current_function {
+                                            continue;
+                                        }
                                         if let Some(func_sym_info) =
                                             self.symbol_table.get_symbol(*func_sym)
                                         {
+                                            if let (Some(rb), Some(qn)) = (
+                                                recv_class_bare.as_deref(),
+                                                func_sym_info
+                                                    .qualified_name
+                                                    .and_then(|q| self.string_interner.get(q)),
+                                            ) {
+                                                let parts: Vec<&str> = qn.split('.').collect();
+                                                if parts.len() >= 2
+                                                    && parts[parts.len() - 2] != rb
+                                                {
+                                                    continue;
+                                                }
+                                            }
                                             if let Some(fm_name) =
                                                 self.string_interner.get(func_sym_info.name)
                                             {
@@ -29749,6 +29776,97 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// @:derive(Drop) — emit a call to the user's drop() method on the given object.
+    /// Block that defines `ir` in the currently-built function (params →
+    /// entry block). None when no emitted instruction produces it.
+    fn def_block_of(&self, ir: IrId) -> Option<IrBlockId> {
+        let func_id = self.builder.current_function?;
+        let func = self.builder.module.functions.get(&func_id)?;
+        if func.signature.parameters.iter().any(|p| p.reg == ir) {
+            return Some(func.cfg.entry_block);
+        }
+        for (bid, block) in &func.cfg.blocks {
+            for inst in &block.instructions {
+                if inst.dest() == Some(ir) {
+                    return Some(*bid);
+                }
+            }
+        }
+        None
+    }
+
+    /// `def_bb` dominates `use_bb` on the CFG built so far: no entry→use
+    /// path avoids def. (BFS from entry skipping def; dominated ⟺ use
+    /// unreachable.)
+    fn block_dominates(&self, def_bb: IrBlockId, use_bb: IrBlockId) -> bool {
+        if def_bb == use_bb {
+            return true;
+        }
+        let Some(func_id) = self.builder.current_function else {
+            return false;
+        };
+        let Some(func) = self.builder.module.functions.get(&func_id) else {
+            return false;
+        };
+        let entry = func.cfg.entry_block;
+        if def_bb == entry {
+            return true;
+        }
+        let mut seen = BTreeSet::new();
+        let mut work = vec![entry];
+        while let Some(b) = work.pop() {
+            if b == def_bb || !seen.insert(b) {
+                continue;
+            }
+            if b == use_bb {
+                return false;
+            }
+            if let Some(blk) = func.cfg.blocks.get(&b) {
+                match &blk.terminator {
+                    crate::ir::IrTerminator::Branch { target } => work.push(*target),
+                    crate::ir::IrTerminator::CondBranch {
+                        true_target,
+                        false_target,
+                        ..
+                    } => {
+                        work.push(*true_target);
+                        work.push(*false_target);
+                    }
+                    crate::ir::IrTerminator::Switch { cases, default, .. } => {
+                        work.extend(cases.iter().map(|(_, t)| *t));
+                        work.push(*default);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        true
+    }
+
+    /// Drop+free a TRACKER-provided value only when its definition DOMINATES
+    /// this point. Tracker state (`owned_heap_values` / drop scopes) is
+    /// linear over LOWERING order, so a value registered in one arm of an
+    /// if/else leaks into the sibling arm's view — a free emitted there
+    /// names a register that never materialized on the executed path and
+    /// aliases an unrelated live object at runtime (use-after-free).
+    /// Skipping the free trades a bounded leak for correctness.
+    fn emit_tracked_free(&mut self, ir: IrId, with_drop_call: bool) {
+        if self.is_terminated() {
+            return;
+        }
+        let Some(cur) = self.builder.current_block else {
+            return;
+        };
+        match self.def_block_of(ir) {
+            Some(def_bb) if self.block_dominates(def_bb, cur) => {
+                if with_drop_call {
+                    self.maybe_emit_drop_call(ir);
+                }
+                self.builder.build_free(ir);
+            }
+            _ => {}
+        }
+    }
+
     /// Called before Free at scope exit, reassignment, and early return.
     fn emit_drop_call(&mut self, obj_reg: IrId, class_sym: SymbolId) {
         let drop_name = self.string_interner.intern("drop");
