@@ -1850,14 +1850,23 @@ impl<'a> HirToMirContext<'a> {
     /// Conservative: a qname shaped `pkg…Class.method` has its class in the
     /// second-to-last segment; when the class can't be read (no qname, or a bare
     /// name), it returns true so existing cross-module resolution is unchanged.
+    ///
+    /// The IrFunction's `qualified_name` is unset for the function currently
+    /// being lowered (the enclosing class's own methods, whose bodies are still
+    /// being emitted). Falling back to the defining symbol's qualified name —
+    /// stable regardless of lowering order — lets us reject the enclosing
+    /// class's same-named method when the receiver is a different, cross-module
+    /// class (e.g. `lmHead.forward` where `lmHead:Linear` must not bind to the
+    /// enclosing `LlamaModel.forward`).
     fn func_not_other_class(&self, func_id: IrFunctionId, class_short: &str) -> bool {
-        match self
+        let ir_qn = self
             .builder
             .module
             .functions
             .get(&func_id)
-            .and_then(|f| f.qualified_name.as_deref())
-        {
+            .and_then(|f| f.qualified_name.clone());
+        let qn = ir_qn.or_else(|| self.symbol_qualified_name_for_func(func_id));
+        match qn.as_deref() {
             Some(q) => {
                 let parts: Vec<&str> = q.split('.').collect();
                 if parts.len() >= 2 {
@@ -1868,6 +1877,30 @@ impl<'a> HirToMirContext<'a> {
             }
             None => true,
         }
+    }
+
+    /// Qualified name of the symbol that maps to `func_id` in the local or
+    /// external function maps. Lowering-order-independent fallback for class
+    /// identification when the IrFunction's own qualified name is not yet
+    /// populated (see `func_not_other_class`).
+    fn symbol_qualified_name_for_func(&self, func_id: IrFunctionId) -> Option<String> {
+        for (sym, &fid) in self
+            .function_map
+            .iter()
+            .chain(self.external_function_map.iter())
+        {
+            if fid == func_id {
+                if let Some(q) = self
+                    .symbol_table
+                    .get_symbol(*sym)
+                    .and_then(|s| s.qualified_name)
+                    .and_then(|qn| self.string_interner.get(qn))
+                {
+                    return Some(q.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Find a MIR function by its bare name in function_map
@@ -17352,23 +17385,22 @@ impl<'a> HirToMirContext<'a> {
                                 // recursion), and for method calls never a
                                 // candidate whose class positively differs from
                                 // the receiver's.
-                                let recv_class_bare: Option<String> =
-                                    if *is_method && !args.is_empty() {
-                                        let type_table = self.type_table;
-                                        type_table
-                                            .get(args[0].ty)
-                                            .and_then(|ti| match &ti.kind {
-                                                TypeKind::Class { symbol_id, .. } => {
-                                                    Some(*symbol_id)
-                                                }
-                                                _ => None,
-                                            })
-                                            .and_then(|sid| self.symbol_table.get_symbol(sid))
-                                            .and_then(|s| self.string_interner.get(s.name))
-                                            .map(|s| s.to_string())
-                                    } else {
-                                        None
-                                    };
+                                let recv_class_bare: Option<String> = if *is_method
+                                    && !args.is_empty()
+                                {
+                                    let type_table = self.type_table;
+                                    type_table
+                                        .get(args[0].ty)
+                                        .and_then(|ti| match &ti.kind {
+                                            TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                            _ => None,
+                                        })
+                                        .and_then(|sid| self.symbol_table.get_symbol(sid))
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                        .map(|s| s.to_string())
+                                } else {
+                                    None
+                                };
                                 if let Some(func_name) = self.string_interner.get(sym_info.name) {
                                     for (func_sym, &func_id) in &self.function_map {
                                         if *func_sym == *symbol {
@@ -17387,8 +17419,7 @@ impl<'a> HirToMirContext<'a> {
                                                     .and_then(|q| self.string_interner.get(q)),
                                             ) {
                                                 let parts: Vec<&str> = qn.split('.').collect();
-                                                if parts.len() >= 2
-                                                    && parts[parts.len() - 2] != rb
+                                                if parts.len() >= 2 && parts[parts.len() - 2] != rb
                                                 {
                                                     continue;
                                                 }
