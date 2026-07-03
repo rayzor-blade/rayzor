@@ -1663,6 +1663,9 @@ fn run_file(
                 tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
             }
             mir_module = modules.into_iter().next().unwrap();
+            // Link forward-declared SIMD MIR-wrapper stubs (cross-module imports
+            // leave `unreachable` stubs whose calls otherwise run as no-ops).
+            mir_module.link_selfcontained_wrapper_stubs();
             let after = mir_module.functions.len() + mir_module.extern_functions.len();
             if let Some(ref h) = progress_handle {
                 h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);

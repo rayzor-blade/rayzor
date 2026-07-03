@@ -309,6 +309,64 @@ impl Default for ModuleMetadata {
 }
 
 impl IrModule {
+    /// Link forward-declared MIR-wrapper stubs to their real body, within this
+    /// module.
+    ///
+    /// An `@:native` SIMD intrinsic (`SIMD16i8_load`, `SIMD4i32_dot16`, …)
+    /// lowers to a single self-contained vector op. When such an intrinsic is
+    /// used across a module boundary, the imported side carries a forward-
+    /// declared `unreachable` STUB while another copy in this merged module is
+    /// filled; the per-call redirect only fixes call sites whose id it can
+    /// match, so a stub reached through a decayed/cross-module id stays empty
+    /// and executes as a no-op (wrong result) plus call overhead. Copy the real
+    /// body over every same-named empty stub. Restricted to bodies that
+    /// reference no other function, so the CFG copy needs no id renumbering.
+    pub fn link_selfcontained_wrapper_stubs(&mut self) {
+        use crate::ir::{IrInstruction, IrTerminator};
+        let refs_other_fn = |cfg: &crate::ir::IrControlFlowGraph| {
+            cfg.blocks.values().any(|b| {
+                b.instructions.iter().any(|i| {
+                    matches!(
+                        i,
+                        IrInstruction::CallDirect { .. }
+                            | IrInstruction::FunctionRef { .. }
+                            | IrInstruction::MakeClosure { .. }
+                    )
+                })
+            })
+        };
+        let is_stub = |cfg: &crate::ir::IrControlFlowGraph| {
+            cfg.blocks.len() == 1
+                && cfg.blocks.values().all(|b| {
+                    b.instructions.is_empty()
+                        && matches!(b.terminator, IrTerminator::Unreachable)
+                })
+        };
+        // One real body per wrapper name.
+        let mut bodies: BTreeMap<String, crate::ir::IrControlFlowGraph> = BTreeMap::new();
+        for func in self.functions.values() {
+            let name = func.qualified_name.as_deref().unwrap_or(&func.name);
+            if !func.cfg.blocks.is_empty()
+                && !is_stub(&func.cfg)
+                && !refs_other_fn(&func.cfg)
+                && !bodies.contains_key(name)
+            {
+                bodies.insert(name.to_string(), func.cfg.clone());
+            }
+        }
+        if bodies.is_empty() {
+            return;
+        }
+        for func in self.functions.values_mut() {
+            if is_stub(&func.cfg) {
+                let name = func.qualified_name.as_deref().unwrap_or(&func.name);
+                if let Some(cfg) = bodies.get(name) {
+                    func.cfg = cfg.clone();
+                }
+            }
+        }
+    }
+
     /// Create a new HIR module
     pub fn new(name: String, source_file: String) -> Self {
         Self {
