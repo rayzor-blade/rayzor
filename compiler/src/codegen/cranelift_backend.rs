@@ -4750,16 +4750,33 @@ impl CraneliftBackend {
                 let b_v = *value_map
                     .get(b)
                     .ok_or_else(|| format!("VectorDot b {:?} not found", b))?;
+                // Build the EXACT tree the AArch64 FEAT_DotProd ISLE rule
+                // (lower.isle rule 8, from #13640) matches, so it folds to a
+                // single `sdot`:
+                //   iadd(iadd_pairwise(iadd_pairwise(swiden_low(lo),  swiden_high(lo)),
+                //                      iadd_pairwise(swiden_low(hi),  swiden_high(hi))),
+                //        acc)
+                //   lo = imul(swiden_low(a),  swiden_low(b))
+                //   hi = imul(swiden_high(a), swiden_high(b))
+                // Each i16 product is widened to i32 SEPARATELY before the
+                // pairwise reduction — the previous tree reduced lo+hi in i16
+                // first, which is the same value but a shape the SDOT rule
+                // doesn't recognize, so it fell back to smull/addp. Without
+                // FEAT_DotProd this same tree lowers to the equivalent (correct)
+                // widening chain.
                 let a_lo = builder.ins().swiden_low(a_v);
                 let a_hi = builder.ins().swiden_high(a_v);
                 let b_lo = builder.ins().swiden_low(b_v);
                 let b_hi = builder.ins().swiden_high(b_v);
-                let p_lo = builder.ins().imul(a_lo, b_lo);
-                let p_hi = builder.ins().imul(a_hi, b_hi);
-                let dot = builder.ins().iadd_pairwise(p_lo, p_hi);
-                let dot_lo = builder.ins().swiden_low(dot);
-                let dot_hi = builder.ins().swiden_high(dot);
-                let pair = builder.ins().iadd_pairwise(dot_lo, dot_hi);
+                let lo = builder.ins().imul(a_lo, b_lo);
+                let hi = builder.ins().imul(a_hi, b_hi);
+                let lo_w_lo = builder.ins().swiden_low(lo);
+                let lo_w_hi = builder.ins().swiden_high(lo);
+                let hi_w_lo = builder.ins().swiden_low(hi);
+                let hi_w_hi = builder.ins().swiden_high(hi);
+                let inner_lo = builder.ins().iadd_pairwise(lo_w_lo, lo_w_hi);
+                let inner_hi = builder.ins().iadd_pairwise(hi_w_lo, hi_w_hi);
+                let pair = builder.ins().iadd_pairwise(inner_lo, inner_hi);
                 let result = builder.ins().iadd(pair, acc_v);
                 value_map.insert(*dest, result);
             }
