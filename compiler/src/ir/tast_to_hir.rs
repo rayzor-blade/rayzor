@@ -5825,7 +5825,120 @@ impl<'a> TastToHirContext<'a> {
                     self.collect_var_refs_stmt(&case.body, refs);
                 }
             }
-            _ => {} // Other expression types - add as needed
+            // A static call (`Class.method(args)`) has no receiver but its
+            // arguments still reference outer variables — dropping them here
+            // loses every capture used only as a static-call argument.
+            TypedExpressionKind::StaticMethodCall { arguments, .. } => {
+                for arg in arguments {
+                    self.collect_var_refs_expr(arg, refs);
+                }
+            }
+            TypedExpressionKind::New { arguments, .. } => {
+                for arg in arguments {
+                    self.collect_var_refs_expr(arg, refs);
+                }
+            }
+            TypedExpressionKind::Cast { expression, .. } => {
+                self.collect_var_refs_expr(expression, refs);
+            }
+            TypedExpressionKind::Is { expression, .. } => {
+                self.collect_var_refs_expr(expression, refs);
+            }
+            TypedExpressionKind::Await { expression, .. } => {
+                self.collect_var_refs_expr(expression, refs);
+            }
+            TypedExpressionKind::Throw { expression, .. } => {
+                self.collect_var_refs_expr(expression, refs);
+            }
+            TypedExpressionKind::MethodReference { receiver, .. } => {
+                self.collect_var_refs_expr(receiver, refs);
+            }
+            TypedExpressionKind::ArrayLiteral { elements, .. } => {
+                for elem in elements {
+                    self.collect_var_refs_expr(elem, refs);
+                }
+            }
+            TypedExpressionKind::MapLiteral { entries, .. } => {
+                for entry in entries {
+                    self.collect_var_refs_expr(&entry.key, refs);
+                    self.collect_var_refs_expr(&entry.value, refs);
+                }
+            }
+            TypedExpressionKind::ObjectLiteral { fields, .. } => {
+                for field in fields {
+                    self.collect_var_refs_expr(&field.value, refs);
+                }
+            }
+            TypedExpressionKind::StringInterpolation { parts, .. } => {
+                for part in parts {
+                    if let StringInterpolationPart::Expression(e) = part {
+                        self.collect_var_refs_expr(e, refs);
+                    }
+                }
+            }
+            TypedExpressionKind::VarDeclarationExpr { initializer, .. } => {
+                self.collect_var_refs_expr(initializer, refs);
+            }
+            TypedExpressionKind::FinalDeclarationExpr { initializer, .. } => {
+                self.collect_var_refs_expr(initializer, refs);
+            }
+            TypedExpressionKind::ArrayComprehension {
+                for_parts,
+                expression,
+                ..
+            } => {
+                for fp in for_parts {
+                    self.collect_var_refs_expr(&fp.iterator, refs);
+                }
+                self.collect_var_refs_expr(expression, refs);
+            }
+            TypedExpressionKind::MapComprehension {
+                for_parts,
+                key_expr,
+                value_expr,
+                ..
+            } => {
+                for fp in for_parts {
+                    self.collect_var_refs_expr(&fp.iterator, refs);
+                }
+                self.collect_var_refs_expr(key_expr, refs);
+                self.collect_var_refs_expr(value_expr, refs);
+            }
+            // Nested closure: its body may reference variables that are also
+            // free in this closure. compute_captures removes this closure's
+            // own locals (incl. nested-closure params via collect_local_defs).
+            TypedExpressionKind::FunctionLiteral { body, .. } => {
+                for stmt in body {
+                    self.collect_var_refs_stmt(stmt, refs);
+                }
+            }
+            TypedExpressionKind::Try {
+                try_expr,
+                catch_clauses,
+                finally_block,
+                ..
+            } => {
+                self.collect_var_refs_expr(try_expr, refs);
+                for catch in catch_clauses {
+                    self.collect_var_refs_stmt(&catch.body, refs);
+                }
+                if let Some(finally) = finally_block {
+                    self.collect_var_refs_expr(finally, refs);
+                }
+            }
+            // Leaf / non-variable-referencing kinds.
+            TypedExpressionKind::Literal { .. }
+            | TypedExpressionKind::This { .. }
+            | TypedExpressionKind::Super { .. }
+            | TypedExpressionKind::Null
+            | TypedExpressionKind::Break
+            | TypedExpressionKind::Continue
+            | TypedExpressionKind::StaticFieldAccess { .. }
+            | TypedExpressionKind::PatternPlaceholder { .. }
+            | TypedExpressionKind::Meta { .. }
+            | TypedExpressionKind::DollarIdent { .. }
+            | TypedExpressionKind::MacroExpression { .. }
+            | TypedExpressionKind::CompilerSpecific { .. } => {}
         }
     }
 
