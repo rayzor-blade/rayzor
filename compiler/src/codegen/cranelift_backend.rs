@@ -2541,13 +2541,25 @@ impl CraneliftBackend {
                         builder.ins().fcvt_from_sint(types::F64, arg)
                     };
 
-                    let result = match callee_name {
+                    let rounded = match callee_name {
                         "haxe_math_sqrt" => builder.ins().sqrt(float_arg),
                         "haxe_math_abs" => builder.ins().fabs(float_arg),
                         "haxe_math_floor" => builder.ins().floor(float_arg),
                         "haxe_math_ceil" => builder.ins().ceil(float_arg),
                         "haxe_math_round" => builder.ins().nearest(float_arg),
                         _ => unreachable!(),
+                    };
+                    // floor/ceil/round return `Int` in Haxe (runtime signature
+                    // `(f64) -> i32`, `x.floor() as i32`): convert the rounded
+                    // f64 to i32 so the result register matches the declared
+                    // type. Without this the caller reads a float register where
+                    // it expects an int, scrambling downstream values. Saturating
+                    // conversion mirrors Rust's `as i32`. sqrt/abs return Float.
+                    let result = match callee_name {
+                        "haxe_math_floor" | "haxe_math_ceil" | "haxe_math_round" => {
+                            builder.ins().fcvt_to_sint_sat(types::I32, rounded)
+                        }
+                        _ => rounded,
                     };
                     debug!(
                         "Math intrinsic: {} -> native Cranelift instruction",
