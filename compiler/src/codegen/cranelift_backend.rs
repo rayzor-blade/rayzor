@@ -1487,8 +1487,25 @@ impl CraneliftBackend {
         // same-name functions with different arity. Reusing those poisons the
         // callee signature and Cranelift panics during call lowering, so reuse
         // only when the declared ABI is identical.
+        // Bare-name reuse is ONLY sound for genuine runtime/extern symbols and
+        // stdlib MIR wrappers (one implementation per name by contract). A
+        // BODIED user/materialized method must never collapse onto a
+        // same-named entry: an empty-bodied stub named bare `forward` lands
+        // in `runtime_functions` via the extern path, and every class's
+        // `forward` shares that name and (ptr…)->ptr signature — collapsing
+        // rebinds e.g. TransformerBlock.forward's thunk target to whichever
+        // class's `forward` claimed the id first (same disease as the
+        // per-file `__vtable_init__` collapse, 62f69aa7). Cross-module
+        // dedup for real methods happens by QUALIFIED name below.
+        let early_stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+        let name_reuse_allowed =
+            is_extern || early_stdlib_mapping.is_mir_wrapper_function(&function.name);
         let mut runtime_name_conflict = false;
-        if let Some(&existing_func_id) = self.runtime_functions.get(&function.name) {
+        if let Some(&existing_func_id) = self
+            .runtime_functions
+            .get(&function.name)
+            .filter(|_| name_reuse_allowed)
+        {
             let existing_decl = self
                 .module
                 .declarations()
@@ -1562,11 +1579,10 @@ impl CraneliftBackend {
             }
         }
 
-        // Determine linkage and name based on whether this is an extern function
-        let is_extern = function.cfg.blocks.is_empty();
-        let stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+        // Determine linkage and name based on whether this is an extern function.
+        // Reuse the mapping built for the name-reuse guard above.
         let is_stdlib_mir_wrapper =
-            !runtime_name_conflict && stdlib_mapping.is_mir_wrapper_function(&function.name);
+            !runtime_name_conflict && early_stdlib_mapping.is_mir_wrapper_function(&function.name);
         let (func_name, linkage) = if is_extern {
             // Extern functions use their actual name and Import linkage
             if runtime_name_conflict {
