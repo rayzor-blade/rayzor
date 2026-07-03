@@ -44,6 +44,20 @@ class Linear implements Module {
         this.paramName = paramName;
     }
 
+    /** Opt-in pure-Haxe Q4_K_M kernel (Phase 4 Haxification): set
+        RAYZOR_HAXE_MATMUL=1 to route quantised forwards through
+        `Q4Matmul.matmul` instead of the Rust FFI kernel. Cached after the
+        first read; -1 = unread. */
+    static var _haxeMatmul:Int = -1;
+
+    static function useHaxeMatmul():Bool {
+        if (_haxeMatmul < 0) {
+            var v = Sys.getEnv("RAYZOR_HAXE_MATMUL");
+            _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 0;
+        }
+        return _haxeMatmul == 1;
+    }
+
     /**
      * Build a Linear whose weight is a `QTensor` (compressed Q4_K_M
      * storage). Forward runs the fused dequant-matmul kernel — no F32
@@ -87,7 +101,11 @@ class Linear implements Module {
             // would leak one ref per Linear call (7+ per block, 16
             // blocks → 100+ leaked refs per generated token).
             var xClone = x.clone();
-            y = qweight.matmulXTQThreaded(xClone, 0);
+            if (useHaxeMatmul()) {
+                y = Q4Matmul.matmul(qweight, xClone);
+            } else {
+                y = qweight.matmulXTQThreaded(xClone, 0);
+            }
             xClone.free();
         } else {
             y = x.matmulT(weight);
