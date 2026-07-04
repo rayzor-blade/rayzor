@@ -9402,6 +9402,27 @@ impl<'a> HirToMirContext<'a> {
                                     IrType::F64,
                                 );
                             }
+                            // Same for narrow int lanes: Haxe `Int` is i32, so
+                            // widen with the accessor's SIGNED contract (the MIR
+                            // int cast zero-extends on Cranelift; `(x<<s)>>s`
+                            // arithmetic recovers the sign, and folds away
+                            // under a following `& 0xFF`). A raw i8 register
+                            // here otherwise degrades downstream typing.
+                            if matches!(elem_ty, IrType::I8 | IrType::I16) {
+                                let shift = if matches!(elem_ty, IrType::I8) {
+                                    24
+                                } else {
+                                    16
+                                };
+                                let widened = self.builder.build_cast(
+                                    extracted,
+                                    elem_ty.clone(),
+                                    IrType::I32,
+                                )?;
+                                let sh = self.builder.build_const(IrValue::I32(shift))?;
+                                let shl = self.builder.build_binop(BinaryOp::Shl, widened, sh)?;
+                                return self.builder.build_binop(BinaryOp::Shr, shl, sh);
+                            }
                             return Some(extracted);
                         }
                     }
