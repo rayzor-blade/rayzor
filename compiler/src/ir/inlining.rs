@@ -774,9 +774,16 @@ impl OptimizationPass for InliningPass {
                 }
             }
 
-            // Inline multiple call sites per iteration. Group by caller,
-            // then within each caller pick one site per block (back-to-front).
-            // Use BTreeMap for deterministic iteration order
+            // Inline call sites grouped by caller, processing each caller's
+            // sites in strictly descending instruction_index order. Descending
+            // order makes multiple inlines into the SAME block sound:
+            // inline_call_site only drains instructions AFTER the call index
+            // into the continuation block, so every lower-index call site in
+            // that block keeps both its block id and its instruction index.
+            // (Previously only ONE site per block per iteration was inlined;
+            // with max_iterations=5 that starved front-of-block call sites in
+            // large straight-line blocks — including InlineHint::Always ones.)
+            // Use BTreeMap for deterministic iteration order.
             let mut sites_by_caller: BTreeMap<IrFunctionId, Vec<CallSite>> = BTreeMap::new();
             for candidate in candidates {
                 sites_by_caller
@@ -789,23 +796,27 @@ impl OptimizationPass for InliningPass {
             }
 
             let mut any_inlined = false;
-            for (_caller_id, sites) in &sites_by_caller {
-                let mut inlined_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+            for (caller_id, sites) in &sites_by_caller {
+                let mut caller_modified = false;
                 for candidate in sites {
-                    if inlined_blocks.contains(&candidate.block) {
-                        continue;
-                    }
                     match Self::inline_call_site(module, candidate, &mut next_reg_id) {
                         Ok(()) => {
                             result.modified = true;
                             any_inlined = true;
-                            inlined_blocks.insert(candidate.block);
+                            caller_modified = true;
                             *result
                                 .stats
                                 .entry("functions_inlined".to_string())
                                 .or_insert(0) += 1;
                         }
                         Err(_) => {}
+                    }
+                }
+                // Splitting a block N times leaves cached predecessor lists
+                // stale (connect_blocks only appends); rebuild from terminators.
+                if caller_modified {
+                    if let Some(caller_func) = module.functions.get_mut(caller_id) {
+                        caller_func.cfg.recompute_predecessors();
                     }
                 }
             }

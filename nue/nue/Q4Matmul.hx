@@ -91,7 +91,7 @@ class Q4Matmul {
         Decodes this block's f32 d/dmin and its 8 6-bit scale/min pairs inline
         from the 16-byte header — no shared pre-decode buffer, so it is safe to
         call concurrently across output-row bands. */
-    static function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
+    static inline function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
         var hdr = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk)));
         var h0 = hdr[0] & 0xFF; var h1 = hdr[1] & 0xFF; var h2 = hdr[2] & 0xFF; var h3 = hdr[3] & 0xFF;
         var h4 = hdr[4] & 0xFF; var h5 = hdr[5] & 0xFF; var h6 = hdr[6] & 0xFF; var h7 = hdr[7] & 0xFF;
@@ -137,7 +137,7 @@ class Q4Matmul {
         0..63 → −32..31 bias folds into 32·Σx via the per-16 bsums. Mirrors
         runtime-core `vec_dot_q6_K_q8_K`. Safe to call concurrently across
         output-row bands (no shared scratch). */
-    static function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
+    static inline function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
         var scVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 192)));
         var dVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 194)));
         var d = f16ToF32((dVec[14] & 0xFF) | ((dVec[15] & 0xFF) << 8));
