@@ -2,6 +2,7 @@ package nue.arch;
 
 import nue.Module;
 import nue.Linear;
+import nue.Q4Matmul;
 import nue.Embedding;
 import nue.model.ModelMetadata;
 import nue.model.NamedTensorMap;
@@ -97,8 +98,17 @@ class LlamaArch implements ArchBuilder {
         }
 
         var blocks:Array<Module> = [];
+        // One persistent spin pool shared by every quant Linear (pure-Haxe
+        // matmul path only). Owned by the model; Main must shut it down.
+        var sp:Null<rayzor.concurrent.SpinPool> = null;
+        // Opt-in until Thread.park lands: without park the idle workers
+        // yield-spin/sleep, which contends with the FFI kernels' Rust pool
+        // and nets slower than serial on laptop-class hardware.
+        if (Linear.useHaxeMatmul() && Sys.getEnv("RAYZOR_HAXE_MATMUL_POOL") != null)
+            sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
+
         for (i in 0...meta.numLayers) {
-            blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8));
+            blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8, sp));
         }
 
         var outputNorm = new RMSNorm(
@@ -141,19 +151,23 @@ class LlamaArch implements ArchBuilder {
                     }
                 }
                 lmHead = Linear.fromQuant(lmQt, null, "weight");
+                lmHead.pool = sp;
             } else {
                 lmHead = new Linear(embed.weight, null, "weight");
             }
         } else {
-            lmHead = buildLinear(weights, "output.weight", null);
+            lmHead = buildLinear(weights, "output.weight", null, sp);
         }
 
-        return new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
+        var model = new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
+        model.spinPool = sp;
+        return model;
     }
 
     static function buildBlock(
         meta:ModelMetadata, layerIndex:Int, dtype:DType,
-        rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool
+        rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool,
+        ?sp:rayzor.concurrent.SpinPool
     ):TransformerBlock {
         var prefix = "blk." + layerIndex + ".";
         var attnNorm = new RMSNorm(
@@ -170,10 +184,10 @@ class LlamaArch implements ArchBuilder {
                     + " is not a multiple of 32 — falling back to F32");
             }
         }
-        var qProj = buildLinear(weights, prefix + "attn_q.weight", null);
-        var kProj = buildLinear(weights, prefix + "attn_k.weight", null);
-        var vProj = buildLinear(weights, prefix + "attn_v.weight", null);
-        var oProj = buildLinear(weights, prefix + "attn_output.weight", null);
+        var qProj = buildLinear(weights, prefix + "attn_q.weight", null, sp);
+        var kProj = buildLinear(weights, prefix + "attn_k.weight", null, sp);
+        var vProj = buildLinear(weights, prefix + "attn_v.weight", null, sp);
+        var oProj = buildLinear(weights, prefix + "attn_output.weight", null, sp);
         var attn = new GQAttention(
             qProj, kProj, vProj, oProj, rope, cache,
             meta.numHeads, meta.numKvHeads, meta.headDim
@@ -185,9 +199,9 @@ class LlamaArch implements ArchBuilder {
         );
 
         var ffn = new SwiGLU(
-            buildLinear(weights, prefix + "ffn_gate.weight", null),
-            buildLinear(weights, prefix + "ffn_up.weight", null),
-            buildLinear(weights, prefix + "ffn_down.weight", null)
+            buildLinear(weights, prefix + "ffn_gate.weight", null, sp),
+            buildLinear(weights, prefix + "ffn_up.weight", null, sp),
+            buildLinear(weights, prefix + "ffn_down.weight", null, sp)
         );
 
         return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, prefix);
@@ -197,7 +211,8 @@ class LlamaArch implements ArchBuilder {
      *  the loader registered a quantised entry. Bias is also F32 in GGUF
      *  even for Q4_K_M weights, so it's read via the F32 path. */
     static function buildLinear(weights:NamedTensorMap, weightName:String,
-                                biasName:Null<String>):Linear {
+                                biasName:Null<String>,
+                                ?sp:rayzor.concurrent.SpinPool):Linear {
         var b:Null<Tensor> = (biasName == null) ? null : weights.get(biasName);
         if (weights.isQuantised(weightName)) {
             var qw = weights.getQuant(weightName);
@@ -221,9 +236,13 @@ class LlamaArch implements ArchBuilder {
                     qw = rq;
                 }
             }
-            return Linear.fromQuant(qw, b, "weight");
+            var lq = Linear.fromQuant(qw, b, "weight");
+            lq.pool = sp;
+            return lq;
         }
-        return new Linear(takeWeight(weights, weightName), b, "weight");
+        var lf = new Linear(takeWeight(weights, weightName), b, "weight");
+        lf.pool = sp;
+        return lf;
     }
 
     /**

@@ -29,6 +29,19 @@ import rayzor.ds.Tensor;
  * ```
  */
 class LlamaModel implements CausalLanguageModel {
+    /** Spin pool shared by the quant Linears (pure-Haxe matmul); joined by
+        shutdownPool(). Null when the FFI matmul path is active. */
+    public var spinPool:Null<rayzor.concurrent.SpinPool> = null;
+
+    /** Join the matmul pool's workers. Call before process exit — the
+        runtime waits on all live threads before JIT teardown. */
+    public function shutdownPool():Void {
+        if (spinPool != null) {
+            spinPool.shutdown();
+            spinPool = null;
+        }
+    }
+
     public var metadata:ModelMetadata;
     public var embedTokens:Embedding;
     public var blocks:Array<Module>;

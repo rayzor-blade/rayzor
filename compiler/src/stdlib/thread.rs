@@ -24,6 +24,9 @@ pub fn build_thread_type(builder: &mut MirBuilder) {
     build_thread_join(builder);
     build_thread_is_finished(builder);
     build_thread_yield_now(builder);
+    build_thread_register_parkable(builder);
+    build_thread_park(builder);
+    build_thread_unpark(builder);
     build_thread_sleep(builder);
     build_thread_current_id(builder);
 
@@ -85,6 +88,32 @@ fn declare_thread_externs(builder: &mut MirBuilder) {
     let func_id = builder
         .begin_function("rayzor_thread_sleep")
         .param("millis", i32_ty)
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_thread_register_parkable() -> i64
+    let i64_ty = crate::ir::IrType::I64;
+    let func_id = builder
+        .begin_function("rayzor_thread_register_parkable")
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_thread_park()
+    let func_id = builder
+        .begin_function("rayzor_thread_park")
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_thread_unpark(id: i64)
+    let func_id = builder
+        .begin_function("rayzor_thread_unpark")
+        .param("id", i64_ty)
         .returns(void_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -256,6 +285,63 @@ fn build_thread_yield_now(builder: &mut MirBuilder) {
         .expect("rayzor_thread_yield_now not found");
     let _result = builder.call(yield_id, vec![]);
 
+    builder.ret(None);
+}
+
+/// Build: fn Thread_registerParkable() -> i64
+fn build_thread_register_parkable(builder: &mut MirBuilder) {
+    let i64_ty = crate::ir::IrType::I64;
+    let func_id = builder
+        .begin_function("Thread_registerParkable")
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ext = builder
+        .get_function_by_name("rayzor_thread_register_parkable")
+        .expect("rayzor_thread_register_parkable not found");
+    let result = builder.call(ext, vec![]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Build: fn Thread_park()
+fn build_thread_park(builder: &mut MirBuilder) {
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("Thread_park")
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ext = builder
+        .get_function_by_name("rayzor_thread_park")
+        .expect("rayzor_thread_park not found");
+    let _ = builder.call(ext, vec![]);
+    builder.ret(None);
+}
+
+/// Build: fn Thread_unpark(id: i64)
+fn build_thread_unpark(builder: &mut MirBuilder) {
+    let void_ty = builder.void_type();
+    let i64_ty = crate::ir::IrType::I64;
+    let func_id = builder
+        .begin_function("Thread_unpark")
+        .param("id", i64_ty)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let id = builder.get_param(0);
+    let ext = builder
+        .get_function_by_name("rayzor_thread_unpark")
+        .expect("rayzor_thread_unpark not found");
+    let _ = builder.call(ext, vec![id]);
     builder.ret(None);
 }
 

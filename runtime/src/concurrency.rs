@@ -294,6 +294,41 @@ pub unsafe extern "C" fn rayzor_thread_is_finished(_handle: *const u8) -> bool {
     false
 }
 
+/// Park/unpark registry: `register_parkable` hands the calling thread a
+/// small id and stores its handle; `unpark(id)` wakes it. std's park token
+/// makes the pair race-free (an unpark before park makes the next park
+/// return immediately), so a dispatcher can flip a state cell and unpark
+/// without a lost-wakeup window.
+static PARKABLE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<i64, std::thread::Thread>>,
+> = std::sync::OnceLock::new();
+static PARKABLE_NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+#[no_mangle]
+pub extern "C" fn rayzor_thread_register_parkable() -> i64 {
+    let id = PARKABLE_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PARKABLE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(id, thread::current());
+    id
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_thread_park() {
+    thread::park();
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_thread_unpark(id: i64) {
+    if let Some(map) = PARKABLE.get() {
+        if let Some(t) = map.lock().unwrap().get(&id) {
+            t.unpark();
+        }
+    }
+}
+
 /// Yield execution to other threads
 #[no_mangle]
 pub extern "C" fn rayzor_thread_yield_now() {

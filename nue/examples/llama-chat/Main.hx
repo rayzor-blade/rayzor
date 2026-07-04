@@ -8,6 +8,7 @@ import nue.sampling.GenerationLoop;
 import nue.tokenizer.Tokenizer;
 import nue.tokenizer.BPETokenizer;
 import nue.CausalLanguageModel;
+import nue.arch.LlamaModel;
 import rayzor.ds.Tensor;
 
 /**
@@ -467,6 +468,9 @@ class Main {
         if (Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
             trace("[output] " + output);
         }
+        // Join the Haxe-matmul spin pool's workers (no-op on the FFI path):
+        // the runtime waits on all live threads before JIT teardown.
+        cast(loaded.model, LlamaModel).shutdownPool();
     }
 
     static inline function fmt(x:Float):String {
