@@ -1825,15 +1825,16 @@ impl TieredBackend {
         // Functions using SIMD instructions skip the interpreter tier since
         // the interpreter returns void for all vector operations.
         for (func_id, func) in &module.functions {
-            // SIMD-heavy functions are the compute hot path (quant matmul dots,
-            // vector kernels). Compile them straight at Optimized — cranelift's
-            // optimizer (backtracking regalloc + egraph) plus MIR O2 — instead
-            // of Baseline, whose opt="none" + single_pass regalloc spills every
-            // vector op to the stack and never inlines. The interpreter can't
-            // run vector ops at all (returns void), so SIMD functions must JIT
-            // regardless; Optimized just picks the good codegen from the start.
-            let tier = if Self::function_uses_simd(func) {
-                OptimizationTier::Optimized
+            let tier = if initial_tier == OptimizationTier::Interpreted
+                && Self::function_uses_simd(func)
+            {
+                if self.config.verbosity >= 1 {
+                    debug!(
+                        "[TieredBackend] Force-promoting {:?} to Baseline (uses SIMD)",
+                        func_id
+                    );
+                }
+                OptimizationTier::Baseline
             } else {
                 initial_tier
             };
