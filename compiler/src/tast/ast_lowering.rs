@@ -13447,16 +13447,37 @@ impl<'a> AstLowering<'a> {
                 }
             }
             TypedExpressionKind::ArrayAccess { array, .. } => {
-                // Extract element type from array type
-                let type_table = self.context.type_table.borrow();
-                let result = match type_table.get(array.expr_type) {
-                    Some(array_type) => match &array_type.kind {
-                        crate::tast::core::TypeKind::Array { element_type } => Ok(*element_type),
-                        _other => Ok(type_table.dynamic_type()),
-                    },
-                    None => Ok(type_table.dynamic_type()),
+                // Extract element type from array type. For a class/abstract
+                // receiver (e.g. an @:arrayAccess extern abstract like
+                // SIMD16i8), resolve the element type from its `get` accessor
+                // instead of collapsing to Dynamic — a Dynamic-typed read
+                // boxes the extracted scalar (`cast i8 -> *void`) and poisons
+                // all downstream arithmetic typing.
+                let accessor_sym = {
+                    let type_table = self.context.type_table.borrow();
+                    match type_table.get(array.expr_type).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Array { element_type }) => {
+                            return Ok(*element_type);
+                        }
+                        Some(
+                            crate::tast::core::TypeKind::Class { symbol_id, .. }
+                            | crate::tast::core::TypeKind::Abstract { symbol_id, .. },
+                        ) => Some(*symbol_id),
+                        _ => None,
+                    }
                 };
-                result
+                if let Some(class_sym) = accessor_sym {
+                    if let Some(get_sym) = self.find_wrapper_get_method(class_sym) {
+                        if let Ok(ret) =
+                            self.infer_method_call_return_type(get_sym, array.expr_type)
+                        {
+                            if ret.is_valid() {
+                                return Ok(ret);
+                            }
+                        }
+                    }
+                }
+                Ok(self.context.type_table.borrow().dynamic_type())
             }
             TypedExpressionKind::MethodCall {
                 receiver,
