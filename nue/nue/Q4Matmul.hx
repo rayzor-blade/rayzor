@@ -2,6 +2,7 @@ package nue;
 
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
+import rayzor.ds.QScheme;
 import rayzor.ds.DType;
 import rayzor.SIMD4i32;
 import rayzor.SIMD16i8;
@@ -92,10 +93,10 @@ class Q4Matmul {
         call concurrently across output-row bands. */
     static function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
         var hdr = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk)));
-        var h0 = hdr.get(0) & 0xFF; var h1 = hdr.get(1) & 0xFF; var h2 = hdr.get(2) & 0xFF; var h3 = hdr.get(3) & 0xFF;
-        var h4 = hdr.get(4) & 0xFF; var h5 = hdr.get(5) & 0xFF; var h6 = hdr.get(6) & 0xFF; var h7 = hdr.get(7) & 0xFF;
-        var h8 = hdr.get(8) & 0xFF; var h9 = hdr.get(9) & 0xFF; var h10 = hdr.get(10) & 0xFF; var h11 = hdr.get(11) & 0xFF;
-        var h12 = hdr.get(12) & 0xFF; var h13 = hdr.get(13) & 0xFF; var h14 = hdr.get(14) & 0xFF; var h15 = hdr.get(15) & 0xFF;
+        var h0 = hdr[0] & 0xFF; var h1 = hdr[1] & 0xFF; var h2 = hdr[2] & 0xFF; var h3 = hdr[3] & 0xFF;
+        var h4 = hdr[4] & 0xFF; var h5 = hdr[5] & 0xFF; var h6 = hdr[6] & 0xFF; var h7 = hdr[7] & 0xFF;
+        var h8 = hdr[8] & 0xFF; var h9 = hdr[9] & 0xFF; var h10 = hdr[10] & 0xFF; var h11 = hdr[11] & 0xFF;
+        var h12 = hdr[12] & 0xFF; var h13 = hdr[13] & 0xFF; var h14 = hdr[14] & 0xFF; var h15 = hdr[15] & 0xFF;
         var d = f16ToF32(h0 | (h1 << 8));
         var dmin = f16ToF32(h2 | (h3 << 8));
         var sc0 = h4 & 63; var sc1 = h5 & 63; var sc2 = h6 & 63; var sc3 = h7 & 63;
@@ -130,25 +131,79 @@ class Q4Matmul {
         return xd * (d * isum.sum() - dmin * imin);
     }
 
-    // Forced-node pool, built once. `WorkerPool.global()` derives its worker
-    // count from CPU topology, which reports a single node on UMA hardware
-    // (Apple Silicon) and would run the row bands serially; force one worker
-    // per logical CPU so the row loop actually fans out. Overridable with
-    // RAYZOR_HAXE_MATMUL_WORKERS.
-    static var _pool:WorkerPool = null;
-
-    static function workers():WorkerPool {
-        if (_pool == null) {
-            var n = CpuTopology.cpuCount();
-            var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
-            if (env != null) {
-                var v = Std.parseInt(env);
-                if (v != null && v > 0) n = v;
+    /** One Q6_K super-block's f32 contribution (256 weights, 210-byte block).
+        Rebuilds each 6-bit weight from its ql low-nibble + qh 2-bit pair and
+        dots it against the shared Q8_K activation with SDOT; the unsigned
+        0..63 → −32..31 bias folds into 32·Σx via the per-16 bsums. Mirrors
+        runtime-core `vec_dot_q6_K_q8_K`. Safe to call concurrently across
+        output-row bands (no shared scratch). */
+    static function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
+        var scVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 192)));
+        var dVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 194)));
+        var d = f16ToF32((dVec[14] & 0xFF) | ((dVec[15] & 0xFF) << 8));
+        var mask = SIMD16i8.splat(0x0F);
+        var mask2 = SIMD16i8.splat(0x03);
+        var sumTerm1 = 0.0;
+        var sumTerm2 = 0.0;
+        for (n in 0...2) {
+            var qlB = wBlk + n * 64;
+            var qhB = wBlk + 128 + n * 32;
+            var scOff = n * 8;
+            var outOff = n * 128;
+            var ql0 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB)));
+            var ql1 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 16)));
+            var ql2 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 32)));
+            var ql3 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 48)));
+            var qh0 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qhB)));
+            var qh1 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qhB + 16)));
+            for (j in 0...4) {
+                var qlP0 = (j == 0) ? SIMD16i8.and(ql0, mask)
+                         : (j == 1) ? SIMD16i8.and(ql2, mask)
+                         : (j == 2) ? SIMD16i8.ushr(ql0, 4) : SIMD16i8.ushr(ql2, 4);
+                var qlP1 = (j == 0) ? SIMD16i8.and(ql1, mask)
+                         : (j == 1) ? SIMD16i8.and(ql3, mask)
+                         : (j == 2) ? SIMD16i8.ushr(ql1, 4) : SIMD16i8.ushr(ql3, 4);
+                var qhP0 = (j == 0) ? SIMD16i8.and(qh0, mask2)
+                         : (j == 1) ? SIMD16i8.and(SIMD16i8.ushr(qh0, 2), mask2)
+                         : (j == 2) ? SIMD16i8.and(SIMD16i8.ushr(qh0, 4), mask2) : SIMD16i8.ushr(qh0, 6);
+                var qhP1 = (j == 0) ? SIMD16i8.and(qh1, mask2)
+                         : (j == 1) ? SIMD16i8.and(SIMD16i8.ushr(qh1, 2), mask2)
+                         : (j == 2) ? SIMD16i8.and(SIMD16i8.ushr(qh1, 4), mask2) : SIMD16i8.ushr(qh1, 6);
+                var qLo = SIMD16i8.or(qlP0, SIMD16i8.shl(qhP0, 4));
+                var qHi = SIMD16i8.or(qlP1, SIMD16i8.shl(qhP1, 4));
+                var xSpan = aBlk + outOff + j * 32;
+                var xLo = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan)));
+                var xHi = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan + 16)));
+                var sdotLo = SIMD4i32.dot(SIMD4i32.splat(0), xLo, qLo).sum();
+                var sdotHi = SIMD4i32.dot(SIMD4i32.splat(0), xHi, qHi).sum();
+                var dScLo:Float = d * scVec.get(scOff + 2 * j);
+                var dScHi:Float = d * scVec.get(scOff + 2 * j + 1);
+                sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
+                var bi = bsBase + ((outOff + j * 32) >> 4);
+                sumTerm2 += 32.0 * dScLo * bsums.getInt32(bi * 4)
+                          + 32.0 * dScHi * bsums.getInt32((bi + 1) * 4);
             }
-            if (n < 1) n = 1;
-            _pool = WorkerPool.withForcedNodes(n);
         }
-        return _pool;
+        return xd * (sumTerm1 - sumTerm2);
+    }
+
+    // `WorkerPool.global()` derives its worker count from CPU topology, which
+    // reports a single node on UMA hardware (Apple Silicon) and would run the
+    // row bands serially; force one worker per logical CPU so the row loop
+    // actually fans out. Overridable with RAYZOR_HAXE_MATMUL_WORKERS. Built
+    // per call (a WorkerPool is just a node-count holder, and parallelRows
+    // spawns fresh threads each call regardless) — NOT via a static field,
+    // whose mutations don't reliably survive across calls on the JIT baseline
+    // tier and left the pool receiver reading as garbage.
+    static function workers():WorkerPool {
+        var n = CpuTopology.cpuCount();
+        var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
+        if (env != null) {
+            var v = Std.parseInt(env);
+            if (v != null && v > 0) n = v;
+        }
+        if (n < 1) n = 1;
+        return WorkerPool.withForcedNodes(n);
     }
 
     /**
@@ -164,28 +219,38 @@ class Q4Matmul {
         var wBase = qw.dataPtr();
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
+        // Q4_K_M GGUFs promote accuracy-sensitive tensors (attn_v, ffn_down)
+        // to Q6_K, which has a different 210-byte super-block. Dispatch to the
+        // matching per-block dot; the Q8_K activation side is scheme-agnostic.
+        var isQ6 = (qw.scheme() == QScheme.Q6_K);
+        var blockBytes = isQ6 ? 210 : 144;
 
         var qs = Bytes.alloc(K);
         var bsums = Bytes.alloc(bpr * 16 * 4);
         var dBytes = Bytes.alloc(bpr * 8);
 
         var y = Tensor.zeros([batch, rows], DType.F32);
-        var yPtr = y.data();
         var pool = workers();
 
         for (r in 0...batch) {
             quantizeQ8K(x, r * K, K, qs, bsums, dBytes);
             var aBase = qs.address();
             var ob = r * rows;
+            // Write results with the dtype-aware flat setter, NOT a raw
+            // `y.data():Ptr<Float>` + `write()`: `Float` is f64, so the raw
+            // store lands 8 bytes at an 8-byte stride and corrupts the F32
+            // output buffer. setFlat narrows to the tensor's element type.
             pool.parallelRows(rows, function(n0:Int, n1:Int, node:Int):Void {
                 for (n in n0...n1) {
                     var sum = 0.0;
                     for (b in 0...bpr) {
                         var blk = n * bpr + b;
-                        sum += q4DotMA4(wBase, blk * 144, aBase, b * 256, bsums, b * 16, dBytes.getDouble(b * 8));
+                        var xdb = dBytes.getDouble(b * 8);
+                        sum += isQ6
+                            ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
+                            : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
                     }
-                    var slot:Ptr<Float> = yPtr.offset(ob + n);
-                    slot.write(sum);
+                    y.setFlat(ob + n, sum);
                 }
             });
         }

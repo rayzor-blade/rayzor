@@ -124,6 +124,16 @@ extern class Tensor {
     public function getFlat(i:Int):Float;
 
     /**
+     * Flat-indexed scalar write — the store counterpart to `getFlat`.
+     * Narrows the value to the tensor's element type (an F32 tensor stores
+     * 4 bytes), so it is the correct way to fill a contiguous F32 output
+     * buffer from Haxe. A raw `data():Ptr<Float>` + `write()` stores 8-byte
+     * f64 at an 8-byte stride and corrupts an F32 tensor.
+     */
+    @:native("tensor_set_flat")
+    public function setFlat(i:Int, value:Float):Void;
+
+    /**
      * Single-FFI top-K + repetition-penalty scan over the tensor.
      *
      * Walks every element of `this`, applies a repetition penalty when

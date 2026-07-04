@@ -1301,6 +1301,39 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 
     load_f32_at(t.data, elem_offset, t.dtype) as f64
 }
 
+/// Flat-indexed scalar write — the store counterpart to
+/// `rayzor_tensor_get_flat`. Narrows `value` to the tensor's element type
+/// (`store_f32_at` dispatches on `dtype`), so writing an f64 into an F32
+/// tensor stores 4 bytes. A raw `Ptr<Float>` write from Haxe would instead
+/// store 8 bytes at an 8-byte stride and corrupt the buffer. No-op if `i` is
+/// out of range or the handle is null.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_set_flat(tensor_ptr: i64, i: i64, value: f64) {
+    if tensor_ptr == 0 {
+        return;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    if i < 0 || (i as usize) >= t.numel {
+        return;
+    }
+    let idx = i as usize;
+    if t.owns_data {
+        store_f32_at(t.data, idx, t.dtype, value as f32);
+        return;
+    }
+    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+    let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
+    let mut remaining = idx;
+    let mut elem_offset: usize = 0;
+    for axis in (0..t.ndim).rev() {
+        let dim = shape_slice[axis];
+        let i_axis = remaining % dim;
+        remaining /= dim;
+        elem_offset += i_axis * strides_slice[axis];
+    }
+    store_f32_at(t.data, elem_offset, t.dtype, value as f32);
+}
+
 /// Top-K + repetition-penalty scan in a single FFI call.
 ///
 /// Replaces the per-element `tensor.getFlat(i)` + `adjusted(...)` loop that
