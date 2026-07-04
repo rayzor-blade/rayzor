@@ -36,6 +36,10 @@ class Linear implements Module {
     public var qweight:Null<QTensor>;
     public var bias:Null<Tensor>;
     public var paramName:String;
+    /** Persistent spin pool for the pure-Haxe quant matmul; set by the
+        arch builder. Plumbed as an instance — cross-module object statics
+        read garbage (statics aren't forwarded across modules). */
+    public var pool:Null<rayzor.concurrent.SpinPool> = null;
 
     public function new(weight:Tensor, ?bias:Tensor, paramName:String = "weight") {
         this.weight = weight;
@@ -48,12 +52,17 @@ class Linear implements Module {
         RAYZOR_HAXE_MATMUL=1 to route quantised forwards through
         `Q4Matmul.matmul` instead of the Rust FFI kernel. Cached after the
         first read; -1 = unread. */
-    static var _haxeMatmul:Int = -1;
+    // 0 = uninitialised, 1 = on, 2 = off. Zero-valued "uninitialised" is
+    // load-bearing: a cross-module duplicate of this static starts at 0
+    // (field initialisers don't run for duplicated statics), and with a -1
+    // sentinel such a copy would return false forever instead of re-reading
+    // the env.
+    static var _haxeMatmul:Int = 0;
 
-    static function useHaxeMatmul():Bool {
-        if (_haxeMatmul < 0) {
+    public static function useHaxeMatmul():Bool {
+        if (_haxeMatmul == 0) {
             var v = Sys.getEnv("RAYZOR_HAXE_MATMUL");
-            _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 0;
+            _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _haxeMatmul == 1;
     }
@@ -102,7 +111,7 @@ class Linear implements Module {
             // blocks → 100+ leaked refs per generated token).
             var xClone = x.clone();
             if (useHaxeMatmul()) {
-                y = Q4Matmul.matmul(qweight, xClone);
+                y = Q4Matmul.matmul(qweight, xClone, pool);
             } else {
                 y = qweight.matmulXTQThreaded(xClone, 0);
             }

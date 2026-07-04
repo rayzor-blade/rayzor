@@ -9,7 +9,7 @@ import rayzor.SIMD16i8;
 import rayzor.Ptr;
 import rayzor.Usize;
 import rayzor.Bytes;
-import rayzor.concurrent.WorkerPool;
+import rayzor.concurrent.SpinPool;
 import rayzor.concurrent.CpuTopology;
 
 /**
@@ -187,15 +187,10 @@ class Q4Matmul {
         return xd * (sumTerm1 - sumTerm2);
     }
 
-    // `WorkerPool.global()` derives its worker count from CPU topology, which
-    // reports a single node on UMA hardware (Apple Silicon) and would run the
-    // row bands serially; force one worker per logical CPU so the row loop
-    // actually fans out. Overridable with RAYZOR_HAXE_MATMUL_WORKERS. Built
-    // per call (a WorkerPool is just a node-count holder, and parallelRows
-    // spawns fresh threads each call regardless) — NOT via a static field,
-    // whose mutations don't reliably survive across calls on the JIT baseline
-    // tier and left the pool receiver reading as garbage.
-    static function workers():WorkerPool {
+    // One worker per logical CPU (CpuTopology reports a single NUMA node on
+    // UMA hardware, which would run the bands serially); overridable with
+    // RAYZOR_HAXE_MATMUL_WORKERS.
+    public static function workerCount():Int {
         var n = CpuTopology.cpuCount();
         var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
         if (env != null) {
@@ -203,8 +198,10 @@ class Q4Matmul {
             if (v != null && v > 0) n = v;
         }
         if (n < 1) n = 1;
-        return WorkerPool.withForcedNodes(n);
+        return n;
     }
+
+
 
     /**
      * y = x @ qw.T, x:[batch,K] F32, qw:[rows,K] Q4_K_M → y:[batch,rows] F32.
@@ -212,7 +209,7 @@ class Q4Matmul {
      * activation row of Q8_K scratch plus the returned tensor (no O(weight)
      * pre-decode buffer).
      */
-    public static function matmul(qw:QTensor, x:Tensor):Tensor {
+    public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
         var rows = qw.rows();
         var K = qw.cols();
         var bpr = K >> 8;
@@ -230,7 +227,7 @@ class Q4Matmul {
         var dBytes = Bytes.alloc(bpr * 8);
 
         var y = Tensor.zeros([batch, rows], DType.F32);
-        var pool = workers();
+
 
         for (r in 0...batch) {
             quantizeQ8K(x, r * K, K, qs, bsums, dBytes);
@@ -240,7 +237,7 @@ class Q4Matmul {
             // `y.data():Ptr<Float>` + `write()`: `Float` is f64, so the raw
             // store lands 8 bytes at an 8-byte stride and corrupts the F32
             // output buffer. setFlat narrows to the tensor's element type.
-            pool.parallelRows(rows, function(n0:Int, n1:Int, node:Int):Void {
+            var band = function(n0:Int, n1:Int, node:Int):Void {
                 for (n in n0...n1) {
                     var sum = 0.0;
                     for (b in 0...bpr) {
@@ -252,7 +249,14 @@ class Q4Matmul {
                     }
                     y.setFlat(ob + n, sum);
                 }
-            });
+            };
+            // Persistent pool when the caller provides one (a spawn-per-call
+            // pool pays thread create/join per matmul and nets zero); inline
+            // otherwise. The pool is plumbed as an instance — a cross-module
+            // OBJECT static reads garbage (statics aren't forwarded across
+            // modules; see bugs_import_xmodule_member_resolution).
+            if (sp != null) sp.parallelRows(rows, band);
+            else band(0, rows, 0);
         }
 
         qs.free();

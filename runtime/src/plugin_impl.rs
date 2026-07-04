@@ -998,6 +998,15 @@ register_symbol!(
     crate::concurrency::rayzor_thread_yield_now
 );
 register_symbol!(
+    "rayzor_thread_register_parkable",
+    crate::concurrency::rayzor_thread_register_parkable
+);
+register_symbol!("rayzor_thread_park", crate::concurrency::rayzor_thread_park);
+register_symbol!(
+    "rayzor_thread_unpark",
+    crate::concurrency::rayzor_thread_unpark
+);
+register_symbol!(
     "rayzor_thread_sleep",
     crate::concurrency::rayzor_thread_sleep
 );

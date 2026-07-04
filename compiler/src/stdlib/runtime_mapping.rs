@@ -1967,6 +1967,14 @@ impl StdlibMapping {
             // MIR wrapper: no params, returns thread id (i64)
             map_method!(static "rayzor_concurrent_Thread", "currentId" => "Thread_currentId", params: 0, mir_wrapper,
                 types: &[] => I64),
+            // Thread::registerParkable() -> Int — hand the calling thread a
+            // park id; Thread::unpark(id) wakes it (std park token, race-free)
+            map_method!(static "rayzor_concurrent_Thread", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
+                types: &[] => I64),
+            map_method!(static "rayzor_concurrent_Thread", "park" => "Thread_park", params: 0, mir_wrapper,
+                types: &[]),
+            map_method!(static "rayzor_concurrent_Thread", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
+                types: &[I64]),
         ];
 
         self.register_from_tuples(mappings);
