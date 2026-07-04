@@ -3551,6 +3551,12 @@ impl StdlibMapping {
             // for tight scans over a contiguous tensor.
             map_method!(instance "rayzor_ds_Tensor", "getFlat" => "Tensor_get_flat", params: 1, mir_wrapper,
                 types: &[PtrVoid, I64] => F64),
+            // tensor.setFlat(i, value): Void — dtype-aware flat store, the
+            // counterpart to getFlat. Narrows to the element type so an F32
+            // tensor stores 4 bytes (a raw Ptr<Float> write stores 8 and
+            // corrupts the buffer).
+            map_method!(instance "rayzor_ds_Tensor", "setFlat" => "Tensor_set_flat", params: 2, mir_wrapper,
+                types: &[PtrVoid, I64, F64]),
             // tensor.topkScan(outLogits, outIds, k, recent, penalty): Int
             // Single FFI replacement for a per-element scan + insertion
             // sort + repetition-penalty loop. Returns number of survivors

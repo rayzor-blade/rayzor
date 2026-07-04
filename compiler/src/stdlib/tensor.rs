@@ -36,6 +36,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     // Element access
     build_tensor_get(builder);
     build_tensor_get_flat(builder);
+    build_tensor_set_flat(builder);
     build_tensor_topk_scan(builder);
     build_tensor_set(builder);
 
@@ -229,6 +230,17 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("tensor", i64_ty.clone())
         .param("i", i64_ty.clone())
         .returns(f64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // set_flat: (tensor, i, value) -> void — store counterpart to get_flat;
+    // narrows to the tensor dtype so an f64 write lands as F32 (4 bytes).
+    let func_id = builder
+        .begin_function("rayzor_tensor_set_flat")
+        .param("tensor", i64_ty.clone())
+        .param("i", i64_ty.clone())
+        .param("value", f64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -1369,6 +1381,34 @@ fn build_tensor_get_flat(builder: &mut MirBuilder) {
         .expect("rayzor_tensor_get_flat not found");
     let result = builder.call(extern_id, vec![self_val, i_val]).unwrap();
     builder.ret(Some(result));
+}
+
+fn build_tensor_set_flat(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_set_flat")
+        .param("self", i64_ty.clone())
+        .param("i", i64_ty)
+        .param("value", f64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let i_val = builder.get_param(1);
+    let value_val = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_set_flat")
+        .expect("rayzor_tensor_set_flat not found");
+    builder.call(extern_id, vec![self_val, i_val, value_val]);
+    builder.ret(None);
 }
 
 /// Tensor_topk_scan(

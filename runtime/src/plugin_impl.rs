@@ -1810,6 +1810,10 @@ register_symbol!(
     crate::tensor::rayzor_tensor_get_flat
 );
 register_symbol!(
+    "rayzor_tensor_set_flat",
+    crate::tensor::rayzor_tensor_set_flat
+);
+register_symbol!(
     "rayzor_tensor_topk_scan",
     crate::tensor::rayzor_tensor_topk_scan
 );
