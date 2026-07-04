@@ -1404,20 +1404,19 @@ fn build_simd16i8_extract(builder: &mut MirBuilder) {
     let self_val = builder.get_param(0);
     let lane = builder.get_param(1);
 
-    // Extract all 16 lanes as i8, sign-extend each to i32.
-    let mut e = Vec::with_capacity(16);
-    for k in 0..16u8 {
-        let xi8 = builder.vector_extract(self_val, k, i8_ty.clone());
-        let xi32 = builder.cast(xi8, i8_ty.clone(), i32_ty.clone());
-        e.push(xi32);
-    }
-    // Branchless select chain: r = (lane==k) ? e[k] : r.
-    let mut r = e[0];
-    for k in 1..16usize {
-        let ck = builder.const_i32(k as i32);
-        let is = builder.icmp(CompareOp::Eq, lane, ck, IrType::Bool);
-        r = builder.select(is, e[k], r, i32_ty.clone());
-    }
+    // Spill the vector to a 16-byte stack slot and load the requested lane
+    // byte directly (str q; ldrsb-shaped) instead of 16 vector_extracts + a
+    // 15-deep runtime select chain — the hot cost in q6DotMA4's per-block
+    // scale reads. Alloc a raw 16-byte i8 buffer (count 16), not a
+    // vector-typed alloca (that lowering mis-sizes the slot).
+    let count16 = builder.const_i32(16);
+    let slot = builder.alloc(i8_ty.clone(), Some(count16));
+    builder.vector_store(slot, self_val, IrType::vector(IrType::I8, 16));
+    // ptr_add assumes an i64 offset; lane is i32 (a byte offset into i8x16).
+    let lane64 = builder.cast(lane, i32_ty.clone(), IrType::I64);
+    let byte_ptr = builder.ptr_add(slot, lane64, IrType::Ptr(Box::new(i8_ty.clone())));
+    let raw = builder.load(byte_ptr, i8_ty.clone());
+    let r = builder.cast(raw, i8_ty.clone(), i32_ty.clone());
     // Normalise the low byte to a sign-extended i32: the cast above zero-extends
     // on Cranelift but I8x16ExtractLaneS sign-extends on wasm — `(r << 24) >> 24`
     // (arithmetic) makes get() consistently SIGNED i8 on both targets. Header
