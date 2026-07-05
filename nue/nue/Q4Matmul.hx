@@ -14,25 +14,18 @@ import rayzor.concurrent.SpinPool;
 import rayzor.concurrent.CpuTopology;
 
 /**
- * Pure-Haxe Q4_K_M × Q8_K matmul — the native-parity alternative to the Rust
- * FFI kernel (`QTensor.matmulXTQThreaded`). Bit-exact vs FFI on synthetic blocks
- * (test_q4km_qmatmul, maxRelErr=0.0); wired onto a real `QTensor` weight so
- * `Linear.forward` can A/B it (gated by RAYZOR_HAXE_MATMUL).
+ * Q4_K_M × Q8_K quantized matmul (gated by RAYZOR_HAXE_MATMUL).
  *
- * Kernel = multi-accumulator (4 i32x4 accs over 8 sub-blocks) + SDOT
- * (`SIMD4i32.dot` → VectorDot → AArch64 SDOT on the LLVM tier). Native only:
- * use `--llvm --release` (the LLVM tier emits SDOT). On wasm the Rust FFI
- * kernel is faster — keep it.
+ * Kernel: per 256-weight super-block, 8 SDOT sub-block dots into 4 i32x4
+ * accumulators (`SIMD4i32.dot`); weight scales/mins decode inline from the
+ * block header (no O(weight) pre-decode buffer). Output rows are distributed
+ * across the `SpinPool`; each row is computed by exactly one claimant with a
+ * fixed reduction order, so results are bit-identical to the serial loop.
+ * Per-call scratch is one activation batch of Q8_K quants, freed on return.
  *
- * Weight scales/mins are decoded INLINE per super-block (no O(weight)
- * pre-decode buffer), and output rows are banded across `WorkerPool` — one
- * output row is computed by exactly one worker, so results are bit-identical
- * to the serial reduction. Only fixed per-call scratch (one activation row's
- * Q8_K quants) is allocated, and it is freed before return.
- *
- * Layout (matches QTensor exactly): weight = 144-byte Q4_K_M super-blocks,
- * row-major [out=rows, in=cols], blocks-per-row = cols>>8. Activation is
- * quantised to Q8_K here (matching the FFI path's internal quant).
+ * Layout (matches QTensor): weight = 144-byte Q4_K super-blocks (Q6_K: 210),
+ * row-major [out=rows, in=cols], blocks-per-row = cols>>8. Activations are
+ * quantised to Q8_K here.
  */
 class Q4Matmul {
     static inline function f16ToF32(bits:Int):Float {
@@ -224,17 +217,10 @@ class Q4Matmul {
      * are Q8_K-quantized up front into packed scratch (batch × one row).
      */
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
-        var rows = qw.rows();
         var K = qw.cols();
         var bpr = K >> 8;
-        var wBase = qw.dataPtr();
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
-        // Q4_K_M GGUFs promote accuracy-sensitive tensors (attn_v, ffn_down)
-        // to Q6_K, which has a different 210-byte super-block. Dispatch to the
-        // matching per-block dot; the Q8_K activation side is scheme-agnostic.
-        var isQ6 = (qw.scheme() == QScheme.Q6_K);
-        var blockBytes = isQ6 ? 210 : 144;
 
         var qs = Bytes.alloc(batch * K);
         var bsums = Bytes.alloc(batch * bpr * 16 * 4);
@@ -249,6 +235,14 @@ class Q4Matmul {
             quantizeQ8K(xBase, r * K, K, aBase, r * K, bsums, r * bpr * 16 * 4, dScales, r * bpr);
         }
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
+
+        var rows = qw.rows();
+        var wBase = qw.dataPtr();
+        // Q4_K_M promotes accuracy-sensitive tensors (attn_v, ffn_down) to
+        // Q6_K (210-byte super-block). Dispatch to the matching per-block
+        // dot; the Q8_K activation side is scheme-agnostic.
+        var isQ6 = (qw.scheme() == QScheme.Q6_K);
+        var blockBytes = isQ6 ? 210 : 144;
 
         var y = Tensor.zeros([batch, rows], DType.F32);
         // Inline f32 stores via Mem.storeF32 (narrows f64→f32 at the
@@ -272,23 +266,51 @@ class Q4Matmul {
                 }
                 return;
             }
-            var sums = new Array<Float>();
-            sums.resize(batch);
+            // Batch tiled by 4 with SCALAR accumulators: an Array<Float>
+            // accumulator writes through a per-element extern (bpr × batch
+            // per row — ~1M calls per prefill matmul); scalars live in
+            // registers. A row's weight blocks (bpr × blockBytes ≤ ~5KB)
+            // stay L1-resident across the ≤ ceil(batch/4) re-walks, and
+            // per-(row,batch) accumulation order over b is unchanged, so
+            // outputs remain bit-identical.
             for (n in n0...n1) {
-                for (r in 0...batch) sums[r] = 0.0;
-                for (b in 0...bpr) {
-                    var blkOff = (n * bpr + b) * blockBytes;
-                    // The weight block stays hot in L1 across the batch loop.
-                    for (r in 0...batch) {
-                        var aOff = r * K + b * 256;
-                        var bsIdx = (r * bpr + b) * 16;
-                        var xdb = dScales[r * bpr + b];
-                        sums[r] += isQ6
-                            ? q6DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb)
-                            : q4DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb);
+                var rt = 0;
+                while (rt + 4 <= batch) {
+                    var s0 = 0.0; var s1 = 0.0; var s2 = 0.0; var s3 = 0.0;
+                    for (b in 0...bpr) {
+                        var blkOff = (n * bpr + b) * blockBytes;
+                        var a0 = rt * K + b * 256;
+                        var i0 = (rt * bpr + b) * 16;
+                        if (isQ6) {
+                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, dScales[rt * bpr + b]);
+                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, dScales[(rt + 1) * bpr + b]);
+                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, dScales[(rt + 2) * bpr + b]);
+                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, dScales[(rt + 3) * bpr + b]);
+                        } else {
+                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, dScales[rt * bpr + b]);
+                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, dScales[(rt + 1) * bpr + b]);
+                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, dScales[(rt + 2) * bpr + b]);
+                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, dScales[(rt + 3) * bpr + b]);
+                        }
                     }
+                    Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
+                    Mem.storeF32(yBase + Usize.fromInt(((rt + 1) * rows + n) << 2), s1);
+                    Mem.storeF32(yBase + Usize.fromInt(((rt + 2) * rows + n) << 2), s2);
+                    Mem.storeF32(yBase + Usize.fromInt(((rt + 3) * rows + n) << 2), s3);
+                    rt += 4;
                 }
-                for (r in 0...batch) Mem.storeF32(yBase + Usize.fromInt((r * rows + n) << 2), sums[r]);
+                while (rt < batch) {
+                    var sum = 0.0;
+                    for (b in 0...bpr) {
+                        var blkOff = (n * bpr + b) * blockBytes;
+                        var xdb = dScales[rt * bpr + b];
+                        sum += isQ6
+                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb)
+                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb);
+                    }
+                    Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), sum);
+                    rt++;
+                }
             }
         };
         // Persistent pool when the caller provides one (a spawn-per-call
@@ -307,18 +329,16 @@ class Q4Matmul {
     /**
      * Fused multi-weight matmul over a SHARED activation: quantize x to Q8_K
      * exactly once, then one banded pass over the CONCATENATED row space of
-     * up to three weights (QKV, or gate+up). Replaces N sequential
-     * `matmul` calls — N quantize passes and N pool dispatches become 1+1.
-     * Per-row math and reduction order are identical to `matmul`, so each
-     * output is bit-identical to the unfused call. Decode (batch=1) only.
-     * Returns one [1, rows_i] F32 tensor per weight.
+     * up to three same-K weights (e.g. gate+up). N quantize passes and N
+     * pool dispatches become 1+1; per-row math and reduction order are
+     * identical to `matmul`, so outputs are bit-identical to unfused calls.
+     * batch>1 inputs fall back to per-weight `matmul`. Returns one
+     * [1, rows_i] F32 tensor per weight.
      */
     public static function matmulFused(w0:QTensor, w1:QTensor, w2:QTensor, x:Tensor, ?sp:SpinPool):Array<Tensor> {
         var K = w0.cols();
-        var nW = (w2 != null) ? 3 : 2;
         var batch = Std.int(x.numel() / K);
         if (batch != 1) {
-            // Prefill goes through the batch-aware single-weight path.
             var outs = [matmul(w0, x, sp), matmul(w1, x, sp)];
             if (w2 != null) outs.push(matmul(w2, x, sp));
             return outs;
