@@ -78,14 +78,22 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
 - FFI glue ≈ 1.5 ms; quantize banded; sampler/decode ≈ 0.3 ms
 - Per-thread rate in-model ≈ 11.2 GMAC/s vs 13.8 resident-bench; Rust ≈ 14.8 in-model.
 
+### Live-decode sample findings (2026-07-06, `sample <pid>` during 512-token decode)
+- Band lambdas: 2.8k leaf samples spread FLAT across offsets — no single stall point in the
+  kernel; the per-thread-rate residue is diffuse (micro-arch: needs Instruments-level IPC/
+  stall attribution, not more code reading).
+- System is wait-dominated: psynch_cvwait 25k + swtch (yield) 13k — workers idle ~92% because
+  band work is only ~1.7 ms/thread/token. Parallel-efficiency headroom is in the JOIN tail and
+  the non-band ~6 ms (FFI 1.5, attention on the 2-thread Rust pool, tensor mgmt, sampler).
+- FIXED from the sample: SpinPool.cell() re-derived the ctl base via extern address() per
+  atomic access (hot in all spin loops) — Atomic handles now hoisted per loop.
+
 ### Ranked next steps
-1. **Per-thread rate 11.2 → ~13.8**: the resident-vs-in-model residue is NOT plain memory
-   (see negative results) — profile the in-model band by disassembly
-   (`RAYZOR_DUMP_FN_PTRS=1` + `rayzor debug lldb`/`resolve`; LLVM pointers print as
-   `[fn-ptr-llvm]`). Candidates: chunk-boundary closure-call overhead, y-store patterns,
-   Q6 share (25% of MACs, 16 ADDV-hsums/block — inherent to per-16-weight scales).
-   2-row Q6 tiling was +17.7% on the Rust side and is unexplored here — the shared operand
-   across 2 rows is the activation+bsums.
+1. **Per-thread rate 11.2 → ~13.8**: flat profile ⇒ diffuse; use Instruments (or PMU counters)
+   for IPC/stall attribution on the band thread. 2-row Q6 tiling (+17.7% on the Rust side)
+   remains the one untested structural idea — shared operand across 2 rows is activation+bsums;
+   multi-return is the blocker (no out-params without heap; consider accumulating row-pair
+   results via two independent inline chains in the band body itself).
 2. **Trims still open**: 2 Bytes allocs per matmul (`qs`, `bsums`) + `Array<Float>` dScales
    remain hot. Next safe trim is persistent per-model/per-pool scratch (instance-held; NEVER a
    cross-module static, see gotcha #3). `Tensor.uninit` is already landed; do not redo it.
@@ -113,6 +121,11 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
 - **Q4Matmul branch-hoist of `isQ6 ? q6Dot : q4Dot` out of the inner loop**: REGRESSION in the
   model path (~35.75 ms p50 in a profiled smoke) despite preserving numerics. The current backend
   likes the original ternary shape better; do not redo without inspecting generated LLVM.
+- **Persistent scratch via SAME-FILE private statics in Q4Matmul**: SIGSEGV. matmul/matmulFused
+  are materialized into caller modules (Linear/SwiGLU are separate files) and those copies see
+  duplicated/garbage object statics — the static hazard applies even within one package. The
+  only safe home for persistent scratch is instance plumbing (like Linear.pool); worth ~0.3
+  ms/token, do it only if adding a Linear field proves drift-safe.
 - **Haxe-side shutdown pool profiling** (`"[profile-pool] " + spinPool.profReport()` in
   `LlamaModel.shutdownPool`) caused LLVM verifier failure (`Invalid bitcast i32 -> i64`) and
   silently dropped the program to Cranelift. If pool timing is needed, prefer a runtime-side
