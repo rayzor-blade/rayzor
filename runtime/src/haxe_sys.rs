@@ -3075,6 +3075,12 @@ pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
 /// returned offset is directly loadable by a guest V128Load — the wasm_runner
 /// `haxe_bytes_data_address` host closure returns the guest data offset.
 /// bytes.address(): Usize
+/// Software-prefetch hint. No-op here: the LLVM tier replaces this symbol
+/// with an alwaysinline wrapper around `llvm.prefetch`; other tiers call
+/// this empty body (correctness-neutral).
+#[no_mangle]
+pub extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
+
 #[no_mangle]
 pub extern "C" fn haxe_bytes_data_address(bytes: *const HaxeBytes) -> i64 {
     if bytes.is_null() {

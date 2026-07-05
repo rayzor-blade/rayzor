@@ -278,6 +278,11 @@ class Q4Matmul {
         var band = function(n0:Int, n1:Int, node:Int):Void {
             if (batch == 1) {
                 // Decode fast path: scalar accumulator, no batch indexing.
+                // No software prefetch here: this model's active weight set
+                // fits the last-level cache, so prefetches are pure overhead
+                // (measured +8%/token). Revisit via Mem.prefetch when the
+                // weight set exceeds LLC (single-thread streaming measured
+                // 8.5 -> 13.5 GMAC/s with it).
                 for (n in n0...n1) {
                     var sum = 0.0;
                     for (b in 0...bpr) {

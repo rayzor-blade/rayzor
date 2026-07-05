@@ -2776,6 +2776,11 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
             map_method!(static "rayzor_Mem", "f32FromBits" => "rayzor_mem_f32_from_bits", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
+            // Plain extern (NOT mir_wrapper): the LLVM backend replaces the
+            // symbol with an llvm.prefetch wrapper; other tiers hit the
+            // runtime no-op.
+            map_method!(static "rayzor_Mem", "prefetch" => "rayzor_mem_prefetch", params: 1, returns: void,
+                types: &[IrTypeDescriptor::I64]),
             // bytes.setInt64(pos: Int, value: Int64): Void
             map_method!(instance "rayzor_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),

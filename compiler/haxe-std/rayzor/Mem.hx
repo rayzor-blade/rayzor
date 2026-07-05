@@ -48,4 +48,9 @@ extern class Mem {
         widened to Float. Exact, branch-free float construction. */
     @:native("f32FromBits")
     public static function f32FromBits(bits:Int):Float;
+
+    /** Prefetch the cache line at `addr` for reading (high locality).
+        A scheduling hint only — never faults, safe on any address. */
+    @:native("prefetch")
+    public static function prefetch(addr:Usize):Void;
 }
