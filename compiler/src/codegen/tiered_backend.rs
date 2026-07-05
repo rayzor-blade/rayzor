@@ -2063,6 +2063,21 @@ impl TieredBackend {
                 self.register_source_info_for_pointers(&all_pointers);
 
                 let count = all_pointers.len();
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    let modules = self.modules.read().unwrap();
+                    for module in modules.iter() {
+                        for (func_id, function) in &module.functions {
+                            if let Some(ptr) = all_pointers.get(func_id) {
+                                eprintln!(
+                                    "[fn-ptr-llvm] {:?} {} -> 0x{:x}",
+                                    func_id,
+                                    function.qualified_name.as_deref().unwrap_or(&function.name),
+                                    ptr
+                                );
+                            }
+                        }
+                    }
+                }
                 {
                     let mut fp_lock = self.function_pointers.write().unwrap();
                     let mut ft_lock = self.function_tiers.write().unwrap();

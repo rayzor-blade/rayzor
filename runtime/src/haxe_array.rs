@@ -426,6 +426,26 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
         return;
     }
 
+    // RAYZOR_ARRAY_GUARD=1: trap on an uninitialized header (MallocScribble
+    // fills fresh allocations with 0xAA) so a debugger stops with the array
+    // address in hand for malloc_history.
+    if std::env::var_os("RAYZOR_ARRAY_GUARD").is_some() {
+        unsafe {
+            let a = &*arr;
+            if (a.ptr as usize) & 0xFFFF_FFFF == 0xAAAA_AAAA
+                || a.len & 0xFFFF_FFFF == 0xAAAA_AAAA
+                || a.cap & 0xFFFF_FFFF == 0xAAAA_AAAA
+            {
+                eprintln!(
+                    "[array-guard] UNINIT header arr={:p} ptr={:p} len={:#x} cap={:#x} elem={:#x}",
+                    arr, a.ptr, a.len, a.cap, a.elem_size
+                );
+                let _ = std::fs::write("/tmp/rayzor_guard_addr.txt", format!("{:p}", arr));
+                std::process::abort();
+            }
+        }
+    }
+
     crate::panic_guard::guarded_call(|| unsafe {
         let arr_ref = &mut *arr;
         debug!(
