@@ -2914,6 +2914,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                     )
                                     .map_err(|e| format!("ptrtoint arg: {}", e))?
                                     .into()
+                            } else if arg_val.is_int_value() && expected_ty.is_int_type() {
+                                // Width mismatch (e.g. i64 value vs i32 param):
+                                // sext/trunc to the declared width or the
+                                // verifier rejects the call.
+                                self.builder
+                                    .build_int_cast_sign_flag(
+                                        arg_val.into_int_value(),
+                                        expected_ty.into_int_type(),
+                                        true,
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("intcast arg: {}", e))?
+                                    .into()
+                            } else if arg_val.is_float_value() && expected_ty.is_float_type() {
+                                self.builder
+                                    .build_float_cast(
+                                        arg_val.into_float_value(),
+                                        expected_ty.into_float_type(),
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("fpcast arg: {}", e))?
+                                    .into()
                             } else {
                                 arg_val
                             }
