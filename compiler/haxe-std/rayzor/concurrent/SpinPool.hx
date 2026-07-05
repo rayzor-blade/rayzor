@@ -12,17 +12,24 @@ import rayzor.Usize;
  * call; for per-token kernels (quant matmul: hundreds of calls per token)
  * the thread create/teardown dominates and parallelism nets zero. A
  * `SpinPool` spawns its workers ONCE and re-dispatches work to them
- * through a lock-free generation protocol, so a dispatch costs a few
- * atomic stores instead of N pthread_create/join.
+ * through a lock-free protocol, so a dispatch costs a few atomic stores.
  *
- * Protocol (per dispatch): the caller publishes the band closure, sets
- * `pending = n-1`, then per worker stores (lo, hi, node) and flips that
- * worker's state cell to 1 — the sequentially-consistent state store
- * publishes everything written before it. The caller runs band 0 itself,
- * then spins until `pending == 0`. A worker spins on its state cell,
- * runs the band, resets state to 0 FIRST and then decrements `pending`
- * (that order is load-bearing: reversed, the caller could re-dispatch
- * into the slot and the worker's late reset would eat the new wakeup).
+ * Work distribution is CHUNK-STEALING, not static bands: workers (and the
+ * caller) claim `chunk`-sized row ranges from a shared atomic cursor until
+ * the range is exhausted. Static equal bands lose the join to the slowest
+ * core (an E-core band runs 3-4x longer than a P-core band and the wall is
+ * max-across-workers); stealing self-balances heterogeneous cores without
+ * needing to know the topology. Each row is still computed by exactly one
+ * worker with an unchanged per-row reduction order, so results remain
+ * bit-identical to the serial loop.
+ *
+ * Protocol (per dispatch): the caller publishes the band closure, resets
+ * the cursor and row/chunk cells, sets `pending = n-1`, then flips each
+ * worker's state cell to 1 (the SC store publishes everything before it)
+ * and unparks it. Workers and caller then race the cursor; a worker that
+ * exhausts the cursor resets its state FIRST and then decrements `pending`
+ * (that order is load-bearing: reversed, the caller could re-dispatch into
+ * the slot and the worker's late reset would eat the new wakeup).
  *
  * Constraints:
  * - Hold the pool in an INSTANCE field / local and pass it down; do not
@@ -31,9 +38,10 @@ import rayzor.Usize;
  *   never joined during normal operation, and the runtime waits for all
  *   live threads before tearing down JIT code.
  * - Captured state in the band closure must be read-only-shared or
- *   write-disjoint by band (as in `WorkerPool.parallelRows`).
- * - Idle workers spin briefly then PARK (Parker.park), so an idle pool
- *   costs little between dispatches.
+ *   write-disjoint by row (as in `WorkerPool.parallelRows`).
+ * - Idle workers spin briefly then PARK (Parker.park). The spin budget
+ *   covers intra-token dispatch gaps so back-to-back kernel dispatches
+ *   don't pay a park/unpark syscall per matmul.
  */
 class SpinPool {
     var _n:Int;
@@ -43,8 +51,10 @@ class SpinPool {
     var _alive:Bool;
 
     /** Cell layout, one 128-byte line per cell (false-sharing stride):
-        cell 0 = pending, cell 1 = shutdown,
-        then per worker w in 1..n-1: base 2+(w-1)*4 = state, lo, hi, node. */
+        cell 0 = pending, 1 = shutdown, 2 = cursor, 3 = rows, 4 = chunk,
+        5 = accumulated band wall (us), 6 = accumulated quantize wall (us),
+        7 = dispatch count, then per worker w in 1..n-1: state at 8+(w-1),
+        pid at 8+(n-1)+(w-1). */
     inline function cell(i:Int):Atomic<Int> {
         var p:Ptr<Int> = Ptr.fromRaw(_ctl.address() + Usize.fromInt(i * 128));
         return Atomic.of(p);
@@ -54,22 +64,28 @@ class SpinPool {
 
     inline function shut():Atomic<Int> return cell(1);
 
-    inline function stateOf(w:Int):Atomic<Int> return cell(2 + (w - 1) * 4);
+    inline function cursor():Atomic<Int> return cell(2);
 
-    inline function loOf(w:Int):Atomic<Int> return cell(2 + (w - 1) * 4 + 1);
+    inline function rowsCell():Atomic<Int> return cell(3);
 
-    inline function hiOf(w:Int):Atomic<Int> return cell(2 + (w - 1) * 4 + 2);
+    inline function chunkCell():Atomic<Int> return cell(4);
 
-    inline function nodeOf(w:Int):Atomic<Int> return cell(2 + (w - 1) * 4 + 3);
+    inline function bandUs():Atomic<Int> return cell(5);
 
-    inline function pidOf(w:Int):Atomic<Int> return cell(2 + (_n - 1) * 4 + (w - 1));
+    inline function quantUs():Atomic<Int> return cell(6);
 
-    /** Spawn `n - 1` persistent workers (the caller is band 0). */
+    inline function dispatches():Atomic<Int> return cell(7);
+
+    inline function stateOf(w:Int):Atomic<Int> return cell(8 + (w - 1));
+
+    inline function pidOf(w:Int):Atomic<Int> return cell(8 + (_n - 1) + (w - 1));
+
+    /** Spawn `n - 1` persistent workers (the caller is also a claimant). */
     public function new(n:Int) {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
-        var cells = 2 + (n > 1 ? (n - 1) * 5 : 0);
+        var cells = 8 + (n > 1 ? (n - 1) * 2 : 0);
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
@@ -87,16 +103,29 @@ class SpinPool {
 
     public function workers():Int return _n;
 
+    /** Claim chunks from the shared cursor until exhausted. `who` is the
+        claimant id (0 = caller) passed through as the band's node arg.
+        Locals are explicitly Int-typed: the `if (n1 > rows) n1 = rows`
+        reassign shape decays n1 to Float in MIR and the band call then
+        fails LLVM verification (double passed to an i32 param). */
+    inline function stealLoop(f:(Int, Int, Int) -> Void, who:Int):Void {
+        var rows:Int = rowsCell().load();
+        var chunk:Int = chunkCell().load();
+        while (true) {
+            var n0:Int = cursor().fetchAdd(chunk);
+            if (n0 >= rows) break;
+            var n1:Int = (n0 + chunk > rows) ? rows : (n0 + chunk);
+            f(n0, n1, who);
+        }
+    }
+
     function workerLoop(w:Int):Int {
         pidOf(w).store(Parker.registerParkable());
         var spins = 0;
         while (true) {
             if (stateOf(w).load() == 1) {
-                var lo = loOf(w).load();
-                var hi = hiOf(w).load();
-                var node = nodeOf(w).load();
                 var f = _fn;
-                f(lo, hi, node);
+                stealLoop(f, w);
                 // Reset state BEFORE decrementing pending (see class doc).
                 stateOf(w).store(0);
                 pending().fetchAdd(-1);
@@ -104,11 +133,14 @@ class SpinPool {
             } else {
                 if (shut().load() == 1) return 0;
                 spins++;
-                // Brief spin covers back-to-back dispatches; then park so an
-                // idle pool costs nothing (no core burn between kernels, no
-                // sleep-wake latency: the dispatcher unparks after flipping
-                // state, and a pre-park unpark makes park return at once).
-                if (spins > 2000) {
+                // Spin-budget tradeoff, MEASURED on llama-chat decode:
+                // 40k spins (~150us) -> 1.17ms/dispatch band wall (workers
+                // park in FFI-glue gaps; each dispatch pays OS wake latency).
+                // 1M spins (~3-5ms) -> 4x WORSE overall: 7 spinning cores
+                // starve the Rust FFI pool (attention/silu/fused-QKV) that
+                // runs between our dispatches. Until the two pools share
+                // cores cooperatively, the short budget is the lesser evil.
+                if (spins > 40000) {
                     Parker.park();
                     spins = 0;
                 }
@@ -117,9 +149,10 @@ class SpinPool {
     }
 
     /**
-     * Band `rows` across the pool: `fn(lo, hi, band)` per band, band 0 on
-     * the calling thread. Blocks until every band completes. Small inputs
-     * run inline (dispatch overhead exceeds the parallel win).
+     * Distribute `rows` across the pool: `fn(lo, hi, node)` per claimed
+     * chunk, with the caller claiming alongside the workers. Blocks until
+     * every row is done. Small inputs run inline (dispatch overhead
+     * exceeds the parallel win).
      */
     public function parallelRows(rows:Int, fn:(Int, Int, Int) -> Void):Void {
         if (rows <= 0) return;
@@ -128,26 +161,46 @@ class SpinPool {
             return;
         }
         _fn = fn; // plain store; published by the SC state flips below
-        var chunk = Std.int(rows / _n);
+        // Chunk sizing: ~8 claims per worker amortizes cursor traffic while
+        // leaving enough grains for stealing to absorb slow cores.
+        var chunk = Std.int(rows / (_n * 8));
+        if (chunk < 8) chunk = 8;
+        cursor().store(0);
+        rowsCell().store(rows);
+        chunkCell().store(chunk);
         pending().store(_n - 1); // before ANY state flip
+        var t0 = Sys.time();
         for (w in 1..._n) {
-            var lo = w * chunk;
-            var hi = (w == _n - 1) ? rows : (w + 1) * chunk;
-            loOf(w).store(lo);
-            hiOf(w).store(hi);
-            nodeOf(w).store(w);
             stateOf(w).store(1);
             var pid = pidOf(w).load();
             if (pid != 0) Parker.unpark(pid);
         }
-        fn(0, chunk, 0);
+        stealLoop(fn, 0);
         while (pending().load() > 0) {}
+        bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
+        var d = dispatches().fetchAdd(1) + 1;
+        // Periodic same-module attribution report (a cross-module call to a
+        // pool method can mis-dispatch; see bugs_import_xmodule_member_resolution).
+        if (d % 512 == 0) Sys.println("[pool-prof] " + profReport());
+    }
+
+    /** Accumulate externally-timed quantize wall (microseconds). */
+    public function addQuantUs(us:Int):Void quantUs().fetchAdd(us);
+
+    /** One-line profile of accumulated pool time; resets nothing. */
+    public function profReport():String {
+        return "band_ms=" + (bandUs().load() / 1000.0)
+            + " quant_ms=" + (quantUs().load() / 1000.0)
+            + " dispatches=" + dispatches().load();
     }
 
     /** Stop and join all workers, then release the control block.
         Mandatory before process exit. Idempotent. */
     public function shutdown():Void {
         if (!_alive) return;
+        // Same-module report (a cross-module call to a new method can
+        // mis-dispatch; see bugs_import_xmodule_member_resolution).
+        Sys.println("[pool-prof] " + profReport());
         _alive = false;
         shut().store(1);
         for (w in 1..._n) {
