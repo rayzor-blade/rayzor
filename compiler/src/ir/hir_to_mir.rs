@@ -25087,18 +25087,55 @@ impl<'a> HirToMirContext<'a> {
                     // missed the (class, interface) pair (e.g. the interface
                     // was declared in a later-loaded file).
                     if let Some(iface_sym) = self.get_interface_symbol(resolved_param) {
-                        // Prefer the arg's static class; if the typechecker
-                        // promoted it to the interface (class erased), recover
+                        // Don't double-wrap an already-fat interface value.
+                        if self.interface_wrapped_args.contains(&arg_reg) {
+                            return arg_reg;
+                        }
+                        // The arg is ALREADY an interface value (fat pointer) of
+                        // this same interface — e.g. materializing the receiver
+                        // of `iface.method()`, or forwarding an interface-typed
+                        // local. A class→interface wrap here would resolve a
+                        // concrete class via the drift-prone type→SymbolId path
+                        // (which can land on an unrelated class) and overwrite
+                        // the real vtable with an empty one — the next dispatch
+                        // faults. Pass it through.
+                        if self.get_interface_symbol(resolved_arg) == Some(iface_sym) {
+                            return arg_reg;
+                        }
+                        // A syntactic `new ClassName()` (optionally behind a
+                        // Cast) carries an AUTHORITATIVE class name. The type→
+                        // SymbolId resolution (`get_class_symbol`) drifts across
+                        // compile contexts and can land on an unrelated class, so
+                        // for a `new` arg we resolve ONLY by FQN and never fall
+                        // through to it:
+                        //  - resolvable here → normal vtable wrap;
+                        //  - not materialized in THIS context → by-NAME wrap
+                        //    with forward-ref dispatch thunks that dedupe with
+                        //    the real ones at merge (order-independent).
+                        if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
+                            if let Some(class_sym) = self.lookup_class_symbol_by_name(&class_fqn) {
+                                if let Some(wrapped) =
+                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                                {
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    return wrapped;
+                                }
+                            }
+                            if let Some(wrapped) = self
+                                .wrap_new_class_as_interface_by_name(arg_reg, &class_fqn, iface_sym)
+                            {
+                                self.interface_wrapped_args.insert(wrapped);
+                                return wrapped;
+                            }
+                        }
+                        // Not a `new` expr: the arg is a variable/field/call
+                        // whose static class is the trustworthy handle. Recover
                         // the concrete class from the value register's class
-                        // hint (raw, unwrapped class object).
+                        // hint when the typechecker promoted it to the interface.
                         let class_sym = self
                             .get_class_symbol(resolved_arg)
                             .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
                         if let Some(class_sym) = class_sym {
-                            // Don't double-wrap an already-fat interface value.
-                            if self.interface_wrapped_args.contains(&arg_reg) {
-                                return arg_reg;
-                            }
                             if let Some(wrapped) =
                                 self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
                             {
@@ -25109,21 +25146,6 @@ impl<'a> HirToMirContext<'a> {
                                 // `temp_heap_values` push that would emit Free.
                                 self.interface_wrapped_args.insert(wrapped);
                                 return wrapped;
-                            }
-                        } else if !self.interface_wrapped_args.contains(&arg_reg) {
-                            // Class fully imported & compiled AFTER this file, so
-                            // it has no SymbolId / vtable / functions here. Wrap
-                            // by NAME using forward-ref dispatch thunks that
-                            // dedupe with the real ones at merge (order-
-                            // independent). Derive the class FQN from the `new`
-                            // expression + this module's package.
-                            if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
-                                if let Some(wrapped) = self.wrap_new_class_as_interface_by_name(
-                                    arg_reg, &class_fqn, iface_sym,
-                                ) {
-                                    self.interface_wrapped_args.insert(wrapped);
-                                    return wrapped;
-                                }
                             }
                         }
                     }
@@ -25148,45 +25170,63 @@ impl<'a> HirToMirContext<'a> {
                     .cloned()
                 {
                     if let Some(Some(param_name)) = names.get(param_index) {
-                        // The arg's static type is usually the concrete class,
-                        // but the typechecker often PROMOTES it to the
-                        // interface at the call boundary (or when it flows
-                        // through an interface-typed local), erasing the class
-                        // from `arg_expr.ty`. In that case the value register
-                        // still holds a RAW class object (never wrapped),
-                        // recoverable from `register_class_hints` /
-                        // `monomorphized_var_types`. Try the type first, then
-                        // fall back to the register/symbol class hint. Without
-                        // this, a cross-module call to a plain `param:Interface`
-                        // with a promoted-to-interface arg stores the raw class
-                        // pointer and SIGSEGVs on the first vtable dispatch.
-                        let class_sym = self
-                            .get_class_symbol(arg_expr.ty)
-                            .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
-                        if let Some(class_sym) = class_sym {
-                            if let Some(iface_sym) =
-                                self.lookup_interface_symbol_by_qualified_name(param_name)
-                            {
-                                // Already a fat pointer (e.g. produced by a
-                                // Class→Interface cast upstream)? Don't
-                                // double-wrap — that would nest fat pointers
-                                // and make `this` the inner wrapper.
-                                if self.interface_wrapped_args.contains(&arg_reg) {
-                                    return arg_reg;
+                        if let Some(iface_sym) =
+                            self.lookup_interface_symbol_by_qualified_name(param_name)
+                        {
+                            // Already a fat pointer (e.g. produced by a
+                            // Class→Interface cast upstream)? Don't double-wrap
+                            // — that would nest fat pointers and make `this` the
+                            // inner wrapper.
+                            if self.interface_wrapped_args.contains(&arg_reg) {
+                                return arg_reg;
+                            }
+                            // Already an interface value of this same interface
+                            // (see the primary path): pass it through rather than
+                            // re-wrapping it into a bogus-class fat pointer.
+                            if self.get_interface_symbol(arg_expr.ty) == Some(iface_sym) {
+                                return arg_reg;
+                            }
+                            // A syntactic `new ClassName()` carries an
+                            // AUTHORITATIVE class name; the type→SymbolId
+                            // resolution drifts across compile contexts and can
+                            // land on an unrelated class, so for a `new` arg we
+                            // resolve ONLY by FQN and never fall through to it:
+                            //  - resolvable here → normal vtable wrap;
+                            //  - not materialized in THIS context → by-NAME wrap
+                            //    with forward-ref dispatch thunks that dedupe at
+                            //    merge (order-independent).
+                            if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
+                                if let Some(class_sym) =
+                                    self.lookup_class_symbol_by_name(&class_fqn)
+                                {
+                                    self.interface_vtables.remove(&(class_sym, iface_sym));
+                                    if let Some(wrapped) = self
+                                        .wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                                    {
+                                        self.interface_wrapped_args.insert(wrapped);
+                                        return wrapped;
+                                    }
                                 }
-                                // Drop any pre-cached vtable for this
-                                // (class, iface) pair before wrapping: the
-                                // cached entry may carry method SymbolIds
-                                // from the file that originally lowered
-                                // the class, and SymbolIds aren't stable
-                                // across contexts — looking them up in
-                                // *this* context's function_map can land
-                                // on an unrelated method (e.g. SymbolId 17
-                                // was LlamaModel.forward in nue.arch but
-                                // BPETokenizer.encode in this context).
-                                // Forcing the lazy name-based rebuild
-                                // produces a vtable resolved against the
-                                // current symbol table.
+                                if let Some(wrapped) = self.wrap_new_class_as_interface_by_name(
+                                    arg_reg, &class_fqn, iface_sym,
+                                ) {
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    return wrapped;
+                                }
+                            }
+                            // Not a `new` expr: the typechecker often PROMOTES
+                            // the arg to the interface, erasing the class from
+                            // `arg_expr.ty`; the value register still holds a RAW
+                            // class object, recoverable from the class hint. Drop
+                            // any pre-cached vtable first — its method SymbolIds
+                            // may be from the class's originating context and
+                            // resolve to unrelated methods here; forcing the
+                            // lazy name-based rebuild resolves against the
+                            // current symbol table.
+                            let class_sym = self
+                                .get_class_symbol(arg_expr.ty)
+                                .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
+                            if let Some(class_sym) = class_sym {
                                 self.interface_vtables.remove(&(class_sym, iface_sym));
                                 if let Some(wrapped) =
                                     self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
@@ -25313,7 +25353,7 @@ impl<'a> HirToMirContext<'a> {
     /// the class isn't resolvable in this context. Prefers the class's own
     /// qualified name if the symbol is present; otherwise qualifies the bare
     /// `new` name with THIS module's package (same-package classes share it —
-    /// e.g. `new LlamaArch()` in `nue.arch.ArchRegistry` → `nue.arch.LlamaArch`).
+    /// e.g. `new Foo()` in package `a.b` → `a.b.Foo`).
     fn new_arg_class_fqn(&self, arg_expr: &HirExpr) -> Option<String> {
         let bare = match &arg_expr.kind {
             HirExprKind::New { class_name, .. } => {
@@ -25335,11 +25375,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         // Qualify with the enclosing class's package (same-package sibling
-        // class shares it). Prefer the enclosing class's qualified name (e.g.
-        // `nue.arch.ArchRegistry` → package `nue.arch`) over `current_module`,
-        // which may be truncated (`nue.ArchRegistry`) and yield the wrong
-        // package — a wrong package produces a thunk name that DOESN'T dedupe
-        // with the real one at merge (empty stub → SIGTRAP).
+        // class shares it). Prefer the enclosing class's qualified name over
+        // `current_module`, which may be truncated and yield the wrong package
+        // — a wrong package produces a thunk name that DOESN'T dedupe with the
+        // real one at merge (empty stub → trap).
         let enclosing_pkg = self
             .current_class_symbol
             .and_then(|s| self.symbol_table.get_symbol(s))
@@ -27973,15 +28012,59 @@ impl<'a> HirToMirContext<'a> {
         // Also capture the actual field type from the symbol table for correct IR type resolution.
         // The passed-in field_ty may be Dynamic when the TAST couldn't resolve the field type
         // (e.g., forward-referenced classes in the same file).
-        let (class_type_id, field_index, actual_field_ty) = match self.field_index_map.get(&field) {
-            Some(&(class_ty, idx)) => {
-                // Get actual field type from symbol table
-                let sym_type = self
-                    .symbol_table
-                    .get_symbol(field)
-                    .map(|s| s.type_id)
-                    .unwrap_or(field_ty);
-                (class_ty, idx, sym_type)
+        let (class_type_id, field_index, actual_field_ty) = match self
+            .field_index_map
+            .get(&field)
+            .copied()
+        {
+            Some((class_ty, idx)) => {
+                // The SymbolId is a GLOBAL monotonic counter, so any stdlib
+                // member added anywhere shifts every later id; an imported
+                // receiver's field id can then ALIAS a different class's
+                // field_index_map entry and GEP the wrong offset (SIGSEGV in
+                // cross-module dispatch). When the looked-up owner class does
+                // not equal the receiver, it is either an inherited field
+                // (fine) or a cross-context collision (wrong). Cross-check with
+                // the drift-proof name+receiver-type probe (no E0803) and
+                // override only on a UNIQUE disagreement — a collision. For
+                // inherited fields the probe yields None/Ambiguous, so the
+                // SymbolId result stands.
+                // A drifted id can alias a DIFFERENT class's entry OR a
+                // different field of the SAME class (wrong index but matching
+                // class), so gating on class mismatch is insufficient. The
+                // name+receiver probe is the authoritative slot (by field name,
+                // disambiguated by the stable receiver type); prefer its unique
+                // result whenever it resolves, and fall back to the SymbolId
+                // fast path only when the probe is None/Ambiguous (e.g.
+                // inherited fields the probe does not attribute to the
+                // receiver's own class). The probe never emits E0803.
+                let mut chosen = (class_ty, idx);
+                if let Some(fname) = self.symbol_table.get_symbol(field).map(|s| s.name) {
+                    if let FieldIndexResolution::Unique(nct, nidx) =
+                        self.resolve_field_index_candidates(fname, receiver_ty)
+                    {
+                        chosen = (nct, nidx);
+                    }
+                }
+                let sym_type = if chosen == (class_ty, idx) {
+                    self.symbol_table
+                        .get_symbol(field)
+                        .map(|s| s.type_id)
+                        .unwrap_or(field_ty)
+                } else {
+                    let (cty, cidx) = chosen;
+                    let mut st = field_ty;
+                    for (sym, &(mcty, mcidx)) in &self.field_index_map {
+                        if mcty == cty && mcidx == cidx {
+                            if let Some(si) = self.symbol_table.get_symbol(*sym) {
+                                st = si.type_id;
+                            }
+                            break;
+                        }
+                    }
+                    st
+                };
+                (chosen.0, chosen.1, sym_type)
             }
             None => {
                 // Fallback: Try to find field by name instead of SymbolId
@@ -35485,6 +35568,35 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Resolve an interface's method-name list, drift-proof.
+    ///
+    /// `interface_method_names` is forwarded across compile contexts with the
+    /// ORIGINATING context's SymbolId keys (compilation.rs forwards values
+    /// verbatim). SymbolIds are a global monotonic counter, so any symbol that
+    /// becomes newly reachable in one context shifts every later id — the
+    /// importer's `interface_symbol` then no longer equals the key the values
+    /// were stored under, and a direct `.get` misses. Recover by matching the
+    /// interface NAME (content-addressed InternedString, stable across
+    /// contexts) — the same trick the Placeholder type-resolution path uses.
+    fn resolve_interface_method_names(
+        &self,
+        interface_symbol: SymbolId,
+    ) -> Option<Vec<InternedString>> {
+        if let Some(v) = self.interface_method_names.get(&interface_symbol) {
+            return Some(v.clone());
+        }
+        let name = self.symbol_table.get_symbol(interface_symbol)?.name;
+        self.interface_method_names
+            .iter()
+            .find(|(k, _)| {
+                self.symbol_table
+                    .get_symbol(**k)
+                    .map(|s| s.name == name)
+                    .unwrap_or(false)
+            })
+            .map(|(_, v)| v.clone())
+    }
+
     /// Wrap a class instance in an interface fat pointer.
     /// Fat pointer layout: { object_ptr: i64, fn_ptr_0: i64, fn_ptr_1: i64, ... }
     /// One slot per interface method, in the interface's method order.
@@ -35517,10 +35629,7 @@ impl<'a> HirToMirContext<'a> {
                 // Tier 2/3: driven by interface_method_names (forwarded and
                 // stable). Resolve each method's SymbolId if available; leave
                 // None otherwise (name-based resolution handles those slots).
-                let method_names = self
-                    .interface_method_names
-                    .get(&interface_symbol)
-                    .cloned()?;
+                let method_names = self.resolve_interface_method_names(interface_symbol)?;
                 let mut all_resolved = true;
                 let entries: Vec<Option<SymbolId>> = method_names
                     .iter()
@@ -35591,8 +35700,7 @@ impl<'a> HirToMirContext<'a> {
         // Interface method NAMES in vtable order — the stable, drift-proof
         // handle for name-based resolution (SymbolIds drift across contexts).
         let iface_method_names: Vec<Option<String>> = self
-            .interface_method_names
-            .get(&interface_symbol)
+            .resolve_interface_method_names(interface_symbol)
             .map(|names| {
                 names
                     .iter()
@@ -35730,8 +35838,7 @@ impl<'a> HirToMirContext<'a> {
         interface_symbol: SymbolId,
     ) -> Option<IrId> {
         let method_names: Vec<String> = self
-            .interface_method_names
-            .get(&interface_symbol)?
+            .resolve_interface_method_names(interface_symbol)?
             .iter()
             .filter_map(|n| self.string_interner.get(*n).map(|s| s.to_string()))
             .collect();

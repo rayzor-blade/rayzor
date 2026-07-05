@@ -338,8 +338,7 @@ impl IrModule {
         let is_stub = |cfg: &crate::ir::IrControlFlowGraph| {
             cfg.blocks.len() == 1
                 && cfg.blocks.values().all(|b| {
-                    b.instructions.is_empty()
-                        && matches!(b.terminator, IrTerminator::Unreachable)
+                    b.instructions.is_empty() && matches!(b.terminator, IrTerminator::Unreachable)
                 })
         };
         // One real body per wrapper name.
