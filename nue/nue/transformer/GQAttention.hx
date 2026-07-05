@@ -99,7 +99,9 @@ class GQAttention implements Module {
         // reshape, then drop the local — leaves only the view refcount on
         // the storage.
         if (qWq != null && kWq != null && vWq != null) {
-            var triple = QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);
+            var triple = Linear.useHaxeMatmul()
+                ? nue.Q4Matmul.matmulFused(qWq, kWq, vWq, x, qProj.pool)
+                : QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);
             if (triple != null && triple.length == 3
                 && triple[0] != null && triple[1] != null && triple[2] != null) {
                 qRaw = triple[0].reshape([seqQ, numQHeads, headDim]);
