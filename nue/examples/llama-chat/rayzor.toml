@@ -10,26 +10,17 @@ native-libs = ["../../../target/release/libnue_plugins.dylib"]
 
 # nue-tuned tier config.
 #
-# Llama-chat wants the old forced-native path: compile all Haxe bodies to
-# Cranelift before Main.main enters. With start_interpreted=true the program
-# eventually bails upward to Cranelift, but the extra interpreter/bootstrap path
-# regresses sustained decode (observed ~68-70 tok/s vs ~74 tok/s on the 808-token
-# Voronoi run).
+# Llama-chat is a monolithic long-running main: compiled direct calls never
+# re-enter the dispatcher, so count-based promotion cannot reach the decode
+# loop. The effective ladder for this workload is the bulk before-main
+# upgrade: Cranelift compiles everything for fast startup + module init,
+# then one upgrade_to_llvm installs the LLVM tier before Main.main enters.
 #
-# Today the warm/hot/blazing thresholds mostly do not affect llama-chat steady
-# state: compiled direct calls do not feed TieredBackend::record_call, so beadie
-# sees no internal call traffic (`Profile: 3 functions ... 3 total calls`).
-# Keep the knobs present for future tier-counter work, but tune this workload
-# around the bulk Cranelift path for now.
-#
-# Disable tier promotion as well: any asynchronous Standard/Optimized/LLVM
-# compile work competes with the decode loop and can look like a streaming hang.
-# With start_interpreted=false, this still compiles all functions up front.
-#
-# blazing_threshold = "max" disables count-based LLVM promotion;
-# auto_upgrade_to_llvm_after_main_entry triggers a single bulk
-# upgrade_to_llvm call after module __init__ returns and before Main.main
-# runs. For this workload it currently costs more than it gives back.
+# enable_tier_promotion=false keeps beadie's background Standard/Optimized
+# recompiles out of the run: they compete with the decode loop for cores
+# and can present as a streaming hang. With start_interpreted=false all
+# functions are compiled up front anyway, so mid-run promotion has nothing
+# to add here.
 [tier]
 interpreter_threshold = 1
 warm_threshold = 30
@@ -37,7 +28,7 @@ hot_threshold = 5
 blazing_threshold = "max"
 sample_rate = 1
 start_interpreted = false
-enable_tier_promotion = true
+enable_tier_promotion = false
 verbosity = 0
 enable_stack_traces = false
-auto_upgrade_to_llvm_after_main_entry = false
+auto_upgrade_to_llvm_after_main_entry = true
