@@ -122,8 +122,9 @@ class SpinPool {
     inline function stealLoop(f:(Int, Int, Int) -> Void, who:Int):Void {
         var rows:Int = rowsCell().load();
         var chunk:Int = chunkCell().load();
+        var cur = cursor();
         while (true) {
-            var n0:Int = cursor().fetchAdd(chunk);
+            var n0:Int = cur.fetchAdd(chunk);
             if (n0 >= rows) break;
             var n1:Int = (n0 + chunk > rows) ? rows : (n0 + chunk);
             f(n0, n1, who);
@@ -132,17 +133,24 @@ class SpinPool {
 
     function workerLoop(w:Int):Int {
         pidOf(w).store(Parker.registerParkable());
+        // Hoist the atomic cells: cell() re-derives the control-block base
+        // via an extern address() call per access, which is measurable in
+        // the state/shut spin loops (profiled hot).
+        var stateC = stateOf(w);
+        var shutC = shut();
+        var pendC = pending();
+        var gapC = gapEwmaUs();
         var spins = 0;
         while (true) {
-            if (stateOf(w).load() == 1) {
+            if (stateC.load() == 1) {
                 var f = _fn;
                 stealLoop(f, w);
                 // Reset state BEFORE decrementing pending (see class doc).
-                stateOf(w).store(0);
-                pending().fetchAdd(-1);
+                stateC.store(0);
+                pendC.fetchAdd(-1);
                 spins = 0;
             } else {
-                if (shut().load() == 1) return 0;
+                if (shutC.load() == 1) return 0;
                 spins++;
                 if (spins <= spinBudget) continue;
                 // Idle beyond the tight-spin window: HOLD by yielding —
@@ -151,13 +159,13 @@ class SpinPool {
                 // real work (no starvation, degrades gracefully under
                 // thermal throttling). Park only once we have been idle
                 // well past the pool's own measured dispatch cadence.
-                var holdUs:Int = gapEwmaUs().load() * 4;
+                var holdUs:Int = gapC.load() * 4;
                 if (holdUs < 200) holdUs = 200;
                 if (holdUs > 20000) holdUs = 20000;
                 var idleStart = Sys.time();
                 var parked = false;
-                while (stateOf(w).load() != 1) {
-                    if (shut().load() == 1) return 0;
+                while (stateC.load() != 1) {
+                    if (shutC.load() == 1) return 0;
                     if ((Sys.time() - idleStart) * 1e6 > holdUs) {
                         parked = true;
                         break;
@@ -222,7 +230,8 @@ class SpinPool {
             if (pid != 0) Parker.unpark(pid);
         }
         stealLoop(fn, 0);
-        while (pending().load() > 0) {}
+        var pendC = pending();
+        while (pendC.load() > 0) {}
         bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
         dispatches().fetchAdd(1);
     }
