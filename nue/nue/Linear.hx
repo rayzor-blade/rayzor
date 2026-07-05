@@ -48,10 +48,9 @@ class Linear implements Module {
         this.paramName = paramName;
     }
 
-    /** Opt-in pure-Haxe Q4_K_M kernel (Phase 4 Haxification): set
-        RAYZOR_HAXE_MATMUL=1 to route quantised forwards through
-        `Q4Matmul.matmul` instead of the Rust FFI kernel. Cached after the
-        first read; -1 = unread. */
+    /** RAYZOR_HAXE_MATMUL=1 routes quantised forwards through
+        `Q4Matmul.matmul`; unset/0 uses the runtime kernel. Cached after
+        the first read. */
     // 0 = uninitialised, 1 = on, 2 = off. Zero-valued "uninitialised" is
     // load-bearing: a cross-module duplicate of this static starts at 0
     // (field initialisers don't run for duplicated statics), and with a -1
