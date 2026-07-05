@@ -50,26 +50,27 @@ class Q4Matmul {
 
     /** Quantise one activation row x[xBase .. xBase+K] to Q8_K (qs/bsums/dOut).
         `bsums` holds K/16 int32 group sums. */
-    static function quantizeQ8K(x:Tensor, xBase:Int, K:Int, qs:Bytes, bsums:Bytes, dOut:Bytes):Void {
+    static function quantizeQ8K(x:Tensor, xBase:Int, K:Int, qs:Bytes, qsOff:Int, bsums:Bytes, bsumsOff:Int,
+            dOut:Bytes, dOff:Int):Void {
         var nb:Int = K >> 8;
         for (b in 0...nb) {
             var maxAbs = 0.0;
             for (i in 0...256) { var a = x.getFlat(xBase + b * 256 + i); if (a < 0) a = -a; if (a > maxAbs) maxAbs = a; }
             if (maxAbs == 0.0) {
-                dOut.setDouble(b * 8, 0.0);
-                for (i in 0...256) qs.set(b * 256 + i, 0);
-                for (s in 0...16) bsums.setInt32((b * 16 + s) * 4, 0);
+                dOut.setDouble(dOff + b * 8, 0.0);
+                for (i in 0...256) qs.set(qsOff + b * 256 + i, 0);
+                for (s in 0...16) bsums.setInt32(bsumsOff + (b * 16 + s) * 4, 0);
             } else {
-                var d = maxAbs / 127.0; dOut.setDouble(b * 8, d); var invD = 127.0 / maxAbs;
+                var d = maxAbs / 127.0; dOut.setDouble(dOff + b * 8, d); var invD = 127.0 / maxAbs;
                 for (s in 0...16) {
                     var sum = 0;
                     for (j in 0...16) {
                         var v = x.getFlat(xBase + b * 256 + s * 16 + j) * invD;
                         var qf = (v >= 0) ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
                         var q = (qf > 127) ? 127 : ((qf < -128) ? -128 : qf);
-                        qs.set(b * 256 + s * 16 + j, q & 0xFF); sum += q;
+                        qs.set(qsOff + b * 256 + s * 16 + j, q & 0xFF); sum += q;
                     }
-                    bsums.setInt32((b * 16 + s) * 4, sum);
+                    bsums.setInt32(bsumsOff + (b * 16 + s) * 4, sum);
                 }
             }
         }
@@ -205,9 +206,11 @@ class Q4Matmul {
 
     /**
      * y = x @ qw.T, x:[batch,K] F32, qw:[rows,K] Q4_K_M → y:[batch,rows] F32.
-     * Output rows are banded across `WorkerPool.global()`; per-call heap is one
-     * activation row of Q8_K scratch plus the returned tensor (no O(weight)
-     * pre-decode buffer).
+     * Output rows are banded once across the pool; batch is the INNER loop so
+     * each quantized weight block is read from memory exactly once per output
+     * row regardless of batch — the kernel is weight-bandwidth-bound, so a
+     * batch-outer nesting made prefill cost seq × decode. All activation rows
+     * are Q8_K-quantized up front into packed scratch (batch × one row).
      */
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
         var rows = qw.rows();
@@ -222,22 +225,23 @@ class Q4Matmul {
         var isQ6 = (qw.scheme() == QScheme.Q6_K);
         var blockBytes = isQ6 ? 210 : 144;
 
-        var qs = Bytes.alloc(K);
-        var bsums = Bytes.alloc(bpr * 16 * 4);
-        var dBytes = Bytes.alloc(bpr * 8);
+        var qs = Bytes.alloc(batch * K);
+        var bsums = Bytes.alloc(batch * bpr * 16 * 4);
+        var dBytes = Bytes.alloc(batch * bpr * 8);
+        for (r in 0...batch) {
+            quantizeQ8K(x, r * K, K, qs, r * K, bsums, r * bpr * 16 * 4, dBytes, r * bpr * 8);
+        }
+        var aBase = qs.address();
 
         var y = Tensor.zeros([batch, rows], DType.F32);
 
-
-        for (r in 0...batch) {
-            quantizeQ8K(x, r * K, K, qs, bsums, dBytes);
-            var aBase = qs.address();
-            var ob = r * rows;
-            // Write results with the dtype-aware flat setter, NOT a raw
-            // `y.data():Ptr<Float>` + `write()`: `Float` is f64, so the raw
-            // store lands 8 bytes at an 8-byte stride and corrupts the F32
-            // output buffer. setFlat narrows to the tensor's element type.
-            var band = function(n0:Int, n1:Int, node:Int):Void {
+        // Write results with the dtype-aware flat setter, NOT a raw
+        // `y.data():Ptr<Float>` + `write()`: `Float` is f64, so the raw
+        // store lands 8 bytes at an 8-byte stride and corrupts the F32
+        // output buffer. setFlat narrows to the tensor's element type.
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            if (batch == 1) {
+                // Decode fast path: scalar accumulator, no batch indexing.
                 for (n in n0...n1) {
                     var sum = 0.0;
                     for (b in 0...bpr) {
@@ -247,17 +251,36 @@ class Q4Matmul {
                             ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
                             : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
                     }
-                    y.setFlat(ob + n, sum);
+                    y.setFlat(n, sum);
                 }
-            };
-            // Persistent pool when the caller provides one (a spawn-per-call
-            // pool pays thread create/join per matmul and nets zero); inline
-            // otherwise. The pool is plumbed as an instance — a cross-module
-            // OBJECT static reads garbage (statics aren't forwarded across
-            // modules; see bugs_import_xmodule_member_resolution).
-            if (sp != null) sp.parallelRows(rows, band);
-            else band(0, rows, 0);
-        }
+                return;
+            }
+            var sums = new Array<Float>();
+            sums.resize(batch);
+            for (n in n0...n1) {
+                for (r in 0...batch) sums[r] = 0.0;
+                for (b in 0...bpr) {
+                    var blkOff = (n * bpr + b) * blockBytes;
+                    // The weight block stays hot in L1 across the batch loop.
+                    for (r in 0...batch) {
+                        var aOff = r * K + b * 256;
+                        var bsIdx = (r * bpr + b) * 16;
+                        var xdb = dBytes.getDouble((r * bpr + b) * 8);
+                        sums[r] += isQ6
+                            ? q6DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb)
+                            : q4DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb);
+                    }
+                }
+                for (r in 0...batch) y.setFlat(r * rows + n, sums[r]);
+            }
+        };
+        // Persistent pool when the caller provides one (a spawn-per-call
+        // pool pays thread create/join per matmul and nets zero); inline
+        // otherwise. The pool is plumbed as an instance — a cross-module
+        // OBJECT static reads garbage (statics aren't forwarded across
+        // modules; see bugs_import_xmodule_member_resolution).
+        if (sp != null) sp.parallelRows(rows, band);
+        else band(0, rows, 0);
 
         qs.free();
         bsums.free();
