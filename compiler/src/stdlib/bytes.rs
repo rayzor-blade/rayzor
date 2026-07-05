@@ -30,6 +30,30 @@ fn build_mem_accessors(builder: &mut MirBuilder) {
     build_mem_store(builder, "rayzor_mem_store_u8", IrType::I32, IrType::U8);
     build_mem_load(builder, "rayzor_mem_load_i32", IrType::I32, IrType::I32);
     build_mem_store(builder, "rayzor_mem_store_i32", IrType::I32, IrType::I32);
+    build_f32_from_bits(builder);
+}
+
+/// `rayzor_mem_f32_from_bits(bits: i32) -> f64`: reinterpret an IEEE-754
+/// single-precision bit pattern as f32, widened to Float. Enables exact
+/// branch-free f16→f32 header decode in quant kernels (bit construction
+/// instead of an iterative pow2 multiply loop).
+fn build_f32_from_bits(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("rayzor_mem_f32_from_bits")
+        .param("bits", IrType::I32)
+        .returns(IrType::F64)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let bits = builder.get_param(0);
+    let f32v = builder.bitcast(bits, IrType::F32);
+    let widened = builder.cast(f32v, IrType::F32, IrType::F64);
+    builder.ret(Some(widened));
 }
 
 /// `name(addr: i64) -> ret_ty` — load `mem_ty` at addr, widen to `ret_ty`.
