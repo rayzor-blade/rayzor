@@ -244,9 +244,11 @@ class Q4Matmul {
         // Contiguous F32 activation base — quantize reads it via inline
         // Mem.loadF32 instead of a per-element getFlat extern.
         var xBase = x.data().raw();
+        var _tq = Sys.time();
         for (r in 0...batch) {
             quantizeQ8K(xBase, r * K, K, aBase, r * K, bsums, r * bpr * 16 * 4, dScales, r * bpr);
         }
+        if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var y = Tensor.zeros([batch, rows], DType.F32);
         // Inline f32 stores via Mem.storeF32 (narrows f64→f32 at the
@@ -300,5 +302,86 @@ class Q4Matmul {
         qs.free();
         bsums.free();
         return y;
+    }
+
+    /**
+     * Fused multi-weight matmul over a SHARED activation: quantize x to Q8_K
+     * exactly once, then one banded pass over the CONCATENATED row space of
+     * up to three weights (QKV, or gate+up). Replaces N sequential
+     * `matmul` calls — N quantize passes and N pool dispatches become 1+1.
+     * Per-row math and reduction order are identical to `matmul`, so each
+     * output is bit-identical to the unfused call. Decode (batch=1) only.
+     * Returns one [1, rows_i] F32 tensor per weight.
+     */
+    public static function matmulFused(w0:QTensor, w1:QTensor, w2:QTensor, x:Tensor, ?sp:SpinPool):Array<Tensor> {
+        var K = w0.cols();
+        var nW = (w2 != null) ? 3 : 2;
+        var batch = Std.int(x.numel() / K);
+        if (batch != 1) {
+            // Prefill goes through the batch-aware single-weight path.
+            var outs = [matmul(w0, x, sp), matmul(w1, x, sp)];
+            if (w2 != null) outs.push(matmul(w2, x, sp));
+            return outs;
+        }
+        var bpr = K >> 8;
+
+        var qs = Bytes.alloc(K);
+        var bsums = Bytes.alloc(bpr * 16 * 4);
+        var dScales = new Array<Float>();
+        dScales.resize(bpr);
+        var aBase = qs.address();
+        var xBase = x.data().raw();
+        var _tq = Sys.time();
+        quantizeQ8K(xBase, 0, K, aBase, 0, bsums, 0, dScales, 0);
+        if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
+
+        var r0 = w0.rows();
+        var r1 = w1.rows();
+        var r2 = (w2 != null) ? w2.rows() : 0;
+        var e0 = r0;          // exclusive end of w0's global rows
+        var e1 = r0 + r1;     // exclusive end of w1's
+        var total = r0 + r1 + r2;
+
+        var wb0 = w0.dataPtr();
+        var wb1 = w1.dataPtr();
+        var wb2 = (w2 != null) ? w2.dataPtr() : wb0;
+        var q60 = (w0.scheme() == QScheme.Q6_K);
+        var q61 = (w1.scheme() == QScheme.Q6_K);
+        var q62 = (w2 != null) && (w2.scheme() == QScheme.Q6_K);
+
+        var y0 = Tensor.zeros([1, r0], DType.F32);
+        var y1 = Tensor.zeros([1, r1], DType.F32);
+        var y2 = (w2 != null) ? Tensor.zeros([1, r2], DType.F32) : null;
+        var yb0 = y0.data().raw();
+        var yb1 = y1.data().raw();
+        var yb2 = (w2 != null) ? y2.data().raw() : yb0;
+
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            for (g in n0...n1) {
+                // Global row -> (weight, local row, base, scheme, out).
+                var wBase:Usize; var isQ6:Bool; var n:Int; var yb:Usize;
+                if (g < e0)      { wBase = wb0; isQ6 = q60; n = g;      yb = yb0; }
+                else if (g < e1) { wBase = wb1; isQ6 = q61; n = g - e0; yb = yb1; }
+                else             { wBase = wb2; isQ6 = q62; n = g - e1; yb = yb2; }
+                var blockBytes = isQ6 ? 210 : 144;
+                var sum = 0.0;
+                for (b in 0...bpr) {
+                    var blk = n * bpr + b;
+                    var xdb = dScales[b];
+                    sum += isQ6
+                        ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
+                        : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
+                }
+                Mem.storeF32(yb + Usize.fromInt(n << 2), sum);
+            }
+        };
+        if (sp != null) sp.parallelRows(total, band);
+        else band(0, total, 0);
+
+        qs.free();
+        bsums.free();
+        var outs = [y0, y1];
+        if (w2 != null) outs.push(y2);
+        return outs;
     }
 }
