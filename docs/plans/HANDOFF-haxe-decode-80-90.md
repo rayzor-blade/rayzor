@@ -120,6 +120,40 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
   A deliberately wrong imin mapping passed it with an identical error value. Any kernel edit
   must be validated with a model run; write a real canary that imports nue.Q4Matmul.
 
+## FLASH-DECODE HAXE PORT (the long-context fix — darmie directive, spec'd 2026-07-06)
+WHY: attention is the LAST GROWING FFI term in decode. It is SERIAL in the current kernel
+(RAYZOR_WORKERS 1/2/3 identical at 800 tokens = 32.4 tok/s) and scales with context: 41.7
+tok/s @256 ctx → 35 @804. By ctx 800 it is ~5-6 ms/token and climbing. Port it to the guest
+pool, banded over the 32 q-heads — parallelism IMPROVES with context.
+
+Reference kernel (mirror exactly): runtime-core/src/tensor/flash_attn.rs
+`flash_attn_decode_one_qhead` — per q-head, 3 passes over cache_len:
+ (1) scores[l] = dot(q_head[64], K[l, kv_head(=q_head/group), :64]) * scale; track max;
+ (2) softmax: scores[l] = exp(scores[l]-max), denom += (max-shifted, matches Tensor.softmax
+     reduction order); (3) out[64] = Σ scores[l]/denom * V[l, kv_head, :64].
+Decode path uses the Q8 cache: GQAttention.hx:187 → KvCacheQ8.flashAttnDecodeQ8Host/Q8
+(nue/nue/transformer/KvCacheQ8.hx — extern; NO raw-pointer surface yet).
+
+Port plan:
+1. Runtime getters (trivial): KvCacheQ8.dataPtr():Usize + rowStrideBytes():Int + the Q8_0
+   block layout constants (32 quants + scale; confirm f16 vs f32 scale in runtime/src source
+   of kv_cache_q8 before writing the dot).
+2. Kernel Q4Matmul-style in a new nue/nue/FlashDecode.hx: band over q-heads via the SpinPool
+   (32 bands; per-claimant scores scratch = ONE Bytes.alloc(32*ctx*4) per call before
+   dispatch, slice by head — NO statics, see the materialized-copies gotcha). Scores pass via
+   SDOT: quantize the 32 q-head rows (64 f32 each) to Q8 once per call (reuse quantizeBlock
+   pattern, per-head scale), then q8xq8 SDOT against K blocks (2 SDOT per 64-dim row) — the
+   wasm q8 flash kernel (perf_wasm_q8_flash_simd128 memory) is prior art. V pass: f32 axpy
+   via SIMD4f mul/add over dequantized V rows (dequant inline per 32-block: SIMD16i8.load +
+   ... no i8->f32 widen op exists — scalar dequant of V may suffice: V pass is
+   bandwidth-light vs scores; measure before adding a widen primitive).
+3. Numerics: exp = Math.exp (LLVM intrinsic); max-shifted softmax reduction order must match
+   Tensor.softmax exactly; compare logits against the FFI path on a fixed prompt for N steps
+   (NOT the vacuous canary pattern — validate through the model).
+4. Wire: GQAttention decode branch behind Linear.useHaxeMatmul(), FFI fallback kept.
+Expected: removes the ctx-linear FFI term; flat ~40+ tok/s at long context; combined with the
+kernel-rate disasm work = the 80-90 path.
+
 ## TIERED-RUNTIME REDESIGN (agreed direction 2026-07-06, unstarted — TOP priority next session)
 Cold start measured: before-main LLVM upgrade costs **+3.0s to first token** (5.97 vs 2.96s).
 The ladder is currently two-tier with dead middle (Baseline/Standard/Optimized = identical
