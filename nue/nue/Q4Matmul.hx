@@ -269,7 +269,7 @@ class Q4Matmul {
         var isQ6 = (qw.scheme() == QScheme.Q6_K);
         var blockBytes = isQ6 ? 210 : 144;
 
-        var y = Tensor.zeros([batch, rows], DType.F32);
+        var y = Tensor.uninit([batch, rows], DType.F32);
         // Inline f32 stores via Mem.storeF32 (narrows f64→f32 at the
         // boundary). NOT `y.data():Ptr<Float>` + write(): Float is f64, so
         // that store lands 8 bytes at an 8-byte stride and corrupts F32.
@@ -413,9 +413,9 @@ class Q4Matmul {
         var q61 = (w1.scheme() == QScheme.Q6_K);
         var q62 = (w2 != null) && (w2.scheme() == QScheme.Q6_K);
 
-        var y0 = Tensor.zeros([1, r0], DType.F32);
-        var y1 = Tensor.zeros([1, r1], DType.F32);
-        var y2 = (w2 != null) ? Tensor.zeros([1, r2], DType.F32) : null;
+        var y0 = Tensor.uninit([1, r0], DType.F32);
+        var y1 = Tensor.uninit([1, r1], DType.F32);
+        var y2 = (w2 != null) ? Tensor.uninit([1, r2], DType.F32) : null;
         var yb0 = y0.data().raw();
         var yb1 = y1.data().raw();
         var yb2 = (w2 != null) ? y2.data().raw() : yb0;

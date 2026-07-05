@@ -711,7 +711,12 @@ fn pool_alloc_bytes(shape: &[usize], dtype: u8) -> usize {
 /// per `fill` and the same wrapper handle is returned (zero mallocs).
 /// On a miss falls through to the canonical four-malloc path below.
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
-unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
+unsafe fn alloc_tensor_with_zero_policy(
+    shape: &[usize],
+    dtype: u8,
+    fill: Option<f32>,
+    zero_unfilled: bool,
+) -> i64 {
     // Env-gated allocation histogram for tensor-pool design audit. One CSV
     // line per call: dtype,ndim,shape0,shape1,...
     record_alloc_histogram(shape, dtype);
@@ -735,10 +740,9 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
         let tensor = entry.ptr as *mut RayzorTensor;
         let t = &mut *tensor;
         // Reset the data buffer per the requested fill semantics. The
-        // popped buffer is the original `numel * elem_size` block; either
-        // way the caller is about to overwrite it (for None we still
-        // zero — historical alloc_tensor zeros when fill=None — to keep
-        // semantics identical between pool-hit and pool-miss paths).
+        // popped buffer is the original `numel * elem_size` block. Historical
+        // alloc_tensor(fill=None) zeroes for callers that expect clean output;
+        // full-overwrite kernels can opt out through alloc_tensor_uninit().
         if !t.data.is_null() && data_bytes > 0 {
             if let Some(val) = fill {
                 if val == 0.0 {
@@ -746,7 +750,7 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
                 } else {
                     fill_dtype(t.data, numel, dtype, val);
                 }
-            } else {
+            } else if zero_unfilled {
                 std::ptr::write_bytes(t.data, 0, data_bytes);
             }
         }
@@ -796,7 +800,7 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
     // Fill data
     if let Some(val) = fill {
         fill_dtype(data, numel, dtype, val);
-    } else {
+    } else if zero_unfilled {
         std::ptr::write_bytes(data, 0, data_bytes);
     }
 
@@ -846,6 +850,16 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
     };
 
     tensor as i64
+}
+
+#[inline]
+unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
+    alloc_tensor_with_zero_policy(shape, dtype, fill, true)
+}
+
+#[inline]
+unsafe fn alloc_tensor_uninit(shape: &[usize], dtype: u8) -> i64 {
+    alloc_tensor_with_zero_policy(shape, dtype, None, false)
 }
 
 // ============================================================================
@@ -942,6 +956,17 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
 pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
     let shape = read_shape(shape_ptr, ndim as usize);
     alloc_tensor(&shape, dtype as u8, Some(0.0))
+}
+
+/// Tensor.uninit(shape_ptr: i64, ndim: i64, dtype: i64) -> i64
+///
+/// Allocate an owning contiguous tensor without initialising its data buffer.
+/// This is only valid for full-overwrite producers. General callers must use
+/// Tensor.zeros/full so stale pooled bytes never become observable.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_uninit(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
+    let shape = read_shape(shape_ptr, ndim as usize);
+    alloc_tensor_uninit(&shape, dtype as u8)
 }
 
 /// Tensor.ones(shape_ptr, ndim, dtype) -> i64

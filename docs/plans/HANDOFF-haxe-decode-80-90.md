@@ -1,7 +1,8 @@
 # HANDOFF: pure-Haxe llama decode → 80–90 tok/s
 
-Audience: the next agent/session picking this up cold. Everything here is measured, committed,
-and reproducible at HEAD (`cb488356`, suite 158/158). Hardware: Apple Silicon (M-series).
+Audience: the next agent/session picking this up cold. Everything here is measured from the
+current pure-Haxe decode branch after the Tensor.uninit / SpinPool-Int-fix pass. Hardware:
+Apple Silicon (M-series).
 
 ## Mission & state
 
@@ -10,12 +11,22 @@ kernel path (`RAYZOR_HAXE_MATMUL=1`), no Rust FFI matmuls.
 
 | metric | 2 days ago | NOW |
 |---|---|---|
-| decode step p50 | 164 ms | **22.75–25.75 ms** (thermal band), user-sustained ~35–40 tok/s |
+| decode step p50 | 164 ms | **21.5–25.75 ms** (thermal band), user-sustained ~35–40 tok/s |
 | prefill | 157 ms/token | **~20 ms/token** (0.33 s / 17-token prompt) |
 | Rust-FFI reference, same binary | — | 9.5 ms/step (105 tok/s short-run; 85–90 sustained) |
 
 All kernel changes are bit-exact by construction (per-row reduction order preserved);
 `test_q4km_dot` is the canary.
+
+Latest landed pass:
+- `Tensor.uninit(shape, dtype)` exists for full-overwrite producers. Native runtime skips the
+  zero-fill on pool hits and fresh allocations; wasm/JS fallbacks keep zero-init for safety.
+- `Q4Matmul` uses `Tensor.uninit` only for outputs it fully overwrites.
+- Pure-Haxe `Linear.forward` no longer clones the input before `Q4Matmul.matmul`.
+- `SpinPool.parallelRows` keeps the original worker-state layout/protocol; only `Int`
+  annotations were added to prevent the `ushr.f64` trap-stub regression.
+- Focused validation: release build green; `test_tensor_uninit_full_overwrite`,
+  `test_q4km_qmatmul`, and a 64-token llama smoke pass with no `W0020` / no LLVM tier loss.
 
 ## How to run / validate
 
@@ -59,7 +70,7 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
 - llama-chat glue: GQAttention QKV + SwiGLU gate/up go through `matmulFused`. Remaining Rust
   FFI per token ≈ 1.5 ms total, all µs-scale kernels: silu, flash_attn_decode (seqQ==1 only —
   prefill attention takes the unfused bmm path), rope, rms_norm, reshape (520 calls),
-  free/clone, softmax, add_into, topk_scan, + Tensor.zeros/Bytes.alloc per matmul.
+  free/clone, softmax, add_into, topk_scan, + Bytes.alloc per matmul.
 
 ## Decode budget @ ~23 ms (where the remaining 2× lives)
 
@@ -68,21 +79,17 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
 - Per-thread rate in-model ≈ 11.2 GMAC/s vs 13.8 resident-bench; Rust ≈ 14.8 in-model.
 
 ### Ranked next steps
-1. **Parallel efficiency 6× → 7.5×+** (biggest term): chunk-size + claimant-count sweep.
-   Chunk = `rows/(_n*8)` min 8 (SpinPool.parallelRows). Claimants = `Q4Matmul.workerCount()`
-   = cpuCount (incl. E-cores; stealing self-balances but E-core throughput still averages in —
-   try P-core-count claimants). ONLY add env knobs via the lazy-init block already in
-   `parallelRows` (see gotcha #4).
-2. **Per-thread rate 11.2 → ~13.8**: the resident-vs-in-model residue is NOT memory (see
-   negative results) — profile the in-model band by disassembly (`RAYZOR_DUMP_FN_PTRS=1` +
-   `rayzor debug lldb`/`resolve`; LLVM pointers print as `[fn-ptr-llvm]`). Candidates:
-   chunk-boundary closure-call overhead, y-store patterns, Q6 share (25% of MACs, 16
-   ADDV-hsums/block — inherent to per-16-weight scales; 2-row tiling was +17.7% on the Rust
-   side and is unexplored here — the shared operand across 2 rows is the activation+bsums).
-3. **Trims**: Tensor.zeros memsets every y though all elements are overwritten (add a
-   Tensor.uninit or full-overwrite hint); 3 Bytes allocs per matmul → persistent per-model
-   scratch (instance-held; NEVER a cross-module static, see gotcha #3).
-4. Memory-leak backstop (separate from perf): InsertFreePass has no MakeClosure arm and can't
+1. **Per-thread rate 11.2 → ~13.8**: the resident-vs-in-model residue is NOT plain memory
+   (see negative results) — profile the in-model band by disassembly
+   (`RAYZOR_DUMP_FN_PTRS=1` + `rayzor debug lldb`/`resolve`; LLVM pointers print as
+   `[fn-ptr-llvm]`). Candidates: chunk-boundary closure-call overhead, y-store patterns,
+   Q6 share (25% of MACs, 16 ADDV-hsums/block — inherent to per-16-weight scales).
+   2-row Q6 tiling was +17.7% on the Rust side and is unexplored here — the shared operand
+   across 2 rows is the activation+bsums.
+2. **Trims still open**: 2 Bytes allocs per matmul (`qs`, `bsums`) + `Array<Float>` dScales
+   remain hot. Next safe trim is persistent per-model/per-pool scratch (instance-held; NEVER a
+   cross-module static, see gotcha #3). `Tensor.uninit` is already landed; do not redo it.
+3. Memory-leak backstop (separate from perf): InsertFreePass has no MakeClosure arm and can't
    see extern-returned containers (shape() arrays, fused triples); band-closure env+struct leak
    per matmul (~small); GB-scale suspect if RSS climbs again: flash-gate miss → unfused bmm
    chain (~150 MB/token) — add a one-shot counter at GQAttention's gate-miss branches.
@@ -98,6 +105,18 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
 - **RAYZOR_WORKERS=0**: worse (some FFI kernels still need a thread).
 - Q6 restructure to integer-domain: the native Rust reference (runtime-core/src/quant/sdot.rs
   `dot_q6_k_q8`, q6_k.rs simd128) is structurally IDENTICAL to our port — no free win there.
+- **SpinPool claimant-count cap / worker-state layout change**: REGRESSION. Waking fewer
+  arbitrary worker slots is not a P-core selector; `RAYZOR_HAXE_POOL_CLAIMANTS=8` measured
+  ~109.75 ms p50 and the control-cell layout change caused cache-sensitive failures. Keep the
+  original worker-state layout. P-core-only needs topology/affinity at worker construction, not
+  dispatch-time claimant caps.
+- **Q4Matmul branch-hoist of `isQ6 ? q6Dot : q4Dot` out of the inner loop**: REGRESSION in the
+  model path (~35.75 ms p50 in a profiled smoke) despite preserving numerics. The current backend
+  likes the original ternary shape better; do not redo without inspecting generated LLVM.
+- **Haxe-side shutdown pool profiling** (`"[profile-pool] " + spinPool.profReport()` in
+  `LlamaModel.shutdownPool`) caused LLVM verifier failure (`Invalid bitcast i32 -> i64`) and
+  silently dropped the program to Cranelift. If pool timing is needed, prefer a runtime-side
+  counter dump or a compiler fix first.
 
 ## GOTCHAS — these WILL bite you (each cost us hours)
 
@@ -131,6 +150,8 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
    not `yield_now`). Exit 133 + no output = look for an unresolved extern.
 8. `--tier-promotion false` (CLI) with llama-chat's manifest routes main through the
    interpreter and breaks; change promotion in the `[tier]` block instead.
+9. `Tensor.uninit` is intentionally unsafe: only use it where every element is written before
+   any read. Native skips zero-fill; wasm/JS fallback currently aliases it to zero-init.
 
 ## Key files
 - Kernel: `nue/nue/Q4Matmul.hx`; glue: `nue/nue/transformer/{GQAttention,SwiGLU}.hx`,

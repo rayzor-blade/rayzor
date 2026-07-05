@@ -1381,6 +1381,12 @@ const rayzor = {{
     const data = new Float64Array(numel);
     return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
   }},
+  rayzor_tensor_uninit: (shapePtr, dtype) => {{
+    const sh = rayzor._readShapeI32(shapePtr);
+    const numel = sh.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(numel);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
+  }},
   rayzor_tensor_ones: (shapePtr, dtype) => {{
     const sh = rayzor._readShapeI32(shapePtr);
     const numel = sh.reduce((a, b) => a * b, 1);
@@ -1601,6 +1607,7 @@ const rayzor = {{
 
   // Bare-name aliases for forwarder stubs
   Tensor_zeros: (...a) => rayzor.rayzor_tensor_zeros(...a),
+  Tensor_uninit: (...a) => rayzor.rayzor_tensor_uninit(...a),
   Tensor_ones: (...a) => rayzor.rayzor_tensor_ones(...a),
   Tensor_full: (...a) => rayzor.rayzor_tensor_full(...a),
   Tensor_fromArray: (...a) => rayzor.rayzor_tensor_from_array(...a),

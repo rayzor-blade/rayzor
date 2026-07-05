@@ -342,6 +342,13 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_uninit(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
+    // WASM keeps the existing zero-init allocation path for now; the symbol
+    // exists so Haxe code that uses full-overwrite Tensor.uninit links on wasm.
+    rayzor_tensor_zeros(shape_ptr, ndim, dtype)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
     rayzor_tensor_full(shape_ptr, ndim, 1.0, dtype)
 }

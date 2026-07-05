@@ -108,13 +108,13 @@ class Linear implements Module {
             // tensor pool's ARC), so leaving the bumped clone bare
             // would leak one ref per Linear call (7+ per block, 16
             // blocks → 100+ leaked refs per generated token).
-            var xClone = x.clone();
             if (useHaxeMatmul()) {
-                y = Q4Matmul.matmul(qweight, xClone, pool);
+                y = Q4Matmul.matmul(qweight, x, pool);
             } else {
+                var xClone = x.clone();
                 y = qweight.matmulXTQThreaded(xClone, 0);
+                xClone.free();
             }
-            xClone.free();
         } else {
             y = x.matmulT(weight);
         }

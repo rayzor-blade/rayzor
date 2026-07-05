@@ -28,6 +28,13 @@ extern class Tensor {
     @:native("tensor_zeros")
     public static function zeros(shape:Array<Int>, dtype:DType):Tensor;
 
+    /**
+     * Create an owning contiguous tensor without initialising its data.
+     * Use only when every element is overwritten before the tensor is read.
+     */
+    @:native("tensor_uninit")
+    public static function uninit(shape:Array<Int>, dtype:DType):Tensor;
+
     /** Create a tensor filled with ones */
     @:native("tensor_ones")
     public static function ones(shape:Array<Int>, dtype:DType):Tensor;

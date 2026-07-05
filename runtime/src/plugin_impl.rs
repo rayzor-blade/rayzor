@@ -1773,6 +1773,7 @@ register_symbol!(
 
 // Construction
 register_symbol!("rayzor_tensor_zeros", crate::tensor::rayzor_tensor_zeros);
+register_symbol!("rayzor_tensor_uninit", crate::tensor::rayzor_tensor_uninit);
 register_symbol!("rayzor_tensor_ones", crate::tensor::rayzor_tensor_ones);
 register_symbol!("rayzor_tensor_full", crate::tensor::rayzor_tensor_full);
 register_symbol!(

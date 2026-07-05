@@ -28,6 +28,10 @@ const tensorRuntime = {
     const sh = _tReadShape(memory, shapePtr, ndim);
     return _tAlloc(_tMkArr(sh.reduce((a,b) => a*b, 1), dtype), sh, dtype);
   },
+  rayzor_tensor_uninit(shapePtr, ndim, dtype) {
+    const sh = _tReadShape(memory, shapePtr, ndim);
+    return _tAlloc(_tMkArr(sh.reduce((a,b) => a*b, 1), dtype), sh, dtype);
+  },
   rayzor_tensor_ones(shapePtr, ndim, dtype) {
     const sh = _tReadShape(memory, shapePtr, ndim);
     const d = _tMkArr(sh.reduce((a,b) => a*b, 1), dtype); d.fill(1);
