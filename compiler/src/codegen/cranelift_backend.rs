@@ -3985,6 +3985,19 @@ impl CraneliftBackend {
                     (types::F32, types::F64) => builder.ins().fpromote(types::F64, src_val),
                     (types::F64, types::F32) => builder.ins().fdemote(types::F32, src_val),
 
+                    // Narrow integer lanes (notably SIMD16i8.get) can feed
+                    // normal numeric promotion before MIR has widened their
+                    // physical Cranelift type. Sign-extend first so the cast
+                    // matches Haxe Int semantics for i8 lanes.
+                    (types::I8, types::F32) => {
+                        let wide = builder.ins().sextend(types::I32, src_val);
+                        builder.ins().fcvt_from_sint(types::F32, wide)
+                    }
+                    (types::I8, types::F64) => {
+                        let wide = builder.ins().sextend(types::I32, src_val);
+                        builder.ins().fcvt_from_sint(types::F64, wide)
+                    }
+
                     // Int to Int conversions (sign extension or truncation)
                     (types::I32, types::I64) => builder.ins().sextend(types::I64, src_val),
                     (types::I64, types::I32) => builder.ins().ireduce(types::I32, src_val),
