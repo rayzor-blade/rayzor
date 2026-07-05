@@ -2938,6 +2938,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                     )
                                     .map_err(|e| format!("fpcast arg: {}", e))?
                                     .into()
+                            } else if arg_val.is_float_value() && expected_ty.is_int_type() {
+                                // Type-decay backstop (e.g. an Int local decayed
+                                // to Float in MIR): convert rather than fail
+                                // verification — an unverified function silently
+                                // drops the WHOLE program to the Cranelift tier.
+                                self.builder
+                                    .build_float_to_signed_int(
+                                        arg_val.into_float_value(),
+                                        expected_ty.into_int_type(),
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("fptosi arg: {}", e))?
+                                    .into()
+                            } else if arg_val.is_int_value() && expected_ty.is_float_type() {
+                                self.builder
+                                    .build_signed_int_to_float(
+                                        arg_val.into_int_value(),
+                                        expected_ty.into_float_type(),
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("sitofp arg: {}", e))?
+                                    .into()
                             } else {
                                 arg_val
                             }
