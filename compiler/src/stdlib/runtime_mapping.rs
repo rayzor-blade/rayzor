@@ -2774,6 +2774,8 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::I32),
             map_method!(static "rayzor_Mem", "storeI32" => "rayzor_mem_store_i32", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
+            map_method!(static "rayzor_Mem", "f32FromBits" => "rayzor_mem_f32_from_bits", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             // bytes.setInt64(pos: Int, value: Int64): Void
             map_method!(instance "rayzor_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),

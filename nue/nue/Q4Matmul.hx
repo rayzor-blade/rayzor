@@ -35,18 +35,14 @@ import rayzor.concurrent.CpuTopology;
  * quantised to Q8_K here (matching the FFI path's internal quant).
  */
 class Q4Matmul {
-    static inline function pow2(e:Int):Float {
-        var r = 1.0;
-        if (e >= 0) { for (i in 0...e) r *= 2.0; } else { for (i in 0...(-e)) r *= 0.5; }
-        return r;
-    }
-
     static inline function f16ToF32(bits:Int):Float {
         var sign:Int = (bits >> 15) & 1; var exp:Int = (bits >> 10) & 0x1F; var mant:Int = bits & 0x3FF;
         var sgn = (sign == 1) ? -1.0 : 1.0;
         if (exp == 0) return sgn * mant * 0.000000059604644775390625;
         if (exp == 31) return (mant == 0) ? sgn * 1e38 : 0.0;
-        return sgn * (1.0 + mant / 1024.0) * pow2(exp - 15);
+        // Exact IEEE f16→f32 rebase: same sign/mantissa, exponent re-biased
+        // 15→127. Branch-free bit construction (was an iterative pow2 loop).
+        return Mem.f32FromBits((sign << 31) | ((exp + 112) << 23) | (mant << 13));
     }
 
     /** Quantise one activation row x[xBase .. xBase+K] to Q8_K (qs/bsums/dOut).

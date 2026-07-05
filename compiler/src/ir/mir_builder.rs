@@ -416,6 +416,17 @@ impl MirBuilder {
         dest
     }
 
+    /// Reinterpret `src`'s bits as `to_ty` (same width, no value conversion).
+    pub fn bitcast(&mut self, src: IrId, to_ty: IrType) -> IrId {
+        let dest = self.alloc_reg_typed(to_ty.clone());
+        self.insert_inst(IrInstruction::BitCast {
+            dest,
+            src,
+            ty: to_ty,
+        });
+        dest
+    }
+
     /// Extract value from aggregate (struct/array) by indices
     pub fn extract_value(&mut self, aggregate: IrId, indices: Vec<u32>) -> IrId {
         // Need to infer field type from aggregate type

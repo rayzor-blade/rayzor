@@ -43,4 +43,9 @@ extern class Mem {
     /** Store an i32 at `addr` (aligned). */
     @:native("storeI32")
     public static function storeI32(addr:Usize, value:Int):Void;
+
+    /** Reinterpret an IEEE-754 single-precision bit pattern as f32,
+        widened to Float. Exact, branch-free float construction. */
+    @:native("f32FromBits")
+    public static function f32FromBits(bits:Int):Float;
 }
