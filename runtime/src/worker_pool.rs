@@ -763,7 +763,19 @@ pub fn global() -> &'static WorkerPool {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(6);
+            .unwrap_or_else(|| {
+                // On the pure-Haxe matmul path the guest SpinPool owns the
+                // cores; a full-width Rust pool spin-waits against it and
+                // caps the guest bands at ~2x scaling (measured: shrinking
+                // this pool to 1 took llama-chat decode 65 -> 27.5 ms/token).
+                // One worker (+ caller band) still covers the us-scale
+                // attention/activation kernels.
+                if std::env::var_os("RAYZOR_HAXE_MATMUL").is_some() {
+                    1
+                } else {
+                    6
+                }
+            });
         WorkerPool::new(n)
     })
 }

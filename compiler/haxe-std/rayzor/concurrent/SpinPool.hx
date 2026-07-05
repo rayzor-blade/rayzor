@@ -44,6 +44,10 @@ import rayzor.Usize;
  *   don't pay a park/unpark syscall per matmul.
  */
 class SpinPool {
+    /** Idle spins before parking. Default covers intra-token FFI-glue gaps
+        (~150us); raise via RAYZOR_HAXE_POOL_SPINS when the Rust FFI pool is
+        small enough not to contend (see the measured tradeoff below). */
+    var spinBudget:Int;
     var _n:Int;
     var _ctl:Bytes;
     var _fn:(Int, Int, Int) -> Void;
@@ -89,6 +93,8 @@ class SpinPool {
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
+        spinBudget = 0; // resolved lazily on first dispatch (env reads in a
+                        // constructor mis-resolve; see bugs_sys_getenv_in_ctor)
         // Bind `this` to an explicit local: an implicit `this` capture in a
         // loop-spawned closure does not resolve.
         var self = this;
@@ -140,7 +146,7 @@ class SpinPool {
                 // starve the Rust FFI pool (attention/silu/fused-QKV) that
                 // runs between our dispatches. Until the two pools share
                 // cores cooperatively, the short budget is the lesser evil.
-                if (spins > 40000) {
+                if (spins > spinBudget) {
                     Parker.park();
                     spins = 0;
                 }
@@ -159,6 +165,19 @@ class SpinPool {
         if (_n <= 1 || rows < _n * 4 || !_alive) {
             fn(0, rows, 0);
             return;
+        }
+        if (spinBudget == 0) {
+            // Idle spins before a worker parks. Too small: every dispatch
+            // pays the OS wake latency. Too large: spinning workers starve
+            // concurrent native pools and lose badly under thermal
+            // throttling. 40k (~150us) is the stable middle; tune per
+            // machine via RAYZOR_HAXE_POOL_SPINS.
+            spinBudget = 40000;
+            var sb = Sys.getEnv("RAYZOR_HAXE_POOL_SPINS");
+            if (sb != null) {
+                var v = Std.parseInt(sb);
+                if (v != null && v > 0) spinBudget = v;
+            }
         }
         _fn = fn; // plain store; published by the SC state flips below
         // Chunk sizing: ~8 claims per worker amortizes cursor traffic while
