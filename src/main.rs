@@ -1146,9 +1146,12 @@ fn run_bundle(
         }
         #[cfg(not(feature = "llvm-backend"))]
         {
-            eprintln!(
-                "[tier] manifest requested auto-upgrade to LLVM, but this build was compiled without the `llvm-backend` feature; continuing on Cranelift"
-            );
+            // Presets default auto-upgrade on; stay quiet unless verbose.
+            if verbose {
+                eprintln!(
+                    "[tier] auto-upgrade to LLVM unavailable (build lacks the `llvm-backend` feature); continuing on Cranelift"
+                );
+            }
         }
     }
 
@@ -1901,9 +1904,13 @@ fn run_file(
         }
         #[cfg(not(feature = "llvm-backend"))]
         {
-            eprintln!(
-                "[tier] manifest requested auto-upgrade to LLVM, but this build was compiled without the `llvm-backend` feature; continuing on Cranelift"
-            );
+            // Presets default auto-upgrade on; only warn when the user
+            // explicitly asked for LLVM on a build that can't provide it.
+            if llvm {
+                eprintln!(
+                    "[tier] --llvm requested, but this build was compiled without the `llvm-backend` feature; continuing on Cranelift"
+                );
+            }
         }
     }
 

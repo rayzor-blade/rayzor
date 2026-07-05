@@ -644,7 +644,10 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
-                auto_upgrade_to_llvm_after_main_entry: false,
+                // A monolithic `main` never re-enters the dispatcher, so
+                // count-based promotion can't reach its inner functions;
+                // install the LLVM tier before main runs.
+                auto_upgrade_to_llvm_after_main_entry: true,
             },
 
             TierPreset::Server => TieredConfig {
@@ -660,7 +663,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
-                auto_upgrade_to_llvm_after_main_entry: false,
+                auto_upgrade_to_llvm_after_main_entry: true,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -2153,14 +2156,22 @@ impl TieredBackend {
             // Baseline is handled by `execute_function`, where we have
             // `&mut self` and can invoke `compile_all_modules_jit`.
             //
-            // Maximum (LLVM) doesn't go through beadie either — it's
-            // user-triggered via `upgrade_to_llvm` and runs on the
-            // main thread because of LLVM's `add_global_mapping`
-            // constraint.
+            // Maximum (LLVM) doesn't go through beadie either — it
+            // must run on the main thread because of LLVM's
+            // `add_global_mapping` constraint. Queue it here; the
+            // queue is drained at the next `execute_function` entry
+            // (a natural safe point on the main thread).
             //
             // ProfileData increment above stays in place so the tier
             // statistics report accurate hotness regardless of who
             // owns the compile.
+            #[cfg(feature = "llvm-backend")]
+            if matches!(target_tier, OptimizationTier::Maximum) {
+                let mut queue = self.llvm_queue.lock().unwrap();
+                if !queue.contains(&func_id) {
+                    queue.push_back(func_id);
+                }
+            }
             if matches!(
                 target_tier,
                 OptimizationTier::Standard | OptimizationTier::Optimized
