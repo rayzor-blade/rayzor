@@ -3550,6 +3550,10 @@ impl StdlibMapping {
             // Tensor.zeros(shape: Array<Int>, dtype: DType): Tensor
             map_method!(static "rayzor_ds_Tensor", "zeros" => "Tensor_zeros", params: 2, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),
+            // Tensor.uninit(shape: Array<Int>, dtype: DType): Tensor
+            // Full-overwrite producers only; wrapper preserves the shape-array ABI.
+            map_method!(static "rayzor_ds_Tensor", "uninit" => "Tensor_uninit", params: 2, mir_wrapper,
+                types: &[PtrVoid, I64] => PtrVoid),
             // Tensor.ones(shape: Array<Int>, dtype: DType): Tensor
             map_method!(static "rayzor_ds_Tensor", "ones" => "Tensor_ones", params: 2, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),

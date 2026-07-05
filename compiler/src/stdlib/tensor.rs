@@ -23,6 +23,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
 
     // Build MIR wrappers
     build_tensor_zeros(builder);
+    build_tensor_uninit(builder);
     build_tensor_ones(builder);
     build_tensor_full(builder);
     build_tensor_from_array(builder);
@@ -121,6 +122,7 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
     // Construction: (shape_ptr: i64, ndim: i64, dtype: i64) -> i64
     for name in &[
         "rayzor_tensor_zeros",
+        "rayzor_tensor_uninit",
         "rayzor_tensor_ones",
         "rayzor_tensor_rand",
     ] {
@@ -672,6 +674,35 @@ fn build_tensor_zeros(builder: &mut MirBuilder) {
     let extern_id = builder
         .get_function_by_name("rayzor_tensor_zeros")
         .expect("rayzor_tensor_zeros not found");
+    let result = builder.call(extern_id, vec![data_ptr, len, dtype]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_uninit(shape_arr: i64, dtype: i64) -> i64
+/// shape_arr is a HaxeArray pointer. Returned data bytes are unspecified;
+/// use only in kernels that store every element before exposing the tensor.
+fn build_tensor_uninit(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_uninit")
+        .param("shape_arr", i64_ty.clone())
+        .param("dtype", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let shape_arr = builder.get_param(0);
+    let dtype = builder.get_param(1);
+    let (data_ptr, len) = extract_array_ptr_len(builder, shape_arr);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_uninit")
+        .expect("rayzor_tensor_uninit not found");
     let result = builder.call(extern_id, vec![data_ptr, len, dtype]).unwrap();
     builder.ret(Some(result));
 }

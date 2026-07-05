@@ -188,27 +188,28 @@ class SpinPool {
             spinBudget = 2000;
             var sb = Sys.getEnv("RAYZOR_HAXE_POOL_SPINS");
             if (sb != null) {
-                var v = Std.parseInt(sb);
+                var v:Null<Int> = Std.parseInt(sb);
                 if (v != null && v > 0) spinBudget = v;
             }
         }
         // Record the inter-dispatch gap EWMA — workers size their idle
         // hold from the pool's own cadence, so the policy adapts to the
         // workload instead of a hand-tuned constant.
-        var nowUs = Std.int((Sys.time() * 1e6) % 2000000000.);
-        var last = lastDispatchUs().load();
+        var nowUs:Int = Std.int((Sys.time() * 1e6) % 2000000000.);
+        var last:Int = lastDispatchUs().load();
         lastDispatchUs().store(nowUs);
         if (last != 0) {
-            var gap = nowUs - last;
+            var gap:Int = nowUs - last;
             if (gap > 0 && gap < 10000000) {
-                var e = gapEwmaUs().load();
-                gapEwmaUs().store(e + ((gap - e) >> 2));
+                var e:Int = gapEwmaUs().load();
+                var delta:Int = gap - e;
+                gapEwmaUs().store(e + (delta >> 2));
             }
         }
         _fn = fn; // plain store; published by the SC state flips below
         // Chunk sizing: ~8 claims per worker amortizes cursor traffic while
         // leaving enough grains for stealing to absorb slow cores.
-        var chunk = Std.int(rows / (_n * 8));
+        var chunk:Int = Std.int(rows / (_n * 8));
         if (chunk < 8) chunk = 8;
         cursor().store(0);
         rowsCell().store(rows);

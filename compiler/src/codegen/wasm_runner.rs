@@ -4164,6 +4164,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     fn canonical_tensor_name(name: &str) -> Option<&str> {
         match name {
             "rayzor_tensor_zeros" | "Tensor_zeros" => Some("rayzor_tensor_zeros"),
+            "rayzor_tensor_uninit" | "Tensor_uninit" => Some("rayzor_tensor_zeros"),
             "rayzor_tensor_ones" | "Tensor_ones" => Some("rayzor_tensor_ones"),
             "rayzor_tensor_full" | "Tensor_full" => Some("rayzor_tensor_full"),
             "rayzor_tensor_from_array" | "Tensor_fromArray" | "Tensor_from_array" => {
@@ -4209,6 +4210,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     let runtime_tensor_exports_linked = [
         "rayzor_tensor_zeros",
+        "rayzor_tensor_uninit",
         "rayzor_tensor_ones",
         "rayzor_tensor_full",
         "rayzor_tensor_from_array",
