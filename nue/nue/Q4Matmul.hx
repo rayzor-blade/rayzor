@@ -236,6 +236,19 @@ class Q4Matmul {
         }
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
+        var y = runBanded(qw, batch, K, aBase, bsums, dScales, sp);
+
+        qs.free();
+        bsums.free();
+        return y;
+    }
+
+    /** One banded pass of `qw` against pre-quantized Q8_K activations
+        (packed batch rows at `aBase`/`bsums`/`dScales`). Shared by `matmul`
+        and the fused batch path so a common activation is quantized once. */
+    static function runBanded(qw:QTensor, batch:Int, K:Int, aBase:Usize, bsums:Bytes,
+            dScales:Array<Float>, sp:Null<SpinPool>):Tensor {
+        var bpr = K >> 8;
         var rows = qw.rows();
         var wBase = qw.dataPtr();
         // Q4_K_M promotes accuracy-sensitive tensors (attn_v, ffn_down) to
@@ -320,9 +333,6 @@ class Q4Matmul {
         // modules; see bugs_import_xmodule_member_resolution).
         if (sp != null) sp.parallelRows(rows, band);
         else band(0, rows, 0);
-
-        qs.free();
-        bsums.free();
         return y;
     }
 
@@ -339,8 +349,27 @@ class Q4Matmul {
         var K = w0.cols();
         var batch = Std.int(x.numel() / K);
         if (batch != 1) {
-            var outs = [matmul(w0, x, sp), matmul(w1, x, sp)];
-            if (w2 != null) outs.push(matmul(w2, x, sp));
+            // Prefill: quantize the shared activation ONCE, then one banded
+            // pass per weight against the packed scratch.
+            var bprB = K >> 8;
+            var qsB = Bytes.alloc(batch * K);
+            var bsumsB = Bytes.alloc(batch * bprB * 16 * 4);
+            var dScalesB = new Array<Float>();
+            dScalesB.resize(batch * bprB);
+            var aB = qsB.address();
+            var xB = x.data().raw();
+            var _tqB = Sys.time();
+            for (r in 0...batch) {
+                quantizeQ8K(xB, r * K, K, aB, r * K, bsumsB, r * bprB * 16 * 4, dScalesB, r * bprB);
+            }
+            if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
+            var outs = [
+                runBanded(w0, batch, K, aB, bsumsB, dScalesB, sp),
+                runBanded(w1, batch, K, aB, bsumsB, dScalesB, sp)
+            ];
+            if (w2 != null) outs.push(runBanded(w2, batch, K, aB, bsumsB, dScalesB, sp));
+            qsB.free();
+            bsumsB.free();
             return outs;
         }
         var bpr = K >> 8;
