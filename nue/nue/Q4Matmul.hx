@@ -48,35 +48,49 @@ class Q4Matmul {
         bytes.storeI32AlignedUnchecked(byteOff, value);
     }
 
-    /** `xBase` = raw address of a CONTIGUOUS F32 activation row (element
-        offset `xOff`); `qsBase` = raw address of the Q8 scratch. All element
-        accesses are inline typed loads/stores (Mem) — no per-element extern. */
-    static function quantizeQ8K(xBase:Usize, xOff:Int, K:Int, qsBase:Usize, qsOff:Int, bsums:Bytes, bsumsOff:Int,
-            dOut:Array<Float>, dIndex:Int):Void {
-        var nb:Int = K >> 8;
-        for (b in 0...nb) {
-            var maxAbs = 0.0;
-            for (i in 0...256) {
-                var a = Mem.loadF32(xBase + Usize.fromInt((xOff + b * 256 + i) << 2));
-                if (a < 0) a = -a; if (a > maxAbs) maxAbs = a;
-            }
-            if (maxAbs == 0.0) {
-                dOut[dIndex + b] = 0.0;
-                for (i in 0...256) Mem.storeU8(qsBase + Usize.fromInt(qsOff + b * 256 + i), 0);
-                for (s in 0...16) storeI32(bsums, bsumsOff + (b * 16 + s) * 4, 0);
-            } else {
-                var d = maxAbs / 127.0; dOut[dIndex + b] = d; var invD = 127.0 / maxAbs;
-                for (s in 0...16) {
-                    var sum = 0;
-                    for (j in 0...16) {
-                        var v = Mem.loadF32(xBase + Usize.fromInt((xOff + b * 256 + s * 16 + j) << 2)) * invD;
-                        var qf = (v >= 0) ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
-                        var q = (qf > 127) ? 127 : ((qf < -128) ? -128 : qf);
-                        Mem.storeU8(qsBase + Usize.fromInt(qsOff + b * 256 + s * 16 + j), q & 0xFF); sum += q;
-                    }
-                    storeI32(bsums, bsumsOff + (b * 16 + s) * 4, sum);
+    /** Quantize super-block `g` of a packed activation batch to Q8_K.
+        Layout is g-linear: elements at g*256, bsums at g*64 bytes, scale at
+        dOut[g]. `xBase`/`qsBase` are raw addresses of contiguous F32 input /
+        Q8 scratch; all element accesses are inline typed loads/stores.
+        Blocks are independent — safe to run concurrently across a band. */
+    static inline function quantizeBlock(xBase:Usize, qsBase:Usize, bsums:Bytes,
+            dOut:Array<Float>, g:Int):Void {
+        var off = g * 256;
+        var maxAbs = 0.0;
+        for (i in 0...256) {
+            var a = Mem.loadF32(xBase + Usize.fromInt((off + i) << 2));
+            if (a < 0) a = -a; if (a > maxAbs) maxAbs = a;
+        }
+        if (maxAbs == 0.0) {
+            dOut[g] = 0.0;
+            for (i in 0...256) Mem.storeU8(qsBase + Usize.fromInt(off + i), 0);
+            for (s in 0...16) storeI32(bsums, g * 64 + s * 4, 0);
+        } else {
+            var d = maxAbs / 127.0; dOut[g] = d; var invD = 127.0 / maxAbs;
+            for (s in 0...16) {
+                var sum = 0;
+                for (j in 0...16) {
+                    var v = Mem.loadF32(xBase + Usize.fromInt((off + s * 16 + j) << 2)) * invD;
+                    var qf = (v >= 0) ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
+                    var q = (qf > 127) ? 127 : ((qf < -128) ? -128 : qf);
+                    Mem.storeU8(qsBase + Usize.fromInt(off + s * 16 + j), q & 0xFF); sum += q;
                 }
+                storeI32(bsums, g * 64 + (s << 2), sum);
             }
+        }
+    }
+
+    /** Quantize `total` super-blocks, banded across the pool when it pays
+        (blocks are independent; per-block work ~1-3us). */
+    static function quantizeAll(xBase:Usize, qsBase:Usize, bsums:Bytes,
+            dOut:Array<Float>, total:Int, sp:Null<SpinPool>):Void {
+        if (sp != null && total >= 16) {
+            var qband = function(lo:Int, hi:Int, node:Int):Void {
+                for (g in lo...hi) quantizeBlock(xBase, qsBase, bsums, dOut, g);
+            };
+            sp.parallelRows(total, qband);
+        } else {
+            for (g in 0...total) quantizeBlock(xBase, qsBase, bsums, dOut, g);
         }
     }
 
@@ -231,9 +245,7 @@ class Q4Matmul {
         // Mem.loadF32 instead of a per-element getFlat extern.
         var xBase = x.data().raw();
         var _tq = Sys.time();
-        for (r in 0...batch) {
-            quantizeQ8K(xBase, r * K, K, aBase, r * K, bsums, r * bpr * 16 * 4, dScales, r * bpr);
-        }
+        quantizeAll(xBase, aBase, bsums, dScales, batch * bpr, sp);
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var y = runBanded(qw, batch, K, aBase, bsums, dScales, sp);
@@ -359,9 +371,7 @@ class Q4Matmul {
             var aB = qsB.address();
             var xB = x.data().raw();
             var _tqB = Sys.time();
-            for (r in 0...batch) {
-                quantizeQ8K(xB, r * K, K, aB, r * K, bsumsB, r * bprB * 16 * 4, dScalesB, r * bprB);
-            }
+            quantizeAll(xB, aB, bsumsB, dScalesB, batch * bprB, sp);
             if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
             var outs = [
                 runBanded(w0, batch, K, aB, bsumsB, dScalesB, sp),
@@ -381,7 +391,7 @@ class Q4Matmul {
         var aBase = qs.address();
         var xBase = x.data().raw();
         var _tq = Sys.time();
-        quantizeQ8K(xBase, 0, K, aBase, 0, bsums, 0, dScales, 0);
+        quantizeAll(xBase, aBase, bsums, dScales, bpr, sp);
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var r0 = w0.rows();
