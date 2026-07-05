@@ -235,6 +235,26 @@ extern class Bytes {
     public function setInt32(pos: Int, value: Int): Void;
 
     /**
+        Load a 32-bit signed integer from an aligned, in-bounds byte position.
+        This is an unchecked kernel helper that compiles to a direct load; use
+        getInt32 for general file-format reads that may be unaligned.
+
+        @param pos Aligned byte position
+        @return The 32-bit integer
+    **/
+    public function loadI32AlignedUnchecked(pos: Int): Int;
+
+    /**
+        Store a 32-bit signed integer to an aligned, in-bounds byte position.
+        This is an unchecked kernel helper that compiles to a direct store; use
+        setInt32 for general file-format writes that may be unaligned.
+
+        @param pos Aligned byte position
+        @param value The 32-bit integer
+    **/
+    public function storeI32AlignedUnchecked(pos: Int, value: Int): Void;
+
+    /**
         Sets a 64-bit signed integer at the given position.
         Uses little-endian byte order.
 

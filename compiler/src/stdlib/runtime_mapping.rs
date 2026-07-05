@@ -2749,6 +2749,31 @@ impl StdlibMapping {
             // bytes.setInt32(pos: Int, value: Int): Void
             map_method!(instance "rayzor_Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
+            // bytes.loadI32AlignedUnchecked(pos: Int): Int
+            map_method!(instance "rayzor_Bytes", "loadI32AlignedUnchecked" => "rayzor_bytes_load_i32_aligned_unchecked", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
+            // bytes.storeI32AlignedUnchecked(pos: Int, value: Int): Void
+            map_method!(instance "rayzor_Bytes", "storeI32AlignedUnchecked" => "rayzor_bytes_store_i32_aligned_unchecked", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
+            // Mem.* — address-based unchecked loads/stores (raw Usize base
+            // from Bytes.address()/Tensor.data().raw()); the f32 pair is the
+            // only scalar f32 access reachable from Haxe (Float is f64).
+            map_method!(static "rayzor_Mem", "loadF32" => "rayzor_mem_load_f32", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::F64),
+            map_method!(static "rayzor_Mem", "storeF32" => "rayzor_mem_store_f32", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::I64, IrTypeDescriptor::F64]),
+            map_method!(static "rayzor_Mem", "loadF64" => "rayzor_mem_load_f64", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::F64),
+            map_method!(static "rayzor_Mem", "storeF64" => "rayzor_mem_store_f64", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::I64, IrTypeDescriptor::F64]),
+            map_method!(static "rayzor_Mem", "loadU8" => "rayzor_mem_load_u8", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::I32),
+            map_method!(static "rayzor_Mem", "storeU8" => "rayzor_mem_store_u8", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
+            map_method!(static "rayzor_Mem", "loadI32" => "rayzor_mem_load_i32", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::I32),
+            map_method!(static "rayzor_Mem", "storeI32" => "rayzor_mem_store_i32", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
             // bytes.setInt64(pos: Int, value: Int64): Void
             map_method!(instance "rayzor_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),

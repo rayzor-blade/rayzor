@@ -4033,6 +4033,29 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let elem_ty = vec_ty.get_element_type();
                 let is_float = elem_ty.is_float_type();
 
+                // Integer Add: emit llvm.vector.reduce.add — guaranteed ADDV
+                // selection on AArch64. The scalar extract+add chain below is
+                // the fallback; O3 does not reliably re-fold it, and the hot
+                // quant kernels hsum once per (sub-)block.
+                if !is_float && matches!(op, BinaryOp::Add) {
+                    use inkwell::intrinsics::Intrinsic;
+                    if let Some(intrinsic) = Intrinsic::find("llvm.vector.reduce.add") {
+                        if let Some(func) =
+                            intrinsic.get_declaration(&self.module, &[vec_ty.into()])
+                        {
+                            let result = self
+                                .builder
+                                .build_call(func, &[vec_val.into()], "reduce_addv")
+                                .map_err(|e| format!("reduce.add call failed: {}", e))?
+                                .try_as_basic_value()
+                                .basic()
+                                .ok_or("reduce.add returned void")?;
+                            self.value_map.insert(*dest, result);
+                            return Ok(());
+                        }
+                    }
+                }
+
                 // Extract first element as accumulator
                 let idx0 = self.context.i32_type().const_int(0, false);
                 let mut acc = self

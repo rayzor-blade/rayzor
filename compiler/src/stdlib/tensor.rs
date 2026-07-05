@@ -8,7 +8,13 @@
 /// HaxeArray layout: [ptr: *mut u8, len: usize, cap: usize, elem_size: usize]
 /// So: data_ptr = load(array_ptr + 0), len = load(array_ptr + 8)
 use crate::ir::mir_builder::MirBuilder;
-use crate::ir::{BinaryOp, CallingConvention, InlineHint, IrType};
+use crate::ir::{BinaryOp, CallingConvention, CompareOp, InlineHint, IrType};
+
+const TENSOR_DATA_OFFSET: i64 = 0;
+const TENSOR_NUMEL_OFFSET: i64 = 32;
+const TENSOR_DTYPE_OFFSET: i64 = 40;
+const TENSOR_OWNS_DATA_OFFSET: i64 = 41;
+const DTYPE_F32_TAG: u8 = 0;
 
 /// Build all tensor type functions
 pub fn build_tensor_types(builder: &mut MirBuilder) {
@@ -1353,18 +1359,22 @@ fn build_tensor_get(builder: &mut MirBuilder) {
 /// Tensor_get_flat(tensor: i64, i: i64) -> f64
 ///
 /// Direct flat-index scalar read — no Array<Int> indices required.
-/// Force-inline so hot logits-scan loops collapse to a single extern call
-/// with no MIR-wrapper frame. Replaces the `tensor.get([i])` pattern that
-/// allocates an Array<Int> per call.
+/// Force-inline so owning F32 tensors collapse to a GEP + f32 load. Replaces
+/// the `tensor.get([i])` pattern that allocates an Array<Int> per call, and
+/// avoids the per-element runtime call in Haxe-side kernels that scan a cloned
+/// activation tensor. Views / non-F32 dtypes fall back to the runtime function,
+/// preserving the public dtype-aware and stride-aware contract.
 fn build_tensor_get_flat(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
     let f64_ty = IrType::F64;
+    let u8_ty = IrType::U8;
+    let f32_ty = IrType::F32;
 
     let func_id = builder
         .begin_function("Tensor_get_flat")
         .param("self", i64_ty.clone())
-        .param("i", i64_ty)
-        .returns(f64_ty)
+        .param("i", i64_ty.clone())
+        .returns(f64_ty.clone())
         .calling_convention(CallingConvention::C)
         .inline(InlineHint::Always)
         .build();
@@ -1379,6 +1389,53 @@ fn build_tensor_get_flat(builder: &mut MirBuilder) {
     let extern_id = builder
         .get_function_by_name("rayzor_tensor_get_flat")
         .expect("rayzor_tensor_get_flat not found");
+
+    let check_dtype = builder.create_block("check_dtype");
+    let check_owns = builder.create_block("check_owns");
+    let check_nonnegative = builder.create_block("check_nonnegative");
+    let check_bound = builder.create_block("check_bound");
+    let fast = builder.create_block("fast_f32_owning");
+    let fallback = builder.create_block("fallback_runtime");
+
+    let zero_i64 = builder.const_i64(0);
+    let self_non_null = builder.cmp(CompareOp::Ne, self_val, zero_i64);
+    builder.cond_br(self_non_null, check_dtype, fallback);
+
+    builder.set_insert_point(check_dtype);
+    let dtype_addr = tensor_field_addr(builder, self_val, TENSOR_DTYPE_OFFSET);
+    let dtype = builder.load(dtype_addr, u8_ty.clone());
+    let f32_tag = builder.const_u8(DTYPE_F32_TAG);
+    let dtype_is_f32 = builder.cmp(CompareOp::Eq, dtype, f32_tag);
+    builder.cond_br(dtype_is_f32, check_owns, fallback);
+
+    builder.set_insert_point(check_owns);
+    let owns_addr = tensor_field_addr(builder, self_val, TENSOR_OWNS_DATA_OFFSET);
+    let owns = builder.load(owns_addr, u8_ty);
+    let false_u8 = builder.const_u8(0);
+    let owns_data = builder.cmp(CompareOp::Ne, owns, false_u8);
+    builder.cond_br(owns_data, check_nonnegative, fallback);
+
+    builder.set_insert_point(check_nonnegative);
+    let zero_i64 = builder.const_i64(0);
+    let i_nonnegative = builder.cmp(CompareOp::Ge, i_val, zero_i64);
+    builder.cond_br(i_nonnegative, check_bound, fallback);
+
+    builder.set_insert_point(check_bound);
+    let numel_addr = tensor_field_addr(builder, self_val, TENSOR_NUMEL_OFFSET);
+    let numel = builder.load(numel_addr, i64_ty.clone());
+    let in_bounds = builder.cmp(CompareOp::Lt, i_val, numel);
+    builder.cond_br(in_bounds, fast, fallback);
+
+    builder.set_insert_point(fast);
+    let data = builder.load(self_val, i64_ty.clone());
+    let four = builder.const_i64(4);
+    let byte_offset = builder.bin_op(BinaryOp::Mul, i_val, four);
+    let elem_ptr = builder.bin_op(BinaryOp::Add, data, byte_offset);
+    let value_f32 = builder.load(elem_ptr, f32_ty.clone());
+    let value_f64 = builder.cast(value_f32, f32_ty, f64_ty.clone());
+    builder.ret(Some(value_f64));
+
+    builder.set_insert_point(fallback);
     let result = builder.call(extern_id, vec![self_val, i_val]).unwrap();
     builder.ret(Some(result));
 }
@@ -1386,12 +1443,14 @@ fn build_tensor_get_flat(builder: &mut MirBuilder) {
 fn build_tensor_set_flat(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
     let f64_ty = IrType::F64;
+    let u8_ty = IrType::U8;
+    let f32_ty = IrType::F32;
 
     let func_id = builder
         .begin_function("Tensor_set_flat")
         .param("self", i64_ty.clone())
-        .param("i", i64_ty)
-        .param("value", f64_ty)
+        .param("i", i64_ty.clone())
+        .param("value", f64_ty.clone())
         .calling_convention(CallingConvention::C)
         .inline(InlineHint::Always)
         .build();
@@ -1407,8 +1466,68 @@ fn build_tensor_set_flat(builder: &mut MirBuilder) {
     let extern_id = builder
         .get_function_by_name("rayzor_tensor_set_flat")
         .expect("rayzor_tensor_set_flat not found");
+
+    let check_dtype = builder.create_block("check_dtype");
+    let check_owns = builder.create_block("check_owns");
+    let check_nonnegative = builder.create_block("check_nonnegative");
+    let check_bound = builder.create_block("check_bound");
+    let fast = builder.create_block("fast_f32_owning");
+    let fallback = builder.create_block("fallback_runtime");
+
+    let zero_i64 = builder.const_i64(0);
+    let self_non_null = builder.cmp(CompareOp::Ne, self_val, zero_i64);
+    builder.cond_br(self_non_null, check_dtype, fallback);
+
+    builder.set_insert_point(check_dtype);
+    let dtype_addr = tensor_field_addr(builder, self_val, TENSOR_DTYPE_OFFSET);
+    let dtype = builder.load(dtype_addr, u8_ty.clone());
+    let f32_tag = builder.const_u8(DTYPE_F32_TAG);
+    let dtype_is_f32 = builder.cmp(CompareOp::Eq, dtype, f32_tag);
+    builder.cond_br(dtype_is_f32, check_owns, fallback);
+
+    builder.set_insert_point(check_owns);
+    let owns_addr = tensor_field_addr(builder, self_val, TENSOR_OWNS_DATA_OFFSET);
+    let owns = builder.load(owns_addr, u8_ty);
+    let false_u8 = builder.const_u8(0);
+    let owns_data = builder.cmp(CompareOp::Ne, owns, false_u8);
+    builder.cond_br(owns_data, check_nonnegative, fallback);
+
+    builder.set_insert_point(check_nonnegative);
+    let zero_i64 = builder.const_i64(0);
+    let i_nonnegative = builder.cmp(CompareOp::Ge, i_val, zero_i64);
+    builder.cond_br(i_nonnegative, check_bound, fallback);
+
+    builder.set_insert_point(check_bound);
+    let numel_addr = tensor_field_addr(builder, self_val, TENSOR_NUMEL_OFFSET);
+    let numel = builder.load(numel_addr, i64_ty.clone());
+    let in_bounds = builder.cmp(CompareOp::Lt, i_val, numel);
+    builder.cond_br(in_bounds, fast, fallback);
+
+    builder.set_insert_point(fast);
+    let data = builder.load(self_val, i64_ty.clone());
+    let four = builder.const_i64(4);
+    let byte_offset = builder.bin_op(BinaryOp::Mul, i_val, four);
+    let elem_ptr = builder.bin_op(BinaryOp::Add, data, byte_offset);
+    let value_f32 = builder.cast(value_val, f64_ty.clone(), f32_ty);
+    builder.store(elem_ptr, value_f32);
+    builder.ret(None);
+
+    builder.set_insert_point(fallback);
     builder.call(extern_id, vec![self_val, i_val, value_val]);
     builder.ret(None);
+}
+
+fn tensor_field_addr(
+    builder: &mut MirBuilder,
+    tensor: crate::ir::IrId,
+    offset: i64,
+) -> crate::ir::IrId {
+    if offset == TENSOR_DATA_OFFSET {
+        tensor
+    } else {
+        let offset_val = builder.const_i64(offset);
+        builder.bin_op(BinaryOp::Add, tensor, offset_val)
+    }
 }
 
 /// Tensor_topk_scan(
