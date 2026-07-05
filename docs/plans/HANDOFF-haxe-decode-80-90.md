@@ -1,0 +1,145 @@
+# HANDOFF: pure-Haxe llama decode → 80–90 tok/s
+
+Audience: the next agent/session picking this up cold. Everything here is measured, committed,
+and reproducible at HEAD (`cb488356`, suite 158/158). Hardware: Apple Silicon (M-series).
+
+## Mission & state
+
+Goal: nue llama-chat 1B Q4_K_M decode at **80–90 tok/s (11–12.5 ms/token)** on the pure-Haxe
+kernel path (`RAYZOR_HAXE_MATMUL=1`), no Rust FFI matmuls.
+
+| metric | 2 days ago | NOW |
+|---|---|---|
+| decode step p50 | 164 ms | **22.75–25.75 ms** (thermal band), user-sustained ~35–40 tok/s |
+| prefill | 157 ms/token | **~20 ms/token** (0.33 s / 17-token prompt) |
+| Rust-FFI reference, same binary | — | 9.5 ms/step (105 tok/s short-run; 85–90 sustained) |
+
+All kernel changes are bit-exact by construction (per-row reduction order preserved);
+`test_q4km_dot` is the canary.
+
+## How to run / validate
+
+```bash
+# build (ALWAYS after compiler/runtime/haxe-std edits; nue/*.hx needs no build)
+LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm CARGO_INCREMENTAL=0 cargo build --release -p rayzor --bin rayzor
+
+# model run (MUST: --no-cache after editing any imported .hx; pkill before/after)
+cd nue/examples/llama-chat && pkill -9 -f target/release/rayzor
+RAYZOR_PROFILE_DECODE=1 RAYZOR_HAXE_MATMUL=1 ../../../target/release/rayzor run Main.hx \
+  --no-cache --safety-warnings off -- <GGUF> "prompt" 32
+# read: step_p50_ms (decode), prefill_fwd_s / prompt_tokens (prefill)
+
+# suite (must stay green; run after every compiler change)
+./run_haxe_tests.sh     # 158/158 at handoff
+```
+
+Kernel micro-bench harness (single-thread, resident vs streaming): `/tmp/stream_bench.hx`
+pattern — self-contained copy of the kernel; **MUST run with `--release`** (see gotcha #1).
+
+## Architecture (the 60-second tour)
+
+- `nue/nue/Q4Matmul.hx` — the kernel. `matmul` (single weight), `matmulFused` (up to 3 same-K
+  weights: ONE Q8_K quantize + one dispatch over concatenated rows), `runBanded` (banded pass
+  against pre-quantized scratch), `quantizeAll`/`quantizeBlock` (block-linear packed scratch:
+  elements at g*256, bsums at g*64, scale dOut[g]; banded when ≥16 blocks). Per-block dots:
+  `q4DotMA4`/`q6DotMA4` (SDOT via `SIMD4i32.dot`; ADDV via `.sum()`; exact f16 header decode
+  via `Mem.f32FromBits`). IR-verified fully inlined: zero extern calls in the hot loop.
+- `compiler/haxe-std/rayzor/Mem.hx` — address-based single-instruction load/store intrinsics
+  (`loadF32/storeF32` = the ONLY scalar f32 access from Haxe; `f32FromBits`; `prefetch`).
+  `Bytes.loadI32AlignedUnchecked` pair = handle-based equivalents.
+- `compiler/haxe-std/rayzor/concurrent/SpinPool.hx` — persistent chunk-STEALING pool
+  (atomic-cursor claims, bit-identical row ownership). Idle policy is self-tuning:
+  tight-spin (2k) → yield-hold (`Thread.yieldNow`) sized by 4× the pool's inter-dispatch-gap
+  EWMA → park (`Parker`). 7.4× on 8 claimants standalone.
+- Core partition: `runtime/src/worker_pool.rs` defaults the RUST pool to **1 worker under
+  RAYZOR_HAXE_MATMUL** (its spin-wait workers otherwise war with the guest pool: decode was
+  65 ms/token before this, 27.5 after). `RAYZOR_WORKERS` overrides.
+- Tiering: default `rayzor run` auto-installs the LLVM tier before main (Application preset).
+  Everything perf-relevant runs LLVM; Cranelift is startup/fallback.
+- llama-chat glue: GQAttention QKV + SwiGLU gate/up go through `matmulFused`. Remaining Rust
+  FFI per token ≈ 1.5 ms total, all µs-scale kernels: silu, flash_attn_decode (seqQ==1 only —
+  prefill attention takes the unfused bmm path), rope, rms_norm, reshape (520 calls),
+  free/clone, softmax, add_into, topk_scan, + Tensor.zeros/Bytes.alloc per matmul.
+
+## Decode budget @ ~23 ms (where the remaining 2× lives)
+
+- matmul band ≈ 17 ms = ~102 ms serial work at ~6× parallel efficiency (10 claimants)
+- FFI glue ≈ 1.5 ms; quantize banded; sampler/decode ≈ 0.3 ms
+- Per-thread rate in-model ≈ 11.2 GMAC/s vs 13.8 resident-bench; Rust ≈ 14.8 in-model.
+
+### Ranked next steps
+1. **Parallel efficiency 6× → 7.5×+** (biggest term): chunk-size + claimant-count sweep.
+   Chunk = `rows/(_n*8)` min 8 (SpinPool.parallelRows). Claimants = `Q4Matmul.workerCount()`
+   = cpuCount (incl. E-cores; stealing self-balances but E-core throughput still averages in —
+   try P-core-count claimants). ONLY add env knobs via the lazy-init block already in
+   `parallelRows` (see gotcha #4).
+2. **Per-thread rate 11.2 → ~13.8**: the resident-vs-in-model residue is NOT memory (see
+   negative results) — profile the in-model band by disassembly (`RAYZOR_DUMP_FN_PTRS=1` +
+   `rayzor debug lldb`/`resolve`; LLVM pointers print as `[fn-ptr-llvm]`). Candidates:
+   chunk-boundary closure-call overhead, y-store patterns, Q6 share (25% of MACs, 16
+   ADDV-hsums/block — inherent to per-16-weight scales; 2-row tiling was +17.7% on the Rust
+   side and is unexplored here — the shared operand across 2 rows is the activation+bsums).
+3. **Trims**: Tensor.zeros memsets every y though all elements are overwritten (add a
+   Tensor.uninit or full-overwrite hint); 3 Bytes allocs per matmul → persistent per-model
+   scratch (instance-held; NEVER a cross-module static, see gotcha #3).
+4. Memory-leak backstop (separate from perf): InsertFreePass has no MakeClosure arm and can't
+   see extern-returned containers (shape() arrays, fused triples); band-closure env+struct leak
+   per matmul (~small); GB-scale suspect if RSS climbs again: flash-gate miss → unfused bmm
+   chain (~150 MB/token) — add a one-shot counter at GQAttention's gate-miss branches.
+
+### Measured NEGATIVE results — do NOT redo
+- **Software prefetch in the 1B decode kernel**: +8%/token REGRESSION (reverted). The 1B active
+  weight set (~32 MB/token) is LLC-resident across tokens; prefetches are pure overhead.
+  Infrastructure kept (`Mem.prefetch` → llvm.prefetch, no-op elsewhere): single-thread
+  STREAMING bench = 8.5 → 13.5 GMAC/s (98% of resident) — it IS the lever for 8B-class models.
+- **Long static spin budgets**: 2M spins measured 23.75 cold but 184–255 ms heat-soaked
+  (starves coexisting native pools). The adaptive policy replaced this; don't reintroduce.
+- **Haxe SwiGLU elementwise**: serial Haxe loses to the two µs-scale FFI kernels it replaces.
+- **RAYZOR_WORKERS=0**: worse (some FFI kernels still need a thread).
+- Q6 restructure to integer-domain: the native Rust reference (runtime-core/src/quant/sdot.rs
+  `dot_q6_k_q8`, q6_k.rs simd128) is structurally IDENTICAL to our port — no free win there.
+
+## GOTCHAS — these WILL bite you (each cost us hours)
+
+1. **Benching without `--release` is meaningless**: the Application preset injects shadow-stack
+   frame calls into every function (`rayzor_push/pop_call_frame`) — a hot kernel runs ~19×
+   slower (0.7 vs 13.7 GMAC/s). llama-chat's manifest sets `enable_stack_traces=false`, so
+   MODEL runs are exempt; standalone benches are NOT.
+2. **Silent tier loss**: ANY LLVM verifier failure silently drops the WHOLE program to
+   Cranelift (grep stderr for "upgrade failed"). Three instances fixed (CallIndirect int
+   widths, float↔int backstop, stealLoop's Int-local decaying to Float under the
+   `if (a > b) a = b` reassign shape — annotate `:Int` in doubt). If perf suddenly ×0.1,
+   check this FIRST.
+3. **Cross-module member drift**: adding methods/fields to a class used across modules
+   (SpinPool!) can mis-dispatch importers' calls to OTHER methods (`spinPool.shutdown()` from
+   LlamaModel currently no-ops — workers are abandoned at exit; known). Statics don't forward
+   across modules at all (instance-plumb everything, e.g. `Linear.pool`). General fix =
+   bugs_import_xmodule_member_resolution (open).
+4. **`Sys.*` calls in constructors or hot dispatch paths trap or mis-resolve** (exit 132/133).
+   The ONE proven-safe place for env reads near the pool is the lazy-init block at the top of
+   `SpinPool.parallelRows`. Model with care.
+5. **`Null<C>`-typed receivers**: method calls used to be SILENTLY DROPPED (fixed afeb76f8 —
+   `resolve_type_to_class_symbol` Optional arm). The general disease — unresolved method call
+   lowering to NOTHING instead of a hard error — is still open: TAST emits the MethodCall with
+   a placeholder symbol; something in tast_to_hir/hir_to_mir eats it. Add the E08xx hard error
+   (no-silent-fallthrough is a standing project rule).
+6. **`--no-cache` after editing any imported `.hx`** or you run stale MIR (symptom: exit 132
+   traps that look like brand-new bugs). **pkill rayzor before/after runs** (orphans spin a
+   core and invert A/Bs). **Heat-soak inverts A/Bs ~3×** — alternate configs within the same
+   thermal window, rest the machine for absolute numbers.
+7. Method-name mismatches compile to trap stubs, silently until called (`Thread.yieldNow`,
+   not `yield_now`). Exit 133 + no output = look for an unresolved extern.
+8. `--tier-promotion false` (CLI) with llama-chat's manifest routes main through the
+   interpreter and breaks; change promotion in the `[tier]` block instead.
+
+## Key files
+- Kernel: `nue/nue/Q4Matmul.hx`; glue: `nue/nue/transformer/{GQAttention,SwiGLU}.hx`,
+  `nue/nue/Linear.hx`, `nue/nue/arch/{LlamaArch,LlamaModel}.hx`
+- Pool: `compiler/haxe-std/rayzor/concurrent/{SpinPool,Parker}.hx`; Rust pool:
+  `runtime/src/worker_pool.rs`
+- Intrinsics: `compiler/haxe-std/rayzor/Mem.hx`, `compiler/src/stdlib/bytes.rs`,
+  mapping rows in `compiler/src/stdlib/runtime_mapping.rs`, LLVM extern-replacement chain in
+  `compiler/src/codegen/llvm_jit_backend.rs` (try_create_*_intrinsic)
+- Tier config: `nue/examples/llama-chat/rayzor.toml` `[tier]`
+- History/attribution detail: memory file `perf_haxe_kernel_pool_cooperation_blocker.md`
+  (path: `~/.claude/projects/-Users-amaterasu-Vibranium-rayzor/memory/`)
