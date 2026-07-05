@@ -40,10 +40,10 @@ class SwiGLU implements Module {
         // know about rayzor_tensor_free, so every intermediate here
         // leaks unless we release it inline. Five frees per FFN call
         // × 16 layers per token compounds fast on long generations.
-        // Pure-Haxe kernel path: gate and up read the SAME x, so run them
+        // gate and up read the SAME x: when both are quantized, run them
         // through the fused kernel — one Q8_K quantize + one pool dispatch
-        // over the concatenated row space instead of two of each.
-        // Bit-identical per row to the two separate calls.
+        // over the concatenated row space instead of two of each
+        // (bit-identical per row to the two separate calls).
         var gLin:Tensor;
         var u:Tensor;
         var gwq = gate.qweight;

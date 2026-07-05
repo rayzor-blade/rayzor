@@ -24,7 +24,7 @@ native-libs = ["../../../target/release/libnue_plugins.dylib"]
 [tier]
 interpreter_threshold = 1
 warm_threshold = 30
-hot_threshold = 10
+hot_threshold = 5
 blazing_threshold = "max"
 sample_rate =1
 start_interpreted = false

@@ -25,11 +25,8 @@ import rayzor.ds.DType;
  * Grouped query means num_q_heads is a multiple of num_kv_heads (Llama
  * 3.2 1B: 32 Q heads, 8 KV heads → 4 Q heads share each KV head). We
  * implement the broadcast by reshape-and-tile of K/V inside the
- * attention loop — see `expandKvHeads` below. The math itself is the
- * standard scaled-dot-product pattern; each tensor op JITs down to the
- * existing SIMD/GPU kernels, so this Haxe forward path is competitive
- * with a fully-fused Rust kernel on F32 (the inner matmuls do all the
- * work).
+ * attention loop — see `expandKvHeads` below. The math is the standard
+ * scaled-dot-product pattern; the inner matmuls do all the work.
  *
  * Choices left for the caller to override by subclassing:
  *   - alibi bias, sliding window mask: re-implement `applyMask`
@@ -80,19 +77,13 @@ class GQAttention implements Module {
         //    hidden_size = numQHeads * headDim  (Q out)
         //                = numKvHeads * headDim (K, V out)
         //
-        //    Fast path: when all three projections are Q4_K_M (the typical
-        //    Llama-3 deployment) dispatch through `QTensor.matmulFusedQKV`,
-        //    which pre-quantises x to Q8_K exactly once and shares that
-        //    view across all three weight matrices in a single
-        //    `parallel_rows` fan-out — replacing three sequential
-        //    fork-joins (one per qProj/kProj/vProj.forward call) with one.
-        //    The runtime guarantees the reduction order is byte-identical
-        //    to three separate `matmulXTQThreaded` calls, so this preserves
-        //    the byte-exact llama.cpp match.
+        //    Fast path: when all three projections are quantized, dispatch
+        //    through the fused QKV kernel — x is quantized to Q8_K once and
+        //    shared across all three weights in a single fan-out, with a
+        //    reduction order identical to three separate matmuls.
         //
-        //    Fallback (F32 weight on any projection, or a runtime gate
-        //    miss leaving the fused result as nulls): three independent
-        //    consumers of x → clone twice; last use moves the original.
+        //    Fallback (an F32 weight on any projection, or a kernel gate
+        //    miss returning nulls): three independent Linear calls.
         var qRaw:Tensor;
         var kRaw:Tensor;
         var v:Tensor;
