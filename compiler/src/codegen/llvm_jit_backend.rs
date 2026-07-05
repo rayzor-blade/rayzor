@@ -668,6 +668,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return Ok(llvm_func);
         }
 
+        // Replace the prefetch hint with llvm.prefetch (free on this tier;
+        // a runtime no-op call on the others).
+        if let Some(llvm_func) = self.try_create_prefetch_intrinsic(&func_name, &fn_type)? {
+            self.function_map.insert(func_id, llvm_func);
+            return Ok(llvm_func);
+        }
+
         // Replace array operations with inline implementations
         // HaxeArray layout: { ptr, len, cap, elem_size } - all 8 bytes each
         if let Some(llvm_func) = self.try_create_array_intrinsic(&func_name, &fn_type)? {
@@ -776,6 +783,63 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .build_return(Some(&result))
             .map_err(|e| format!("Failed to build return: {}", e))?;
 
+        Ok(Some(wrapper))
+    }
+
+    /// Replace `rayzor_mem_prefetch(addr: i64)` with an alwaysinline wrapper
+    /// around `llvm.prefetch(ptr, read, locality=3, data)` so hot kernels can
+    /// hide DRAM latency on streamed weights. Returns None for other names.
+    fn try_create_prefetch_intrinsic(
+        &self,
+        func_name: &str,
+        fn_type: &inkwell::types::FunctionType<'ctx>,
+    ) -> Result<Option<FunctionValue<'ctx>>, String> {
+        use inkwell::intrinsics::Intrinsic;
+        if func_name != "rayzor_mem_prefetch" {
+            return Ok(None);
+        }
+        let intrinsic = Intrinsic::find("llvm.prefetch")
+            .ok_or_else(|| "LLVM intrinsic llvm.prefetch not found".to_string())?;
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let intrinsic_func = intrinsic
+            .get_declaration(&self.module, &[ptr_type.into()])
+            .ok_or_else(|| "Failed to get llvm.prefetch declaration".to_string())?;
+
+        let wrapper = self.module.add_function(
+            func_name,
+            *fn_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        wrapper.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+                0,
+            ),
+        );
+        let bb = self.context.append_basic_block(wrapper, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(bb);
+        let addr = wrapper.get_params()[0].into_int_value();
+        let ptr = builder
+            .build_int_to_ptr(addr, ptr_type, "pf_ptr")
+            .map_err(|e| format!("prefetch inttoptr failed: {}", e))?;
+        let i32t = self.context.i32_type();
+        builder
+            .build_call(
+                intrinsic_func,
+                &[
+                    ptr.into(),
+                    i32t.const_int(0, false).into(), // read
+                    i32t.const_int(3, false).into(), // high temporal locality
+                    i32t.const_int(1, false).into(), // data cache
+                ],
+                "",
+            )
+            .map_err(|e| format!("llvm.prefetch call failed: {}", e))?;
+        builder
+            .build_return(None)
+            .map_err(|e| format!("prefetch return failed: {}", e))?;
         Ok(Some(wrapper))
     }
 
