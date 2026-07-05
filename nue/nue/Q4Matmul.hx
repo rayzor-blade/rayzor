@@ -9,6 +9,7 @@ import rayzor.SIMD16i8;
 import rayzor.Ptr;
 import rayzor.Usize;
 import rayzor.Bytes;
+import rayzor.Mem;
 import rayzor.concurrent.SpinPool;
 import rayzor.concurrent.CpuTopology;
 
@@ -50,27 +51,41 @@ class Q4Matmul {
 
     /** Quantise one activation row x[xBase .. xBase+K] to Q8_K (qs/bsums/dOut).
         `bsums` holds K/16 int32 group sums. */
-    static function quantizeQ8K(x:Tensor, xBase:Int, K:Int, qs:Bytes, qsOff:Int, bsums:Bytes, bsumsOff:Int,
-            dOut:Bytes, dOff:Int):Void {
+    static inline function loadI32(bytes:Bytes, byteOff:Int):Int {
+        return bytes.loadI32AlignedUnchecked(byteOff);
+    }
+
+    static inline function storeI32(bytes:Bytes, byteOff:Int, value:Int):Void {
+        bytes.storeI32AlignedUnchecked(byteOff, value);
+    }
+
+    /** `xBase` = raw address of a CONTIGUOUS F32 activation row (element
+        offset `xOff`); `qsBase` = raw address of the Q8 scratch. All element
+        accesses are inline typed loads/stores (Mem) — no per-element extern. */
+    static function quantizeQ8K(xBase:Usize, xOff:Int, K:Int, qsBase:Usize, qsOff:Int, bsums:Bytes, bsumsOff:Int,
+            dOut:Array<Float>, dIndex:Int):Void {
         var nb:Int = K >> 8;
         for (b in 0...nb) {
             var maxAbs = 0.0;
-            for (i in 0...256) { var a = x.getFlat(xBase + b * 256 + i); if (a < 0) a = -a; if (a > maxAbs) maxAbs = a; }
+            for (i in 0...256) {
+                var a = Mem.loadF32(xBase + Usize.fromInt((xOff + b * 256 + i) << 2));
+                if (a < 0) a = -a; if (a > maxAbs) maxAbs = a;
+            }
             if (maxAbs == 0.0) {
-                dOut.setDouble(dOff + b * 8, 0.0);
-                for (i in 0...256) qs.set(qsOff + b * 256 + i, 0);
-                for (s in 0...16) bsums.setInt32(bsumsOff + (b * 16 + s) * 4, 0);
+                dOut[dIndex + b] = 0.0;
+                for (i in 0...256) Mem.storeU8(qsBase + Usize.fromInt(qsOff + b * 256 + i), 0);
+                for (s in 0...16) storeI32(bsums, bsumsOff + (b * 16 + s) * 4, 0);
             } else {
-                var d = maxAbs / 127.0; dOut.setDouble(dOff + b * 8, d); var invD = 127.0 / maxAbs;
+                var d = maxAbs / 127.0; dOut[dIndex + b] = d; var invD = 127.0 / maxAbs;
                 for (s in 0...16) {
                     var sum = 0;
                     for (j in 0...16) {
-                        var v = x.getFlat(xBase + b * 256 + s * 16 + j) * invD;
+                        var v = Mem.loadF32(xBase + Usize.fromInt((xOff + b * 256 + s * 16 + j) << 2)) * invD;
                         var qf = (v >= 0) ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
                         var q = (qf > 127) ? 127 : ((qf < -128) ? -128 : qf);
-                        qs.set(qsOff + b * 256 + s * 16 + j, q & 0xFF); sum += q;
+                        Mem.storeU8(qsBase + Usize.fromInt(qsOff + b * 256 + s * 16 + j), q & 0xFF); sum += q;
                     }
-                    bsums.setInt32(bsumsOff + (b * 16 + s) * 4, sum);
+                    storeI32(bsums, bsumsOff + (b * 16 + s) * 4, sum);
                 }
             }
         }
@@ -121,14 +136,14 @@ class Q4Matmul {
         var i3 = SIMD4i32.splat(sc3) * dv3 + SIMD4i32.splat(sc7) * dv7;
         var isum = (i0 + i1) + (i2 + i3);
         var b4 = bsBase * 4;
-        var imin = mn0 * (bsums.getInt32(b4) + bsums.getInt32(b4 + 4))
-                 + mn1 * (bsums.getInt32(b4 + 8) + bsums.getInt32(b4 + 12))
-                 + mn2 * (bsums.getInt32(b4 + 16) + bsums.getInt32(b4 + 20))
-                 + mn3 * (bsums.getInt32(b4 + 24) + bsums.getInt32(b4 + 28))
-                 + mn4 * (bsums.getInt32(b4 + 32) + bsums.getInt32(b4 + 36))
-                 + mn5 * (bsums.getInt32(b4 + 40) + bsums.getInt32(b4 + 44))
-                 + mn6 * (bsums.getInt32(b4 + 48) + bsums.getInt32(b4 + 52))
-                 + mn7 * (bsums.getInt32(b4 + 56) + bsums.getInt32(b4 + 60));
+        var imin = mn0 * (loadI32(bsums, b4) + loadI32(bsums, b4 + 4))
+                 + mn1 * (loadI32(bsums, b4 + 8) + loadI32(bsums, b4 + 12))
+                 + mn2 * (loadI32(bsums, b4 + 16) + loadI32(bsums, b4 + 20))
+                 + mn3 * (loadI32(bsums, b4 + 24) + loadI32(bsums, b4 + 28))
+                 + mn4 * (loadI32(bsums, b4 + 32) + loadI32(bsums, b4 + 36))
+                 + mn5 * (loadI32(bsums, b4 + 40) + loadI32(bsums, b4 + 44))
+                 + mn6 * (loadI32(bsums, b4 + 48) + loadI32(bsums, b4 + 52))
+                 + mn7 * (loadI32(bsums, b4 + 56) + loadI32(bsums, b4 + 60));
         return xd * (d * isum.sum() - dmin * imin);
     }
 
@@ -181,8 +196,8 @@ class Q4Matmul {
                 var dScHi:Float = d * scVec.get(scOff + 2 * j + 1);
                 sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
                 var bi = bsBase + ((outOff + j * 32) >> 4);
-                sumTerm2 += 32.0 * dScLo * bsums.getInt32(bi * 4)
-                          + 32.0 * dScHi * bsums.getInt32((bi + 1) * 4);
+                sumTerm2 += 32.0 * dScLo * loadI32(bsums, bi * 4)
+                          + 32.0 * dScHi * loadI32(bsums, (bi + 1) * 4);
             }
         }
         return xd * (sumTerm1 - sumTerm2);
@@ -227,18 +242,22 @@ class Q4Matmul {
 
         var qs = Bytes.alloc(batch * K);
         var bsums = Bytes.alloc(batch * bpr * 16 * 4);
-        var dBytes = Bytes.alloc(batch * bpr * 8);
-        for (r in 0...batch) {
-            quantizeQ8K(x, r * K, K, qs, r * K, bsums, r * bpr * 16 * 4, dBytes, r * bpr * 8);
-        }
+        var dScales = new Array<Float>();
+        dScales.resize(batch * bpr);
         var aBase = qs.address();
+        // Contiguous F32 activation base — quantize reads it via inline
+        // Mem.loadF32 instead of a per-element getFlat extern.
+        var xBase = x.data().raw();
+        for (r in 0...batch) {
+            quantizeQ8K(xBase, r * K, K, aBase, r * K, bsums, r * bpr * 16 * 4, dScales, r * bpr);
+        }
 
         var y = Tensor.zeros([batch, rows], DType.F32);
+        // Inline f32 stores via Mem.storeF32 (narrows f64→f32 at the
+        // boundary). NOT `y.data():Ptr<Float>` + write(): Float is f64, so
+        // that store lands 8 bytes at an 8-byte stride and corrupts F32.
+        var yBase = y.data().raw();
 
-        // Write results with the dtype-aware flat setter, NOT a raw
-        // `y.data():Ptr<Float>` + `write()`: `Float` is f64, so the raw
-        // store lands 8 bytes at an 8-byte stride and corrupts the F32
-        // output buffer. setFlat narrows to the tensor's element type.
         var band = function(n0:Int, n1:Int, node:Int):Void {
             if (batch == 1) {
                 // Decode fast path: scalar accumulator, no batch indexing.
@@ -246,12 +265,12 @@ class Q4Matmul {
                     var sum = 0.0;
                     for (b in 0...bpr) {
                         var blk = n * bpr + b;
-                        var xdb = dBytes.getDouble(b * 8);
+                        var xdb = dScales[b];
                         sum += isQ6
                             ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
                             : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
                     }
-                    y.setFlat(n, sum);
+                    Mem.storeF32(yBase + Usize.fromInt(n << 2), sum);
                 }
                 return;
             }
@@ -265,13 +284,13 @@ class Q4Matmul {
                     for (r in 0...batch) {
                         var aOff = r * K + b * 256;
                         var bsIdx = (r * bpr + b) * 16;
-                        var xdb = dBytes.getDouble((r * bpr + b) * 8);
+                        var xdb = dScales[r * bpr + b];
                         sums[r] += isQ6
                             ? q6DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb)
                             : q4DotMA4(wBase, blkOff, aBase, aOff, bsums, bsIdx, xdb);
                     }
                 }
-                for (r in 0...batch) y.setFlat(r * rows + n, sums[r]);
+                for (r in 0...batch) Mem.storeF32(yBase + Usize.fromInt((r * rows + n) << 2), sums[r]);
             }
         };
         // Persistent pool when the caller provides one (a spawn-per-call
@@ -284,7 +303,6 @@ class Q4Matmul {
 
         qs.free();
         bsums.free();
-        dBytes.free();
         return y;
     }
 }

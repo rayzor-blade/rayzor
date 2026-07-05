@@ -120,10 +120,17 @@ class GQAttention implements Module {
             } else {
                 // Gate-miss inside the kernel (SDOT unavailable, batch != 1,
                 // x non-contiguous, …): fall back to the three-call path.
-                var qProjOut = qProj.forward(x.clone());
+                // Linear.forward does NOT free its parameter (caller-frees
+                // convention), so bind each clone and free it after the call
+                // — an anonymous `x.clone()` argument leaks its refcount.
+                var xq = x.clone();
+                var qProjOut = qProj.forward(xq);
+                xq.free();
                 qRaw = qProjOut.reshape([seqQ, numQHeads, headDim]);
                 qProjOut.free();
-                var kProjOut = kProj.forward(x.clone());
+                var xk = x.clone();
+                var kProjOut = kProj.forward(xk);
+                xk.free();
                 kRaw = kProjOut.reshape([seqQ, numKvHeads, headDim]);
                 kProjOut.free();
                 var vProjOut = vProj.forward(x);
@@ -131,10 +138,14 @@ class GQAttention implements Module {
                 vProjOut.free();
             }
         } else {
-            var qProjOut = qProj.forward(x.clone());
+            var xq = x.clone();
+            var qProjOut = qProj.forward(xq);
+            xq.free();
             qRaw = qProjOut.reshape([seqQ, numQHeads, headDim]);
             qProjOut.free();
-            var kProjOut = kProj.forward(x.clone());
+            var xk = x.clone();
+            var kProjOut = kProj.forward(xk);
+            xk.free();
             kRaw = kProjOut.reshape([seqQ, numKvHeads, headDim]);
             kProjOut.free();
             var vProjOut = vProj.forward(x);
