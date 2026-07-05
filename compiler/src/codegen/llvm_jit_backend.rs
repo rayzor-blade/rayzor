@@ -2689,18 +2689,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     ));
                 };
 
-                // Match Cranelift/interpreter GEP semantics:
-                // - byte pointers use 1-byte addressing
-                // - all object/reference fields are addressed in 8-byte slots
-                // Using the pointee size here is wrong for Ptr(Void), which would collapse
-                // multiple pointer fields onto offset 0 and corrupt object headers.
+                // Match Cranelift/interpreter GEP semantics EXACTLY:
+                // - Ptr(U8|I8) uses 1-byte addressing
+                // - everything else — including Ref(U8|I8) — is addressed in
+                //   8-byte slots (all Rayzor object field slots are uniformly
+                //   8 bytes; class_alloc_sizes = field_index * 8)
+                // Including Ref in the byte case diverged from the other two
+                // tiers: a Ref(U8)-typed GEP with slot indices compiled to
+                // byte offsets 1/2/3 instead of 8/16/24, leaving object
+                // headers uninitialized on the LLVM tier only.
                 let elem_size: u64 = match ty {
-                    crate::ir::IrType::Ptr(inner) | crate::ir::IrType::Ref(inner) => {
-                        match inner.as_ref() {
-                            crate::ir::IrType::U8 | crate::ir::IrType::I8 => 1,
-                            _ => 8,
-                        }
-                    }
+                    crate::ir::IrType::Ptr(inner) => match inner.as_ref() {
+                        crate::ir::IrType::U8 | crate::ir::IrType::I8 => 1,
+                        _ => 8,
+                    },
                     _ => 8,
                 };
 
@@ -3603,7 +3605,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
             // Pointer operations
             IrInstruction::PtrAdd {
-                dest, ptr, offset, ..
+                dest,
+                ptr,
+                offset,
+                ty,
             } => {
                 let ptr_val = self.get_value(*ptr)?.into_pointer_value();
                 let offset_raw = self.get_value(*offset)?;
@@ -3617,6 +3622,36 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .map_err(|e| format!("Failed to cast ptr offset: {}", e))?
                 } else {
                     offset_raw.into_int_value()
+                };
+                // Match Cranelift PtrAdd semantics EXACTLY: the offset is in
+                // POINTEE-SIZED elements, scaled to bytes by the pointee's
+                // type size. Treating it as a raw byte offset diverged from
+                // the other tiers: an array-header init emitted as
+                // PtrAdd(hdr, 1/2/3) with Ptr(I64) wrote at byte offsets
+                // 1/2/3 instead of 8/16/24, leaving the header
+                // uninitialized on the LLVM tier only.
+                let elem_size: u64 = match ty {
+                    crate::ir::IrType::Ptr(inner) => Self::pointee_type_size(inner.as_ref()),
+                    _ => 1,
+                };
+                let offset_val = if elem_size == 1 {
+                    offset_val
+                } else {
+                    let size_const = self.context.i64_type().const_int(elem_size, false);
+                    let wide = if offset_val.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(
+                                offset_val,
+                                self.context.i64_type(),
+                                "ptr_offset_ext",
+                            )
+                            .map_err(|e| format!("Failed to extend ptr offset: {}", e))?
+                    } else {
+                        offset_val
+                    };
+                    self.builder
+                        .build_int_mul(wide, size_const, "ptr_offset_scaled")
+                        .map_err(|e| format!("Failed to scale ptr offset: {}", e))?
                 };
                 let result = unsafe {
                     self.builder
@@ -4884,6 +4919,25 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         Ok(())
+    }
+
+    /// Pointee size for PtrAdd offset scaling. Mirrors
+    /// `CraneliftBackend::type_size` EXACTLY — the three tiers must agree on
+    /// pointer-arithmetic semantics or code that works on one miscompiles on
+    /// another.
+    fn pointee_type_size(ty: &crate::ir::IrType) -> u64 {
+        use crate::ir::IrType;
+        match ty {
+            IrType::I8 | IrType::U8 | IrType::Bool => 1,
+            IrType::I16 | IrType::U16 => 2,
+            IrType::I32 | IrType::U32 | IrType::F32 => 4,
+            IrType::I64 | IrType::U64 | IrType::F64 => 8,
+            IrType::Ptr(_) | IrType::Ref(_) => 8,
+            IrType::Void => 0,
+            IrType::Any => 8,
+            IrType::Vector { element, count } => Self::pointee_type_size(element) * (*count as u64),
+            _ => 8,
+        }
     }
 
     /// Get an LLVM value from the value map
