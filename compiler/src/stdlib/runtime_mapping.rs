@@ -1975,6 +1975,14 @@ impl StdlibMapping {
                 types: &[]),
             map_method!(static "rayzor_concurrent_Thread", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
                 types: &[I64]),
+            // Parker.* — same runtime primitives, on a dedicated extern so
+            // the members don't perturb Thread's cross-module member layout.
+            map_method!(static "rayzor_concurrent_Parker", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
+                types: &[] => I64),
+            map_method!(static "rayzor_concurrent_Parker", "park" => "Thread_park", params: 0, mir_wrapper,
+                types: &[]),
+            map_method!(static "rayzor_concurrent_Parker", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
+                types: &[I64]),
         ];
 
         self.register_from_tuples(mappings);

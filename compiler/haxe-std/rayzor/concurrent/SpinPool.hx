@@ -32,7 +32,7 @@ import rayzor.Usize;
  *   live threads before tearing down JIT code.
  * - Captured state in the band closure must be read-only-shared or
  *   write-disjoint by band (as in `WorkerPool.parallelRows`).
- * - Idle workers back off spin -> yield -> sleep(1ms), so a parked pool
+ * - Idle workers spin briefly then PARK (Parker.park), so an idle pool
  *   costs little between dispatches.
  */
 class SpinPool {
@@ -62,12 +62,14 @@ class SpinPool {
 
     inline function nodeOf(w:Int):Atomic<Int> return cell(2 + (w - 1) * 4 + 3);
 
+    inline function pidOf(w:Int):Atomic<Int> return cell(2 + (_n - 1) * 4 + (w - 1));
+
     /** Spawn `n - 1` persistent workers (the caller is band 0). */
     public function new(n:Int) {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
-        var cells = 2 + (n > 1 ? (n - 1) * 4 : 0);
+        var cells = 2 + (n > 1 ? (n - 1) * 5 : 0);
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
@@ -86,6 +88,7 @@ class SpinPool {
     public function workers():Int return _n;
 
     function workerLoop(w:Int):Int {
+        pidOf(w).store(Parker.registerParkable());
         var spins = 0;
         while (true) {
             if (stateOf(w).load() == 1) {
@@ -101,8 +104,14 @@ class SpinPool {
             } else {
                 if (shut().load() == 1) return 0;
                 spins++;
-                if (spins > 200000) Thread.sleep(1);
-                else if (spins > 5000) Thread.yieldNow();
+                // Brief spin covers back-to-back dispatches; then park so an
+                // idle pool costs nothing (no core burn between kernels, no
+                // sleep-wake latency: the dispatcher unparks after flipping
+                // state, and a pre-park unpark makes park return at once).
+                if (spins > 2000) {
+                    Parker.park();
+                    spins = 0;
+                }
             }
         }
     }
@@ -128,6 +137,8 @@ class SpinPool {
             hiOf(w).store(hi);
             nodeOf(w).store(w);
             stateOf(w).store(1);
+            var pid = pidOf(w).load();
+            if (pid != 0) Parker.unpark(pid);
         }
         fn(0, chunk, 0);
         while (pending().load() > 0) {}
@@ -139,6 +150,10 @@ class SpinPool {
         if (!_alive) return;
         _alive = false;
         shut().store(1);
+        for (w in 1..._n) {
+            var pid = pidOf(w).load();
+            if (pid != 0) Parker.unpark(pid);
+        }
         for (t in _threads) t.join();
         _threads = [];
         _ctl.free();

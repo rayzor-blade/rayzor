@@ -101,11 +101,7 @@ class LlamaArch implements ArchBuilder {
         // One persistent spin pool shared by every quant Linear (pure-Haxe
         // matmul path only). Owned by the model; Main must shut it down.
         var sp:Null<rayzor.concurrent.SpinPool> = null;
-        // Opt-in until Thread.park lands: without park the idle workers
-        // yield-spin/sleep, which contends with the FFI kernels' Rust pool
-        // and nets slower than serial on laptop-class hardware.
-        if (Linear.useHaxeMatmul() && Sys.getEnv("RAYZOR_HAXE_MATMUL_POOL") != null)
-            sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
+        if (Linear.useHaxeMatmul()) sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
 
         for (i in 0...meta.numLayers) {
             blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8, sp));
