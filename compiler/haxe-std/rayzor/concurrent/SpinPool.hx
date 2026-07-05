@@ -178,10 +178,7 @@ class SpinPool {
         stealLoop(fn, 0);
         while (pending().load() > 0) {}
         bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
-        var d = dispatches().fetchAdd(1) + 1;
-        // Periodic same-module attribution report (a cross-module call to a
-        // pool method can mis-dispatch; see bugs_import_xmodule_member_resolution).
-        if (d % 512 == 0) Sys.println("[pool-prof] " + profReport());
+        dispatches().fetchAdd(1);
     }
 
     /** Accumulate externally-timed quantize wall (microseconds). */
@@ -198,9 +195,6 @@ class SpinPool {
         Mandatory before process exit. Idempotent. */
     public function shutdown():Void {
         if (!_alive) return;
-        // Same-module report (a cross-module call to a new method can
-        // mis-dispatch; see bugs_import_xmodule_member_resolution).
-        Sys.println("[pool-prof] " + profReport());
         _alive = false;
         shut().store(1);
         for (w in 1..._n) {
