@@ -111,19 +111,25 @@ class Q4Matmul {
         from the 16-byte header — no shared pre-decode buffer, so it is safe to
         call concurrently across output-row bands. */
     static inline function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
-        var hdr = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk)));
-        var h0 = hdr[0] & 0xFF; var h1 = hdr[1] & 0xFF; var h2 = hdr[2] & 0xFF; var h3 = hdr[3] & 0xFF;
-        var h4 = hdr[4] & 0xFF; var h5 = hdr[5] & 0xFF; var h6 = hdr[6] & 0xFF; var h7 = hdr[7] & 0xFF;
-        var h8 = hdr[8] & 0xFF; var h9 = hdr[9] & 0xFF; var h10 = hdr[10] & 0xFF; var h11 = hdr[11] & 0xFF;
-        var h12 = hdr[12] & 0xFF; var h13 = hdr[13] & 0xFF; var h14 = hdr[14] & 0xFF; var h15 = hdr[15] & 0xFF;
-        var d = f16ToF32(h0 | (h1 << 8));
-        var dmin = f16ToF32(h2 | (h3 << 8));
-        var sc0 = h4 & 63; var sc1 = h5 & 63; var sc2 = h6 & 63; var sc3 = h7 & 63;
-        var mn0 = h8 & 63; var mn1 = h9 & 63; var mn2 = h10 & 63; var mn3 = h11 & 63;
-        var sc4 = (h12 & 0x0F) | (((h4 >> 6) & 3) << 4); var mn4 = ((h12 >> 4) & 0x0F) | (((h8 >> 6) & 3) << 4);
-        var sc5 = (h13 & 0x0F) | (((h5 >> 6) & 3) << 4); var mn5 = ((h13 >> 4) & 0x0F) | (((h9 >> 6) & 3) << 4);
-        var sc6 = (h14 & 0x0F) | (((h6 >> 6) & 3) << 4); var mn6 = ((h14 >> 4) & 0x0F) | (((h10 >> 6) & 3) << 4);
-        var sc7 = (h15 & 0x0F) | (((h7 >> 6) & 3) << 4); var mn7 = ((h15 >> 4) & 0x0F) | (((h11 >> 6) & 3) << 4);
+        // Header decode via four u32 loads + shifts (the llama.cpp kmask
+        // shape) instead of 16 SIMD lane extracts — same bit math, fewer
+        // and cheaper ops on the ~4M headers decoded per token.
+        var w0 = Mem.loadI32(wBase + Usize.fromInt(wBlk));       // d | dmin<<16
+        var u0 = Mem.loadI32(wBase + Usize.fromInt(wBlk + 4));   // sc0..3 bytes
+        var u1 = Mem.loadI32(wBase + Usize.fromInt(wBlk + 8));   // mn0..3 bytes
+        var u2 = Mem.loadI32(wBase + Usize.fromInt(wBlk + 12));  // packed lo4s
+        var d = f16ToF32(w0 & 0xFFFF);
+        var dmin = f16ToF32((w0 >>> 16) & 0xFFFF);
+        var sc0 = u0 & 63; var sc1 = (u0 >>> 8) & 63; var sc2 = (u0 >>> 16) & 63; var sc3 = (u0 >>> 24) & 63;
+        var mn0 = u1 & 63; var mn1 = (u1 >>> 8) & 63; var mn2 = (u1 >>> 16) & 63; var mn3 = (u1 >>> 24) & 63;
+        var sc4 = (u2 & 0x0F) | (((u0 >>> 6) & 3) << 4);
+        var mn4 = ((u2 >>> 4) & 0x0F) | (((u1 >>> 6) & 3) << 4);
+        var sc5 = ((u2 >>> 8) & 0x0F) | (((u0 >>> 14) & 3) << 4);
+        var mn5 = ((u2 >>> 12) & 0x0F) | (((u1 >>> 14) & 3) << 4);
+        var sc6 = ((u2 >>> 16) & 0x0F) | (((u0 >>> 22) & 3) << 4);
+        var mn6 = ((u2 >>> 20) & 0x0F) | (((u1 >>> 22) & 3) << 4);
+        var sc7 = ((u2 >>> 24) & 0x0F) | (((u0 >>> 30) & 3) << 4);
+        var mn7 = ((u2 >>> 28) & 0x0F) | (((u1 >>> 30) & 3) << 4);
 
         var dv0 = subDotVec(wBase, wBlk + 16 + 0 * 32, false, aBase, aBlk + 0 * 32);
         var dv1 = subDotVec(wBase, wBlk + 16 + 0 * 32, true,  aBase, aBlk + 1 * 32);
@@ -285,12 +291,33 @@ class Q4Matmul {
                 // 8.5 -> 13.5 GMAC/s with it).
                 for (n in n0...n1) {
                     var sum = 0.0;
-                    for (b in 0...bpr) {
-                        var blk = n * bpr + b;
-                        var xdb = dScales[b];
-                        sum += isQ6
-                            ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
-                            : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
+                    // Two-block pairing: adjacent blocks are independent, so
+                    // evaluating b and b+1 into one add keeps ~16 SDOT chains
+                    // in flight and hides each block's scalar tail (hsum +
+                    // f64 scale math + mins fold) under the other's vector
+                    // work — the shape of the Rust kernel's paired inner loop.
+                    var base = n * bpr;
+                    var b = 0;
+                    if (isQ6) {
+                        while (b + 2 <= bpr) {
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b])
+                                 + q6DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, dScales[b + 1]);
+                            b += 2;
+                        }
+                        while (b < bpr) {
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b]);
+                            b++;
+                        }
+                    } else {
+                        while (b + 2 <= bpr) {
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b])
+                                 + q4DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, dScales[b + 1]);
+                            b += 2;
+                        }
+                        while (b < bpr) {
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b]);
+                            b++;
+                        }
                     }
                     Mem.storeF32(yBase + Usize.fromInt(n << 2), sum);
                 }
