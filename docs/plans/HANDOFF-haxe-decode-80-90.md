@@ -120,6 +120,43 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
   A deliberately wrong imin mapping passed it with an identical error value. Any kernel edit
   must be validated with a model run; write a real canary that imports nue.Q4Matmul.
 
+## TIERED-RUNTIME REDESIGN (agreed direction 2026-07-06, unstarted — TOP priority next session)
+Cold start measured: before-main LLVM upgrade costs **+3.0s to first token** (5.97 vs 2.96s).
+The ladder is currently two-tier with dead middle (Baseline/Standard/Optimized = identical
+cranelift-"speed" codegen; warm/hot thresholds in llama-chat manifest are inverted 1/30/5 and
+unvalidated; count-based promotion can't see inner functions; mid-run swaps are no-ops because
+calls bake absolute relocations).
+
+The keystone: **patchable call table**.
+1. TieredBackend allocates a leaked slot table (dense slot per function; CraneliftBackend
+   assigns slots at declare, exports func_id→slot). Baseline-tier CallDirect lowers to
+   iconst(slot_addr) → load → call_indirect (sig via import_signature from called_func.
+   signature). Touch point: cranelift_backend.rs ~3326 (normal-call func_ref) and the call
+   emission below it (~3340-3500: sret/env/arg handling stays identical; only the callee
+   operand changes). Extern/libc/runtime calls stay direct. Fill slots at finalize; LLVM
+   upgrade atomically stores its pointers into the SAME slots → promotion lands mid-run
+   (fat-ptr thunks are cranelift bodies whose calls route through the table, so existing
+   closures/vtables promote transitively). Flag-gate (config/env) until proven.
+2. Background LLVM: spawn the whole-module compile on its own thread (own Context) at main
+   entry; swap table slots when done. Cold start = cranelift (2.96s), full LLVM speed lands
+   seconds later mid-run. (MCJIT bulk-resolution history: resolve per-function; keep the
+   sync-before-main path as fallback flag.)
+3. Warm tier that carries weight: baseline compiles at cranelift "none" (faster cold start);
+   per-function hotness counters injected in baseline prologues (same injection point as the
+   shadow-stack instrumentation) route hot functions through the EXISTING beadie background
+   per-function recompile at "speed", swapped via the table (ms-scale per function). Hot/max =
+   the background LLVM whole-module swap. Validate thresholds (warn on inverted configs).
+
+## AUTOVECTORIZATION: answered 2026-07-06 (probe /tmp/vec_probe.hx)
+Loops ARE JIT'd both tiers, but: cranelift never autovectorizes; on the LLVM tier loop/SLP
+vectorizers are ON yet **FP reductions cannot legally vectorize because our fast-math runs
+WITHOUT reassoc** (deliberate, bit-exactness) — a clean raw-f32 sum loop compiled fully scalar
+(no vector ops in post-opt IR; 4.2 GB/s = fadd latency chain). Integer loops may vectorize;
+float accumulations never will. Hot kernels are fast because of EXPLICIT SIMD — that is the
+pattern for any new hot loop. Optional lever: per-function @:fastMath metadata → set reassoc
+on that function's FP ops (bit-exactness preserved elsewhere), or manual multi-accumulator
+loops.
+
 ### Measured NEGATIVE results — do NOT redo
 - **Software prefetch in the 1B decode kernel**: +8%/token REGRESSION (reverted). The 1B active
   weight set (~32 MB/token) is LLC-resident across tokens; prefetches are pure overhead.
