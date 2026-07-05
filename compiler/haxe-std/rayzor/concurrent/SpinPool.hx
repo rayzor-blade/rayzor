@@ -57,8 +57,9 @@ class SpinPool {
     /** Cell layout, one 128-byte line per cell (false-sharing stride):
         cell 0 = pending, 1 = shutdown, 2 = cursor, 3 = rows, 4 = chunk,
         5 = accumulated band wall (us), 6 = accumulated quantize wall (us),
-        7 = dispatch count, then per worker w in 1..n-1: state at 8+(w-1),
-        pid at 8+(n-1)+(w-1). */
+        7 = dispatch count, 8 = inter-dispatch gap EWMA (us), 9 = last
+        dispatch timestamp (us, wrapping), then per worker w in 1..n-1:
+        state at 10+(w-1), pid at 10+(n-1)+(w-1). */
     inline function cell(i:Int):Atomic<Int> {
         var p:Ptr<Int> = Ptr.fromRaw(_ctl.address() + Usize.fromInt(i * 128));
         return Atomic.of(p);
@@ -80,16 +81,20 @@ class SpinPool {
 
     inline function dispatches():Atomic<Int> return cell(7);
 
-    inline function stateOf(w:Int):Atomic<Int> return cell(8 + (w - 1));
+    inline function gapEwmaUs():Atomic<Int> return cell(8);
 
-    inline function pidOf(w:Int):Atomic<Int> return cell(8 + (_n - 1) + (w - 1));
+    inline function lastDispatchUs():Atomic<Int> return cell(9);
+
+    inline function stateOf(w:Int):Atomic<Int> return cell(10 + (w - 1));
+
+    inline function pidOf(w:Int):Atomic<Int> return cell(10 + (_n - 1) + (w - 1));
 
     /** Spawn `n - 1` persistent workers (the caller is also a claimant). */
     public function new(n:Int) {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
-        var cells = 8 + (n > 1 ? (n - 1) * 2 : 0);
+        var cells = 10 + (n > 1 ? (n - 1) * 2 : 0);
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
@@ -139,17 +144,28 @@ class SpinPool {
             } else {
                 if (shut().load() == 1) return 0;
                 spins++;
-                // Spin-budget tradeoff, MEASURED on llama-chat decode:
-                // 40k spins (~150us) -> 1.17ms/dispatch band wall (workers
-                // park in FFI-glue gaps; each dispatch pays OS wake latency).
-                // 1M spins (~3-5ms) -> 4x WORSE overall: 7 spinning cores
-                // starve the Rust FFI pool (attention/silu/fused-QKV) that
-                // runs between our dispatches. Until the two pools share
-                // cores cooperatively, the short budget is the lesser evil.
-                if (spins > spinBudget) {
-                    Parker.park();
-                    spins = 0;
+                if (spins <= spinBudget) continue;
+                // Idle beyond the tight-spin window: HOLD by yielding —
+                // the worker stays runnable (no OS wake latency on the
+                // next dispatch) but cedes its core to any thread with
+                // real work (no starvation, degrades gracefully under
+                // thermal throttling). Park only once we have been idle
+                // well past the pool's own measured dispatch cadence.
+                var holdUs:Int = gapEwmaUs().load() * 4;
+                if (holdUs < 200) holdUs = 200;
+                if (holdUs > 20000) holdUs = 20000;
+                var idleStart = Sys.time();
+                var parked = false;
+                while (stateOf(w).load() != 1) {
+                    if (shut().load() == 1) return 0;
+                    if ((Sys.time() - idleStart) * 1e6 > holdUs) {
+                        parked = true;
+                        break;
+                    }
+                    Thread.yieldNow();
                 }
+                if (parked) Parker.park();
+                spins = 0;
             }
         }
     }
@@ -167,16 +183,26 @@ class SpinPool {
             return;
         }
         if (spinBudget == 0) {
-            // Idle spins before a worker parks. Too small: every dispatch
-            // pays the OS wake latency. Too large: spinning workers starve
-            // concurrent native pools and lose badly under thermal
-            // throttling. 40k (~150us) is the stable middle; tune per
-            // machine via RAYZOR_HAXE_POOL_SPINS.
-            spinBudget = 40000;
+            // Tight-spin window before the yield-hold phase (see
+            // workerLoop). RAYZOR_HAXE_POOL_SPINS overrides.
+            spinBudget = 2000;
             var sb = Sys.getEnv("RAYZOR_HAXE_POOL_SPINS");
             if (sb != null) {
                 var v = Std.parseInt(sb);
                 if (v != null && v > 0) spinBudget = v;
+            }
+        }
+        // Record the inter-dispatch gap EWMA — workers size their idle
+        // hold from the pool's own cadence, so the policy adapts to the
+        // workload instead of a hand-tuned constant.
+        var nowUs = Std.int((Sys.time() * 1e6) % 2000000000.);
+        var last = lastDispatchUs().load();
+        lastDispatchUs().store(nowUs);
+        if (last != 0) {
+            var gap = nowUs - last;
+            if (gap > 0 && gap < 10000000) {
+                var e = gapEwmaUs().load();
+                gapEwmaUs().store(e + ((gap - e) >> 2));
             }
         }
         _fn = fn; // plain store; published by the SC state flips below
