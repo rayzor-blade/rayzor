@@ -7038,6 +7038,11 @@ impl<'a> AstLowering<'a> {
                     // For type aliases like `typedef Bytes = rayzor.Bytes`, follow the target type
                     self.resolve_type_to_class_symbol_inner(type_table, *target_type)
                 }
+                // `Null<C>` receiver — methods resolve against C (an explicit
+                // Null<T> annotation must behave like the ?param sugar).
+                crate::tast::core::TypeKind::Optional { inner_type, .. } => {
+                    self.resolve_type_to_class_symbol_inner(type_table, *inner_type)
+                }
                 crate::tast::core::TypeKind::Placeholder { name } => {
                     // For extern classes (Placeholder types), look up by name in the symbol table
                     // These classes may have been compiled in a different unit (stdlib)
