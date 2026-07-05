@@ -40,12 +40,26 @@ class SwiGLU implements Module {
         // know about rayzor_tensor_free, so every intermediate here
         // leaks unless we release it inline. Five frees per FFN call
         // × 16 layers per token compounds fast on long generations.
-        var xClone = x.clone();
-        var gLin = gate.forward(xClone);
-        xClone.free();
+        // Pure-Haxe kernel path: gate and up read the SAME x, so run them
+        // through the fused kernel — one Q8_K quantize + one pool dispatch
+        // over the concatenated row space instead of two of each.
+        // Bit-identical per row to the two separate calls.
+        var gLin:Tensor;
+        var u:Tensor;
+        var gwq = gate.qweight;
+        var uwq = up.qweight;
+        if (Linear.useHaxeMatmul() && gwq != null && uwq != null) {
+            var pair = nue.Q4Matmul.matmulFused(gwq, uwq, null, x, gate.pool);
+            gLin = pair[0];
+            u = pair[1];
+        } else {
+            var xClone = x.clone();
+            gLin = gate.forward(xClone);
+            xClone.free();
+            u = up.forward(x);
+        }
         var g = gLin.silu();
         gLin.free();
-        var u = up.forward(x);
         var gu = g.mul(u);
         g.free();
         u.free();
