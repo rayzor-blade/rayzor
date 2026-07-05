@@ -102,6 +102,24 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
    per matmul (~small); GB-scale suspect if RSS climbs again: flash-gate miss → unfused bmm
    chain (~150 MB/token) — add a one-shot counter at GQAttention's gate-miss branches.
 
+### Session results 2026-07-06 (late)
+- LANDED 90323ba7: u32 header decode (kmask shape) + two-block paired inner loop → sustained
+  **40-41.7 tok/s** (256 tok, rested), p50 21.5-22 ms. cd8de0c8: Atomic handles hoisted out of
+  SpinPool spin loops (cell()/address() extern was sampled hot).
+- RAYZOR_WORKERS sweep {1,3,6} on sustained runs: **1 remains best even with yield-hold**
+  (w=6: p95 66 ms — core war returns). Long-context droop (35.3 @512 vs 40.6 @256) is partly
+  attention-on-1-worker growth; partly thermal.
+- THE REMAINING 2×, quantified: FFI aggregate ≈160 GMAC/s ⇒ Rust **~21.7 GMAC/s per thread
+  in-model**; our isolated best is 13.7. The phase-3 "1.08× parity" compared a weaker Rust
+  entry. The 1.6× kernel gap survived: header opt (wash), pairing (+4%), per-p partial
+  restructure (wash, reverted). NEXT: instruction-level comparison — disassemble our inlined
+  block loop (fn-ptr dump + lldb) vs Rust dot_q4_k_q8_kblock_2 objdump; count instructions and
+  SDOT density per block. That tells us if it's codegen quality (fixable in the LLVM pipeline /
+  MIR shapes) or an intrinsic-level difference.
+- **TOOLING TRAP: test_q4km_qmatmul is SELF-CONTAINED — it does NOT exercise nue/Q4Matmul.**
+  A deliberately wrong imin mapping passed it with an identical error value. Any kernel edit
+  must be validated with a model run; write a real canary that imports nue.Q4Matmul.
+
 ### Measured NEGATIVE results — do NOT redo
 - **Software prefetch in the 1B decode kernel**: +8%/token REGRESSION (reverted). The 1B active
   weight set (~32 MB/token) is LLC-resident across tokens; prefetches are pure overhead.
@@ -118,6 +136,9 @@ pattern — self-contained copy of the kernel; **MUST run with `--release`** (se
   ~109.75 ms p50 and the control-cell layout change caused cache-sensitive failures. Keep the
   original worker-state layout. P-core-only needs topology/affinity at worker construction, not
   dispatch-time claimant caps.
+- **Per-p partial-reduction restructure of q4DotMA4** (Rust dot_q4_k_q8 shape: fold each
+  sub-block pair into scalar partials immediately): WASH vs the committed 8-acc + single-hsum
+  shape (extra hsums cancel the register-pressure relief). Reverted.
 - **Q4Matmul branch-hoist of `isQ6 ? q6Dot : q4Dot` out of the inner loop**: REGRESSION in the
   model path (~35.75 ms p50 in a profiled smoke) despite preserving numerics. The current backend
   likes the original ternary shape better; do not redo without inspecting generated LLVM.
