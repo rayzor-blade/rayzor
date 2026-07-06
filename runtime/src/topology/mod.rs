@@ -60,6 +60,43 @@ pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
     platform::perf_core_count()
 }
 
+/// System-derived default for the guest SpinPool's CPU spin-wait relax
+/// hint (PAUSE/YIELD each idle spin). 1 = emit the hint, 0 = bare spin.
+/// The decision is purely a property of the platform, so it lives here
+/// (one place) rather than a hand-set env: a bare spin loop wastes power
+/// and heats the core on x86 and on thermally-tight ARM boards, but on a
+/// thermally-generous Apple M-series desktop/laptop the hint's marginal
+/// idle-branch cost is not worth it. `RAYZOR_HAXE_POOL_RELAX` overrides.
+#[no_mangle]
+pub extern "C" fn rayzor_pool_relax_default() -> i32 {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        0
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    {
+        1
+    }
+}
+
+/// System-derived default for the guest SpinPool tight-spin budget
+/// (iterations before the yield-hold -> park descent). Throttle-prone
+/// parts (x86, ARM boards) park sooner so idle cores can drop frequency;
+/// M-series spins longer because park-wake latency, not power, is the
+/// cost there. `RAYZOR_HAXE_POOL_SPINS` overrides. Iteration counts (not
+/// wall-time) so the ratio, not the absolute, is what matters here.
+#[no_mangle]
+pub extern "C" fn rayzor_pool_spin_default() -> i32 {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        2000
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    {
+        800
+    }
+}
+
 /// NUMA node a given logical CPU belongs to. Returns `0` on no-NUMA
 /// platforms; returns `-1` if `cpu` is out of range.
 #[no_mangle]

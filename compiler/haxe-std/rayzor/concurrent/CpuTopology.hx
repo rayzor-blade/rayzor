@@ -36,6 +36,18 @@ extern class CpuTopology {
     @:native("rayzor_topology_perf_core_count")
     public static function perfCoreCount():Int;
 
+    /** System-derived default for the guest-pool CPU spin-wait relax hint
+        (1 = emit PAUSE/YIELD, 0 = bare spin). Platform property; overridden
+        by RAYZOR_HAXE_POOL_RELAX. */
+    @:native("rayzor_pool_relax_default")
+    public static function poolRelaxDefault():Int;
+
+    /** System-derived default for the guest-pool tight-spin budget
+        (iterations before yield-hold->park). Overridden by
+        RAYZOR_HAXE_POOL_SPINS. */
+    @:native("rayzor_pool_spin_default")
+    public static function poolSpinDefault():Int;
+
     /** Which NUMA node a given logical CPU belongs to. Returns 0 on
         no-NUMA, -1 if cpu out of range. */
     @:native("rayzor_topology_cpu_to_node")
