@@ -146,7 +146,13 @@ pub extern "C" fn rayzor_pool_spin_default() -> i32 {
         let iters_per_us = spin_iters_per_us();
         let park_wake_us = park_wake_latency_us();
         let budget = (iters_per_us * park_wake_us).round();
-        (budget as i64).clamp(200, 50_000) as i32
+        let clamped = (budget as i64).clamp(200, 50_000) as i32;
+        if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
+            eprintln!(
+                "[pool-spin-calib] iters_per_us={iters_per_us:.1} park_wake_us={park_wake_us:.2} budget={budget} -> clamped={clamped}"
+            );
+        }
+        clamped
     })
 }
 

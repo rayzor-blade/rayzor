@@ -1135,13 +1135,17 @@ fn run_bundle(
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
         {
+            let _up_t = std::time::Instant::now();
             if let Err(e) = backend.upgrade_to_llvm() {
                 eprintln!(
                     "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
                     e
                 );
-            } else if verbose {
-                eprintln!("[tier] Upgraded to LLVM");
+            } else if verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some() {
+                eprintln!(
+                    "[tier] Upgraded to LLVM in {:.3}s",
+                    _up_t.elapsed().as_secs_f64()
+                );
             }
         }
         #[cfg(not(feature = "llvm-backend"))]
@@ -1893,13 +1897,17 @@ fn run_file(
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
         {
+            let _up_t = std::time::Instant::now();
             if let Err(e) = backend.upgrade_to_llvm() {
                 eprintln!(
                     "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
                     e
                 );
-            } else if verbose {
-                eprintln!("[tier] Upgraded to LLVM");
+            } else if verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some() {
+                eprintln!(
+                    "[tier] Upgraded to LLVM in {:.3}s",
+                    _up_t.elapsed().as_secs_f64()
+                );
             }
         }
         #[cfg(not(feature = "llvm-backend"))]
