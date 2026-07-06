@@ -98,6 +98,11 @@ harness = false
 default = ["cranelift-backend", "llvm-backend", "wasm-runtime"]
 cranelift-backend = []
 llvm-backend = ["inkwell", "llvm-sys"]
+# Link LLVM dynamically (libLLVM.so) instead of the static component libs.
+# Off by default (M1/homebrew links static). Needed on distros whose apt
+# `llvm-<v>-dev` lists `Polly` as a static component but ships no libPolly.a
+# (Debian/Ubuntu) — the shared lib bundles Polly, sidestepping the missing .a.
+llvm-dynamic = ["llvm-sys/force-dynamic"]
 wasm-runtime = ["wasmtime", "wasi-common", "rayzor-gpu", "pollster", "wgpu"]
 all-backends = ["cranelift-backend", "llvm-backend"]
 

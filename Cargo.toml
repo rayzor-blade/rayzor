@@ -31,6 +31,9 @@ edition = "2021"
 # dependency, not optional. `--no-default-features` still gives a Cranelift-only build.
 default = ["llvm-backend"]
 llvm-backend = ["compiler/llvm-backend"]
+# Opt-in: link LLVM dynamically (for distros missing libPolly.a, e.g. apt
+# llvm-<v>-dev on Debian/Ubuntu). `cargo build --features llvm-dynamic`.
+llvm-dynamic = ["compiler/llvm-dynamic"]
 # Heap + CPU profiler. Off by default; see rayzor-runtime's `profile`
 # feature for details. Activate with `cargo build --release --features profile`
 # then use RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH / RAYZOR_CPU_PROFILE.
