@@ -281,6 +281,64 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         })
     }
 
+    /// Stamp host `target-cpu`/`target-features` attributes on every function
+    /// with a body. MCJIT's EngineBuilder constructs its TargetMachine with an
+    /// EMPTY cpu string — a generic subtarget. Module-level triple/data-layout
+    /// do NOT carry CPU features, so without per-function attributes ISel
+    /// selects baseline armv8.0: no dotprod, and every
+    /// `llvm.experimental.vector.partial.reduce.add` lowers to the
+    /// sshll/smlal widening chain instead of SDOT (observed in-model on the
+    /// decode band). Per-function subtarget attributes override the engine's
+    /// generic default at selection time.
+    /// Stamp one function with the host subtarget (see
+    /// `stamp_host_subtarget_attrs`). Must run before ISel for any function
+    /// compiled after the engine exists (per-function Tier-3 path) — the
+    /// SDOT target intrinsic is a FATAL "cannot select" on the engine's
+    /// generic default subtarget, not just slow code.
+    fn stamp_fn_subtarget_attrs(&self, func: FunctionValue<'ctx>) {
+        let cpu = TargetMachine::get_host_cpu_name();
+        let feats = TargetMachine::get_host_cpu_features();
+        func.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context
+                .create_string_attribute("target-cpu", cpu.to_str().unwrap_or("generic")),
+        );
+        func.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context
+                .create_string_attribute("target-features", feats.to_str().unwrap_or("")),
+        );
+    }
+
+    fn stamp_host_subtarget_attrs(&self) {
+        let cpu = TargetMachine::get_host_cpu_name();
+        let feats = TargetMachine::get_host_cpu_features();
+        let cpu_attr = self
+            .context
+            .create_string_attribute("target-cpu", cpu.to_str().unwrap_or("generic"));
+        let feat_attr = self
+            .context
+            .create_string_attribute("target-features", feats.to_str().unwrap_or(""));
+        let mut stamped = 0usize;
+        let mut f = self.module.get_first_function();
+        while let Some(func) = f {
+            if func.count_basic_blocks() > 0 {
+                func.add_attribute(inkwell::attributes::AttributeLoc::Function, cpu_attr);
+                func.add_attribute(inkwell::attributes::AttributeLoc::Function, feat_attr);
+                stamped += 1;
+            }
+            f = func.get_next_function();
+        }
+        if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
+            eprintln!(
+                "[llvm-stamp] {} fns cpu={} feats.len={}",
+                stamped,
+                cpu.to_str().unwrap_or("?"),
+                feats.to_str().map(|s| s.len()).unwrap_or(0)
+            );
+        }
+    }
+
     /// Create a backend in AOT mode. In AOT mode, struct→ptr coercion for
     /// extern (C ABI) calls uses alloca+store instead of field extraction.
     pub fn with_aot_mode(
@@ -479,6 +537,37 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Ok(result)
     }
 
+    /// Build `llvm.aarch64.neon.sdot(acc<4xi32>, a<16xi8>, b<16xi8>) -> <4xi32>`
+    /// directly. The portable partial.reduce.add path depends on ISel
+    /// pattern-matching `mul(sext, sext)` — instcombine canonicalizes
+    /// `sext(and(x, 0xF))` to `zext`, which turns the pattern into the
+    /// USDOT shape (i8mm); Apple M1-class cores have dotprod but NOT i8mm,
+    /// so those sites legalize to the sshll/smlal widening chain (~6 ops
+    /// per 16 lanes instead of 1). A target intrinsic is opaque to IR
+    /// passes and always selects to one SDOT. Lane grouping (consecutive
+    /// 4) differs from the strided partial.reduce grouping, but integer
+    /// addition is exact, so accumulator TOTALS are bit-identical — and
+    /// the Cranelift tier's SDOT uses this grouping already.
+    fn try_build_neon_sdot(
+        &self,
+        acc: inkwell::values::VectorValue<'ctx>,
+        a: inkwell::values::VectorValue<'ctx>,
+        b: inkwell::values::VectorValue<'ctx>,
+    ) -> Option<inkwell::values::VectorValue<'ctx>> {
+        use inkwell::intrinsics::Intrinsic;
+        let intrinsic = Intrinsic::find("llvm.aarch64.neon.sdot")?;
+        let i32x4 = self.context.i32_type().vec_type(4);
+        let i8x16 = self.context.i8_type().vec_type(16);
+        let func = intrinsic.get_declaration(&self.module, &[i32x4.into(), i8x16.into()])?;
+        let call = self
+            .builder
+            .build_call(func, &[acc.into(), a.into(), b.into()], "sdot")
+            .ok()?;
+        call.try_as_basic_value()
+            .basic()
+            .map(|v| v.into_vector_value())
+    }
+
     /// Compile a single function (for tiered JIT)
     ///
     /// This is the main entry point for Tier 3 optimization.
@@ -493,9 +582,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Compile the function body
         self.compile_function_body(func_id, function, llvm_func)?;
+        self.stamp_fn_subtarget_attrs(llvm_func);
 
         // Create execution engine if not exists
         if self.execution_engine.is_none() {
+            self.stamp_host_subtarget_attrs();
             let engine = self
                 .module
                 .create_jit_execution_engine(self.opt_level)
@@ -1296,6 +1387,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // The execution engine needs the opt_level for machine code generation (instruction
         // selection, register allocation, etc.), separate from the IR-level optimizations
         // that run_passes() already performed.
+        self.stamp_host_subtarget_attrs();
         let engine = self
             .module
             .create_jit_execution_engine(self.opt_level)
@@ -4241,6 +4333,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let acc_v = self.get_value(*acc)?.into_vector_value();
                 let a_v = self.get_value(*a)?.into_vector_value();
                 let b_v = self.get_value(*b)?.into_vector_value();
+                // MCJIT targets the host: on aarch64 emit the SDOT target
+                // intrinsic directly (see try_build_neon_sdot for why the
+                // portable form does not survive O3 on non-i8mm cores).
+                #[cfg(target_arch = "aarch64")]
+                if let Some(res) = self.try_build_neon_sdot(acc_v, a_v, b_v) {
+                    self.value_map.insert(*dest, res.into());
+                    return Ok(());
+                }
                 let i32_ty = self.context.i32_type();
                 let i32x16 = i32_ty.vec_type(16);
                 let a32 = self
