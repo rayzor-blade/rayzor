@@ -31,7 +31,9 @@ fn main() -> ExitCode {
     if args.len() != 3 {
         eprintln!(
             "rayzor-wasm-opt: usage: {} <input.wasm> <output.wasm>",
-            args.first().map(String::as_str).unwrap_or("rayzor-wasm-opt")
+            args.first()
+                .map(String::as_str)
+                .unwrap_or("rayzor-wasm-opt")
         );
         return ExitCode::from(2);
     }
