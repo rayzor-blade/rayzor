@@ -146,8 +146,47 @@ pub(super) fn cpu_count() -> i32 {
 }
 
 pub(super) fn perf_core_count() -> i32 {
-    // No hybrid-core split exposed here — logical count is the best answer.
-    cpu_count()
+    // Hybrid x86 (Intel Alder Lake+ P/E cores): the P-cores run a higher
+    // max frequency than the E-cores, so count the logical CPUs whose
+    // cpufreq `cpuinfo_max_freq` equals the machine maximum. This keeps a
+    // guest pool off the E-cores — on a small-chassis NUC, oversubscribing
+    // E-cores both loses the fork-join barrier to the slow straggler and
+    // heats the package into throttling. Any sysfs gap falls back to the
+    // logical count (previous behaviour), so this never returns < 1 or
+    // panics. Homogeneous parts report every core at the same max freq =>
+    // the full logical count, unchanged.
+    let total = cpu_count();
+    let mut max_khz: u64 = 0;
+    let mut freqs: Vec<u64> = Vec::with_capacity(total as usize);
+    for cpu in 0..total {
+        let path = format!(
+            "/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_max_freq",
+            cpu
+        );
+        match std::fs::read_to_string(&path) {
+            Ok(s) => {
+                let khz = s.trim().parse::<u64>().unwrap_or(0);
+                if khz > max_khz {
+                    max_khz = khz;
+                }
+                freqs.push(khz);
+            }
+            // Missing cpufreq (VM, no governor) — bail to logical count.
+            Err(_) => return total,
+        }
+    }
+    if max_khz == 0 {
+        return total;
+    }
+    // A P-core is one within 5% of the machine max (guards minor per-core
+    // max-freq skew). Homogeneous => all match => total.
+    let threshold = max_khz - max_khz / 20;
+    let p = freqs.iter().filter(|&&f| f >= threshold).count() as i32;
+    if p >= 1 {
+        p
+    } else {
+        total
+    }
 }
 
 pub(super) fn cpu_to_node(cpu: i32) -> i32 {

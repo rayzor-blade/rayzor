@@ -69,6 +69,17 @@ extern class Thread<T> {
     public static function yieldNow(): Void;
 
     /**
+     * CPU spin-wait relax hint: PAUSE (x86) / YIELD (aarch64). Unlike
+     * `yieldNow` this does NOT transition to the scheduler — the thread
+     * stays runnable but the core drops power for one spin iteration.
+     * Call it every iteration of a busy-wait: on x86 a bare spin loop
+     * runs the core at full power (and triggers memory-order machine
+     * clears), which is the dominant thermal cost on constrained parts.
+     */
+    @:native("cpu_relax")
+    public static function cpuRelax(): Void;
+
+    /**
      * Sleep the current thread for the specified duration in milliseconds.
      *
      * @param millis Duration to sleep in milliseconds

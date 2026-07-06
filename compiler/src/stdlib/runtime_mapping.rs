@@ -1963,6 +1963,9 @@ impl StdlibMapping {
             // MIR wrapper: no params, returns void
             map_method!(static "rayzor_concurrent_Thread", "yieldNow" => "Thread_yieldNow", params: 0, mir_wrapper,
                 types: &[]),
+            // Thread::cpuRelax() -> Void — PAUSE/YIELD spin-wait hint
+            map_method!(static "rayzor_concurrent_Thread", "cpuRelax" => "Thread_cpuRelax", params: 0, mir_wrapper,
+                types: &[]),
             // Thread::currentId() -> Int
             // MIR wrapper: no params, returns thread id (i64)
             map_method!(static "rayzor_concurrent_Thread", "currentId" => "Thread_currentId", params: 0, mir_wrapper,

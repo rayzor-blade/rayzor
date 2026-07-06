@@ -335,6 +335,18 @@ pub extern "C" fn rayzor_thread_yield_now() {
     thread::yield_now();
 }
 
+/// CPU spin-wait relax hint. Emits `PAUSE` on x86 / `YIELD` on aarch64 —
+/// the thread stays runnable (unlike `yield_now`, no scheduler transition)
+/// but the core drops power and, on x86, avoids the memory-order
+/// machine-clears a bare spin loop triggers. Called every iteration of a
+/// busy-wait (guest SpinPool tight-spin + fork-join). Critical on
+/// thermally-constrained x86 (a bare Haxe spin loop runs the core at full
+/// power); benign on M-series.
+#[no_mangle]
+pub extern "C" fn rayzor_cpu_relax() {
+    std::hint::spin_loop();
+}
+
 /// Sleep for specified milliseconds
 #[no_mangle]
 pub extern "C" fn rayzor_thread_sleep(millis: i32) {

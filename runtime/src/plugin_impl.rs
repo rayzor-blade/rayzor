@@ -997,6 +997,7 @@ register_symbol!(
     "rayzor_thread_yield_now",
     crate::concurrency::rayzor_thread_yield_now
 );
+register_symbol!("rayzor_cpu_relax", crate::concurrency::rayzor_cpu_relax);
 register_symbol!(
     "rayzor_thread_register_parkable",
     crate::concurrency::rayzor_thread_register_parkable
