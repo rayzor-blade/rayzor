@@ -3,6 +3,7 @@ package nue.transformer;
 import rayzor.ds.Tensor;
 import rayzor.ds.DType;
 import nue.transformer.KvCacheQ8;
+import nue.transformer.Q8Cache;
 
 /**
  * Per-layer key/value cache for incremental decoding.
@@ -48,7 +49,7 @@ class KVCache {
 
     public function new(
         maxSeqLen:Int, numKvHeads:Int, headDim:Int, dtype:DType,
-        useQ8:Bool = false
+        useQ8:Bool = false, useHaxeQ8:Bool = false
     ) {
         this.maxSeqLen = maxSeqLen;
         this.numKvHeads = numKvHeads;
@@ -61,7 +62,7 @@ class KVCache {
         // mainstream LLM checkpoint satisfies this.)
         var canQ8 = useQ8 && (headDim % 32 == 0);
         this.useQ8H = false;
-        if (canQ8 && FlashDecode.enabled()) {
+        if (canQ8 && useHaxeQ8) {
             this.keysQ8H = new Q8Cache(maxSeqLen, numKvHeads, headDim);
             this.valuesQ8H = new Q8Cache(maxSeqLen, numKvHeads, headDim);
             this.useQ8H = true;
@@ -159,7 +160,9 @@ class KVCache {
      */
     public function keysView():Tensor {
         if (useQ8H) {
-            return keysQ8H.dequantView(currentLen);
+            var t = Tensor.zeros([currentLen, numKvHeads, headDim], DType.F32);
+            keysQ8H.dequantInto(currentLen, t);
+            return t;
         }
         if (useQ8) {
             return keysQ8.dequantView(currentLen);
@@ -171,7 +174,9 @@ class KVCache {
     /** Active V slice — counterpart to `keysView` with the same ownership rules. */
     public function valuesView():Tensor {
         if (useQ8H) {
-            return valuesQ8H.dequantView(currentLen);
+            var t = Tensor.zeros([currentLen, numKvHeads, headDim], DType.F32);
+            valuesQ8H.dequantInto(currentLen, t);
+            return t;
         }
         if (useQ8) {
             return valuesQ8.dequantView(currentLen);

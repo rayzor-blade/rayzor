@@ -68,12 +68,15 @@ class FlashDecode {
         var bph = headDim >> 5; // 32-quant blocks per head
         var headBytes = kc.headBytes;
         var rowBytes = kc.rowBytes;
-        var kBase = kc.data.address();
-        var vBase = vc.data.address();
-        var qBase = q.data().raw();
+        // :Usize on every extern-returned address (see Q8Cache.append —
+        // unannotated inference through field-loaded receivers decays to
+        // Float and corrupts the pointer arithmetic).
+        var kBase:Usize = kc.data.address();
+        var vBase:Usize = vc.data.address();
+        var qBase:Usize = q.data().raw();
 
         var out = Tensor.zeros([1, numQHeads, headDim], DType.F32);
-        var outB = out.data().raw();
+        var outB:Usize = out.data().raw();
 
         // Per-call scratch. scores doubles as the softmax-weight buffer;
         // vScr holds one dequantized 32-float V block per kv-head band.
@@ -81,10 +84,10 @@ class FlashDecode {
         var qsc = Bytes.alloc(numQHeads * bph * 4);
         var scores = Bytes.alloc(numQHeads * cacheLen * 4);
         var vScr = Bytes.alloc(numKvHeads * 128);
-        var qqB = qq.address();
-        var qscB = qsc.address();
-        var scB = scores.address();
-        var vScrB = vScr.address();
+        var qqB:Usize = qq.address();
+        var qscB:Usize = qsc.address();
+        var scB:Usize = scores.address();
+        var vScrB:Usize = vScr.address();
 
         // Quantize the q rows to per-32-block q8 (numQHeads*headDim floats).
         for (qh in 0...numQHeads) {
@@ -121,6 +124,10 @@ class FlashDecode {
         } else {
             band(0, numKvHeads, 0);
         }
+        qq.free();
+        qsc.free();
+        scores.free();
+        vScr.free();
         return out;
     }
 

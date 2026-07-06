@@ -5,6 +5,8 @@ import nue.Linear;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
+import nue.transformer.FlashDecode;
+import nue.transformer.Q8Cache;
 
 /**
  * Grouped Query Attention (the Llama 3+ attention variant).

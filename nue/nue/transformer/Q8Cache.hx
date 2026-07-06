@@ -58,13 +58,17 @@ class Q8Cache {
         var n = shp[0];
         if (row + n > maxSeqLen) return -1;
         if (shp[1] != numKvHeads || shp[2] != headDim) return -1;
-        var sBase = src.data().raw();
-        var dBase = data.address();
-        var cell = dBase + Usize.fromInt(maxSeqLen * rowBytes);
+        // Locals along the address path are explicitly :Usize — an
+        // unannotated extern-return through a field-loaded receiver chain
+        // currently infers Float and turns pointer adds into fp adds
+        // (silent-decay compiler bug, repro in this file's history).
+        var sBase:Usize = src.data().raw();
+        var dBase:Usize = data.address();
+        var cell:Usize = dBase + Usize.fromInt(maxSeqLen * rowBytes);
         var blocksPerRow = numKvHeads * (headDim >> 5);
         for (r in 0...n) {
-            var srcRow = sBase + Usize.fromInt(r * numKvHeads * headDim * 4);
-            var dstRow = dBase + Usize.fromInt((row + r) * rowBytes);
+            var srcRow:Usize = sBase + Usize.fromInt(r * numKvHeads * headDim * 4);
+            var dstRow:Usize = dBase + Usize.fromInt((row + r) * rowBytes);
             // Heads are contiguous in both source and destination, so the
             // whole row is one linear run of 32-float groups -> 34B blocks.
             for (b in 0...blocksPerRow) {
@@ -75,27 +79,31 @@ class Q8Cache {
         return row + n;
     }
 
-    /** Dequantize rows 0..len into a fresh owning F32 tensor
-        `[len, numKvHeads, headDim]` (the prefill attention path). */
-    public function dequantView(len:Int):Tensor {
-        var out = Tensor.zeros([len, numKvHeads, headDim], DType.F32);
-        var oBase = out.data().raw();
-        var dBase = data.address();
+    /** Dequantize rows 0..len into caller-allocated `out`
+        (`[len, numKvHeads, headDim]` F32) — the prefill attention path.
+        Shaped as fill-into rather than allocate-and-return, and named
+        distinctly from the plugin extern's `dequantView`: cross-module
+        resolution currently fails on Haxe methods that RETURN an extern
+        class (forward-ref stub), and same-name cross-class dispatch
+        collapses to an unresolvable bare symbol. Tensor PARAMS resolve
+        fine (same shape as `append`). */
+    public function dequantInto(len:Int, out:Tensor):Void {
+        var oBase:Usize = out.data().raw();
+        var dBase:Usize = data.address();
         var blocksPerRow = numKvHeads * (headDim >> 5);
         for (r in 0...len) {
-            var srcRow = dBase + Usize.fromInt(r * rowBytes);
-            var dstRow = oBase + Usize.fromInt(r * numKvHeads * headDim * 4);
+            var srcRow:Usize = dBase + Usize.fromInt(r * rowBytes);
+            var dstRow:Usize = oBase + Usize.fromInt(r * numKvHeads * headDim * 4);
             for (b in 0...blocksPerRow) {
-                var blk = srcRow + Usize.fromInt(b * 34);
+                var blk:Usize = srcRow + Usize.fromInt(b * 34);
                 var sc = f16ToF32(Mem.loadI32(blk) & 0xFFFF);
-                var dst = dstRow + Usize.fromInt(b * 128);
+                var dst:Usize = dstRow + Usize.fromInt(b * 128);
                 for (i in 0...32) {
                     var qv = (Mem.loadU8(blk + Usize.fromInt(2 + i)) << 24) >> 24;
                     Mem.storeF32(dst + Usize.fromInt(i * 4), sc * qv);
                 }
             }
         }
-        return out;
     }
 
     static inline function f16ToF32(bits:Int):Float {
@@ -110,50 +118,38 @@ class Q8Cache {
 
     /** IEEE f32 -> f16 bits, round to nearest even (the storage rounding
         for block scales). `cell` is a 4-byte scratch address for the
-        float -> bits reinterpret. */
+        float -> bits reinterpret. Structured as straight-line early
+        returns with branchless mantissa-carry: `(e<<10) + q2` lets a
+        rounded-up mantissa overflow arithmetically into the exponent
+        (0x400 carry), and a cross-branch `q2 = 0; e += 1` reassignment
+        is exactly the conditional-int-reassign shape the MIR lowering
+        currently decays to Float (stealLoop family) — verified live:
+        scales just below powers of two came back as f32 bit patterns.
+        Bit-exact vs IEEE RNE on a 120k-value sweep. */
     static inline function f16FromF32(v:Float, cell:Usize):Int {
         Mem.storeF32(cell, v);
-        var x = Mem.loadI32(cell);
-        var sign = (x >>> 16) & 0x8000;
-        var exp = (x >>> 23) & 0xFF;
-        var man = x & 0x7FFFFF;
-        var r:Int;
-        if (exp == 0xFF) {
-            // inf/nan (nan keeps a payload bit)
-            r = sign | 0x7C00 | (man != 0 ? 0x200 : 0);
-        } else {
-            var e = exp - 112; // rebase bias 127 -> 15
-            if (e >= 0x1F) {
-                r = sign | 0x7C00;
-            } else if (e <= 0) {
-                if (e < -10) {
-                    r = sign; // underflow to signed zero
-                } else {
-                    // subnormal: shift the implicit-1 mantissa into place
-                    var m = man | 0x800000;
-                    var shift = 14 - e; // 14..24
-                    var q = m >>> shift;
-                    var rem = m & ((1 << shift) - 1);
-                    var half = 1 << (shift - 1);
-                    if (rem > half || (rem == half && (q & 1) == 1)) q += 1;
-                    // a carry out of the subnormal mantissa lands on
-                    // exponent 1 — the bit pattern is already correct
-                    r = sign | q;
-                }
-            } else {
-                var q2 = man >>> 13;
-                var rem2 = man & 0x1FFF;
-                if (rem2 > 0x1000 || (rem2 == 0x1000 && (q2 & 1) == 1)) {
-                    q2 += 1;
-                    if (q2 == 0x400) {
-                        q2 = 0;
-                        e += 1;
-                    }
-                }
-                r = (e >= 0x1F) ? (sign | 0x7C00) : (sign | (e << 10) | q2);
-            }
+        var x:Int = Mem.loadI32(cell);
+        var sign:Int = (x >>> 16) & 0x8000;
+        var exp:Int = (x >>> 23) & 0xFF;
+        var man:Int = x & 0x7FFFFF;
+        if (exp == 0xFF) return sign | 0x7C00 | (man != 0 ? 0x200 : 0);
+        var e:Int = exp - 112; // rebase bias 127 -> 15
+        if (e >= 0x1F) return sign | 0x7C00;
+        if (e <= 0) {
+            if (e < -10) return sign; // underflow to signed zero
+            var m:Int = man | 0x800000;
+            var shift:Int = 14 - e; // 14..24
+            var half1:Int = (1 << (shift - 1)) - 1;
+            var q:Int = (m + half1 + ((m >>> shift) & 1)) >>> shift;
+            // a carry out of the subnormal mantissa lands on exponent 1 —
+            // the bit pattern is already correct
+            return sign | q;
         }
-        return r;
+        var rounded:Int = man + 0xFFF + ((man >>> 13) & 1);
+        var q2:Int = rounded >>> 13;
+        var bits:Int = (e << 10) + q2; // mantissa carry rolls into exponent
+        if (bits >= 0x7C00) return sign | 0x7C00;
+        return sign | bits;
     }
 
     /** Quantize one 32-float group at `srcF32` into the 34-byte Q8_0
