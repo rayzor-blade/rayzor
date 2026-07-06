@@ -2055,6 +2055,14 @@ register_symbol!(
     crate::topology::rayzor_topology_perf_core_count
 );
 register_symbol!(
+    "rayzor_pool_relax_default",
+    crate::topology::rayzor_pool_relax_default
+);
+register_symbol!(
+    "rayzor_pool_spin_default",
+    crate::topology::rayzor_pool_spin_default
+);
+register_symbol!(
     "rayzor_topology_cpu_to_node",
     crate::topology::rayzor_topology_cpu_to_node
 );

@@ -208,16 +208,22 @@ class SpinPool {
             return;
         }
         if (spinBudget == 0) {
-            // Tight-spin window before the yield-hold phase (see
-            // workerLoop). RAYZOR_HAXE_POOL_SPINS overrides.
-            spinBudget = 2000;
+            // Defaults are DERIVED FROM THE PLATFORM (arch/thermal profile,
+            // computed once in the runtime) — not hand-set constants. The
+            // env vars only OVERRIDE for a specific box. Tight-spin window
+            // before the yield-hold phase; see workerLoop.
+            spinBudget = CpuTopology.poolSpinDefault();
+            if (spinBudget <= 0) spinBudget = 2000;
             var sb = Sys.getEnv("RAYZOR_HAXE_POOL_SPINS");
             if (sb != null) {
                 var v:Null<Int> = Std.parseInt(sb);
                 if (v != null && v > 0) spinBudget = v;
             }
+            relaxHint = CpuTopology.poolRelaxDefault();
             var rx = Sys.getEnv("RAYZOR_HAXE_POOL_RELAX");
-            relaxHint = (rx != null && rx != "0" && rx != "" && rx != "false") ? 1 : 0;
+            if (rx != null) {
+                relaxHint = (rx != "0" && rx != "" && rx != "false") ? 1 : 0;
+            }
         }
         // Record the inter-dispatch gap EWMA — workers size their idle
         // hold from the pool's own cadence, so the policy adapts to the
