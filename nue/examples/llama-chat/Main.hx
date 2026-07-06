@@ -129,6 +129,18 @@ class LocalTempSampler implements Sampler {
         if (ngFilled < NG_N - 1) ngFilled++;
     }
 
+    // 0 = unread, 1 = on, 2 = off (cross-module-duplicate-safe pattern).
+    static var _dumpTopkGate:Int = 0;
+    static var _dumpStep:Int = 0;
+
+    static inline function dumpTopk():Bool {
+        if (_dumpTopkGate == 0) {
+            var v = Sys.getEnv("RAYZOR_DUMP_TOPK");
+            _dumpTopkGate = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _dumpTopkGate == 1;
+    }
+
     public function sample(logits:Tensor):Int {
         var shape = logits.shape();
         var n = shape[shape.length - 1];
@@ -150,6 +162,17 @@ class LocalTempSampler implements Sampler {
         var sz = logits.topkScan(topKLogits, topKIds, k, recent, penaltyArg);
         if (sz < 0) {
             sz = topKScanFallback(logits, n, k, penalize, rp);
+        }
+
+        // RAYZOR_DUMP_TOPK=1: per-step top-5 (id:logit) for A/B'ing kernel
+        // backends numerically (identical prompt + temp 0 + penalty 1 makes
+        // the streams directly diffable).
+        if (dumpTopk()) {
+            var line = "[topk] step=" + _dumpStep;
+            var m = sz < 5 ? sz : 5;
+            for (i in 0...m) line += " " + topKIds[i] + ":" + topKLogits[i];
+            Sys.println(line);
+            _dumpStep++;
         }
 
         // -------- No-repeat-ngram filter ----------

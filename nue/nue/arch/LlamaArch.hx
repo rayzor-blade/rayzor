@@ -76,6 +76,14 @@ class LlamaArch implements ArchBuilder {
         // env-lookup overhead and the build chain stays self-contained.
         var kvQ8Env = Sys.getEnv("RAYZOR_KV_Q8");
         var useKvQ8 = (kvQ8Env != null && kvQ8Env != "0" && kvQ8Env != "");
+        // Guest-owned Q8 cache + pure-Haxe flash decode (see FlashDecode).
+        // Read here, alongside RAYZOR_KV_Q8, and threaded through as an
+        // explicit parameter: this build path is a proven-safe env-read
+        // site, and an explicit param avoids gate resolution inside the
+        // KVCache ctor.
+        var flashEnv = Sys.getEnv("RAYZOR_HAXE_FLASH");
+        var useHaxeQ8 = useKvQ8
+            && (flashEnv != null && flashEnv != "0" && flashEnv != "" && flashEnv != "false");
 
         // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
         // routes lookups through `QTensor.gatherRowsQ6K`, dequantising only
@@ -104,7 +112,7 @@ class LlamaArch implements ArchBuilder {
         if (Linear.useHaxeMatmul()) sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
 
         for (i in 0...meta.numLayers) {
-            blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8, sp));
+            blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8, useHaxeQ8, sp));
         }
 
         var outputNorm = new RMSNorm(
@@ -162,7 +170,7 @@ class LlamaArch implements ArchBuilder {
 
     static function buildBlock(
         meta:ModelMetadata, layerIndex:Int, dtype:DType,
-        rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool,
+        rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool, useHaxeQ8:Bool,
         ?sp:rayzor.concurrent.SpinPool
     ):TransformerBlock {
         var prefix = "blk." + layerIndex + ".";
@@ -171,9 +179,12 @@ class LlamaArch implements ArchBuilder {
             meta.normEps, "weight"
         );
 
-        var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype, useKvQ8);
+        var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype,
+            useKvQ8, useHaxeQ8);
         if (useKvQ8 && layerIndex == 0) {
-            if (cache.useQ8) {
+            if (cache.useQ8H) {
+                Sys.println("[kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)");
+            } else if (cache.useQ8) {
                 Sys.println("[kv-cache] Q8_0 mode enabled");
             } else {
                 Sys.println("[kv-cache] Q8_0 requested but head_dim=" + meta.headDim
