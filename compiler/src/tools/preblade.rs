@@ -107,6 +107,19 @@ pub fn create_bundle(mut config: BundleConfig) -> Result<usize, String> {
         println!("  check    passed");
     }
 
+    // Coherency pass — MUST run before we clone/serialize the MIR. A bundle
+    // is an artifact builder: like AOT (aot_compiler.rs), it clones MIR after
+    // lower_to_tast() and persists it. Cross-module CallDirect targets are
+    // only re-resolved to their final local ids by this pass, which consults
+    // `import_mir_modules` as the id source-of-truth. That source-of-truth is
+    // NOT carried in the bundle, so any stale ref left in the merged module is
+    // frozen at serialize time and surfaces later as an intermittent
+    // "function <id> not found" at JIT time (the id survives merge as a
+    // dangling cross-module target only on some builds, per HashMap ordering).
+    // The interactive `run` path tolerates it because it executes in the same
+    // live session; the bundle cannot. Mirror AOT: finalize, THEN snapshot.
+    unit.finalize_mir_references();
+
     // Get MIR modules (uses cached BLADE files when available)
     let mir_modules = unit.get_mir_modules();
 
@@ -114,53 +127,54 @@ pub fn create_bundle(mut config: BundleConfig) -> Result<usize, String> {
         return Err("No MIR modules generated".to_string());
     }
 
-    // Convert Arc<IrModule> to IrModule for the bundle
-    let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
+    // Bundle exactly the module `rayzor run` compiles: the MERGED module,
+    // which `get_mir_modules()` returns LAST (the earlier entries are the
+    // per-file/stdlib modules, still un-merged). Bundling all of them was
+    // the regression — it (a) double-included the whole stdlib as broken
+    // standalone functions (bare `keys` extern with no runtime symbol,
+    // `writeString` with an ABI-mismatched signature) that the merged path
+    // resolves at the call site, and (b) made tree-shaking miss cross-module
+    // CallDirect edges (a callee in another Vec entry was pruned as
+    // "unreachable" even though the entry module calls it), producing
+    // "function not found" at JIT time. Mirroring run_file here — single
+    // merged module, then shake, then link stubs — keeps the two paths
+    // byte-identical.
+    let mut merged = (**mir_modules.last().unwrap()).clone();
+    let module_count = 1usize;
 
-    let module_count = modules.len();
-
-    // Find entry module and function
-    let entry_module = modules
-        .iter()
-        .rev()
-        .find(|m| {
-            m.functions
-                .values()
-                .any(|f| f.name == "main" || f.name == "Main_main" || f.name.ends_with("_main"))
-        })
-        .map(|m| m.name.clone())
+    let entry_function = merged
+        .functions
+        .values()
+        .find(|f| f.name == "main" || f.name == "Main_main" || f.name.ends_with("_main"))
+        .map(|f| f.name.clone())
         .ok_or("No entry point found (no main function)")?;
-
-    let entry_function = modules
-        .iter()
-        .find(|m| m.name == entry_module)
-        .and_then(|m| {
-            m.functions
-                .values()
-                .find(|f| f.name == "main" || f.name == "Main_main" || f.name.ends_with("_main"))
-                .map(|f| f.name.clone())
-        })
-        .ok_or("Entry function not found")?;
+    let entry_module = merged.name.clone();
 
     if config.verbose {
         println!("  entry    {}::{}", entry_module, entry_function);
     }
 
-    // Tree-shake BEFORE optimization
-    if config.strip {
+    // Tree-shake the SINGLE merged module (always, like run_file). Shaking a
+    // multi-module Vec misses cross-module callees; shaking one merged module
+    // is complete. Then link forward-declared self-contained wrapper stubs so
+    // their calls don't degrade to no-ops (run_file does the same).
+    {
+        let mut modules = vec![merged];
         let stats = tree_shake::tree_shake_bundle(&mut modules, &entry_module, &entry_function);
+        merged = modules.into_iter().next().unwrap();
+        merged.link_selfcontained_wrapper_stubs();
         if config.verbose {
             println!(
-                "  shake    -{} fn, -{} ext, -{} glob, -{} mod | kept {} fn, {} ext",
+                "  shake    -{} fn, -{} ext | kept {} fn, {} ext",
                 stats.functions_removed,
                 stats.extern_functions_removed,
-                stats.globals_removed,
-                stats.modules_removed,
                 stats.functions_kept,
                 stats.extern_functions_kept
             );
         }
     }
+
+    let mut modules = vec![merged];
 
     // Apply MIR optimizations after tree-shaking
     if let Some(level) = config.opt_level {
