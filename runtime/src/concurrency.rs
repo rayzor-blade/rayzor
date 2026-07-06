@@ -220,6 +220,31 @@ pub(crate) fn arm64_jit_barrier() {
     // No-op on other architectures
 }
 
+/// Bias the calling thread onto a performance core on Apple Silicon.
+///
+/// Pool workers spawned at the default QoS float between P- and E-cores at the
+/// scheduler's discretion; when a banded-matmul worker lands on an E-core the
+/// fork-join tail waits on that straggler, which shows up as ~15% run-to-run
+/// throughput variance (bimodal, non-thermal). Requesting USER_INITIATED pins
+/// the intent to the P-cluster so the claimants stay co-located. No-op off
+/// macOS — Linux biases P-cores through cpu-affinity in the topology layer.
+#[inline]
+pub(crate) fn pin_thread_to_performance_core() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // QOS_CLASS_USER_INITIATED = 0x19: high-priority compute the caller is
+        // actively blocked on. Strong P-core affinity without claiming the
+        // UI-reserved USER_INTERACTIVE band.
+        extern "C" {
+            fn pthread_set_qos_class_self_np(
+                qos_class: std::os::raw::c_uint,
+                relative_priority: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        pthread_set_qos_class_self_np(0x19, 0);
+    }
+}
+
 /// Spawn a new thread with a closure
 ///
 /// # Safety
@@ -247,6 +272,8 @@ pub unsafe extern "C" fn rayzor_thread_spawn(
 
     // Spawn thread — wrapped in catch_unwind so panics don't leak ACTIVE_THREAD_COUNT
     let handle = thread::spawn(move || {
+        // Keep compute workers on P-cores (kills the E-core fork-join straggler).
+        pin_thread_to_performance_core();
         // Execute barrier before calling JIT code
         arm64_jit_barrier();
 
