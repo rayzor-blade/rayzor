@@ -568,6 +568,56 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .map(|v| v.into_vector_value())
     }
 
+    /// Build `llvm.x86.avx512.vpdpbusd.128(acc<4xi32>, u<4xi32>, s<4xi32>)`
+    /// directly — the u8×i8 dot-accumulate. LLVM emits the VEX (AVX-VNNI)
+    /// encoding on cores with avxvnni-but-not-avx512vnni, EVEX where present.
+    /// Emitted directly for the same reason as the ARM sdot: the x86 backend
+    /// does not fold the portable partial.reduce.add pattern to vpdpbusd, so
+    /// those sites otherwise legalize to a vpmovsxbd/vpmulld/vpaddd widening
+    /// chain (~one instruction becomes several per 16 lanes).
+    ///
+    /// vpdpbusd is UNSIGNED×SIGNED. VectorDot's second operand `b` is
+    /// contractually non-negative (the caller's Q4 weight nibble is AND-masked
+    /// to 0..15), so it takes the unsigned slot and `a` (signed activation)
+    /// the signed slot; the products, hence the accumulator, are identical to
+    /// the ARM sdot's signed×signed. Gated on the host having AVX-VNNI so the
+    /// JIT never bakes an instruction the running CPU cannot decode.
+    #[cfg(target_arch = "x86_64")]
+    fn try_build_x86_vpdpbusd(
+        &self,
+        acc: inkwell::values::VectorValue<'ctx>,
+        a: inkwell::values::VectorValue<'ctx>,
+        b: inkwell::values::VectorValue<'ctx>,
+    ) -> Option<inkwell::values::VectorValue<'ctx>> {
+        use inkwell::intrinsics::Intrinsic;
+        if !std::arch::is_x86_feature_detected!("avxvnni") {
+            return None;
+        }
+        let intrinsic = Intrinsic::find("llvm.x86.avx512.vpdpbusd.128")?;
+        // Fixed <4 x i32> operands (not overloaded), so no type args.
+        let func = intrinsic.get_declaration(&self.module, &[])?;
+        let i32x4 = self.context.i32_type().vec_type(4);
+        // i8x16 and i32x4 are both 128 bits: bitcast is free (no data move).
+        let b_u = self
+            .builder
+            .build_bit_cast(b, i32x4, "vnni_u")
+            .ok()?
+            .into_vector_value();
+        let a_s = self
+            .builder
+            .build_bit_cast(a, i32x4, "vnni_s")
+            .ok()?
+            .into_vector_value();
+        // vpdpbusd(acc, unsigned = b, signed = a).
+        let call = self
+            .builder
+            .build_call(func, &[acc.into(), b_u.into(), a_s.into()], "vpdpbusd")
+            .ok()?;
+        call.try_as_basic_value()
+            .basic()
+            .map(|v| v.into_vector_value())
+    }
+
     /// Compile a single function (for tiered JIT)
     ///
     /// This is the main entry point for Tier 3 optimization.
@@ -4419,6 +4469,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 // portable form does not survive O3 on non-i8mm cores).
                 #[cfg(target_arch = "aarch64")]
                 if let Some(res) = self.try_build_neon_sdot(acc_v, a_v, b_v) {
+                    self.value_map.insert(*dest, res.into());
+                    return Ok(());
+                }
+                // On AVX-VNNI x86, emit vpdpbusd directly (the backend won't
+                // fold partial.reduce.add to it). Falls through on non-VNNI x86.
+                #[cfg(target_arch = "x86_64")]
+                if let Some(res) = self.try_build_x86_vpdpbusd(acc_v, a_v, b_v) {
                     self.value_map.insert(*dest, res.into());
                     return Ok(());
                 }
