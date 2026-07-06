@@ -27,6 +27,13 @@ extern class KvCacheQ8 {
     /** Release the underlying buffer. Idempotent on null/zero handle. */
     public function free():Void;
 
+    /** Raw base address of the Q8_0 block storage (row-major:
+        row l at l*rowBytes(), kv-head h at +h*(headDim/32)*34). */
+    public function dataPtr():rayzor.Usize;
+
+    /** Bytes per cache row (= numKvHeads * (headDim/32) * 34). */
+    public function rowBytes():Int;
+
     /**
      * Quantise + append `newRows` (F32, shape `[n, num_kv_heads,
      * head_dim]`) at write cursor `currentLen`. Returns the new

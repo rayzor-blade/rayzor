@@ -38,6 +38,13 @@ class KVCache {
     public var numKvHeads:Int;
     public var headDim:Int;
     public var dtype:DType;
+    // Pure-Haxe Q8_0 backing (RAYZOR_HAXE_FLASH) — replaces the plugin
+    // pair when active; exactly one of useQ8/useQ8H is true. Declared
+    // after every pre-existing member: importers of this class resolve
+    // fields by declaration order.
+    public var keysQ8H:Q8Cache;
+    public var valuesQ8H:Q8Cache;
+    public var useQ8H:Bool;
 
     public function new(
         maxSeqLen:Int, numKvHeads:Int, headDim:Int, dtype:DType,
@@ -53,6 +60,13 @@ class KVCache {
         // fine; Qwen 0.5B's 64 too; Mistral 7B's 128 too — every
         // mainstream LLM checkpoint satisfies this.)
         var canQ8 = useQ8 && (headDim % 32 == 0);
+        this.useQ8H = false;
+        if (canQ8 && FlashDecode.enabled()) {
+            this.keysQ8H = new Q8Cache(maxSeqLen, numKvHeads, headDim);
+            this.valuesQ8H = new Q8Cache(maxSeqLen, numKvHeads, headDim);
+            this.useQ8H = true;
+            canQ8 = false; // guest-owned storage; plugin pair not allocated
+        }
         if (canQ8) {
             this.keysQ8 = KvCacheQ8.alloc(maxSeqLen, numKvHeads, headDim);
             this.valuesQ8 = KvCacheQ8.alloc(maxSeqLen, numKvHeads, headDim);
@@ -103,7 +117,14 @@ class KVCache {
         if (currentLen + n > maxSeqLen) {
             throw "KVCache overflow: " + (currentLen + n) + " > " + maxSeqLen;
         }
-        if (useQ8) {
+        if (useQ8H) {
+            var newK = keysQ8H.append(currentLen, newKeys);
+            var newV = valuesQ8H.append(currentLen, newValues);
+            if (newK < 0 || newV < 0) {
+                throw "Q8Cache.append failed (k=" + newK + ", v=" + newV + ")";
+            }
+            currentLen = newK;
+        } else if (useQ8) {
             var newK = keysQ8.append(currentLen, newKeys);
             var newV = valuesQ8.append(currentLen, newValues);
             if (newK < 0 || newV < 0) {
@@ -137,6 +158,9 @@ class KVCache {
      * dequant allocation.
      */
     public function keysView():Tensor {
+        if (useQ8H) {
+            return keysQ8H.dequantView(currentLen);
+        }
         if (useQ8) {
             return keysQ8.dequantView(currentLen);
         }
@@ -146,6 +170,9 @@ class KVCache {
 
     /** Active V slice — counterpart to `keysView` with the same ownership rules. */
     public function valuesView():Tensor {
+        if (useQ8H) {
+            return valuesQ8H.dequantView(currentLen);
+        }
         if (useQ8) {
             return valuesQ8.dequantView(currentLen);
         }
