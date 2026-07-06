@@ -1,20 +1,38 @@
 # Plan: pure-Haxe quantized matmul via a fused integer-dot primitive
 
-**Status:** proposed (2026-06-20). Phase 0 in progress.
+**Status (updated 2026-06-30): Phases 0–3 DONE. Phase 4 (real nue band-loop
+integration) and Phase 5 (wasm cranelift floor) remain.** The fused-dot
+primitive + pure-Haxe Q4_K_M kernel are built and bit-exact on native + wasm +
+LLVM (test_q4km_dot, test_q4km_qmatmul maxRelErr=0.0).
 
-**Goal:** move the Q4_K_M / Q6_K × Q8_K matmul dot into pure Haxe, then fuse
-dequant + dot + scale across the (currently FFI) boundary — for superior **wasm**
-decode latency. Native is already at NEON-SDOT parity; the win is removing the
-FFI fusion barrier (the documented #1 wasm decode lever — "CALL never inlined on
-wasm").
+**Measured result** (q4bench, rows=K=2048, q4DotMA4 = multi-accumulator kernel):
+- **Native: 1.08–1.12× Rust FFI = AT PARITY.** BUT only via `--llvm --release`
+  (LLVM tier emits SDOT). Plain `rayzor run` = debug + cranelift JIT = ~30×, a
+  frame-tracking artifact; `--release` cranelift = ~3.9× (no LLVM SDOT). Always
+  measure native with `--llvm --release`.
+- **Wasm: ~3.4× Rust FFI.** A cranelift-vs-LLVM codegen floor (no LLVM on wasm),
+  NOT the FFI barrier (see thesis correction). Down from ~94× via multi-acc +
+  Bytes-inline; kernel-source opt is exhausted. Mode-independent (wasm has no
+  frame-tracking).
 
-**Why this is feasible now (not a parity-replication exercise):** the SDOT
-lowering already ships in wasmtime 47 / cranelift 0.134 (darmie's PR #13640) —
-wasm `i32x4.relaxed_dot_i8x16_i7x16_add_s` → AArch64 SDOT, and native
-`swiden+imul+iadd_pairwise` CLIF → SDOT via a priority-8 ISLE rule. Production
-`rayzor_runtime_wasm.wasm` objdumps to 24 sdot / 0 smull. So this plan only has
-to make rayzor's *own* backends **emit** the dot op; the downstream lowering is
-done. The "won't reach SDOT" risk does not exist.
+**Thesis correction — the original "superior wasm" goal was wrong:** this plan
+aimed to beat the Rust kernel on wasm by removing the "FFI fusion barrier (CALL
+never inlined on wasm)". That premise is STALE — the SIMD/Ptr/Bytes wrappers ARE
+inlined on wasm (disasm-confirmed 2026-06-29), and pure-Haxe wasm is 3.4×
+*slower* than the in-guest Rust kernel, so Haxifying the wasm matmul would
+REGRESS decode. The real wasm gap is cranelift's dot-loop codegen quality vs LLVM
+(extra instrs/sdot = nibble-unpack + address math that i32-wrap semantics block
+cranelift from folding into load offsets — a Phase-5 / upstream matter).
+**Conclusion: pure-Haxe Q4 is a genuine win on NATIVE (parity — Haxe carries its
+own weight, off the per-section FFI); on wasm, KEEP the Rust FFI kernel until the
+cranelift floor closes.**
+
+**SDOT lowering (the downstream half) was already done** before this plan: ships
+in wasmtime 47 / cranelift 0.134 (darmie's PR #13640) — wasm
+`i32x4.relaxed_dot_i8x16_i7x16_add_s` → AArch64 SDOT, native
+`swiden+imul+iadd_pairwise` CLIF → SDOT via a priority-8 ISLE rule. So Phases 1–2
+only had to make rayzor's backends *emit* the dot op (done); the "won't reach
+SDOT" risk never materialized.
 
 **Why not "SIMD4i":** a 4×i32 elementwise vector is the wrong shape. The quant
 hot path is a **16×i8 input → 4×i32 accumulator FUSED widening dot**, not an
@@ -38,7 +56,11 @@ primitive is an `i8x16` type + a `VectorDot` op. (See
 
 ---
 
-## Phase 0 — Fix the wasm integer-vector miscompile *(correctness; standalone; do regardless)*
+## Phase 0 — DONE (committed 87a14a6e): wasm integer-vector miscompile fixed.
+
+Element-aware wasm vector arms landed (`VectorSplat/BinOp/Extract/Insert/UnaryOp/
+MinMax/Reduce` branch on `vec_ty` → `I8x16/I16x8/I32x4/I64x2`). Gate passes
+(test_simd4i32, test_simd16i8_bitops bit-identical native+wasm). *Original text:*
 
 `wasm_backend.rs:~3611-3760` hardcodes f32x4 for all vector arithmetic, so any
 integer `VectorBinOp` silently emits `F32x4Add` and `and/or/xor` traps.
@@ -125,23 +147,22 @@ simd4i32 + f32 unchanged, native suite — only known-flaky test_copy/test_excep
 - **Gate:** standalone Haxe 16×i8 dot == scalar reference, bit-exact native+wasm;
   objdump confirms SDOT in both native machine code and JIT'd wasm.
 
-## Phase 3 — Port the Q4_K_M dot kernel to Haxe
+## Phase 3 — DONE (2026-06-29..30): pure-Haxe Q4_K_M dot, bit-exact native+wasm.
 
-**Prereqs status (2026-06-21, a 4-agent map workflow confirmed Phase 3 needs
-compiler prereqs first, not "just write Haxe"):**
+`test_q4km_dot` + `test_q4km_qmatmul` PASS on wasm (maxRelErr=0.0) and native;
+the multi-accumulator kernel (q4DotMA4 in /tmp/q4bench.hx) hits native parity
+(1.12×) and wasm 3.4×. All prereqs landed:
 - ✅ **Nibble-unpack ops** — `SIMD16i8.and/or/xor/shl/shr/ushr` (8a007a39).
-  wasm already lowered them; native Cranelift had NO vector shift (added
-  ishl/sshr/ushr). Static methods. Gate: test_simd16i8_bitops.hx bit-identical N+W.
-- ✅ **SIMD vectors as fn params** — coreType SIMD was typed I64 as a param
-  (128→64-bit truncation, codegen crash); fixed in convert_type (d3c3bb1e).
-  Unblocks helper-fn decomposition of the kernel.
-- ⏳ **Bytes→Ptr load path** — add `Bytes.address():Usize` (HaxeBytes.ptr@0);
-  `SIMD16i8.load(Ptr.fromRaw(addr+byteOff))` byte-granular. UNPROVEN from real Bytes.
-- ⏳ **f16→f32 decode** for d/dmin (pure-Haxe bit math).
-- ⏳ **Bit-exact gate** — NO single-block dot FFI exists; either add
-  `rayzor_vec_dot_q4_k_q8_k(wptr,xptr)->f32` or drive via 1×256 QTensor matmulXTQ.
-  Oracle = `vec_dot_q4_K_q8_K_scalar` (q4_k_m.rs:233); add a golden-bits printer test.
-- See `memory/project_haxe_q4_dot_phase3.md` for the full refined spec.
+- ✅ **SIMD vectors as fn params** — coreType SIMD I64-truncation fixed (d3c3bb1e).
+- ✅ **Bytes→Ptr load path** — `Bytes.address()` landed; AND Bytes scalar
+  accessors (getDouble/getInt32/getFloat) now INLINE to guest f64/i32/f32 loads
+  on wasm instead of host-import calls (45× faster; was the wasm scalar-machinery
+  killer). `SIMD16i8.load(Ptr.fromRaw(addr+byteOff))` proven from real Bytes.
+- ✅ **f16→f32 decode** — pure-Haxe bit math (f16ToF32 in the kernel).
+- ✅ **Bit-exact gate** — via QTensor matmulXTQ oracle; checksums match.
+- See `memory/project_haxe_q4_dot_phase3.md`.
+
+*Original phase text (kept for reference):*
 
 Template off `q4_k_m.rs:vec_dot_q4_K_q8_K_simd128` (cleaner than NEON intrinsics).
 
@@ -152,19 +173,39 @@ Template off `q4_k_m.rs:vec_dot_q4_K_q8_K_simd128` (cleaner than NEON intrinsics
 - **Gate:** bit-identical dot vs Rust kernel on real GGUF blocks; France→Paris
   greedy match; decode A/B vs FFI kernel.
 
-## Phase 4 — Fuse across the removed FFI barrier *(the superior-latency win)*
+## Phase 4 — REMAINING (reframed): wire the native-parity kernel into nue
 
-- Inline the Haxe dot into the qmatmul band loop so dequant + dot + scale +
-  surrounding elementwise fuse (no FFI call, no marshaling — the L1 lever).
-- Measure in-guest wasm decode tok/s vs FFI baseline (target: beat ~30 tok/s).
-- Q6_K follows the same template + 6-bit reconstruction.
+The microbench proves the kernel (native 1.12×). What's left is the *real*
+integration — wire the multi-accumulator Haxe Q4 dot into nue's actual Linear /
+qmatmul band loop on **NATIVE** and validate end-to-end on a real model
+(`--llvm --release`, France→Paris greedy match, decode A/B vs the FFI kernel).
+Needs a GGUF on disk (none found earlier — supply a path).
+- **NOT on wasm:** the superior-wasm framing is retracted (see thesis correction
+  at top) — pure-Haxe wasm is 3.4× slower than the in-guest Rust kernel, so keep
+  Rust FFI on wasm. The wasm win is gated on Phase 5 (cranelift floor).
+- Q6_K follows the same template + 6-bit reconstruction (native).
 
-## Phase 5 — *(parallel/optional)* close the Cranelift-vs-LLVM floor upstream
+## Phase 5 — REMAINING (the wasm floor): mostly upstream + one rayzor lever
 
-Residual non-dot gap (no `addv` hsum tax, weaker scheduler/regalloc, 2-acc ILP
-ceiling — the 30→90 tok/s gap). Upstream cranelift (addv-fusion for i32x4
-reductions + aarch64 regalloc/scheduling), same muscle as #13640, against the
-`8cb28bc` checkout.
+- **addv/hsum fusion + relaxed_dot→SDOT: MERGED upstream** (darmie). Production
+  wasm objdumps to SDOT; the dot itself is at per-sdot parity with Rust.
+- **amode-CSE PR #13766: LANDED upstream, but a DISASM-CONFIRMED no-op for
+  rayzor's wasm** — rayzor's dot loads are offset-0 `[base,idx,uxtw]`; the const
+  displacement is baked into the i32 address inside `uextend`, which cranelift
+  cannot fold out (i32 wrap), so the shared-base+offset pattern the PR optimizes
+  never occurs. (See `memory/perf_wasm_amode_pr_noop_static_offset_lever.md`.)
+- **Rayzor-side lever (the only one that can move it): emit static wasm load
+  offsets.** A static-offset peel in `wasm_backend` (decompose `base + const`
+  addresses → MemArg.offset, seeing through Usize.fromInt/Ptr.fromRaw) is
+  IMPLEMENTED (uncommitted) and correct (bit-exact, fires in ~20 constant-offset
+  functions) but **inert for the q4 hot kernel**: its loads are dynamic-offset
+  until the inner `half` loop is unrolled, and unrolling currently hits a
+  straight-line-SIMD wasm-validation bug (`block with value...types`). So the
+  remaining chain is: fix that unroll codegen bug → unroll the small SIMD loops →
+  the peel fires → cranelift shares the base. Estimated upside ~10–15% wasm
+  (3.4×→~3×, toward the ~2.9× dot-work floor) — modest; weigh against Phase 4.
+- Residual beyond that = cranelift scheduler/regalloc/ILP (weaker than LLVM, no
+  LLVM on wasm) — genuine upstream work, diminishing.
 
 ---
 
@@ -175,6 +216,14 @@ reductions + aarch64 regalloc/scheduling), same muscle as #13640, against the
 - **relaxed_dot determinism:** exact only in-range. Q4 nibbles 0..15 and Q6 6-bit
   0..63 both fit the i7x16 operand (≤127); activations i8 → bit-identical across
   runtimes (memory-confirmed for Q4; **verify Q6's 0..63 operand** as a gate).
+- **wasm-opt post-pass is `-O2`, NOT `-O3`:** binaryen (v116) miscompiles
+  `relaxed_dot` on *constant* inputs at `-O3` — an O3-only pass folds it to a
+  wrong value (`test_simd16i8_bitops`: and/or/shifts → `0x04040404`; xor and any
+  runtime-data dot unaffected). `-O2` is correct with no perf loss (the win is
+  simplify/coalesce-locals, both in O2). Set in `wasm-opt-helper/src/main.rs`
+  (`new_opt_level_2`) and `src/wasm_cmd.rs` (legacy `wasm-opt` path). Escape
+  hatch: `RAYZOR_WASM_NO_OPT=1`. Likely an upstream binaryen bug (relaxed-SIMD
+  fold at O3 is unsound).
 - **Don't replay native-only ILP tricks:** 2-row tiling *regressed* on wasm
   (cranelift regalloc spills). Expect Phase 4 = parity-to-modest until Phase 5.
 - **Validation discipline:** bit-exact dot before any perf claim; decode A/B with
@@ -183,9 +232,14 @@ reductions + aarch64 regalloc/scheduling), same muscle as #13640, against the
 
 ## Sequencing
 
-Phase 0 is independent correctness (land first). Phases 1–2 build the primitive.
-Phases 3–4 are the kernel move + latency payoff. Phase 5 is the upstream floor
-that gates "superior vs parity" on wasm.
+**Phases 0–3 are DONE** (primitive + bit-exact pure-Haxe Q4 kernel, native
+parity). The remaining work, in value order:
+1. **Phase 4 (native nue integration)** — the real "make it real" milestone; the
+   kernel is at parity in the microbench, prove it in nue's decode path. Needs a
+   GGUF.
+2. **Phase 5 (wasm floor)** — modest (~10–15%) and gated on a codegen-bug fix +
+   unrolling (rayzor side) plus diminishing upstream cranelift work. Lower
+   priority than Phase 4; the wasm dot stays Rust FFI meanwhile.
 
 ## Build/test notes
 

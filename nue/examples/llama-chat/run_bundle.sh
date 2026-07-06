@@ -62,7 +62,7 @@ sleep 0.2
 cmd=(
   "$RAYZOR" run "$BUNDLE"
   --native-lib "$LIB"
-  --preset "$PRESET"
+  # --preset "$PRESET"
   --release
   --tier-thresholds "$INTERP_THRESHOLD/$WARM_THRESHOLD/$HOT_THRESHOLD/$BLAZING_THRESHOLD"
 )
