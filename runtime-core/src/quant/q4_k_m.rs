@@ -630,7 +630,12 @@ mod golden_gate {
         for i in 0..128 {
             qs[i] = i as u8;
         }
-        let weight = Q4KMBlock { d: 0x3C00, dmin: 0x3800, scales, qs };
+        let weight = Q4KMBlock {
+            d: 0x3C00,
+            dmin: 0x3800,
+            scales,
+            qs,
+        };
 
         // Activation: d=0.01; qs[i]=(i%16)-8 → every 16-block sums to -8,
         // so bsums all -8. qs in -8..7 (well inside the dot's i7 operand range).
@@ -646,7 +651,11 @@ mod golden_gate {
             }
             bsums[s] = sum as i16;
         }
-        let x = Q8KBlock { d: 0.01, qs: xqs, bsums };
+        let x = Q8KBlock {
+            d: 0.01,
+            qs: xqs,
+            bsums,
+        };
 
         let dot = vec_dot_q4_K_q8_K_scalar(&weight, &x);
         eprintln!("GOLDEN packed_scales={:?}", scales);
@@ -667,7 +676,12 @@ mod golden_gate {
         for i in 0..128 {
             qs2[i] = ((i * 7 + 3) % 256) as u8;
         }
-        let weight2 = Q4KMBlock { d: 0x2E66, dmin: 0x2C00, scales: scales2, qs: qs2 };
+        let weight2 = Q4KMBlock {
+            d: 0x2E66,
+            dmin: 0x2C00,
+            scales: scales2,
+            qs: qs2,
+        };
 
         let mut xqs2 = [0i8; 256];
         for i in 0..256 {
@@ -681,7 +695,11 @@ mod golden_gate {
             }
             bsums2[s] = sum as i16;
         }
-        let x2 = Q8KBlock { d: 0.0375, qs: xqs2, bsums: bsums2 };
+        let x2 = Q8KBlock {
+            d: 0.0375,
+            qs: xqs2,
+            bsums: bsums2,
+        };
 
         let dot2 = vec_dot_q4_K_q8_K_scalar(&weight2, &x2);
         eprintln!("GOLDEN2 packed_scales={:?}", scales2);
