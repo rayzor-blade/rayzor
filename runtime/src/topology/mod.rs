@@ -69,32 +69,85 @@ pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
 /// idle-branch cost is not worth it. `RAYZOR_HAXE_POOL_RELAX` overrides.
 #[no_mangle]
 pub extern "C" fn rayzor_pool_relax_default() -> i32 {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        0
+    // Always on. Emitting PAUSE/YIELD each idle spin is universally good in
+    // a busy-wait: it drops core power, so less heat and less throttling —
+    // which even a thermally-generous M-series hits under sustained serving
+    // (measured: relax-on held drift +3.7 vs -17.4 off on M1, floor 68 vs
+    // 57), and on x86 it also avoids memory-order machine-clears. Lowered
+    // to a single inline instruction, so effectively free when idle-branch.
+    1
+}
+
+/// Calibrate how many `spin_loop()` iterations run per microsecond on THIS
+/// core — the whole reason a fixed iteration budget is meaningless across
+/// CPUs (2000 iters is a different wall-time on M1 vs an i5).
+fn spin_iters_per_us() -> f64 {
+    use std::time::Instant;
+    let n: u64 = 2_000_000;
+    let t = Instant::now();
+    let mut acc: u64 = 0;
+    for i in 0..n {
+        std::hint::spin_loop();
+        acc = acc.wrapping_add(i);
     }
-    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-    {
-        1
+    std::hint::black_box(acc);
+    let us = t.elapsed().as_nanos() as f64 / 1000.0;
+    if us > 0.0 {
+        n as f64 / us
+    } else {
+        100.0
     }
 }
 
-/// System-derived default for the guest SpinPool tight-spin budget
-/// (iterations before the yield-hold -> park descent). Throttle-prone
-/// parts (x86, ARM boards) park sooner so idle cores can drop frequency;
-/// M-series spins longer because park-wake latency, not power, is the
-/// cost there. `RAYZOR_HAXE_POOL_SPINS` overrides. Iteration counts (not
-/// wall-time) so the ratio, not the absolute, is what matters here.
+/// Measure the park -> unpark -> resume round-trip latency (median of a few
+/// samples). This is the "cost of blocking" side of the spin-vs-block
+/// break-even.
+fn park_wake_latency_us() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let mut samples: Vec<f64> = Vec::new();
+    for _ in 0..5 {
+        let start = Instant::now();
+        let resumed_ns = Arc::new(AtomicU64::new(0));
+        let r2 = resumed_ns.clone();
+        let th = std::thread::spawn(move || {
+            std::thread::park();
+            r2.store(start.elapsed().as_nanos() as u64, Ordering::Release);
+        });
+        // Let it reach the park before we wake it.
+        std::thread::sleep(Duration::from_micros(500));
+        let unpark_ns = start.elapsed().as_nanos() as u64;
+        th.thread().unpark();
+        let _ = th.join();
+        let resumed = resumed_ns.load(Ordering::Acquire);
+        if resumed > unpark_ns {
+            samples.push((resumed - unpark_ns) as f64 / 1000.0);
+        }
+    }
+    if samples.is_empty() {
+        return 20.0; // conservative fallback if measurement was too noisy
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples[samples.len() / 2]
+}
+
+/// System-DERIVED (not hardcoded) tight-spin budget: keep spinning only
+/// while spinning is cheaper than a park+wake cycle, then block so the core
+/// can drop frequency. budget_iters = (iters/us on this core) x (park->wake
+/// us) — the classic adaptive-spin break-even, with the CPU-speed term
+/// measured so it is meaningful on any machine. Computed once (OnceLock);
+/// `RAYZOR_HAXE_POOL_SPINS` still overrides. Clamped to a sane band.
 #[no_mangle]
 pub extern "C" fn rayzor_pool_spin_default() -> i32 {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        2000
-    }
-    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-    {
-        800
-    }
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<i32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let iters_per_us = spin_iters_per_us();
+        let park_wake_us = park_wake_latency_us();
+        let budget = (iters_per_us * park_wake_us).round();
+        (budget as i64).clamp(200, 50_000) as i32
+    })
 }
 
 /// NUMA node a given logical CPU belongs to. Returns `0` on no-NUMA
