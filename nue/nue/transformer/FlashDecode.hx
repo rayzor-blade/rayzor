@@ -74,6 +74,12 @@ class FlashDecode {
         var kBase:Usize = kc.data.address();
         var vBase:Usize = vc.data.address();
         var qBase:Usize = q.data().raw();
+        // Precomputed per-block f32 scales (filled once at append), read
+        // zero-copy in the passes instead of re-decoding f16 per token per
+        // cached position — O(cacheLen) redundancy that grows with context.
+        var kScale:Usize = kc.scaleF32.address();
+        var vScale:Usize = vc.scaleF32.address();
+        var blocksPerRow:Int = kc.blocksPerRow;
 
         var out = Tensor.zeros([1, numQHeads, headDim], DType.F32);
         var outB:Usize = out.data().raw();
@@ -120,7 +126,8 @@ class FlashDecode {
         var band = function(lo:Int, hi:Int, w:Int):Void {
             for (h in lo...hi) {
                 bandOne(h, group, bph, headBytes, rowBytes, cacheLen, rowStride,
-                    headDim, scale, kBase, vBase, qqB, qscB, scB, vScrB, outB);
+                    headDim, scale, kBase, vBase, qqB, qscB, scB, vScrB, outB,
+                    kScale, vScale, blocksPerRow);
             }
         };
         if (sp != null) {
@@ -136,16 +143,19 @@ class FlashDecode {
     static function bandOne(h:Int, group:Int, bph:Int, headBytes:Int,
             rowBytes:Int, cacheLen:Int, rowStride:Int, headDim:Int, scale:Float,
             kBase:Usize, vBase:Usize, qqB:Usize, qscB:Usize, scB:Usize,
-            vScrB:Usize, outB:Usize):Void {
+            vScrB:Usize, outB:Usize, kScale:Usize, vScale:Usize,
+            blocksPerRow:Int):Void {
         var g0 = h * group;
+        var hb = h * bph; // this kv-head's first block index within a row
 
         // -- pass 1: scores = scale * (q . K), int-domain SDOT.
         var l = 0;
         while (l < cacheLen) {
             var rowP = kBase + Usize.fromInt(l * rowBytes + h * headBytes);
+            var scRow = kScale + Usize.fromInt((l * blocksPerRow + hb) * 4);
             for (b in 0...bph) {
                 var blk = rowP + Usize.fromInt(b * 34);
-                var ksc = f16ToF32(Mem.loadI32(blk) & 0xFFFF);
+                var ksc = Mem.loadF32(scRow + Usize.fromInt(b * 4));
                 var k0 = SIMD16i8.load(Ptr.fromRaw(blk + Usize.fromInt(2)));
                 var k1 = SIMD16i8.load(Ptr.fromRaw(blk + Usize.fromInt(18)));
                 for (gi in 0...group) {
@@ -202,9 +212,10 @@ class FlashDecode {
         l = 0;
         while (l < cacheLen) {
             var rowP = vBase + Usize.fromInt(l * rowBytes + h * headBytes);
+            var vScRow = vScale + Usize.fromInt((l * blocksPerRow + hb) * 4);
             for (b in 0...bph) {
                 var blk = rowP + Usize.fromInt(b * 34);
-                var vsc = f16ToF32(Mem.loadI32(blk) & 0xFFFF);
+                var vsc = Mem.loadF32(vScRow + Usize.fromInt(b * 4));
                 for (i in 0...32) {
                     var qv = (Mem.loadU8(blk + Usize.fromInt(2 + i)) << 24) >> 24;
                     Mem.storeF32(vs + Usize.fromInt(i * 4), vsc * qv);

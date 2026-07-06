@@ -4,6 +4,7 @@ import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.QScheme;
 import rayzor.ds.DType;
+import rayzor.SIMD4f;
 import rayzor.SIMD4i32;
 import rayzor.SIMD16i8;
 import rayzor.Ptr;
@@ -58,19 +59,27 @@ class Q4Matmul {
     static inline function quantizeBlock(xBase:Usize, qsBase:Usize, bsums:Bytes,
             dBase:Usize, g:Int):Void {
         var off = g * 256;
-        var maxAbs = 0.0;
-        for (i in 0...256) {
-            var a = Mem.loadF32(xBase + Usize.fromInt((off + i) << 2));
-            // abs via max(a,-a): reassigning `a = -a` in an if made the
-            // compiler box the reassigned Float (per-negative-element heap
-            // alloc — millions/token). This form stays unboxed f64.
-            var na = -a;
-            var aa = a > na ? a : na;
-            // Unconditional select (fcsel), NOT `if (aa > maxAbs) maxAbs =
-            // aa`: conditionally reassigning a loop-carried Float boxes it on
-            // every update (compiler bug, stealLoop decay family).
-            maxAbs = aa > maxAbs ? aa : maxAbs;
+        // SIMD maxAbs: 4-wide abs+max with 2 accumulators to break the
+        // loop-carried max latency chain. IEEE max is exact + associative
+        // and abs(v)==max(v,-v) for non-NaN activations, so the reduced
+        // maxAbs is bit-identical to the scalar loop. The horizontal fold
+        // is ternary-only (fcsel, no haxe_box_float).
+        var pbase = xBase + Usize.fromInt(off << 2);
+        var m0 = SIMD4f.splat(0.0);
+        var m1 = SIMD4f.splat(0.0);
+        var vi = 0;
+        while (vi < 256) {
+            var v0 = SIMD4f.load(Ptr.fromRaw(pbase + Usize.fromInt(vi << 2)));
+            var v1 = SIMD4f.load(Ptr.fromRaw(pbase + Usize.fromInt((vi + 4) << 2)));
+            m0 = m0.max(v0.abs());
+            m1 = m1.max(v1.abs());
+            vi += 8;
         }
+        var m = m0.max(m1);
+        var l0 = m.get(0); var l1 = m.get(1); var l2 = m.get(2); var l3 = m.get(3);
+        var mx01 = l0 > l1 ? l0 : l1;
+        var mx23 = l2 > l3 ? l2 : l3;
+        var maxAbs = mx01 > mx23 ? mx01 : mx23;
         if (maxAbs == 0.0) {
             Mem.storeF32(dBase + Usize.fromInt(g << 2), 0.0);
             for (i in 0...256) Mem.storeU8(qsBase + Usize.fromInt(off + i), 0);
