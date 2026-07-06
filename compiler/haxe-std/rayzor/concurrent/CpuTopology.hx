@@ -31,6 +31,11 @@ extern class CpuTopology {
     @:native("rayzor_topology_cpu_count")
     public static function cpuCount():Int;
 
+    /** Physical performance-core count on hybrid (big.LITTLE) parts;
+        equals `cpuCount()` where no hybrid split is exposed. */
+    @:native("rayzor_topology_perf_core_count")
+    public static function perfCoreCount():Int;
+
     /** Which NUMA node a given logical CPU belongs to. Returns 0 on
         no-NUMA, -1 if cpu out of range. */
     @:native("rayzor_topology_cpu_to_node")

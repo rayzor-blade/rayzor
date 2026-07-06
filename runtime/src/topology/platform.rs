@@ -29,6 +29,10 @@ pub(crate) fn cpu_count() -> i32 {
     imp::cpu_count().max(1)
 }
 
+pub(crate) fn perf_core_count() -> i32 {
+    imp::perf_core_count().max(1)
+}
+
 pub(crate) fn cpu_to_node(cpu: i32) -> i32 {
     if cpu < 0 || cpu >= cpu_count() {
         return -1;

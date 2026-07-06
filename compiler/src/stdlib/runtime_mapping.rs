@@ -3900,6 +3900,9 @@ impl StdlibMapping {
             map_method!(static "rayzor_concurrent_CpuTopology", "cpuCount"
                 => "rayzor_topology_cpu_count",
                 params: 0, returns: primitive, types: &[] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "perfCoreCount"
+                => "rayzor_topology_perf_core_count",
+                params: 0, returns: primitive, types: &[] => I32),
             map_method!(static "rayzor_concurrent_CpuTopology", "cpuToNode"
                 => "rayzor_topology_cpu_to_node",
                 params: 1, returns: primitive, types: &[I32] => I32),

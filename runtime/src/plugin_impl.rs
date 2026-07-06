@@ -2050,6 +2050,10 @@ register_symbol!(
     crate::topology::rayzor_topology_cpu_count
 );
 register_symbol!(
+    "rayzor_topology_perf_core_count",
+    crate::topology::rayzor_topology_perf_core_count
+);
+register_symbol!(
     "rayzor_topology_cpu_to_node",
     crate::topology::rayzor_topology_cpu_to_node
 );

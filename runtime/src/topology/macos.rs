@@ -56,6 +56,30 @@ pub(super) fn cpu_count() -> i32 {
         .max(1)
 }
 
+pub(super) fn perf_core_count() -> i32 {
+    // Physical performance cores (`hw.perflevel0.physicalcpu`). Absent on
+    // pre-hybrid Macs — fall back to the logical count.
+    let mut val: c_int = 0;
+    let mut len = std::mem::size_of::<c_int>();
+    let name = b"hw.perflevel0.physicalcpu\0";
+    // SAFETY: name is NUL-terminated; val/len are stack locals sized to a
+    // single c_int, the documented type of this sysctl.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr() as *const libc::c_char,
+            &mut val as *mut _ as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && val > 0 {
+        val
+    } else {
+        cpu_count()
+    }
+}
+
 pub(super) fn cpu_to_node(_cpu: i32) -> i32 {
     0
 }

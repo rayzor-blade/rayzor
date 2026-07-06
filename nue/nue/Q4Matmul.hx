@@ -212,11 +212,12 @@ class Q4Matmul {
         return xd * (sumTerm1 - sumTerm2);
     }
 
-    // One worker per logical CPU (CpuTopology reports a single NUMA node on
-    // UMA hardware, which would run the bands serially); overridable with
+    // Claimants = physical performance cores (caller included). E-core
+    // claimants gate every band's fork-join tail on hybrid parts, so the
+    // pool never sizes past the P-cluster; overridable with
     // RAYZOR_HAXE_MATMUL_WORKERS.
     public static function workerCount():Int {
-        var n = CpuTopology.cpuCount();
+        var n = CpuTopology.perfCoreCount();
         var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
         if (env != null) {
             var v = Std.parseInt(env);

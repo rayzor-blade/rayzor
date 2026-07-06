@@ -746,8 +746,19 @@ fn park_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RAYZOR_NO_PARK").map_or(true, |v| v != "1"))
 }
 
+/// Matches the guest-side gate (`Linear.useHaxeMatmul`): set AND not
+/// `"0"`/`""`/`"false"`. A bare `RAYZOR_HAXE_MATMUL=0` must behave like
+/// unset — presence-only detection silently shrank the FFI-path pool to 1
+/// worker and halved throughput.
+fn haxe_matmul_active() -> bool {
+    std::env::var("RAYZOR_HAXE_MATMUL")
+        .map(|v| !v.is_empty() && v != "0" && v != "false")
+        .unwrap_or(false)
+}
+
 /// Process-wide singleton. Lazily constructed on first `global()` call with a
-/// worker count picked from `RAYZOR_WORKERS` (or 6 by default on M-series).
+/// worker count picked from `RAYZOR_WORKERS`, defaulting to a width derived
+/// from the machine's performance-core count.
 pub fn global() -> &'static WorkerPool {
     static POOL: std::sync::OnceLock<WorkerPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
@@ -770,10 +781,17 @@ pub fn global() -> &'static WorkerPool {
                 // this pool to 1 took llama-chat decode 65 -> 27.5 ms/token).
                 // One worker (+ caller band) still covers the us-scale
                 // attention/activation kernels.
-                if std::env::var_os("RAYZOR_HAXE_MATMUL").is_some() {
+                if haxe_matmul_active() {
                     1
                 } else {
-                    6
+                    // Compute width = P-cores - 1 (caller participates, so
+                    // workers = P - 2). E-cores are excluded — one straggler
+                    // band on an E-core gates every fork-join — and one
+                    // P-core stays free for the sequential glue between
+                    // kernels (sampler, tokenizer, harness I/O).
+                    (crate::topology::rayzor_topology_perf_core_count() as usize)
+                        .saturating_sub(2)
+                        .max(1)
                 }
             });
         WorkerPool::new(n)
