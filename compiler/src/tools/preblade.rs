@@ -61,12 +61,24 @@ pub fn create_bundle(mut config: BundleConfig) -> Result<usize, String> {
 
     let t0 = Instant::now();
 
-    // Create compilation unit
+    // Create compilation unit.
+    //
+    // A .rzb is a self-contained production artifact and MUST be built from
+    // fresh, cross-module-coherent MIR — the BLADE cache is DELIBERATELY
+    // ignored here regardless of `config.enable_cache`. Cached per-file MIR
+    // carries session-specific function ids from the compile that populated
+    // the cache; when those cached modules are merged into the single bundle
+    // module, a cross-module CallDirect (e.g. GGUFLoader.loadWithTokenizer ->
+    // fn 410017) can survive with an id that no longer exists and that the
+    // name-based finalize pass cannot remap, so the bundle SIGILLs at the
+    // trap-stub on first call. Compiling from source every time keeps the id
+    // space internally consistent. (The cache still speeds up `rayzor run`.)
     let mut comp_config = CompilationConfig::default();
-    comp_config.enable_cache = config.enable_cache;
+    comp_config.enable_cache = false;
     comp_config.cache_dir = config.cache_dir.clone();
     comp_config.pipeline_config = comp_config.pipeline_config.skip_analysis();
     comp_config.emit_safety_warnings = false;
+    let _ = config.enable_cache; // bundle builds never read/write the cache
 
     let mut unit = CompilationUnit::new(comp_config);
 
