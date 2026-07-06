@@ -49,12 +49,14 @@ class Q4Matmul {
     }
 
     /** Quantize super-block `g` of a packed activation batch to Q8_K.
-        Layout is g-linear: elements at g*256, bsums at g*64 bytes, scale at
-        dOut[g]. `xBase`/`qsBase` are raw addresses of contiguous F32 input /
-        Q8 scratch; all element accesses are inline typed loads/stores.
-        Blocks are independent — safe to run concurrently across a band. */
+        Layout is g-linear: elements at g*256, bsums at g*64 bytes, scale as
+        one f32 at dBase + g*4. `xBase`/`qsBase`/`dBase` are raw addresses of
+        contiguous F32 input / Q8 scratch / f32 scale scratch; every element
+        access is an inline typed load/store — the scale buffer is raw Bytes
+        (not Array<Float>) so a hot row never touches the boxing element
+        extern. Blocks are independent — safe to run concurrently across a band. */
     static inline function quantizeBlock(xBase:Usize, qsBase:Usize, bsums:Bytes,
-            dOut:Array<Float>, g:Int):Void {
+            dBase:Usize, g:Int):Void {
         var off = g * 256;
         var maxAbs = 0.0;
         for (i in 0...256) {
@@ -62,11 +64,13 @@ class Q4Matmul {
             if (a < 0) a = -a; if (a > maxAbs) maxAbs = a;
         }
         if (maxAbs == 0.0) {
-            dOut[g] = 0.0;
+            Mem.storeF32(dBase + Usize.fromInt(g << 2), 0.0);
             for (i in 0...256) Mem.storeU8(qsBase + Usize.fromInt(off + i), 0);
             for (s in 0...16) storeI32(bsums, g * 64 + s * 4, 0);
         } else {
-            var d = maxAbs / 127.0; dOut[g] = d; var invD = 127.0 / maxAbs;
+            var d = maxAbs / 127.0;
+            Mem.storeF32(dBase + Usize.fromInt(g << 2), d);
+            var invD = 127.0 / maxAbs;
             for (s in 0...16) {
                 var sum = 0;
                 for (j in 0...16) {
@@ -83,14 +87,14 @@ class Q4Matmul {
     /** Quantize `total` super-blocks, banded across the pool when it pays
         (blocks are independent; per-block work ~1-3us). */
     static function quantizeAll(xBase:Usize, qsBase:Usize, bsums:Bytes,
-            dOut:Array<Float>, total:Int, sp:Null<SpinPool>):Void {
+            dBase:Usize, total:Int, sp:Null<SpinPool>):Void {
         if (sp != null && total >= 16) {
             var qband = function(lo:Int, hi:Int, node:Int):Void {
-                for (g in lo...hi) quantizeBlock(xBase, qsBase, bsums, dOut, g);
+                for (g in lo...hi) quantizeBlock(xBase, qsBase, bsums, dBase, g);
             };
             sp.parallelRows(total, qband);
         } else {
-            for (g in 0...total) quantizeBlock(xBase, qsBase, bsums, dOut, g);
+            for (g in 0...total) quantizeBlock(xBase, qsBase, bsums, dBase, g);
         }
     }
 
@@ -245,28 +249,31 @@ class Q4Matmul {
 
         var qs = Bytes.alloc(batch * K);
         var bsums = Bytes.alloc(batch * bpr * 16 * 4);
-        var dScales = new Array<Float>();
-        dScales.resize(batch * bpr);
+        var dScales = Bytes.alloc(batch * bpr * 4);
         var aBase = qs.address();
+        var dBase = dScales.address();
         // Contiguous F32 activation base — quantize reads it via inline
         // Mem.loadF32 instead of a per-element getFlat extern.
         var xBase = x.data().raw();
         var _tq = Sys.time();
-        quantizeAll(xBase, aBase, bsums, dScales, batch * bpr, sp);
+        quantizeAll(xBase, aBase, bsums, dBase, batch * bpr, sp);
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
-        var y = runBanded(qw, batch, K, aBase, bsums, dScales, sp);
+        var y = runBanded(qw, batch, K, aBase, bsums, dBase, sp);
 
         qs.free();
         bsums.free();
+        dScales.free();
         return y;
     }
 
     /** One banded pass of `qw` against pre-quantized Q8_K activations
-        (packed batch rows at `aBase`/`bsums`/`dScales`). Shared by `matmul`
-        and the fused batch path so a common activation is quantized once. */
+        (packed batch rows at `aBase`/`bsums`/`dBase`). Shared by `matmul`
+        and the fused batch path so a common activation is quantized once.
+        `dBase` is a raw f32 scale buffer (one f32 per super-block) — read
+        via Mem.loadF32 so the hot row makes no boxing element-extern calls. */
     static function runBanded(qw:QTensor, batch:Int, K:Int, aBase:Usize, bsums:Bytes,
-            dScales:Array<Float>, sp:Null<SpinPool>):Tensor {
+            dBase:Usize, sp:Null<SpinPool>):Tensor {
         var bpr = K >> 8;
         var rows = qw.rows();
         var wBase = qw.dataPtr();
@@ -301,22 +308,22 @@ class Q4Matmul {
                     var b = 0;
                     if (isQ6) {
                         while (b + 2 <= bpr) {
-                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b])
-                                 + q6DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, dScales[b + 1]);
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
+                                 + q6DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
                             b += 2;
                         }
                         while (b < bpr) {
-                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b]);
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
                             b++;
                         }
                     } else {
                         while (b + 2 <= bpr) {
-                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b])
-                                 + q4DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, dScales[b + 1]);
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
+                                 + q4DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
                             b += 2;
                         }
                         while (b < bpr) {
-                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, dScales[b]);
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
                             b++;
                         }
                     }
@@ -324,10 +331,8 @@ class Q4Matmul {
                 }
                 return;
             }
-            // Batch tiled by 4 with SCALAR accumulators: an Array<Float>
-            // accumulator writes through a per-element extern (bpr × batch
-            // per row — ~1M calls per prefill matmul); scalars live in
-            // registers. A row's weight blocks (bpr × blockBytes ≤ ~5KB)
+            // Batch tiled by 4 with SCALAR accumulators (registers, not a
+            // heap Array). A row's weight blocks (bpr × blockBytes ≤ ~5KB)
             // stay L1-resident across the ≤ ceil(batch/4) re-walks, and
             // per-(row,batch) accumulation order over b is unchanged, so
             // outputs remain bit-identical.
@@ -339,16 +344,20 @@ class Q4Matmul {
                         var blkOff = (n * bpr + b) * blockBytes;
                         var a0 = rt * K + b * 256;
                         var i0 = (rt * bpr + b) * 16;
+                        var d0 = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
+                        var d1 = Mem.loadF32(dBase + Usize.fromInt(((rt + 1) * bpr + b) << 2));
+                        var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
+                        var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, dScales[rt * bpr + b]);
-                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, dScales[(rt + 1) * bpr + b]);
-                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, dScales[(rt + 2) * bpr + b]);
-                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, dScales[(rt + 3) * bpr + b]);
+                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
+                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
+                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
+                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
                         } else {
-                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, dScales[rt * bpr + b]);
-                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, dScales[(rt + 1) * bpr + b]);
-                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, dScales[(rt + 2) * bpr + b]);
-                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, dScales[(rt + 3) * bpr + b]);
+                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
+                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
+                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
+                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
                         }
                     }
                     Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
@@ -361,7 +370,7 @@ class Q4Matmul {
                     var sum = 0.0;
                     for (b in 0...bpr) {
                         var blkOff = (n * bpr + b) * blockBytes;
-                        var xdb = dScales[rt * bpr + b];
+                        var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
                         sum += isQ6
                             ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb)
                             : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb);
@@ -399,32 +408,33 @@ class Q4Matmul {
             var bprB = K >> 8;
             var qsB = Bytes.alloc(batch * K);
             var bsumsB = Bytes.alloc(batch * bprB * 16 * 4);
-            var dScalesB = new Array<Float>();
-            dScalesB.resize(batch * bprB);
+            var dScalesB = Bytes.alloc(batch * bprB * 4);
             var aB = qsB.address();
+            var dB = dScalesB.address();
             var xB = x.data().raw();
             var _tqB = Sys.time();
-            quantizeAll(xB, aB, bsumsB, dScalesB, batch * bprB, sp);
+            quantizeAll(xB, aB, bsumsB, dB, batch * bprB, sp);
             if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
             var outs = [
-                runBanded(w0, batch, K, aB, bsumsB, dScalesB, sp),
-                runBanded(w1, batch, K, aB, bsumsB, dScalesB, sp)
+                runBanded(w0, batch, K, aB, bsumsB, dB, sp),
+                runBanded(w1, batch, K, aB, bsumsB, dB, sp)
             ];
-            if (w2 != null) outs.push(runBanded(w2, batch, K, aB, bsumsB, dScalesB, sp));
+            if (w2 != null) outs.push(runBanded(w2, batch, K, aB, bsumsB, dB, sp));
             qsB.free();
             bsumsB.free();
+            dScalesB.free();
             return outs;
         }
         var bpr = K >> 8;
 
         var qs = Bytes.alloc(K);
         var bsums = Bytes.alloc(bpr * 16 * 4);
-        var dScales = new Array<Float>();
-        dScales.resize(bpr);
+        var dScales = Bytes.alloc(bpr * 4);
         var aBase = qs.address();
+        var dBase = dScales.address();
         var xBase = x.data().raw();
         var _tq = Sys.time();
-        quantizeAll(xBase, aBase, bsums, dScales, bpr, sp);
+        quantizeAll(xBase, aBase, bsums, dBase, bpr, sp);
         if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var r0 = w0.rows();
@@ -459,7 +469,7 @@ class Q4Matmul {
                 var sum = 0.0;
                 for (b in 0...bpr) {
                     var blk = n * bpr + b;
-                    var xdb = dScales[b];
+                    var xdb = Mem.loadF32(dBase + Usize.fromInt(b << 2));
                     sum += isQ6
                         ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
                         : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
@@ -472,6 +482,7 @@ class Q4Matmul {
 
         qs.free();
         bsums.free();
+        dScales.free();
         var outs = [y0, y1];
         if (w2 != null) outs.push(y2);
         return outs;
