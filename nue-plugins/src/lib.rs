@@ -172,6 +172,10 @@ declare_native_methods! {
         [Ptr, I64, Ptr]                                                       => I64;
     "nue_transformer_KvCacheQ8", "dequantView",       instance, "rayzor_kv_cache_q8_dequant_view",
         [Ptr, I64]                                                            => Ptr;
+    "nue_transformer_KvCacheQ8", "dataPtr",           instance, "rayzor_kv_q8_data_ptr",
+        [Ptr]                                                                 => I64;
+    "nue_transformer_KvCacheQ8", "rowBytes",          instance, "rayzor_kv_q8_row_bytes",
+        [Ptr]                                                                 => I64;
     "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
     "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8Host", instance, "rayzor_tensor_flash_attn_q8_host",
@@ -266,6 +270,25 @@ struct RayzorKvCacheQ8 {
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
+}
+
+/// Raw base of the Q8_0 block storage (guest kernels read it directly).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_kv_q8_data_ptr(handle: i64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+    (*(handle as *const RayzorKvCacheQ8)).data as i64
+}
+
+/// Bytes per cache row (= num_kv_heads * head_dim_bytes).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_kv_q8_row_bytes(handle: i64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+    let c = &*(handle as *const RayzorKvCacheQ8);
+    (c.num_kv_heads * c.head_dim_bytes) as i64
 }
 
 #[inline]

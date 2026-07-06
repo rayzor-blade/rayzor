@@ -178,6 +178,23 @@ class GQAttention implements Module {
         // Q8 path: dispatch directly to the Q8 fused kernel, skipping
         // the F32 dequant view. The kernel streams over Q8 K/V blocks,
         // dequantising into a 32-f32 stack buffer per block.
+        // Pure-Haxe Q8 decode attention (guest-owned cache + SDOT kernel,
+        // banded across kv-heads on the matmul pool).
+        if (seqQ == 1 && cache.useQ8H) {
+            var ctx = FlashDecode.decode(
+                cache.keysQ8H, cache.valuesQ8H, q, cache.currentLen,
+                numQHeads, scale, qProj.pool
+            );
+            if (ctx != null) {
+                var hiddenSize = numQHeads * headDim;
+                var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
+                var out = oProj.forward(ctxFlat);
+                ctxFlat.free();
+                ctx.free();
+                q.free();
+                return out;
+            }
+        }
         if (seqQ == 1 && cache.useQ8) {
             // Prefer the host-parallel kernel: on the wasm run target it bands
             // attention across the embedder's native worker pool (otherwise idle

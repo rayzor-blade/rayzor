@@ -186,7 +186,7 @@ class SpinPool {
      */
     public function parallelRows(rows:Int, fn:(Int, Int, Int) -> Void):Void {
         if (rows <= 0) return;
-        if (_n <= 1 || rows < _n * 4 || !_alive) {
+        if (_n <= 1 || rows < 2 || !_alive) {
             fn(0, rows, 0);
             return;
         }
@@ -216,9 +216,17 @@ class SpinPool {
         }
         _fn = fn; // plain store; published by the SC state flips below
         // Chunk sizing: ~8 claims per worker amortizes cursor traffic while
-        // leaving enough grains for stealing to absorb slow cores.
-        var chunk:Int = Std.int(rows / (_n * 8));
-        if (chunk < 8) chunk = 8;
+        // leaving enough grains for stealing to absorb slow cores. Below
+        // 4 rows/claimant we're in the fat-row regime (each row carries
+        // large work, e.g. one attention kv-head band): claim single rows
+        // so every claimant gets one — cursor traffic is noise there.
+        var chunk:Int;
+        if (rows < _n * 4) {
+            chunk = 1;
+        } else {
+            chunk = Std.int(rows / (_n * 8));
+            if (chunk < 8) chunk = 8;
+        }
         cursor().store(0);
         rowsCell().store(rows);
         chunkCell().store(chunk);
