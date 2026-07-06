@@ -97,8 +97,11 @@ class FlashDecode {
                 var maxAbs = 0.0;
                 for (i in 0...32) {
                     var v = Mem.loadF32(src + Usize.fromInt(i * 4));
-                    if (v < 0) v = -v;
-                    if (v > maxAbs) maxAbs = v;
+                    // abs via max(v,-v): reassigning v boxes the Float (see
+                    // Q4Matmul.quantizeBlock).
+                    var nv = -v;
+                    var av = v > nv ? v : nv;
+                    maxAbs = av > maxAbs ? av : maxAbs;
                 }
                 var s = maxAbs == 0.0 ? 0.0 : maxAbs / 127.0;
                 var inv = s == 0.0 ? 0.0 : 1.0 / s;
