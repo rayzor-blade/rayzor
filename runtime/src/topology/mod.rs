@@ -53,6 +53,13 @@ pub extern "C" fn rayzor_topology_cpu_count() -> i32 {
     platform::cpu_count()
 }
 
+/// Physical performance-core count on hybrid (big.LITTLE) parts. Falls
+/// back to the logical CPU count when no hybrid split is exposed.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
+    platform::perf_core_count()
+}
+
 /// NUMA node a given logical CPU belongs to. Returns `0` on no-NUMA
 /// platforms; returns `-1` if `cpu` is out of range.
 #[no_mangle]

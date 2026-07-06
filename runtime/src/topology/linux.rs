@@ -145,6 +145,11 @@ pub(super) fn cpu_count() -> i32 {
     topology().cpus
 }
 
+pub(super) fn perf_core_count() -> i32 {
+    // No hybrid-core split exposed here — logical count is the best answer.
+    cpu_count()
+}
+
 pub(super) fn cpu_to_node(cpu: i32) -> i32 {
     let t = topology();
     if (0..t.cpus).contains(&cpu) {
