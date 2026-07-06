@@ -30,6 +30,17 @@ class Q8Cache {
     /** Bytes per cache row: numKvHeads * headBytes. */
     public var rowBytes:Int;
 
+    // Persistent decode-attention scratch (owned here so FlashDecode.decode
+    // reuses one allocation per layer instead of alloc/free'ing every token
+    // — the `scores` buffer grows with context, so per-call allocation is
+    // both a long-context throughput tax and a source of RSS churn). Sized
+    // to maxSeqLen on the first decode, when numQHeads becomes known; null
+    // until then. Declared after every pre-existing member.
+    public var scrQ:Bytes;
+    public var scrQScale:Bytes;
+    public var scrScores:Bytes;
+    public var scrV:Bytes;
+
     public function new(maxSeqLen:Int, numKvHeads:Int, headDim:Int) {
         this.maxSeqLen = maxSeqLen;
         this.numKvHeads = numKvHeads;
@@ -41,10 +52,28 @@ class Q8Cache {
         this.data = Bytes.alloc(maxSeqLen * rowBytes + 4);
     }
 
+    /** Lazily allocate the decode scratch, sized to maxSeqLen so it never
+        reallocates as context grows. Idempotent. */
+    public function ensureDecodeScratch(numQHeads:Int):Void {
+        if (scrScores != null) return;
+        var bph = headDim >> 5;
+        scrQ = Bytes.alloc(numQHeads * headDim);
+        scrQScale = Bytes.alloc(numQHeads * bph * 4);
+        scrScores = Bytes.alloc(numQHeads * maxSeqLen * 4);
+        scrV = Bytes.alloc(numKvHeads * 128);
+    }
+
     public function free():Void {
         if (data != null) {
             data.free();
             data = null;
+        }
+        if (scrScores != null) {
+            scrQ.free();
+            scrQScale.free();
+            scrScores.free();
+            scrV.free();
+            scrScores = null;
         }
     }
 

@@ -78,16 +78,17 @@ class FlashDecode {
         var out = Tensor.zeros([1, numQHeads, headDim], DType.F32);
         var outB:Usize = out.data().raw();
 
-        // Per-call scratch. scores doubles as the softmax-weight buffer;
-        // vScr holds one dequantized 32-float V block per kv-head band.
-        var qq = Bytes.alloc(numQHeads * headDim);
-        var qsc = Bytes.alloc(numQHeads * bph * 4);
-        var scores = Bytes.alloc(numQHeads * cacheLen * 4);
-        var vScr = Bytes.alloc(numKvHeads * 128);
-        var qqB:Usize = qq.address();
-        var qscB:Usize = qsc.address();
-        var scB:Usize = scores.address();
-        var vScrB:Usize = vScr.address();
+        // Persistent scratch owned by the K cache (allocated once, sized to
+        // maxSeqLen). scores doubles as the softmax-weight buffer; its rows
+        // are maxSeqLen-strided so a partially-filled context indexes the
+        // same cells regardless of cacheLen. vScr holds one dequantized
+        // 32-float V block per kv-head band.
+        kc.ensureDecodeScratch(numQHeads);
+        var rowStride = kc.maxSeqLen;
+        var qqB:Usize = kc.scrQ.address();
+        var qscB:Usize = kc.scrQScale.address();
+        var scB:Usize = kc.scrScores.address();
+        var vScrB:Usize = kc.scrV.address();
 
         // Quantize the q rows to per-32-block q8 (numQHeads*headDim floats).
         for (qh in 0...numQHeads) {
@@ -115,8 +116,8 @@ class FlashDecode {
 
         var band = function(lo:Int, hi:Int, w:Int):Void {
             for (h in lo...hi) {
-                bandOne(h, group, bph, headBytes, rowBytes, cacheLen, headDim,
-                    scale, kBase, vBase, qqB, qscB, scB, vScrB, outB);
+                bandOne(h, group, bph, headBytes, rowBytes, cacheLen, rowStride,
+                    headDim, scale, kBase, vBase, qqB, qscB, scB, vScrB, outB);
             }
         };
         if (sp != null) {
@@ -124,17 +125,13 @@ class FlashDecode {
         } else {
             band(0, numKvHeads, 0);
         }
-        qq.free();
-        qsc.free();
-        scores.free();
-        vScr.free();
         return out;
     }
 
     /** All three passes for one kv-head's GQA group. Touches only that
         group's score rows, output rows, and this band's V scratch slot. */
     static function bandOne(h:Int, group:Int, bph:Int, headBytes:Int,
-            rowBytes:Int, cacheLen:Int, headDim:Int, scale:Float,
+            rowBytes:Int, cacheLen:Int, rowStride:Int, headDim:Int, scale:Float,
             kBase:Usize, vBase:Usize, qqB:Usize, qscB:Usize, scB:Usize,
             vScrB:Usize, outB:Usize):Void {
         var g0 = h * group;
@@ -157,7 +154,7 @@ class FlashDecode {
                         SIMD16i8.load(Ptr.fromRaw(qOff + Usize.fromInt(16))), k1);
                     var qs = Mem.loadF32(qscB + Usize.fromInt((qh * bph + b) * 4));
                     var p = ksc * qs * scale * acc.sum();
-                    var cellA = scB + Usize.fromInt((qh * cacheLen + l) * 4);
+                    var cellA = scB + Usize.fromInt((qh * rowStride + l) * 4);
                     if (b == 0) {
                         Mem.storeF32(cellA, p);
                     } else {
@@ -171,7 +168,7 @@ class FlashDecode {
         // -- pass 2: softmax rows in place, weights pre-multiplied by 1/denom.
         for (gi in 0...group) {
             var qh = g0 + gi;
-            var rowA = scB + Usize.fromInt(qh * cacheLen * 4);
+            var rowA = scB + Usize.fromInt(qh * rowStride * 4);
             var mx = Mem.loadF32(rowA);
             var i = 1;
             while (i < cacheLen) {
@@ -211,7 +208,7 @@ class FlashDecode {
                 }
                 for (gi in 0...group) {
                     var qh = g0 + gi;
-                    var wgt = Mem.loadF32(scB + Usize.fromInt((qh * cacheLen + l) * 4));
+                    var wgt = Mem.loadF32(scB + Usize.fromInt((qh * rowStride + l) * 4));
                     var ob = outB + Usize.fromInt((qh * headDim + b * 32) * 4);
                     var wv = SIMD4f.splat(wgt);
                     for (t in 0...8) {
