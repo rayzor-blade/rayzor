@@ -61,7 +61,15 @@ class Q4Matmul {
         var maxAbs = 0.0;
         for (i in 0...256) {
             var a = Mem.loadF32(xBase + Usize.fromInt((off + i) << 2));
-            if (a < 0) a = -a; if (a > maxAbs) maxAbs = a;
+            // abs via max(a,-a): reassigning `a = -a` in an if made the
+            // compiler box the reassigned Float (per-negative-element heap
+            // alloc — millions/token). This form stays unboxed f64.
+            var na = -a;
+            var aa = a > na ? a : na;
+            // Unconditional select (fcsel), NOT `if (aa > maxAbs) maxAbs =
+            // aa`: conditionally reassigning a loop-carried Float boxes it on
+            // every update (compiler bug, stealLoop decay family).
+            maxAbs = aa > maxAbs ? aa : maxAbs;
         }
         if (maxAbs == 0.0) {
             Mem.storeF32(dBase + Usize.fromInt(g << 2), 0.0);
@@ -75,8 +83,12 @@ class Q4Matmul {
                 var sum = 0;
                 for (j in 0...16) {
                     var v = Mem.loadF32(xBase + Usize.fromInt((off + s * 16 + j) << 2)) * invD;
-                    var qf = (v >= 0) ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
-                    var q = (qf > 127) ? 127 : ((qf < -128) ? -128 : qf);
+                    // Round-half-away via Std.int (fptosi intrinsic, no box).
+                    // Math.floor/ceil boxed the Float argument per element —
+                    // millions of heap allocs/token. Same result: truncation
+                    // of v±0.5 equals floor(v+0.5)/ceil(v-0.5) by sign.
+                    var q = v >= 0 ? Std.int(v + 0.5) : Std.int(v - 0.5);
+                    if (q > 127) q = 127; else if (q < -128) q = -128;
                     Mem.storeU8(qsBase + Usize.fromInt(off + s * 16 + j), q & 0xFF); sum += q;
                 }
                 storeI32(bsums, g * 64 + (s << 2), sum);
