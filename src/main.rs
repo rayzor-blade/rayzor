@@ -1095,11 +1095,23 @@ fn run_bundle(
     let mut manifest_native_symbols = Vec::new();
     if let Some(project) = manifest_project.as_ref() {
         for lib_path in project.resolved_native_libs() {
-            if let Ok((lib, _plugin, runtime_symbols)) =
-                crate::native_libs::load_manifest_native_lib(&lib_path)
-            {
-                loaded_native_libs.push(lib);
-                manifest_native_symbols.extend(runtime_symbols);
+            match crate::native_libs::load_manifest_native_lib(&lib_path) {
+                Ok((lib, _plugin, runtime_symbols)) => {
+                    loaded_native_libs.push(lib);
+                    manifest_native_symbols.extend(runtime_symbols);
+                }
+                // A manifest-listed native-lib that fails to load leaves every
+                // extern method it maps unresolved — the JIT then fails later
+                // with an opaque "can't resolve symbol <leaf>" at finalize (or a
+                // NULL call). Surface it here instead of degrading silently.
+                Err(e) => {
+                    eprintln!(
+                        "  warning: native-lib '{}' failed to load: {} \
+                         (its runtime kernels will be unresolved)",
+                        lib_path.display(),
+                        e
+                    );
+                }
             }
         }
     }
@@ -3141,11 +3153,22 @@ fn cmd_bundle(
             }
         }
         for lib_path in project.resolved_native_libs() {
-            if let Ok((lib, plugin, _symbols)) =
-                crate::native_libs::load_manifest_native_lib(&lib_path)
-            {
-                _loaded_native_libs.push(lib);
-                plugins.push(Box::new(plugin));
+            match crate::native_libs::load_manifest_native_lib(&lib_path) {
+                Ok((lib, plugin, _symbols)) => {
+                    _loaded_native_libs.push(lib);
+                    plugins.push(Box::new(plugin));
+                }
+                // Fatal for bundling: without the plugin's method mappings the
+                // extern calls it backs (e.g. KvCacheQ8.alloc) bake into the
+                // .rzb as bare leaf symbols that never resolve on any host.
+                Err(e) => {
+                    eprintln!(
+                        "  warning: native-lib '{}' failed to load at bundle time: {} \
+                         (extern kernels it maps will bake in as unresolved symbols)",
+                        lib_path.display(),
+                        e
+                    );
+                }
             }
         }
     }

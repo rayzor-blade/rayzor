@@ -37,6 +37,34 @@ pub struct Project {
     pub manifest: ProjectManifest,
 }
 
+/// Map a native-lib path to this platform's dynamic-library extension.
+///
+/// Manifests carry a single path with the author's extension. If the listed
+/// file is absent but a same-stem sibling with THIS platform's dylib extension
+/// exists, use that. Otherwise the path is returned unchanged (a genuinely
+/// missing lib still surfaces at load time rather than being masked here).
+fn resolve_platform_dylib(p: PathBuf) -> PathBuf {
+    const DYLIB_EXTS: [&str; 3] = ["dylib", "so", "dll"];
+    let plat_ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(target_os = "windows") {
+        "dll"
+    } else {
+        "so"
+    };
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) if DYLIB_EXTS.contains(&ext) && ext != plat_ext && !p.exists() => {
+            let swapped = p.with_extension(plat_ext);
+            if swapped.exists() {
+                swapped
+            } else {
+                p
+            }
+        }
+        _ => p,
+    }
+}
+
 impl Project {
     /// Resolve the entry file path relative to project root.
     pub fn entry_path(&self) -> Option<PathBuf> {
@@ -53,12 +81,21 @@ impl Project {
     }
 
     /// Resolve native lib paths declared via `[build] native-libs`,
-    /// relative to project root.
+    /// relative to project root. A manifest lists one path per lib, usually
+    /// with the author's platform extension (e.g. `libfoo.dylib`); the same
+    /// `.rzb` is built and run on other OSes where the sibling artifact is
+    /// `libfoo.so` / `foo.dll`. [`resolve_platform_dylib`] swaps the extension
+    /// to this platform's so a cross-platform manifest still loads the plugin.
     pub fn resolved_native_libs(&self) -> Vec<PathBuf> {
         self.manifest
             .build
             .as_ref()
-            .map(|b| b.native_libs.iter().map(|p| self.root.join(p)).collect())
+            .map(|b| {
+                b.native_libs
+                    .iter()
+                    .map(|p| resolve_platform_dylib(self.root.join(p)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
