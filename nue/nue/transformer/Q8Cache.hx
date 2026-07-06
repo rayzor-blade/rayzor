@@ -41,15 +41,27 @@ class Q8Cache {
     public var scrScores:Bytes;
     public var scrV:Bytes;
 
+    // Precomputed per-block f32 scale (= f16ToF32 of the stored f16), one
+    // per (row, kv-head, block), filled once at append. The decode flash
+    // kernel re-scans the whole cache every token, so decoding the f16
+    // scale in-kernel re-does f16ToF32 for every prior position on every
+    // subsequent token — O(cacheLen) redundant work that grows with
+    // context. Reading this buffer instead is a single zero-copy load.
+    // blocksPerRow = numKvHeads * (headDim/32).
+    public var scaleF32:Bytes;
+    public var blocksPerRow:Int;
+
     public function new(maxSeqLen:Int, numKvHeads:Int, headDim:Int) {
         this.maxSeqLen = maxSeqLen;
         this.numKvHeads = numKvHeads;
         this.headDim = headDim;
         this.headBytes = (headDim >> 5) * 34;
         this.rowBytes = numKvHeads * headBytes;
+        this.blocksPerRow = numKvHeads * (headDim >> 5);
         // +4 trailing bytes: scratch cell for the f32<->bits roundtrip in
         // the f16 scale encode (appends are single-threaded).
         this.data = Bytes.alloc(maxSeqLen * rowBytes + 4);
+        this.scaleF32 = Bytes.alloc(maxSeqLen * blocksPerRow * 4);
     }
 
     /** Lazily allocate the decode scratch, sized to maxSeqLen so it never
@@ -67,6 +79,10 @@ class Q8Cache {
         if (data != null) {
             data.free();
             data = null;
+        }
+        if (scaleF32 != null) {
+            scaleF32.free();
+            scaleF32 = null;
         }
         if (scrScores != null) {
             scrQ.free();
@@ -93,16 +109,18 @@ class Q8Cache {
         // (silent-decay compiler bug, repro in this file's history).
         var sBase:Usize = src.data().raw();
         var dBase:Usize = data.address();
+        var scBase:Usize = scaleF32.address();
         var cell:Usize = dBase + Usize.fromInt(maxSeqLen * rowBytes);
-        var blocksPerRow = numKvHeads * (headDim >> 5);
         for (r in 0...n) {
             var srcRow:Usize = sBase + Usize.fromInt(r * numKvHeads * headDim * 4);
             var dstRow:Usize = dBase + Usize.fromInt((row + r) * rowBytes);
+            var scRow:Usize = scBase + Usize.fromInt((row + r) * blocksPerRow * 4);
             // Heads are contiguous in both source and destination, so the
             // whole row is one linear run of 32-float groups -> 34B blocks.
             for (b in 0...blocksPerRow) {
                 quantBlock(srcRow + Usize.fromInt(b * 128),
-                    dstRow + Usize.fromInt(b * 34), cell);
+                    dstRow + Usize.fromInt(b * 34),
+                    scRow + Usize.fromInt(b * 4), cell);
             }
         }
         return row + n;
@@ -183,7 +201,7 @@ class Q8Cache {
 
     /** Quantize one 32-float group at `srcF32` into the 34-byte Q8_0
         block at `dst`. */
-    static inline function quantBlock(srcF32:Usize, dst:Usize, cell:Usize):Void {
+    static inline function quantBlock(srcF32:Usize, dst:Usize, scaleDst:Usize, cell:Usize):Void {
         var maxAbs = 0.0;
         for (i in 0...32) {
             var v = Mem.loadF32(srcF32 + Usize.fromInt(i * 4));
@@ -196,6 +214,9 @@ class Q8Cache {
         var bits = f16FromF32(scale, cell);
         Mem.storeU8(dst, bits & 0xFF);
         Mem.storeU8(dst + Usize.fromInt(1), (bits >>> 8) & 0xFF);
+        // Store the f16-decoded scale (= what the flash kernel reads) so the
+        // decode path loads it directly instead of re-decoding f16 per token.
+        Mem.storeF32(scaleDst, f16ToF32(bits));
         for (i in 0...32) {
             var x = Mem.loadF32(srcF32 + Usize.fromInt(i * 4)) * inv;
             var q = x >= 0 ? Std.int(x + 0.5) : Std.int(x - 0.5);
