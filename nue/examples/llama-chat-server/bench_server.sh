@@ -28,6 +28,18 @@ REQUANT_LM_HEAD="${REQUANT_LM_HEAD:-${RAYZOR_REQUANT_LM_HEAD:-}}"
 PRESET="${PRESET:-application}"
 PORT_BASE="${PORT_BASE:-19890}"
 NO_CACHE="${NO_CACHE:-true}"
+# Bench the precompiled .rzb instead of `rayzor run Main.hx`:
+#   BUNDLE=auto        build llama-chat-server.rzb up front, then bench it
+#   BUNDLE=<path.rzb>  bench an existing bundle
+# The .rzb skips the front-end compile; tier flags still apply at run time.
+BUNDLE="${BUNDLE:-}"
+NATIVE_LIB="${NATIVE_LIB:-../../../target/release/libnue_plugins.dylib}"
+
+if [[ "$BUNDLE" == "auto" ]]; then
+  BUNDLE="$SCRIPT_DIR/llama-chat-server.rzb"
+  echo "[bench] building bundle -> $BUNDLE"
+  "$RAYZOR" bundle Main.hx -o "$BUNDLE" >/dev/null || { echo "bundle build failed" >&2; exit 1; }
+fi
 
 if [[ -n "$VARIANTS" ]]; then
   read -r -a VARIANT_LIST <<< "$VARIANTS"
@@ -371,6 +383,18 @@ run_one() {
     # Prebuilt server binary (e.g. `rayzor aot` output). Tier flags and
     # --no-cache are JIT-only and don't apply; program args go directly.
     cmd=("$SERVER_BIN" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
+  elif [[ -n "$BUNDLE" ]]; then
+    # Precompiled .rzb bundle: no front-end compile, still JIT-tiered. Kernel
+    # symbols come in via --native-lib (bundles carry no [build] native-libs).
+    # Tier flags mirror the source path so bundle-vs-source is apples-to-apples.
+    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--preset" "$PRESET" "--stats")
+    if [[ "$variant" != "toml" ]]; then
+      cmd+=("--tier-thresholds" "$variant")
+    fi
+    cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
+    cmd+=("--tier-promotion" "$TIER_PROMOTION")
+    cmd+=("--release")
+    cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   else
     cmd=("$RAYZOR" run)
     if [[ "$NO_CACHE" == "true" || "$NO_CACHE" == "1" || "$NO_CACHE" == "yes" ]]; then
@@ -382,6 +406,7 @@ run_one() {
     fi
     cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
     cmd+=("--tier-promotion" "$TIER_PROMOTION")
+    cmd+=("--release")
     cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   fi
 
