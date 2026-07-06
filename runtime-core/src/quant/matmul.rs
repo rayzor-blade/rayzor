@@ -81,12 +81,17 @@ pub fn dot_f32_simd(a: &[f32], b: &[f32]) -> f32 {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    // `is_x86_feature_detected!` is std-only; in this `no_std` crate the
+    // AVX2/FMA path is gated at compile time — taken when built with
+    // `+avx2,+fma` (e.g. `-C target-cpu=native`), scalar fallback otherwise.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     {
-        if is_x86_feature_detected!("fma") {
-            // SAFETY: feature-detect gate above guarantees AVX/FMA.
-            return unsafe { dot_f32_avx2_fma(a, b, n) };
-        }
+        // SAFETY: the cfg gate guarantees AVX2+FMA are enabled for this build.
+        return unsafe { dot_f32_avx2_fma(a, b, n) };
     }
 
     #[allow(unreachable_code)]
