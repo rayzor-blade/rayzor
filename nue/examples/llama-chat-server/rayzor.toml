@@ -20,4 +20,4 @@ start_interpreted = false
 enable_tier_promotion = true
 verbosity = 0
 enable_stack_traces = false
-auto_upgrade_to_llvm_after_main_entry = false
+auto_upgrade_to_llvm_after_main_entry = true
