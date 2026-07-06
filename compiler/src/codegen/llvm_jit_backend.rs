@@ -766,6 +766,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return Ok(llvm_func);
         }
 
+        // CPU spin-wait hint as a single inline PAUSE/YIELD (no call).
+        if let Some(llvm_func) = self.try_create_cpu_relax_intrinsic(&func_name, &fn_type)? {
+            self.function_map.insert(func_id, llvm_func);
+            return Ok(llvm_func);
+        }
+
         // Replace array operations with inline implementations
         // HaxeArray layout: { ptr, len, cap, elem_size } - all 8 bytes each
         if let Some(llvm_func) = self.try_create_array_intrinsic(&func_name, &fn_type)? {
@@ -931,6 +937,69 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         builder
             .build_return(None)
             .map_err(|e| format!("prefetch return failed: {}", e))?;
+        Ok(Some(wrapper))
+    }
+
+    /// Replace `rayzor_cpu_relax()` with an alwaysinline wrapper emitting the
+    /// host CPU spin-wait hint as a SINGLE inline instruction — no call. On
+    /// x86 `llvm.x86.sse2.pause` (PAUSE); on aarch64 `llvm.aarch64.hint(1)`
+    /// (YIELD); elsewhere an empty body (no-op). Because it inlines into the
+    /// SpinPool spin loops with zero call overhead, it costs ~1 cycle even
+    /// on M-series while giving thermally-constrained x86 the PAUSE that
+    /// drops spin power and avoids memory-order machine-clears.
+    fn try_create_cpu_relax_intrinsic(
+        &self,
+        func_name: &str,
+        fn_type: &inkwell::types::FunctionType<'ctx>,
+    ) -> Result<Option<FunctionValue<'ctx>>, String> {
+        if func_name != "rayzor_cpu_relax" {
+            return Ok(None);
+        }
+        let wrapper = self.module.add_function(
+            func_name,
+            *fn_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        wrapper.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+                0,
+            ),
+        );
+        let bb = self.context.append_basic_block(wrapper, "entry");
+        let builder = self.context.create_builder();
+        builder.position_at_end(bb);
+
+        // Emit the bare spin-wait mnemonic via inline asm (side-effecting so
+        // ISel/DCE keep it). `Intrinsic::find` does not resolve the target
+        // hint intrinsics by name, so inline asm is the reliable path.
+        #[cfg(target_arch = "aarch64")]
+        let asm_mnemonic = "yield";
+        #[cfg(target_arch = "x86_64")]
+        let asm_mnemonic = "pause";
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let asm_mnemonic = "";
+
+        if !asm_mnemonic.is_empty() {
+            let void_fn_ty = self.context.void_type().fn_type(&[], false);
+            let asm = self.context.create_inline_asm(
+                void_fn_ty,
+                asm_mnemonic.to_string(),
+                String::new(), // no operand constraints
+                true,          // has side effects (do not DCE)
+                false,         // no align-stack
+                None,          // default asm dialect
+                false,         // cannot throw
+            );
+            builder
+                .build_indirect_call(void_fn_ty, asm, &[], "")
+                .map_err(|e| format!("cpu_relax inline asm call failed: {}", e))?;
+        }
+
+        builder
+            .build_return(None)
+            .map_err(|e| format!("cpu_relax return failed: {}", e))?;
         Ok(Some(wrapper))
     }
 
@@ -1863,6 +1932,18 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
             // Replace Std functions with inline implementations (e.g., Std.int → fptosi)
             if let Some(llvm_func) = self.try_create_std_intrinsic(&func_name, &fn_type)? {
+                self.function_map.insert(func_id, llvm_func);
+                return Ok(llvm_func);
+            }
+
+            // Prefetch / CPU-relax hints → inline single instruction (this
+            // extern path is the one the tiered per-function declare hits;
+            // declare_extern_function has the same two checks).
+            if let Some(llvm_func) = self.try_create_prefetch_intrinsic(&func_name, &fn_type)? {
+                self.function_map.insert(func_id, llvm_func);
+                return Ok(llvm_func);
+            }
+            if let Some(llvm_func) = self.try_create_cpu_relax_intrinsic(&func_name, &fn_type)? {
                 self.function_map.insert(func_id, llvm_func);
                 return Ok(llvm_func);
             }

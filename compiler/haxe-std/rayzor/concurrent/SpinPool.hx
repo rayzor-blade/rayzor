@@ -48,6 +48,14 @@ class SpinPool {
         (~150us); raise via RAYZOR_HAXE_POOL_SPINS when the Rust FFI pool is
         small enough not to contend (see the measured tradeoff below). */
     var spinBudget:Int;
+    /** Emit a CPU PAUSE/YIELD each idle spin. Default OFF: on M-series the
+        per-spin hint costs more (call + response latency in the hot join)
+        than it saves and there is no thermal pressure. On thermally-
+        constrained x86 (small-chassis NUC) a bare spin loop runs the core
+        at full power and machine-clears on the shared cell — enable via
+        RAYZOR_HAXE_POOL_RELAX=1 to trade a little dispatch latency for much
+        lower spin power / less throttling. -1 = unresolved. */
+    var relaxHint:Int;
     var _n:Int;
     var _ctl:Bytes;
     var _fn:(Int, Int, Int) -> Void;
@@ -100,6 +108,7 @@ class SpinPool {
         _alive = true;
         spinBudget = 0; // resolved lazily on first dispatch (env reads in a
                         // constructor mis-resolve; see bugs_sys_getenv_in_ctor)
+        relaxHint = -1; // resolved lazily alongside spinBudget
         // Bind `this` to an explicit local: an implicit `this` capture in a
         // loop-spawned closure does not resolve.
         var self = this;
@@ -141,6 +150,10 @@ class SpinPool {
         var pendC = pending();
         var gapC = gapEwmaUs();
         var spins = 0;
+        // relaxHint is resolved on the first dispatch; workers spawned before
+        // it re-read on each idle entry via the field is too costly, so read
+        // it once per idle transition below.
+        var rlx = 0;
         while (true) {
             if (stateC.load() == 1) {
                 var f = _fn;
@@ -149,9 +162,13 @@ class SpinPool {
                 stateC.store(0);
                 pendC.fetchAdd(-1);
                 spins = 0;
+                rlx = relaxHint; // refresh once per work cycle (post-init)
             } else {
                 if (shutC.load() == 1) return 0;
                 spins++;
+                // PAUSE/YIELD each idle spin when enabled (x86 thermal; see
+                // relaxHint). Gated: the hint's call cost regresses M-series.
+                if (rlx == 1) Thread.cpuRelax();
                 if (spins <= spinBudget) continue;
                 // Idle beyond the tight-spin window: HOLD by yielding —
                 // the worker stays runnable (no OS wake latency on the
@@ -199,6 +216,8 @@ class SpinPool {
                 var v:Null<Int> = Std.parseInt(sb);
                 if (v != null && v > 0) spinBudget = v;
             }
+            var rx = Sys.getEnv("RAYZOR_HAXE_POOL_RELAX");
+            relaxHint = (rx != null && rx != "0" && rx != "" && rx != "false") ? 1 : 0;
         }
         // Record the inter-dispatch gap EWMA — workers size their idle
         // hold from the pool's own cadence, so the policy adapts to the
@@ -239,7 +258,14 @@ class SpinPool {
         }
         stealLoop(fn, 0);
         var pendC = pending();
-        while (pendC.load() > 0) {}
+        // PAUSE/YIELD while the caller waits on the last stragglers when the
+        // relax hint is enabled (x86 thermal). Default off: the per-iteration
+        // call cost lengthens the hot join on M-series.
+        if (relaxHint == 1) {
+            while (pendC.load() > 0) { Thread.cpuRelax(); }
+        } else {
+            while (pendC.load() > 0) {}
+        }
         bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
         dispatches().fetchAdd(1);
     }

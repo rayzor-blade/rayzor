@@ -24,6 +24,7 @@ pub fn build_thread_type(builder: &mut MirBuilder) {
     build_thread_join(builder);
     build_thread_is_finished(builder);
     build_thread_yield_now(builder);
+    build_thread_cpu_relax(builder);
     build_thread_register_parkable(builder);
     build_thread_park(builder);
     build_thread_unpark(builder);
@@ -79,6 +80,14 @@ fn declare_thread_externs(builder: &mut MirBuilder) {
     // extern fn rayzor_thread_yield_now()
     let func_id = builder
         .begin_function("rayzor_thread_yield_now")
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_cpu_relax()  — PAUSE/YIELD spin-wait hint
+    let func_id = builder
+        .begin_function("rayzor_cpu_relax")
         .returns(void_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -285,6 +294,25 @@ fn build_thread_yield_now(builder: &mut MirBuilder) {
         .expect("rayzor_thread_yield_now not found");
     let _result = builder.call(yield_id, vec![]);
 
+    builder.ret(None);
+}
+
+/// Build: fn Thread_cpuRelax() — one PAUSE/YIELD spin-wait hint.
+fn build_thread_cpu_relax(builder: &mut MirBuilder) {
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("Thread_cpuRelax")
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(crate::ir::InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let ext = builder
+        .get_function_by_name("rayzor_cpu_relax")
+        .expect("rayzor_cpu_relax not found");
+    let _result = builder.call(ext, vec![]);
     builder.ret(None);
 }
 
