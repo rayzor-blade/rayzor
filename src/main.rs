@@ -118,6 +118,12 @@ enum Commands {
         #[arg(long = "rpkg", value_name = "FILE")]
         rpkg_files: Vec<PathBuf>,
 
+        /// Load a raw native plugin dylib by path (repeatable). Supplies the
+        /// runtime kernel symbols a `.rzb`/`.hx` needs without a rayzor.toml —
+        /// the CLI equivalent of the manifest's `[build] native-libs`.
+        #[arg(long = "native-lib", value_name = "FILE")]
+        native_libs: Vec<PathBuf>,
+
         /// Enable or disable safety warnings (use-after-move, etc.)
         #[arg(long, default_value = "on")]
         safety_warnings: String,
@@ -783,6 +789,7 @@ fn main() {
             cache_dir,
             release,
             rpkg_files,
+            native_libs,
             safety_warnings,
             interactive,
             wasm,
@@ -813,6 +820,7 @@ fn main() {
                     cache_dir,
                     release,
                     rpkg_files,
+                    native_libs,
                     safety_warnings != "off",
                     interactive,
                     program_args,
@@ -1026,6 +1034,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bundle(
     file: &Path,
     verbose: bool,
@@ -1039,6 +1048,7 @@ fn run_bundle(
     release: bool,
     manifest_project: Option<compiler::workspace::Project>,
     cli_rpkg_files: Vec<PathBuf>,
+    cli_native_libs: Vec<PathBuf>,
     program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::TieredBackend;
@@ -1076,6 +1086,11 @@ fn run_bundle(
         }
     }
 
+    // Runtime kernel symbols come from two sources: the manifest's
+    // `[build] native-libs` (when a rayzor.toml is discoverable) and the CLI
+    // `--native-lib` flag. The CLI path is what lets a bundle run with no
+    // toml shipped — the deployment is `.rzb` + dylib, invoked as
+    // `rayzor run app.rzb --native-lib libfoo.dylib --preset …`.
     let mut loaded_native_libs = Vec::new();
     let mut manifest_native_symbols = Vec::new();
     if let Some(project) = manifest_project.as_ref() {
@@ -1085,6 +1100,28 @@ fn run_bundle(
             {
                 loaded_native_libs.push(lib);
                 manifest_native_symbols.extend(runtime_symbols);
+            }
+        }
+    }
+    for lib_path in &cli_native_libs {
+        match crate::native_libs::load_manifest_native_lib(lib_path) {
+            Ok((lib, _plugin, runtime_symbols)) => {
+                if verbose {
+                    println!(
+                        "  native   loaded {} ({} symbols)",
+                        lib_path.display(),
+                        runtime_symbols.len()
+                    );
+                }
+                loaded_native_libs.push(lib);
+                manifest_native_symbols.extend(runtime_symbols);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to load --native-lib {}: {}",
+                    lib_path.display(),
+                    e
+                ));
             }
         }
     }
@@ -1130,6 +1167,49 @@ fn run_bundle(
         backend
             .compile_module(module.clone())
             .map_err(|e| format!("Failed to compile module '{}': {}", module.name, e))?;
+    }
+
+    // Run static/vtable initializers BEFORE the LLVM upgrade — the same
+    // sequence run_file uses. This is what makes the runner tier-aware:
+    // `upgrade_to_llvm` only registers LLVM pointers for functions the tiered
+    // backend has already materialized into `function_pointers` (see
+    // compile_all_with_llvm's `needed_func_ids`). Running `__vtable_init__`
+    // (which bakes method addresses into vtables) and `__init__` forces the
+    // reachable set — including the hot decode path reached through vtables —
+    // to materialize, so the upgrade actually promotes it. Without this the
+    // bundle stayed 100% Cranelift baseline (0 LLVM in --stats) and decoded
+    // ~3x slower than the source-JIT path. Collect EVERY same-named copy
+    // (per-file initializers merged into one module); registration is
+    // idempotent, matching run_file.
+    let vtable_init_ids: Vec<compiler::ir::IrFunctionId> = bundle
+        .modules()
+        .iter()
+        .flat_map(|m| {
+            m.functions
+                .iter()
+                .filter(|(_, f)| f.name == "__vtable_init__")
+                .map(|(id, _)| *id)
+        })
+        .collect();
+    let module_init_ids: Vec<compiler::ir::IrFunctionId> = bundle
+        .modules()
+        .iter()
+        .flat_map(|m| {
+            m.functions
+                .iter()
+                .filter(|(_, f)| f.name == "__init__")
+                .map(|(id, _)| *id)
+        })
+        .collect();
+    for id in &vtable_init_ids {
+        backend
+            .execute_function(*id, vec![])
+            .map_err(|e| format!("vtable init failed: {}", e))?;
+    }
+    for id in &module_init_ids {
+        backend
+            .execute_function(*id, vec![])
+            .map_err(|e| format!("module init failed: {}", e))?;
     }
 
     if auto_upgrade_to_llvm {
@@ -1208,6 +1288,7 @@ fn run_file(
     cache_dir: Option<PathBuf>,
     release: bool,
     rpkg_files: Vec<PathBuf>,
+    native_libs: Vec<PathBuf>,
     safety_warnings: bool,
     interactive: bool,
     program_args: Vec<String>,
@@ -1267,6 +1348,7 @@ fn run_file(
             release,
             manifest_project,
             rpkg_files,
+            native_libs,
             program_args,
         );
     }
@@ -1428,6 +1510,25 @@ fn run_file(
                         e
                     );
                 }
+            }
+        }
+    }
+    // CLI `--native-lib` dylibs: same treatment as manifest native-libs, so a
+    // source run can be configured without a rayzor.toml.
+    for lib_path in &native_libs {
+        manifest_native_lib_inputs.push(lib_path.clone());
+        match native_libs::load_manifest_native_lib(lib_path) {
+            Ok((lib, plugin, runtime_symbols)) => {
+                loaded_native_libs.push(lib);
+                compiler_plugins.push(Box::new(plugin));
+                manifest_native_symbols.extend(runtime_symbols);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to load --native-lib {}: {}",
+                    lib_path.display(),
+                    e
+                ));
             }
         }
     }
@@ -2363,6 +2464,7 @@ fn build_from_hxml(
                     None,       // cache_dir
                     false,      // release
                     Vec::new(), // rpkg_files
+                    Vec::new(), // native_libs
                     false,      // safety_warnings
                     false,      // interactive
                     Vec::new(), // program_args
