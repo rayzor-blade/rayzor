@@ -3365,7 +3365,15 @@ impl TieredBackend {
                     && !value.eq_ignore_ascii_case("false")
                     && !value.eq_ignore_ascii_case("off")
             }
-            Err(_) => false,
+            // Default to AOT on Linux. MCJIT's RuntimeDyld is unstable on
+            // x86_64 Linux: it corrupts LLVM state during the startup-hook
+            // rerun (a dangling FunctionValue crashes get_function_pointer_by_id
+            // in libLLVM), and it can't resolve the malloc/free libcalls the
+            // closure-box lowering emits. The AOT-to-dylib path (object file ->
+            // system linker -> dlopen) sidesteps RuntimeDyld entirely and is the
+            // working LLVM tier there. aarch64/macOS MCJIT is stable and stays
+            // the default; `RAYZOR_LLVM_TIER_AOT=0` forces MCJIT everywhere.
+            Err(_) => cfg!(target_os = "linux"),
         }
     }
 
