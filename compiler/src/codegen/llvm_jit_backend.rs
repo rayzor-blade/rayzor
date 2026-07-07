@@ -475,6 +475,72 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Some((a, b))
     }
 
+    /// Emit `malloc(size)` by materializing malloc's absolute address as an IR
+    /// constant and calling it indirectly, instead of referencing the external
+    /// `malloc` symbol.
+    ///
+    /// LLVM recognizes `malloc`/`free` as libcalls and routes them through
+    /// TargetLibraryInfo. On Linux, MCJIT/RuntimeDyld leaves the large-code-
+    /// model `R_X86_64_64` relocation for that libcall at 0 — unlike ordinary
+    /// runtime symbols (`haxe_*`/`rayzor_*`), which resolve through the
+    /// `LLVMAddSymbol` explicit table — so the JIT bakes `movabs $0; call *reg`
+    /// and SIGSEGVs the first startup hook that boxes a closure
+    /// (`__vtable_init__` allocating a 16-byte FunctionRef). The compiler
+    /// process is the JIT host, so the registered libc `malloc` address is the
+    /// correct callee; baking it as a constant sidesteps symbol resolution.
+    fn build_heap_malloc(
+        &self,
+        size: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let addr = self
+            .runtime_addr("malloc")
+            .unwrap_or(libc::malloc as usize as u64);
+        let fp = self
+            .builder
+            .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "malloc_fp")
+            .map_err(|e| format!("inttoptr malloc: {}", e))?;
+        let ft = ptr_type.fn_type(&[i64_type.into()], false);
+        self.builder
+            .build_indirect_call(ft, fp, &[size.into()], name)
+            .map_err(|e| format!("call malloc: {}", e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "malloc did not return a value".to_string())
+            .map(|v| v.into_pointer_value())
+    }
+
+    /// Emit `free(ptr)` via a materialized absolute-address indirect call — see
+    /// [`Self::build_heap_malloc`] for why the `free` libcall can't go through
+    /// MCJIT symbol resolution on Linux.
+    fn build_heap_free(&self, ptr: PointerValue<'ctx>) -> Result<(), String> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let addr = self
+            .runtime_addr("free")
+            .unwrap_or(libc::free as usize as u64);
+        let fp = self
+            .builder
+            .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "free_fp")
+            .map_err(|e| format!("inttoptr free: {}", e))?;
+        let ft = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.builder
+            .build_indirect_call(ft, fp, &[ptr.into()], "free_call")
+            .map_err(|e| format!("call free: {}", e))?;
+        Ok(())
+    }
+
+    /// Address of a registered runtime symbol, or `None` if absent/null.
+    fn runtime_addr(&self, name: &str) -> Option<u64> {
+        self.runtime_symbols
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .map(|(_, a)| *a as u64)
+            .filter(|a| *a != 0)
+    }
+
     /// Build an FMA intrinsic call: fma(a, b, c) = a * b + c
     fn build_fma(
         &self,
@@ -2916,33 +2982,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         element_size
                     };
 
-                    // Get or declare malloc function
-                    let malloc_fn = match self.module.get_function("malloc") {
-                        Some(f) => f,
-                        None => {
-                            let malloc_fn_type = self
-                                .context
-                                .ptr_type(AddressSpace::default())
-                                .fn_type(&[self.context.i64_type().into()], false);
-                            self.module.add_function("malloc", malloc_fn_type, None)
-                        }
-                    };
-
-                    // Call malloc(total_size)
-                    let malloc_result = self
-                        .builder
-                        .build_call(
-                            malloc_fn,
-                            &[total_size.into()],
-                            &format!("malloc_{}", dest.as_u32()),
-                        )
-                        .map_err(|e| format!("Failed to build malloc call: {}", e))?;
-
-                    let ptr = malloc_result
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or("malloc did not return a value")?
-                        .into_pointer_value();
+                    // Call malloc(total_size) via a materialized address —
+                    // see build_heap_malloc for the MCJIT-libcall rationale.
+                    let ptr =
+                        self.build_heap_malloc(total_size, &format!("malloc_{}", dest.as_u32()))?;
 
                     self.value_map.insert(*dest, ptr.into());
                 }
@@ -3312,23 +3355,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 // Otherwise, call libc free() for heap-allocated memory.
                 if !self.alloca_ids.contains(ptr) {
                     if let Ok(ptr_val) = self.get_value(*ptr) {
-                        // Get or declare free function
-                        let free_fn = match self.module.get_function("free") {
-                            Some(f) => f,
-                            None => {
-                                let free_fn_type = self.context.void_type().fn_type(
-                                    &[self.context.ptr_type(Default::default()).into()],
-                                    false,
-                                );
-                                self.module.add_function("free", free_fn_type, None)
-                            }
-                        };
-
-                        // Cast to pointer if needed and call free(ptr)
+                        // Cast to pointer if needed and free(ptr) via a
+                        // materialized absolute address (see build_heap_free).
                         let ptr_as_ptr = if ptr_val.is_pointer_value() {
                             ptr_val.into_pointer_value()
                         } else {
-                            // int-to-ptr cast for non-pointer values
                             self.builder
                                 .build_int_to_ptr(
                                     ptr_val.into_int_value(),
@@ -3337,12 +3368,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 )
                                 .map_err(|e| format!("Failed to cast for free: {}", e))?
                         };
-
-                        let _ = self.builder.build_call(
-                            free_fn,
-                            &[ptr_as_ptr.into()],
-                            &format!("free_{}", ptr.as_u32()),
-                        );
+                        self.build_heap_free(ptr_as_ptr)?;
                     }
                 }
             }
@@ -3502,24 +3528,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let env_ptr = if !captured_values.is_empty() {
                     let env_size = (captured_values.len() * 8) as u64;
 
-                    // Get or declare malloc
-                    let malloc_fn = match self.module.get_function("malloc") {
-                        Some(f) => f,
-                        None => {
-                            let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
-                            self.module.add_function("malloc", malloc_fn_type, None)
-                        }
-                    };
-
                     let size_arg = i64_type.const_int(env_size, false);
-                    let env_addr = self
-                        .builder
-                        .build_call(malloc_fn, &[size_arg.into()], "env_malloc")
-                        .map_err(|e| format!("Failed to malloc env: {}", e))?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or("malloc did not return a value")?
-                        .into_pointer_value();
+                    let env_addr = self.build_heap_malloc(size_arg, "env_malloc")?;
 
                     // Store each captured value into the environment
                     for (i, captured_id) in captured_values.iter().enumerate() {
@@ -3580,23 +3590,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 };
 
                 // Allocate closure struct: { fn_ptr: ptr, env_ptr: ptr }
-                let malloc_fn = match self.module.get_function("malloc") {
-                    Some(f) => f,
-                    None => {
-                        let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
-                        self.module.add_function("malloc", malloc_fn_type, None)
-                    }
-                };
-
                 let closure_size = i64_type.const_int(16, false);
-                let closure_ptr = self
-                    .builder
-                    .build_call(malloc_fn, &[closure_size.into()], "closure_malloc")
-                    .map_err(|e| format!("Failed to malloc closure: {}", e))?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("malloc did not return a value")?
-                    .into_pointer_value();
+                let closure_ptr = self.build_heap_malloc(closure_size, "closure_malloc")?;
 
                 // Store function pointer at offset 0
                 let func_as_ptr = self
@@ -3998,23 +3993,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     // Function references must use the same closure layout as CallIndirect:
                     // { fn_ptr: i64, env_ptr: i64 }. Virtual dispatch and other indirect-call
                     // sites load both slots, so returning a raw code pointer here will crash.
-                    let malloc_fn = match self.module.get_function("malloc") {
-                        Some(f) => f,
-                        None => {
-                            let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
-                            self.module.add_function("malloc", malloc_fn_type, None)
-                        }
-                    };
-
                     let closure_size = i64_type.const_int(16, false);
-                    let closure_ptr = self
-                        .builder
-                        .build_call(malloc_fn, &[closure_size.into()], "fnref_closure_malloc")
-                        .map_err(|e| format!("Failed to malloc function ref closure: {}", e))?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or("malloc did not return a value")?
-                        .into_pointer_value();
+                    let closure_ptr =
+                        self.build_heap_malloc(closure_size, "fnref_closure_malloc")?;
 
                     let func_ptr = llvm_func.as_global_value().as_pointer_value();
                     let func_as_i64 = self
