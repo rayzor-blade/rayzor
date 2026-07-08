@@ -320,12 +320,30 @@ impl std::fmt::Display for BladeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BladeError::Io(e) => write!(f, "I/O error: {}", e),
-            BladeError::Serialization(e) => write!(f, "Serialization error: {}", e),
+            BladeError::Serialization(e) => {
+                let detail = e.to_string();
+                write!(f, "Serialization error: {}", detail)?;
+                if looks_like_stale_postcard_schema(&detail) {
+                    write!(
+                        f,
+                        " (the .blade/.rzb file was probably built with an older compiler; clear .rayzor/cache and rebuild the bundle)"
+                    )?;
+                }
+                Ok(())
+            }
             BladeError::Compression(e) => write!(f, "Compression error: {}", e),
             BladeError::InvalidMagic => write!(f, "Invalid BLADE magic number"),
             BladeError::UnsupportedVersion(v) => write!(f, "Unsupported BLADE version: {}", v),
         }
     }
+}
+
+fn looks_like_stale_postcard_schema(detail: &str) -> bool {
+    detail.contains("Found a bool that wasn't 0 or 1")
+        || detail.contains("DeserializeBadBool")
+        || detail.contains("DeserializeUnexpectedEnd")
+        || detail.contains("SerdeDeCustom")
+        || detail.contains("enum")
 }
 
 impl std::error::Error for BladeError {}

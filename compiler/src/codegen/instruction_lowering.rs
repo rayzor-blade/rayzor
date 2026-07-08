@@ -11,6 +11,80 @@ use crate::ir::{BinaryOp, CompareOp, IrId, IrInstruction, IrType, UnaryOp};
 use super::CraneliftBackend;
 
 impl CraneliftBackend {
+    fn is_integer_only_binop(op: &BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::Ushr
+        )
+    }
+
+    fn integer_binop_operation_ty(lhs_ty: Type, rhs_ty: Type, expected_ty: Type) -> Type {
+        let operand_ty = if lhs_ty.is_int() && rhs_ty.is_int() {
+            if lhs_ty.bits() >= rhs_ty.bits() {
+                lhs_ty
+            } else {
+                rhs_ty
+            }
+        } else if lhs_ty.is_int() {
+            lhs_ty
+        } else if rhs_ty.is_int() {
+            rhs_ty
+        } else if expected_ty.is_int() {
+            expected_ty
+        } else {
+            types::I32
+        };
+
+        if expected_ty.is_int() && expected_ty.bits() > operand_ty.bits() {
+            expected_ty
+        } else {
+            operand_ty
+        }
+    }
+
+    fn integer_binop_uses_signed_coercion(op: &BinaryOp, ty: &IrType) -> bool {
+        matches!(op, BinaryOp::Shr)
+            || ty.is_signed()
+            || !matches!(ty, IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64)
+    }
+
+    fn coerce_integer_binop_operand(
+        builder: &mut FunctionBuilder,
+        value: Value,
+        value_ty: Type,
+        operation_ty: Type,
+        signed: bool,
+    ) -> Value {
+        if value_ty == operation_ty {
+            value
+        } else if value_ty.is_float() {
+            if signed {
+                builder.ins().fcvt_to_sint(operation_ty, value)
+            } else {
+                builder.ins().fcvt_to_uint(operation_ty, value)
+            }
+        } else if value_ty.is_int() && operation_ty.is_int() {
+            if value_ty.bits() < operation_ty.bits() {
+                if signed {
+                    builder.ins().sextend(operation_ty, value)
+                } else {
+                    builder.ins().uextend(operation_ty, value)
+                }
+            } else if value_ty.bits() > operation_ty.bits() {
+                builder.ins().ireduce(operation_ty, value)
+            } else {
+                value
+            }
+        } else {
+            value
+        }
+    }
+
     /// Lower a binary operation to Cranelift IR
     pub(super) fn lower_binary_op(
         &mut self,
@@ -53,7 +127,10 @@ impl CraneliftBackend {
             rhs_ty
         };
 
-        let operation_ty = if both_operands_are_int && !expected_ty.is_int() {
+        let integer_only_op = Self::is_integer_only_binop(op);
+        let operation_ty = if integer_only_op {
+            Self::integer_binop_operation_ty(lhs_ty, rhs_ty, expected_ty)
+        } else if both_operands_are_int && !expected_ty.is_int() {
             // Expected type is not an integer but operands are - use the larger operand type
             // This happens with unresolved generics that become Ptr(Void) -> I64
             larger_operand_ty
@@ -71,10 +148,20 @@ impl CraneliftBackend {
         };
 
         // Determine if we're doing float operations based on operand types
-        let use_float_ops = lhs_ty.is_float() || rhs_ty.is_float() || operation_ty.is_float();
+        let use_float_ops =
+            !integer_only_op && (lhs_ty.is_float() || rhs_ty.is_float() || operation_ty.is_float());
+        let signed_integer_coercion = Self::integer_binop_uses_signed_coercion(op, ty);
 
         // Coerce operands to the correct type for the operation
-        let lhs = if use_float_ops && lhs_ty.is_int() {
+        let lhs = if integer_only_op {
+            Self::coerce_integer_binop_operand(
+                builder,
+                lhs,
+                lhs_ty,
+                operation_ty,
+                signed_integer_coercion,
+            )
+        } else if use_float_ops && lhs_ty.is_int() {
             // Convert integer to float
             let float_ty = if rhs_ty.is_float() {
                 rhs_ty
@@ -97,7 +184,15 @@ impl CraneliftBackend {
             lhs
         };
 
-        let rhs = if use_float_ops && rhs_ty.is_int() {
+        let rhs = if integer_only_op {
+            Self::coerce_integer_binop_operand(
+                builder,
+                rhs,
+                rhs_ty,
+                operation_ty,
+                signed_integer_coercion,
+            )
+        } else if use_float_ops && rhs_ty.is_int() {
             // Convert integer to float
             let float_ty = if lhs_ty.is_float() {
                 lhs_ty
@@ -189,13 +284,7 @@ impl CraneliftBackend {
             BinaryOp::Or => builder.ins().bor(lhs, rhs),
             BinaryOp::Xor => builder.ins().bxor(lhs, rhs),
             BinaryOp::Shl => builder.ins().ishl(lhs, rhs),
-            BinaryOp::Shr => {
-                if ty.is_signed() {
-                    builder.ins().sshr(lhs, rhs)
-                } else {
-                    builder.ins().ushr(lhs, rhs)
-                }
-            }
+            BinaryOp::Shr => builder.ins().sshr(lhs, rhs),
             BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
             // Floating point operations
             BinaryOp::FAdd => {
@@ -494,7 +583,10 @@ impl CraneliftBackend {
             rhs_ty
         };
 
-        let operation_ty = if both_operands_are_int && !expected_ty.is_int() {
+        let integer_only_op = Self::is_integer_only_binop(op);
+        let operation_ty = if integer_only_op {
+            Self::integer_binop_operation_ty(lhs_ty, rhs_ty, expected_ty)
+        } else if both_operands_are_int && !expected_ty.is_int() {
             // Expected type is not an integer but operands are - use the larger operand type
             // This happens with unresolved generics that become Ptr(Void) -> I64
             larger_operand_ty
@@ -512,10 +604,20 @@ impl CraneliftBackend {
         };
 
         // Determine if we're doing float operations based on operand types
-        let use_float_ops = lhs_ty.is_float() || rhs_ty.is_float() || operation_ty.is_float();
+        let use_float_ops =
+            !integer_only_op && (lhs_ty.is_float() || rhs_ty.is_float() || operation_ty.is_float());
+        let signed_integer_coercion = Self::integer_binop_uses_signed_coercion(op, ty);
 
         // Coerce operands to the correct type for the operation
-        let lhs = if use_float_ops && lhs_ty.is_int() {
+        let lhs = if integer_only_op {
+            Self::coerce_integer_binop_operand(
+                builder,
+                lhs,
+                lhs_ty,
+                operation_ty,
+                signed_integer_coercion,
+            )
+        } else if use_float_ops && lhs_ty.is_int() {
             // Convert integer to float
             let float_ty = if rhs_ty.is_float() {
                 rhs_ty
@@ -538,7 +640,15 @@ impl CraneliftBackend {
             lhs
         };
 
-        let rhs = if use_float_ops && rhs_ty.is_int() {
+        let rhs = if integer_only_op {
+            Self::coerce_integer_binop_operand(
+                builder,
+                rhs,
+                rhs_ty,
+                operation_ty,
+                signed_integer_coercion,
+            )
+        } else if use_float_ops && rhs_ty.is_int() {
             // Convert integer to float
             let float_ty = if lhs_ty.is_float() {
                 lhs_ty
@@ -630,13 +740,7 @@ impl CraneliftBackend {
             BinaryOp::Or => builder.ins().bor(lhs, rhs),
             BinaryOp::Xor => builder.ins().bxor(lhs, rhs),
             BinaryOp::Shl => builder.ins().ishl(lhs, rhs),
-            BinaryOp::Shr => {
-                if ty.is_signed() {
-                    builder.ins().sshr(lhs, rhs)
-                } else {
-                    builder.ins().ushr(lhs, rhs)
-                }
-            }
+            BinaryOp::Shr => builder.ins().sshr(lhs, rhs),
             BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
             BinaryOp::FAdd => {
                 if let Some((a, b)) = Self::try_extract_fmul(builder, lhs) {

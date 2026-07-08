@@ -79,6 +79,8 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd4i32_insert(builder);
     build_simd4i32_sum(builder);
     build_simd4i32_dot16(builder);
+    build_simd4i32_dot16_i8_i7(builder);
+    build_simd4i32_dot16_i8_u8(builder);
     // SIMD16i8 (i8x16 dot operands) MIR wrappers
     build_simd16i8_splat(builder);
     build_simd16i8_load(builder);
@@ -1256,6 +1258,60 @@ fn build_simd4i32_dot16(builder: &mut MirBuilder) {
     let a = builder.get_param(1);
     let b = builder.get_param(2);
     let result = builder.vector_dot(acc, a, b);
+    builder.ret(Some(result));
+}
+
+/// SIMD4i32_dot16_i8_i7(acc, a, b) -> vec<i32;4>
+/// Same value as signed i8×signed i8 dot when `b` is in i7 range, but lets
+/// x86 LLVM select VPDPBUSD for quantized-weight kernels.
+fn build_simd4i32_dot16_i8_i7(builder: &mut MirBuilder) {
+    let vec_i32 = IrType::vector(IrType::I32, 4);
+    let vec_i8 = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD4i32_dot16_i8_i7")
+        .param("acc", vec_i32.clone())
+        .param("a", vec_i8.clone())
+        .param("b", vec_i8.clone())
+        .returns(vec_i32)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let acc = builder.get_param(0);
+    let a = builder.get_param(1);
+    let b = builder.get_param(2);
+    let result = builder.vector_dot_i8_i7(acc, a, b);
+    builder.ret(Some(result));
+}
+
+/// SIMD4i32_dot16_i8_u8(acc, a, b) -> vec<i32;4>
+/// Signed lhs x unsigned rhs dot. Used by Q8 attention's shifted-query VNNI
+/// path; callers apply the correction term outside the dot.
+fn build_simd4i32_dot16_i8_u8(builder: &mut MirBuilder) {
+    let vec_i32 = IrType::vector(IrType::I32, 4);
+    let vec_i8 = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD4i32_dot16_i8_u8")
+        .param("acc", vec_i32.clone())
+        .param("a", vec_i8.clone())
+        .param("b", vec_i8.clone())
+        .returns(vec_i32)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let acc = builder.get_param(0);
+    let a = builder.get_param(1);
+    let b = builder.get_param(2);
+    let result = builder.vector_dot_i8_u8(acc, a, b);
     builder.ret(Some(result));
 }
 

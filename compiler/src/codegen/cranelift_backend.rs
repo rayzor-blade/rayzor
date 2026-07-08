@@ -4753,7 +4753,14 @@ impl CraneliftBackend {
             // Without FEAT_DotProd it lowers to the equivalent smull/addp chain —
             // same value, just slower. This is the identical tree wasm's
             // relaxed_dot lowers through, so native and wasm agree bit-for-bit.
-            IrInstruction::VectorDot { dest, acc, a, b } => {
+            IrInstruction::VectorDot {
+                dest,
+                acc,
+                a,
+                b,
+                rhs_unsigned,
+                ..
+            } => {
                 let acc_v = *value_map
                     .get(acc)
                     .ok_or_else(|| format!("VectorDot acc {:?} not found", acc))?;
@@ -4779,8 +4786,16 @@ impl CraneliftBackend {
                 // widening chain.
                 let a_lo = builder.ins().swiden_low(a_v);
                 let a_hi = builder.ins().swiden_high(a_v);
-                let b_lo = builder.ins().swiden_low(b_v);
-                let b_hi = builder.ins().swiden_high(b_v);
+                let b_lo = if *rhs_unsigned {
+                    builder.ins().uwiden_low(b_v)
+                } else {
+                    builder.ins().swiden_low(b_v)
+                };
+                let b_hi = if *rhs_unsigned {
+                    builder.ins().uwiden_high(b_v)
+                } else {
+                    builder.ins().swiden_high(b_v)
+                };
                 let lo = builder.ins().imul(a_lo, b_lo);
                 let hi = builder.ins().imul(a_hi, b_hi);
                 let lo_w_lo = builder.ins().swiden_low(lo);

@@ -64,11 +64,27 @@ extern abstract SIMD4i32 {
     /**
      * Fused widening dot-accumulate (the quantized-matmul primitive):
      * `acc + dot(a, b)` where the 16 i8×i8 products of `a` and `b` are summed
-     * in groups of 4 into the 4 i32 lanes. Lowers to a single AArch64 SDOT
-     * (`vdotq_s32`) natively and `i32x4.relaxed_dot_i8x16_i7x16_add_s` on wasm.
-     * For cross-runtime-deterministic results keep `b` in i7 range (−64..63) —
-     * quantized weights (4-bit 0..15, 6-bit 0..63) satisfy this.
+     * in groups of 4 into the 4 i32 lanes. This is signed i8 × signed i8;
+     * use `dotI8I7` only for quantized-weight kernels whose RHS is known to
+     * stay in i7 range.
      */
     @:native("dot")
     public static function dot(acc:SIMD4i32, a:SIMD16i8, b:SIMD16i8):SIMD4i32;
+
+    /**
+     * Quantized-weight dot-accumulate. Same mathematical result as `dot`
+     * when every lane of `b` is in i7 range (0..63 for Q4/Q6 unpacked
+     * weights), but gives x86 backends permission to use unsigned×signed
+     * VNNI instructions. Do not use for Q8×Q8 attention.
+     */
+    @:native("dotI8I7")
+    public static function dotI8I7(acc:SIMD4i32, a:SIMD16i8, b:SIMD16i8):SIMD4i32;
+
+    /**
+     * Signed-lhs × unsigned-rhs dot-accumulate. `b` lanes are interpreted as
+     * u8 (0..255). Used by Q8 flash attention with shifted query bytes and a
+     * separate block-sum correction.
+     */
+    @:native("dotI8U8")
+    public static function dotI8U8(acc:SIMD4i32, a:SIMD16i8, b:SIMD16i8):SIMD4i32;
 }

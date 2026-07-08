@@ -541,6 +541,71 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .filter(|a| *a != 0)
     }
 
+    /// Address of a registered runtime symbol backing an LLVM extern.
+    fn runtime_addr_for_llvm_func(&self, func: FunctionValue<'ctx>) -> Option<u64> {
+        let name = func.get_name().to_string_lossy();
+        if let Some(addr) = self.runtime_addr(name.as_ref()) {
+            return Some(addr);
+        }
+        if let Some((base, suffix)) = name.rsplit_once("__extern_") {
+            if suffix.parse::<u32>().is_ok() {
+                return self.runtime_addr(base);
+            }
+        }
+        None
+    }
+
+    fn coerce_basic_value_to_type(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target_ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if value.get_type() == target_ty {
+            return Ok(value);
+        }
+
+        if value.is_int_value() && target_ty.is_int_type() {
+            let int_val = value.into_int_value();
+            let target_int_ty = target_ty.into_int_type();
+            let src_bits = int_val.get_type().get_bit_width();
+            let dst_bits = target_int_ty.get_bit_width();
+            if src_bits < dst_bits {
+                return self
+                    .builder
+                    .build_int_s_extend(int_val, target_int_ty, name)
+                    .map(|v| v.into())
+                    .map_err(|e| format!("Failed to extend {}: {}", name, e));
+            }
+            if src_bits > dst_bits {
+                return self
+                    .builder
+                    .build_int_truncate(int_val, target_int_ty, name)
+                    .map(|v| v.into())
+                    .map_err(|e| format!("Failed to truncate {}: {}", name, e));
+            }
+            return Ok(int_val.into());
+        }
+
+        if value.is_pointer_value() && target_ty.is_int_type() {
+            return self
+                .builder
+                .build_ptr_to_int(value.into_pointer_value(), target_ty.into_int_type(), name)
+                .map(|v| v.into())
+                .map_err(|e| format!("Failed to ptrtoint {}: {}", name, e));
+        }
+
+        if value.is_int_value() && target_ty.is_pointer_type() {
+            return self
+                .builder
+                .build_int_to_ptr(value.into_int_value(), target_ty.into_pointer_type(), name)
+                .map(|v| v.into())
+                .map_err(|e| format!("Failed to inttoptr {}: {}", name, e));
+        }
+
+        Ok(value)
+    }
+
     /// Build an FMA intrinsic call: fma(a, b, c) = a * b + c
     fn build_fma(
         &self,
@@ -570,7 +635,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
     /// Build `llvm.vector.partial.reduce.add(acc<4xi32>, vec<16xi32>) -> <4xi32>`:
     /// the portable partial-reduction LLVM's AArch64 backend folds to SDOT under
-    /// +dotprod (and x86 to vpdpbusd). Semantics: res[i] = acc[i] + vec[i] +
+    /// +dotprod. Semantics: res[i] = acc[i] + vec[i] +
     /// vec[i+4] + vec[i+8] + vec[i+12] — bit-identical to the manual 4-shuffle +
     /// 3-add strided reduce it replaces. Returns Err if the intrinsic is absent on
     /// this LLVM build so the caller can fall back to the manual form.
@@ -642,13 +707,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// those sites otherwise legalize to a vpmovsxbd/vpmulld/vpaddd widening
     /// chain (~one instruction becomes several per 16 lanes).
     ///
-    /// vpdpbusd is UNSIGNED×SIGNED. VectorDot's second operand `b` is
-    /// contractually non-negative (the caller's Q4 weight nibble is AND-masked
-    /// to 0..15), so it takes the unsigned slot and `a` (signed activation)
-    /// the signed slot; the products, hence the accumulator, are identical to
-    /// the ARM sdot's signed×signed. Gated on the host having AVX-VNNI so the
-    /// JIT never bakes an instruction the running CPU cannot decode.
+    /// vpdpbusd is UNSIGNED×SIGNED. VectorDot's second operand `b` takes the
+    /// unsigned slot and `a` the signed slot. For Q4/Q6 `b` is already
+    /// non-negative; for Q8 flash attention the caller stores `q + 128` and
+    /// applies a block-sum correction. Gated on the host having AVX-VNNI so
+    /// the JIT never bakes an instruction the running CPU cannot decode.
     #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)]
     fn try_build_x86_vpdpbusd(
         &self,
         acc: inkwell::values::VectorValue<'ctx>,
@@ -3109,29 +3174,156 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let target_ty = self.translate_type(ty)?;
 
                 let result = if src_val.is_int_value() {
+                    let src_int = src_val.into_int_value();
                     // If target is pointer type, use inttoptr instead of bitcast
                     // (LLVM bitcast cannot convert integer to ptr)
                     if target_ty.is_pointer_type() {
                         self.builder
                             .build_int_to_ptr(
-                                src_val.into_int_value(),
+                                src_int,
                                 target_ty.into_pointer_type(),
                                 &format!("bitcast_{}", dest.as_u32()),
                             )
                             .map(|v| v.into())
+                            .map_err(|e| e.to_string())
+                    } else if target_ty.is_int_type() {
+                        let target_int_ty = target_ty.into_int_type();
+                        let src_bits = src_int.get_type().get_bit_width();
+                        let target_bits = target_int_ty.get_bit_width();
+                        if src_bits == target_bits {
+                            Ok(src_int.into())
+                        } else if src_bits < target_bits {
+                            self.builder
+                                .build_int_s_extend(
+                                    src_int,
+                                    target_int_ty,
+                                    &format!("bitcast_sext_{}", dest.as_u32()),
+                                )
+                                .map(|v| v.into())
+                                .map_err(|e| e.to_string())
+                        } else {
+                            self.builder
+                                .build_int_truncate(
+                                    src_int,
+                                    target_int_ty,
+                                    &format!("bitcast_trunc_{}", dest.as_u32()),
+                                )
+                                .map(|v| v.into())
+                                .map_err(|e| e.to_string())
+                        }
+                    } else if target_ty.is_float_type() {
+                        let target_float_ty = target_ty.into_float_type();
+                        let target_bits = match ty {
+                            IrType::F32 => Some(32),
+                            IrType::F64 => Some(64),
+                            _ => None,
+                        };
+                        let src_bits = src_int.get_type().get_bit_width() as u64;
+                        match target_bits {
+                            Some(bits) if bits == src_bits => self
+                                .builder
+                                .build_bit_cast(
+                                    src_int,
+                                    target_float_ty,
+                                    &format!("bitcast_{}", dest.as_u32()),
+                                )
+                                .map_err(|e| e.to_string()),
+                            Some(bits) if src_bits < bits => {
+                                let wide_int_ty = self.context.custom_width_int_type(bits as u32);
+                                let wide = self
+                                    .builder
+                                    .build_int_s_extend(
+                                        src_int,
+                                        wide_int_ty,
+                                        &format!("bitcast_float_sext_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| format!("Failed to extend bitcast int: {}", e))?;
+                                self.builder
+                                    .build_bit_cast(
+                                        wide,
+                                        target_float_ty,
+                                        &format!("bitcast_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| e.to_string())
+                            }
+                            Some(bits) => {
+                                let narrow_int_ty = self.context.custom_width_int_type(bits as u32);
+                                let narrow = self
+                                    .builder
+                                    .build_int_truncate(
+                                        src_int,
+                                        narrow_int_ty,
+                                        &format!("bitcast_float_trunc_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| {
+                                        format!("Failed to truncate bitcast int: {}", e)
+                                    })?;
+                                self.builder
+                                    .build_bit_cast(
+                                        narrow,
+                                        target_float_ty,
+                                        &format!("bitcast_{}", dest.as_u32()),
+                                    )
+                                    .map_err(|e| e.to_string())
+                            }
+                            None => Err("Failed to get target float size for bitcast".to_string()),
+                        }
                     } else {
-                        self.builder.build_bit_cast(
-                            src_val.into_int_value(),
-                            target_ty,
-                            &format!("bitcast_{}", dest.as_u32()),
-                        )
+                        Err("Unsupported integer bitcast target type".to_string())
                     }
                 } else if src_val.is_float_value() {
-                    self.builder.build_bit_cast(
-                        src_val.into_float_value(),
-                        target_ty,
-                        &format!("bitcast_{}", dest.as_u32()),
-                    )
+                    let src_float = src_val.into_float_value();
+                    if target_ty.is_int_type() {
+                        let target_int_ty = target_ty.into_int_type();
+                        let src_float_ty = src_float.get_type();
+                        let src_bits = if src_float_ty == self.context.f64_type() {
+                            64
+                        } else if src_float_ty == self.context.f32_type() {
+                            32
+                        } else {
+                            return Err("Failed to get source float size for bitcast".to_string());
+                        };
+                        let raw_int_ty = self.context.custom_width_int_type(src_bits as u32);
+                        let raw = self
+                            .builder
+                            .build_bit_cast(
+                                src_float,
+                                raw_int_ty,
+                                &format!("bitcast_raw_{}", dest.as_u32()),
+                            )
+                            .map_err(|e| format!("Failed to bitcast float: {}", e))?
+                            .into_int_value();
+                        let target_bits = target_int_ty.get_bit_width() as u64;
+                        if src_bits == target_bits {
+                            Ok(raw.into())
+                        } else if src_bits < target_bits {
+                            self.builder
+                                .build_int_z_extend(
+                                    raw,
+                                    target_int_ty,
+                                    &format!("bitcast_zext_{}", dest.as_u32()),
+                                )
+                                .map(|v| v.into())
+                                .map_err(|e| e.to_string())
+                        } else {
+                            self.builder
+                                .build_int_truncate(
+                                    raw,
+                                    target_int_ty,
+                                    &format!("bitcast_trunc_{}", dest.as_u32()),
+                                )
+                                .map(|v| v.into())
+                                .map_err(|e| e.to_string())
+                        }
+                    } else {
+                        self.builder
+                            .build_bit_cast(
+                                src_float,
+                                target_ty,
+                                &format!("bitcast_{}", dest.as_u32()),
+                            )
+                            .map_err(|e| e.to_string())
+                    }
                 } else if src_val.is_pointer_value() {
                     // If target is integer type, use ptrtoint instead of bitcast
                     // (LLVM bitcast cannot convert ptr to integer)
@@ -3143,12 +3335,15 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 &format!("bitcast_{}", dest.as_u32()),
                             )
                             .map(|v| v.into())
+                            .map_err(|e| e.to_string())
                     } else {
-                        self.builder.build_bit_cast(
-                            src_val.into_pointer_value(),
-                            target_ty,
-                            &format!("bitcast_{}", dest.as_u32()),
-                        )
+                        self.builder
+                            .build_bit_cast(
+                                src_val.into_pointer_value(),
+                                target_ty,
+                                &format!("bitcast_{}", dest.as_u32()),
+                            )
+                            .map_err(|e| e.to_string())
                     }
                 } else {
                     return Err("Unsupported bitcast type".to_string());
@@ -4049,6 +4244,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_load(vec_llvm_ty, ptr_val, &format!("vload_{}", dest.as_u32()))
                     .map_err(|e| format!("Failed to build vector load: {}", e))?;
+                if let Some(inst) = loaded.as_instruction_value() {
+                    inst.set_alignment(1)
+                        .map_err(|e| format!("Failed to set vector load alignment: {}", e))?;
+                }
                 self.value_map.insert(*dest, loaded);
             }
 
@@ -4074,9 +4273,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     return Err(format!("VectorStore ptr {:?} has unexpected type", ptr));
                 };
                 let vec_val = self.get_value(*value)?;
-                self.builder
+                let store = self
+                    .builder
                     .build_store(ptr_val, vec_val)
                     .map_err(|e| format!("Failed to build vector store: {}", e))?;
+                store
+                    .set_alignment(1)
+                    .map_err(|e| format!("Failed to set vector store alignment: {}", e))?;
             }
 
             IrInstruction::VectorBinOp {
@@ -4440,7 +4643,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // i32x16, multiply, then sum strided groups of 4 into the i32x4 result
             // (4 shuffles + 3 adds) and add the accumulator. Matches the Cranelift
             // and wasm lowerings bit-for-bit.
-            IrInstruction::VectorDot { dest, acc, a, b } => {
+            IrInstruction::VectorDot {
+                dest,
+                acc,
+                a,
+                b,
+                rhs_i7,
+                rhs_unsigned,
+            } => {
                 use inkwell::types::VectorType;
                 let acc_v = self.get_value(*acc)?.into_vector_value();
                 let a_v = self.get_value(*a)?.into_vector_value();
@@ -4449,16 +4659,22 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 // intrinsic directly (see try_build_neon_sdot for why the
                 // portable form does not survive O3 on non-i8mm cores).
                 #[cfg(target_arch = "aarch64")]
-                if let Some(res) = self.try_build_neon_sdot(acc_v, a_v, b_v) {
-                    self.value_map.insert(*dest, res.into());
-                    return Ok(());
+                if !*rhs_unsigned {
+                    if let Some(res) = self.try_build_neon_sdot(acc_v, a_v, b_v) {
+                        self.value_map.insert(*dest, res.into());
+                        return Ok(());
+                    }
                 }
-                // On AVX-VNNI x86, emit vpdpbusd directly (the backend won't
-                // fold partial.reduce.add to it). Falls through on non-VNNI x86.
+                // SIMD4i32.dot is signed i8 x signed i8. Q4/Q6 kernels call
+                // the specialized dotI8I7 wrapper, which sets rhs_i7 and lets
+                // x86 use VPDPBUSD safely. Q8 flash attention sets rhs_unsigned
+                // and applies its shifted-query correction outside the dot.
                 #[cfg(target_arch = "x86_64")]
-                if let Some(res) = self.try_build_x86_vpdpbusd(acc_v, a_v, b_v) {
-                    self.value_map.insert(*dest, res.into());
-                    return Ok(());
+                if *rhs_i7 || *rhs_unsigned {
+                    if let Some(res) = self.try_build_x86_vpdpbusd(acc_v, a_v, b_v) {
+                        self.value_map.insert(*dest, res.into());
+                        return Ok(());
+                    }
                 }
                 let i32_ty = self.context.i32_type();
                 let i32x16 = i32_ty.vec_type(16);
@@ -4466,19 +4682,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .builder
                     .build_int_s_extend(a_v, i32x16, "dot_a32")
                     .map_err(|e| format!("VectorDot sext a failed: {}", e))?;
-                let b32 = self
-                    .builder
-                    .build_int_s_extend(b_v, i32x16, "dot_b32")
-                    .map_err(|e| format!("VectorDot sext b failed: {}", e))?;
+                let b32 = if *rhs_unsigned {
+                    self.builder
+                        .build_int_z_extend(b_v, i32x16, "dot_b32u")
+                        .map_err(|e| format!("VectorDot zext b failed: {}", e))?
+                } else {
+                    self.builder
+                        .build_int_s_extend(b_v, i32x16, "dot_b32")
+                        .map_err(|e| format!("VectorDot sext b failed: {}", e))?
+                };
                 let mul = self
                     .builder
                     .build_int_mul(a32, b32, "dot_mul")
                     .map_err(|e| format!("VectorDot mul failed: {}", e))?;
-                // Prefer the portable llvm.vector.partial.reduce.add intrinsic, which
-                // LLVM's AArch64 backend folds to SDOT (x86 -> vpdpbusd). The manual
-                // strided shuffle-reduce below is the bit-identical fallback for LLVM
-                // builds lacking the intrinsic — but it does NOT fold to SDOT, so the
-                // intrinsic path is what closes the dot-throughput gap vs Cranelift.
+                // Prefer the portable llvm.vector.partial.reduce.add intrinsic,
+                // which LLVM's AArch64 backend folds to SDOT. The manual strided
+                // shuffle-reduce below is the bit-identical fallback for LLVM
+                // builds lacking the intrinsic, but it does not fold to SDOT.
                 let res = match self.build_partial_reduce_add(acc_v, mul, "dot_pr") {
                     Ok(v) => v,
                     Err(_e) => {
@@ -4898,7 +5118,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 li.set_alignment(4).map_err(|e| e.to_string())?;
                 self.value_map.insert(*dest, loaded);
             }
-            IrInstruction::AtomicStore { ptr, value, .. } => {
+            IrInstruction::AtomicStore { ptr, value, ty } => {
                 let pv = self.get_value(*ptr)?;
                 let p = if pv.is_pointer_value() {
                     pv.into_pointer_value()
@@ -4911,7 +5131,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         )
                         .map_err(|e| e.to_string())?
                 };
-                let v = self.get_value(*value)?;
+                let store_ty = self.translate_type(ty)?;
+                let v =
+                    self.coerce_basic_value_to_type(self.get_value(*value)?, store_ty, "astore_v")?;
                 let st = self.builder.build_store(p, v).map_err(|e| e.to_string())?;
                 st.set_atomic_ordering(inkwell::AtomicOrdering::SequentiallyConsistent)
                     .map_err(|e| e.to_string())?;
@@ -4922,7 +5144,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 op,
                 ptr,
                 value,
-                ..
+                ty,
             } => {
                 let pv = self.get_value(*ptr)?;
                 let p = if pv.is_pointer_value() {
@@ -4936,7 +5158,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         )
                         .map_err(|e| e.to_string())?
                 };
-                let v = self.get_value(*value)?.into_int_value();
+                let rmw_ty = self.translate_type(ty)?;
+                let v =
+                    self.coerce_basic_value_to_type(self.get_value(*value)?, rmw_ty, "armw_v")?;
+                let v = v.into_int_value();
                 let binop = match op {
                     crate::ir::AtomicRmwOp::Add => inkwell::AtomicRMWBinOp::Add,
                     crate::ir::AtomicRmwOp::Sub => inkwell::AtomicRMWBinOp::Sub,
@@ -4956,7 +5181,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 ptr,
                 expected,
                 replacement,
-                ..
+                ty,
             } => {
                 let pv = self.get_value(*ptr)?;
                 let p = if pv.is_pointer_value() {
@@ -4970,8 +5195,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         )
                         .map_err(|e| e.to_string())?
                 };
-                let e = self.get_value(*expected)?.into_int_value();
-                let x = self.get_value(*replacement)?.into_int_value();
+                let cas_ty = self.translate_type(ty)?;
+                let e = self
+                    .coerce_basic_value_to_type(self.get_value(*expected)?, cas_ty, "acas_e")?
+                    .into_int_value();
+                let x = self
+                    .coerce_basic_value_to_type(self.get_value(*replacement)?, cas_ty, "acas_x")?
+                    .into_int_value();
                 let pair = self
                     .builder
                     .build_cmpxchg(
@@ -5344,11 +5574,33 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     }
                 };
 
-                // Call haxe_string_literal(ptr, len) -> *mut HaxeString
-                let result = self
-                    .builder
-                    .build_call(string_literal_fn, &[str_ptr.into(), str_len.into()], "")
-                    .map_err(|e| format!("Failed to call haxe_string_literal: {}", e))?;
+                // Call haxe_string_literal(ptr, len) -> *mut HaxeString.
+                // Linux MCJIT can leave ordinary external relocations as null
+                // in generated startup hooks, so materialize the registered
+                // runtime address when it is available.
+                let result = if let Some(addr) = self.runtime_addr("haxe_string_literal") {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let fp = self
+                        .builder
+                        .build_int_to_ptr(
+                            self.context.i64_type().const_int(addr, false),
+                            ptr_type,
+                            "haxe_string_literal_fp",
+                        )
+                        .map_err(|e| format!("inttoptr haxe_string_literal: {}", e))?;
+                    self.builder
+                        .build_indirect_call(
+                            string_literal_fn.get_type(),
+                            fp,
+                            &[str_ptr.into(), str_len.into()],
+                            "",
+                        )
+                        .map_err(|e| format!("Failed to call haxe_string_literal: {}", e))?
+                } else {
+                    self.builder
+                        .build_call(string_literal_fn, &[str_ptr.into(), str_len.into()], "")
+                        .map_err(|e| format!("Failed to call haxe_string_literal: {}", e))?
+                };
 
                 let haxe_str_ptr = result
                     .try_as_basic_value()
@@ -6630,10 +6882,30 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 llvm_func.count_basic_blocks(),
             );
         }
-        let call_site = self
-            .builder
-            .build_call(*llvm_func, &arg_values, "")
-            .map_err(|e| format!("Failed to build call: {}", e))?;
+        let call_site = if self.extern_function_ids.contains(&func_id) {
+            if let Some(addr) = self.runtime_addr_for_llvm_func(*llvm_func) {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let fp = self
+                    .builder
+                    .build_int_to_ptr(
+                        self.context.i64_type().const_int(addr, false),
+                        ptr_type,
+                        "runtime_call_fp",
+                    )
+                    .map_err(|e| format!("inttoptr runtime call: {}", e))?;
+                self.builder
+                    .build_indirect_call(llvm_func.get_type(), fp, &arg_values, "")
+                    .map_err(|e| format!("Failed to build runtime indirect call: {}", e))?
+            } else {
+                self.builder
+                    .build_call(*llvm_func, &arg_values, "")
+                    .map_err(|e| format!("Failed to build call: {}", e))?
+            }
+        } else {
+            self.builder
+                .build_call(*llvm_func, &arg_values, "")
+                .map_err(|e| format!("Failed to build call: {}", e))?
+        };
 
         // For sret functions, the return value is in the sret slot, not the call result
         if let Some(sret_ptr) = sret_slot {
