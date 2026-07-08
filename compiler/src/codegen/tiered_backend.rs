@@ -1693,6 +1693,8 @@ impl TieredBackend {
 
     fn run_startup_hooks_native(&self, modules: &[IrModule]) -> Result<(), String> {
         let function_pointers = self.function_pointers.read().unwrap();
+        let trace_startup = std::env::var_os("RAYZOR_LLVM_TRACE_STARTUP").is_some()
+            || std::env::var_os("RAYZOR_TIER_TRACE_STARTUP").is_some();
 
         for module in modules {
             // Every contributing file leaves its own `__vtable_init__` /
@@ -1719,10 +1721,31 @@ impl TieredBackend {
                     let Some(&func_ptr) = function_pointers.get(&init_id) else {
                         continue;
                     };
+                    if func_ptr == 0 {
+                        if trace_startup {
+                            eprintln!(
+                                "[tier-startup] skipping zero pointer for {} {:?} in {}",
+                                init_name, init_id, module.name
+                            );
+                        }
+                        continue;
+                    }
+                    if trace_startup {
+                        eprintln!(
+                            "[tier-startup] calling {} {:?} in {} @ 0x{:x}",
+                            init_name, init_id, module.name, func_ptr
+                        );
+                    }
                     unsafe {
                         let init_fn: extern "C" fn(i64) =
                             std::mem::transmute(func_ptr as *const u8);
                         init_fn(0);
+                    }
+                    if trace_startup {
+                        eprintln!(
+                            "[tier-startup] finished {} {:?} in {}",
+                            init_name, init_id, module.name
+                        );
                     }
                 }
             }
@@ -3365,15 +3388,10 @@ impl TieredBackend {
                     && !value.eq_ignore_ascii_case("false")
                     && !value.eq_ignore_ascii_case("off")
             }
-            // Default to AOT on Linux. MCJIT's RuntimeDyld is unstable on
-            // x86_64 Linux: it corrupts LLVM state during the startup-hook
-            // rerun (a dangling FunctionValue crashes get_function_pointer_by_id
-            // in libLLVM), and it can't resolve the malloc/free libcalls the
-            // closure-box lowering emits. The AOT-to-dylib path (object file ->
-            // system linker -> dlopen) sidesteps RuntimeDyld entirely and is the
-            // working LLVM tier there. aarch64/macOS MCJIT is stable and stays
-            // the default; `RAYZOR_LLVM_TIER_AOT=0` forces MCJIT everywhere.
-            Err(_) => cfg!(target_os = "linux"),
+            // Keep AOT opt-in. The normal LLVM tier should exercise MCJIT so
+            // beadie/tier promotion failures are visible instead of being
+            // hidden behind a system linker hop.
+            Err(_) => false,
         }
     }
 

@@ -453,17 +453,18 @@ pub enum IrInstruction {
 
     /// Fused widening dot-product accumulate: `dest = acc + dot(a, b)`, where
     /// `a`/`b` are 16-lane i8 vectors and the 16 i8×i8 products are summed in
-    /// groups of 4 into the 4 i32 lanes of `dest` (and added to `acc`). This is
-    /// the quantized-matmul primitive: it lowers to a single AArch64 SDOT
-    /// (`vdotq_s32`) on native and to `i32x4.relaxed_dot_i8x16_i7x16_add_s` on
-    /// wasm (which wasmtime 47 lowers to SDOT). For cross-runtime-deterministic
-    /// results the `b` operand must stay in i7 range (−64..63) — quant weights
-    /// (4-bit nibbles 0..15, 6-bit 0..63) satisfy this.
+    /// groups of 4 into the 4 i32 lanes of `dest` (and added to `acc`). Public
+    /// SIMD4i32.dot uses signed i8 × signed i8 semantics. `rhs_i7=true`
+    /// promises `b` is in i7 range (quantized-weight kernels), allowing
+    /// relaxed/i7 dot instructions. `rhs_unsigned=true` treats `b` as u8 and
+    /// is used by Q8 attention's shifted-query correction path.
     VectorDot {
         dest: IrId,
         acc: IrId,
         a: IrId,
         b: IrId,
+        rhs_i7: bool,
+        rhs_unsigned: bool,
     },
 
     // === Atomic memory operations (sequentially consistent) ===

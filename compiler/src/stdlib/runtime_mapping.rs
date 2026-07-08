@@ -3472,6 +3472,16 @@ impl StdlibMapping {
             // acc + Σ a·b over 16 i8 lanes grouped by 4 → i32x4). Lowers to SDOT.
             map_method!(static "rayzor_SIMD4i32", "dot" => "SIMD4i32_dot16", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
+            // SIMD4i32.dotI8I7(acc, a, b): same result as dot when b is in
+            // i7 range. Q4/Q6 kernels use this to unlock x86 VPDPBUSD without
+            // weakening the public signed*signed dot contract.
+            map_method!(static "rayzor_SIMD4i32", "dotI8I7" => "SIMD4i32_dot16_i8_i7", params: 3, mir_wrapper,
+                types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
+            // SIMD4i32.dotI8U8(acc, a, b): signed lhs x unsigned rhs.
+            // Q8 flash attention uses shifted query bytes plus a correction
+            // term to recover signed*signed math while still unlocking VNNI.
+            map_method!(static "rayzor_SIMD4i32", "dotI8U8" => "SIMD4i32_dot16_i8_u8", params: 3, mir_wrapper,
+                types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
         ];
 
         self.register_from_tuples(mappings);

@@ -5024,14 +5024,43 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // Fused widening dot-accumulate: dest = acc + dot(a_i8x16, b_i8x16).
-            // i32x4.relaxed_dot_i8x16_i7x16_add_s(a, b, acc) — one instruction
-            // that wasmtime 47 lowers to AArch64 SDOT. Exact (= the native
-            // result) when b stays in i7 range, which quant weights satisfy.
-            IrInstruction::VectorDot { dest, acc, a, b } => {
-                self.get_reg(f, *a);
-                self.get_reg(f, *b);
-                self.get_reg(f, *acc);
-                f.instruction(&Instruction::I32x4RelaxedDotI8x16I7x16AddS);
+            // The relaxed SIMD dot is only exact under the `rhs_i7` contract used
+            // by Q4/Q6 kernels. Public SIMD4i32.dot is signed i8 x signed i8, so
+            // fall back to scalar lane extraction there.
+            IrInstruction::VectorDot {
+                dest,
+                acc,
+                a,
+                b,
+                rhs_i7,
+                rhs_unsigned,
+            } => {
+                if *rhs_i7 {
+                    self.get_reg(f, *a);
+                    self.get_reg(f, *b);
+                    self.get_reg(f, *acc);
+                    f.instruction(&Instruction::I32x4RelaxedDotI8x16I7x16AddS);
+                } else {
+                    self.get_reg(f, *acc);
+                    for lane in 0..4u8 {
+                        self.get_reg(f, *acc);
+                        f.instruction(&Instruction::I32x4ExtractLane(lane));
+                        for sub in 0..4u8 {
+                            let byte_lane = lane * 4 + sub;
+                            self.get_reg(f, *a);
+                            f.instruction(&Instruction::I8x16ExtractLaneS(byte_lane));
+                            self.get_reg(f, *b);
+                            if *rhs_unsigned {
+                                f.instruction(&Instruction::I8x16ExtractLaneU(byte_lane));
+                            } else {
+                                f.instruction(&Instruction::I8x16ExtractLaneS(byte_lane));
+                            }
+                            f.instruction(&Instruction::I32Mul);
+                            f.instruction(&Instruction::I32Add);
+                        }
+                        f.instruction(&Instruction::I32x4ReplaceLane(lane));
+                    }
+                }
                 self.set_reg(f, *dest);
             }
 

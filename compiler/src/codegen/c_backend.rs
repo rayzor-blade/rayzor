@@ -1419,12 +1419,26 @@ impl CBackend {
 
             // Fused widening dot-accumulate: dest = acc + dot(a_i8x16, b_i8x16),
             // result lane j = acc[j] + Σ_{i=0..3} a[4j+i]·b[4j+i].
-            IrInstruction::VectorDot { dest, acc, a, b } => {
+            IrInstruction::VectorDot {
+                dest,
+                acc,
+                a,
+                b,
+                rhs_unsigned,
+                ..
+            } => {
                 self.emit_line(&format!("r{} = r{};", dest.as_u32(), acc.as_u32()));
-                self.emit_line(&format!(
-                    "{{ int *_ac=(int*)&r{}; signed char *_a=(signed char*)&r{}, *_b=(signed char*)&r{}; for (int _k=0;_k<16;_k++) _ac[_k>>2] += (int)_a[_k]*(int)_b[_k]; }}",
-                    dest.as_u32(), a.as_u32(), b.as_u32()
-                ));
+                if *rhs_unsigned {
+                    self.emit_line(&format!(
+                        "{{ int *_ac=(int*)&r{}; signed char *_a=(signed char*)&r{}; unsigned char *_b=(unsigned char*)&r{}; for (int _k=0;_k<16;_k++) _ac[_k>>2] += (int)_a[_k]*(int)_b[_k]; }}",
+                        dest.as_u32(), a.as_u32(), b.as_u32()
+                    ));
+                } else {
+                    self.emit_line(&format!(
+                        "{{ int *_ac=(int*)&r{}; signed char *_a=(signed char*)&r{}, *_b=(signed char*)&r{}; for (int _k=0;_k<16;_k++) _ac[_k>>2] += (int)_a[_k]*(int)_b[_k]; }}",
+                        dest.as_u32(), a.as_u32(), b.as_u32()
+                    ));
+                }
             }
 
             IrInstruction::VectorUnaryOp {

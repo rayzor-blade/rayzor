@@ -650,11 +650,43 @@ impl MirBuilder {
     }
 
     /// Fused widening dot-accumulate: `dest = acc + dot(a, b)` where a/b are
-    /// 16-lane i8 vectors and the result is an i32x4 (4 i32 lanes, each the sum
-    /// of 4 i8×i8 products). Lowers to AArch64 SDOT / wasm relaxed_dot.
+    /// 16-lane signed i8 vectors and the result is an i32x4 (4 i32 lanes, each
+    /// the sum of 4 i8×i8 products).
     pub fn vector_dot(&mut self, acc: IrId, a: IrId, b: IrId) -> IrId {
+        self.vector_dot_with_rhs_mode(acc, a, b, false, false)
+    }
+
+    /// Same result as `vector_dot`, but promises the RHS lanes are non-negative
+    /// and fit in i7 range (0..63 for the quantized-weight kernels). Backends
+    /// may use unsigned x signed dot instructions that are only equivalent under
+    /// that contract.
+    pub fn vector_dot_i8_i7(&mut self, acc: IrId, a: IrId, b: IrId) -> IrId {
+        self.vector_dot_with_rhs_mode(acc, a, b, true, false)
+    }
+
+    /// Signed lhs x unsigned rhs dot. Used by Q8 attention with shifted query
+    /// bytes: dot(k, q + 128) - 128 * sum(k) == dot(k, q).
+    pub fn vector_dot_i8_u8(&mut self, acc: IrId, a: IrId, b: IrId) -> IrId {
+        self.vector_dot_with_rhs_mode(acc, a, b, false, true)
+    }
+
+    fn vector_dot_with_rhs_mode(
+        &mut self,
+        acc: IrId,
+        a: IrId,
+        b: IrId,
+        rhs_i7: bool,
+        rhs_unsigned: bool,
+    ) -> IrId {
         let dest = self.alloc_reg_typed(IrType::vector(IrType::I32, 4));
-        self.insert_inst(IrInstruction::VectorDot { dest, acc, a, b });
+        self.insert_inst(IrInstruction::VectorDot {
+            dest,
+            acc,
+            a,
+            b,
+            rhs_i7,
+            rhs_unsigned,
+        });
         dest
     }
 

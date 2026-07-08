@@ -28,11 +28,20 @@ class Main {
         // Different i7-range values (deterministic across runtimes).
         var sum3 = SIMD4i32.dot(SIMD4i32.splat(0), SIMD16i8.splat(5), SIMD16i8.splat(7)).sum(); // 4×4×35 = 560
 
-        var ok = sum1 == 96 && lane0 == 24 && sum2 == 192 && sum3 == 560;
+        // Signedness regression: x86 VPDPBUSD is unsigned*signed, but the
+        // public SIMD4i32.dot contract is signed*signed. Q8 flash attention
+        // depends on negative lanes in both operands staying signed.
+        var sum4 = SIMD4i32.dot(SIMD4i32.splat(0), SIMD16i8.splat(2), SIMD16i8.splat(-3)).sum(); // -96
+        var sum5 = SIMD4i32.dot(SIMD4i32.splat(0), SIMD16i8.splat(-2), SIMD16i8.splat(3)).sum(); // -96
+
+        var ok = sum1 == 96 && lane0 == 24 && sum2 == 192 && sum3 == 560
+            && sum4 == -96 && sum5 == -96;
         if (ok) {
-            Sys.println("PASS simd-dot sum1=" + sum1 + " sum2=" + sum2 + " sum3=" + sum3);
+            Sys.println("PASS simd-dot sum1=" + sum1 + " sum2=" + sum2
+                + " sum3=" + sum3 + " sum4=" + sum4 + " sum5=" + sum5);
         } else {
-            Sys.println("FAIL sum1=" + sum1 + " lane0=" + lane0 + " sum2=" + sum2 + " sum3=" + sum3);
+            Sys.println("FAIL sum1=" + sum1 + " lane0=" + lane0 + " sum2=" + sum2
+                + " sum3=" + sum3 + " sum4=" + sum4 + " sum5=" + sum5);
         }
     }
 }
