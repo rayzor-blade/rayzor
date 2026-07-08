@@ -61,6 +61,12 @@ class SpinPool {
     var _fn:(Int, Int, Int) -> Void;
     var _threads:Array<Thread<Int>>;
     var _alive:Bool;
+    var _scratch0:Null<Bytes>;
+    var _scratch1:Null<Bytes>;
+    var _scratch2:Null<Bytes>;
+    var _scratch0Cap:Int;
+    var _scratch1Cap:Int;
+    var _scratch2Cap:Int;
 
     /** Cell layout, one 128-byte line per cell (false-sharing stride):
         cell 0 = pending, 1 = shutdown, 2 = cursor, 3 = rows, 4 = chunk,
@@ -106,6 +112,12 @@ class SpinPool {
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
+        _scratch0 = null;
+        _scratch1 = null;
+        _scratch2 = null;
+        _scratch0Cap = 0;
+        _scratch1Cap = 0;
+        _scratch2Cap = 0;
         spinBudget = 0; // resolved lazily on first dispatch (env reads in a
                         // constructor mis-resolve; see bugs_sys_getenv_in_ctor)
         relaxHint = -1; // resolved lazily alongside spinBudget
@@ -286,6 +298,54 @@ class SpinPool {
             + " dispatches=" + dispatches().load();
     }
 
+    /** Reusable per-pool scratch for hot kernels with sequential dispatches.
+        The buffer may grow but never shrinks until shutdown, which avoids
+        malloc/free churn in per-token quant matmuls and keeps Linux glibc
+        arenas from ballooning on worker-heavy runs. */
+    public function scratchBytes(slot:Int, size:Int):Bytes {
+        if (size < 0) size = 0;
+        if (slot == 0) {
+            if (_scratch0 == null || _scratch0Cap < size) {
+                if (_scratch0 != null) _scratch0.free();
+                _scratch0 = Bytes.alloc(size);
+                _scratch0Cap = size;
+            }
+            return cast _scratch0;
+        }
+        if (slot == 1) {
+            if (_scratch1 == null || _scratch1Cap < size) {
+                if (_scratch1 != null) _scratch1.free();
+                _scratch1 = Bytes.alloc(size);
+                _scratch1Cap = size;
+            }
+            return cast _scratch1;
+        }
+        if (_scratch2 == null || _scratch2Cap < size) {
+            if (_scratch2 != null) _scratch2.free();
+            _scratch2 = Bytes.alloc(size);
+            _scratch2Cap = size;
+        }
+        return cast _scratch2;
+    }
+
+    function freeScratch():Void {
+        if (_scratch0 != null) {
+            _scratch0.free();
+            _scratch0 = null;
+            _scratch0Cap = 0;
+        }
+        if (_scratch1 != null) {
+            _scratch1.free();
+            _scratch1 = null;
+            _scratch1Cap = 0;
+        }
+        if (_scratch2 != null) {
+            _scratch2.free();
+            _scratch2 = null;
+            _scratch2Cap = 0;
+        }
+    }
+
     /** Stop and join all workers, then release the control block.
         Mandatory before process exit. Idempotent. */
     public function shutdown():Void {
@@ -298,6 +358,7 @@ class SpinPool {
         }
         for (t in _threads) t.join();
         _threads = [];
+        freeScratch();
         _ctl.free();
     }
 }

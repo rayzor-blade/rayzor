@@ -1,10 +1,12 @@
 ============================================
   Rayzor Haxe Test Results
-  Sun Jun 21 11:05:05 BST 2026
+  Mon Jul  6 16:42:13 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
+[33mWarning:[0m [W0110] type of array literal can not be inferred at assignment, this would fall back to Array<Dynamic>; annotate `var a:Array<T> = []` for deterministic behavior at runtime
+
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -348,6 +350,10 @@ true
 false
 done
 
+--- test_balancedtree_crossmodule_mono [PASS] ---
+Running compiler/tests/haxe/test_balancedtree_crossmodule_mono.hx [debug] [preset: Application]...
+PASS
+
 --- test_bind [PASS] ---
 Running compiler/tests/haxe/test_bind.hx [debug] [preset: Application]...
 8
@@ -372,6 +378,10 @@ Expected: 65536
 5 ^ 3 = 6
 10 % 3 = 1
 
+--- test_bytes_aligned_i32 [PASS] ---
+Running compiler/tests/haxe/test_bytes_aligned_i32.hx [debug] [preset: Application]...
+PASS bytes-aligned-i32 a=287454020 c=-1234567 d=1432778632 byte4=121 byte8=136
+
 --- test_class_instance_reflection [PASS] ---
 Running compiler/tests/haxe/test_class_instance_reflection.hx [debug] [preset: Application]...
 Dog
@@ -387,6 +397,11 @@ TClass(Dog)
 true
 false
 Animal
+
+--- test_closure_field_call [PASS] ---
+Running compiler/tests/haxe/test_closure_field_call.hx [debug] [preset: Application]...
+[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(4)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(22)), func_ptr: IrId(21), args: [], signature: Function { params: [Void], return_type: I32, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
+test_closure_field_call OK
 
 --- test_closures [PASS] ---
 Running compiler/tests/haxe/test_closures.hx [debug] [preset: Application]...
@@ -575,6 +590,10 @@ Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application
 10
 done
 
+--- test_empty_array_infer [PASS] ---
+Running compiler/tests/haxe/test_empty_array_infer.hx [debug] [preset: Application]...
+PASS empty-array-infer f0=0.0078125 g0=0.25 i=7 c0=0.0078125 q0=0.125 getFlat=0.5 str=a pt=7
+
 --- test_enum_abstract [PASS] ---
 Running compiler/tests/haxe/test_enum_abstract.hx [debug] [preset: Application]...
 0
@@ -651,13 +670,16 @@ Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
 hello world
 done
 
---- test_exception [CRASH(132/SIGILL)] ---
+--- test_exception [PASS] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
 specific
 42
 caught dynamic
+has stack
+has callstack
+done
 
 --- test_exception_method_parity [PASS] ---
 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
@@ -696,6 +718,10 @@ Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Applicati
  [38;5;240m   │[0m 
  [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
 [38;5;246m────╯[0m
+[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
+
+[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
+
 red
 red
 red
@@ -721,11 +747,11 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-world
-hello
-20
-10
-30
+1
+2
+300
+100
+200
 done
 
 --- test_forward [PASS] ---
@@ -750,6 +776,10 @@ Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
 30
 caught
 done
+
+--- test_generic_ctor_untyped_selfref [PASS] ---
+Running compiler/tests/haxe/test_generic_ctor_untyped_selfref.hx [debug] [preset: Application]...
+FAIL h_leaf=1 h_parent=2
 
 --- test_generic_tree [PASS] ---
 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
@@ -816,7 +846,7 @@ Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]
  [38;5;240m   │[0m                   [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
 [38;5;246m────╯[0m
 draw:box
-null
+fail2
 click:submit
 button-draw:submit
 done
@@ -933,6 +963,15 @@ false
 222
 333
 
+--- test_map_value_iteration [PASS] ---
+Running compiler/tests/haxe/test_map_value_iteration.hx [debug] [preset: Application]...
+warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1347: expected expression, found 'is'; falling back to legacy parser
+warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1420: expected field declaration, found 'for'; falling back to legacy parser
+warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1575: expected field declaration, found 'kv'; falling back to legacy parser
+warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1644: expected field declaration, found 'for'; falling back to legacy parser
+warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1762: expected field declaration, found 'Sys'; falling back to legacy parser
+PASS
+
 --- test_method_reference_lvalue [PASS] ---
 Running compiler/tests/haxe/test_method_reference_lvalue.hx [debug] [preset: Application]...
 Animal: Rex
@@ -959,6 +998,10 @@ Test 2: Object array with null
 Array2 created, length: 0
 After null set, length: 6
 All tests passed!
+
+--- test_null_receiver_method [PASS] ---
+Running compiler/tests/haxe/test_null_receiver_method.hx [debug] [preset: Application]...
+PASS null-receiver-method a=12 b=12
 
 --- test_null_safety [PASS] ---
 Running compiler/tests/haxe/test_null_safety.hx [debug] [preset: Application]...
@@ -1038,6 +1081,35 @@ Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
 hello
 done
 
+--- test_q4km_dot [PASS] ---
+Running compiler/tests/haxe/test_q4km_dot.hx [debug] [preset: Application]...
+PASS q4km-dot case1=75.84 (~75.84) case2=-14.1860595703125 (~-14.186)
+
+--- test_q4km_qmatmul [PASS] ---
+Running compiler/tests/haxe/test_q4km_qmatmul.hx [debug] [preset: Application]...
+PASS q4km-qmatmul rows=8 K=512 maxRelErr=0.00000007220598597307485 maxAbsErr=0.0006035890164639568
+
+--- test_rayzor_spec [PASS] ---
+Running compiler/tests/haxe/test_rayzor_spec.hx [debug] [preset: Application]...
+[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(2)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(160)), func_ptr: IrId(3), args: [], signature: Function { params: [Void], return_type: Void, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
+  ok   Math > adds
+  ok   Math > greater
+  ok   Math > bool true
+  ok   Math > bool false
+  ok   Math > nested > equal floats
+  ok   Strings > equal
+  ok   Strings > contains
+  ok   Strings > differ
+
+8 passing, 0 failing
+  FAIL Detect > mismatch -- expected 5 but got 4
+
+0 passing, 1 failing
+  ok   TierJit > jit-gated runs
+
+1 passing, 0 failing
+test_rayzor_spec OK
+
 --- test_recursive_class [PASS] ---
 Running compiler/tests/haxe/test_recursive_class.hx [debug] [preset: Application]...
 1
@@ -1102,6 +1174,8 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
+error[IMPORT]: imported module `Resource` failed to compile (1 error(s)); calls into it will trap at runtime. First errors:
+    Cannot find name '__resources__' (78:21)
 42
 42
 
@@ -1113,6 +1187,18 @@ Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
 42
 done
 
+--- test_simd16i8_bitops [PASS] ---
+Running compiler/tests/haxe/test_simd16i8_bitops.hx [debug] [preset: Application]...
+PASS simd16i8-bitops and=112 ushr=160 shr=-96 shl=1792 or=112 xor=96
+
+--- test_simd16i8_get [PASS] ---
+Running compiler/tests/haxe/test_simd16i8_get.hx [debug] [preset: Application]...
+PASS simd16i8-get l0=7 l1=23 l5=87 l15=247 l8signed=-121
+
+--- test_simd16i8_load_bytes [PASS] ---
+Running compiler/tests/haxe/test_simd16i8_load_bytes.hx [debug] [preset: Application]...
+PASS simd16i8-load-bytes sumA=136 ordered=1360
+
 --- test_simd4f_get_lane [PASS] ---
 Running compiler/tests/haxe/test_simd4f_get_lane.hx [debug] [preset: Application]...
 PASS simd4f-get-lane lanes=10,20,30,40 loopSum=100
@@ -1120,6 +1206,10 @@ PASS simd4f-get-lane lanes=10,20,30,40 loopSum=100
 --- test_simd4f_loop_phi [PASS] ---
 Running compiler/tests/haxe/test_simd4f_loop_phi.hx [debug] [preset: Application]...
 PASS simd4f-loop-phi add=800 mul=64
+
+--- test_simd4f_methods [PASS] ---
+Running compiler/tests/haxe/test_simd4f_methods.hx [debug] [preset: Application]...
+test_simd4f_methods OK
 
 --- test_simd4f_values [PASS] ---
 Running compiler/tests/haxe/test_simd4f_values.hx [debug] [preset: Application]...
@@ -1237,6 +1327,10 @@ Running compiler/tests/haxe/test_tensor_device_tag.hx [debug] [preset: Applicati
 0
 -1
 
+--- test_tensor_uninit_full_overwrite [PASS] ---
+Running compiler/tests/haxe/test_tensor_uninit_full_overwrite.hx [debug] [preset: Application]...
+PASS tensor-uninit-full-overwrite sum=21
+
 --- test_thread_spawn_function_value [PASS] ---
 Running compiler/tests/haxe/test_thread_spawn_function_value.hx [debug] [preset: Application]...
 
@@ -1247,6 +1341,10 @@ before
 done
 no throw
 ok
+
+--- test_trycatch_merge_phi [PASS] ---
+Running compiler/tests/haxe/test_trycatch_merge_phi.hx [debug] [preset: Application]...
+test_trycatch_merge_phi OK
 
 --- test_type_api [PASS] ---
 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
@@ -1290,6 +1388,10 @@ Running compiler/tests/haxe/test_typedef.hx [debug] [preset: Application]...
 Alice
 25
 30
+
+--- test_typeof_dynamic [PASS] ---
+Running compiler/tests/haxe/test_typeof_dynamic.hx [debug] [preset: Application]...
+test_typeof_dynamic OK
 
 --- test_typeof_output_parity [PASS] ---
 Running compiler/tests/haxe/test_typeof_output_parity.hx [debug] [preset: Application]...
@@ -1358,8 +1460,8 @@ Done
 
 
 =========================================
-  TOTAL:        142
-  PASSED:       141
+  TOTAL:        159
+  PASSED:       159
   FAILED:       0
-  CRASHED:      1
+  CRASHED:      0
 =========================================

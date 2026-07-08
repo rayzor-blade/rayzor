@@ -126,7 +126,7 @@ class Q4Matmul {
             var wRaw = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + half * 16)));
             var wNib = isHi ? SIMD16i8.ushr(wRaw, 4) : SIMD16i8.and(wRaw, SIMD16i8.splat(0x0F));
             var aVec = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + half * 16)));
-            acc = SIMD4i32.dot(acc, aVec, wNib);
+            acc = SIMD4i32.dotI8I7(acc, aVec, wNib);
         }
         return acc;
     }
@@ -224,8 +224,8 @@ class Q4Matmul {
                 var xSpan = aBlk + outOff + j * 32;
                 var xLo = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan)));
                 var xHi = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan + 16)));
-                var sdotLo = SIMD4i32.dot(SIMD4i32.splat(0), xLo, qLo).sum();
-                var sdotHi = SIMD4i32.dot(SIMD4i32.splat(0), xHi, qHi).sum();
+                var sdotLo = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xLo, qLo).sum();
+                var sdotHi = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xHi, qHi).sum();
                 var dScLo:Float = d * scVec.get(scOff + 2 * j);
                 var dScHi:Float = d * scVec.get(scOff + 2 * j + 1);
                 sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
@@ -245,8 +245,8 @@ class Q4Matmul {
         var n = CpuTopology.perfCoreCount();
         var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
         if (env != null) {
-            var v = Std.parseInt(env);
-            if (v != null && v > 0) n = v;
+            var v:Int = Std.int(Std.parseFloat(env));
+            if (v > 0) n = v;
         }
         if (n < 1) n = 1;
         return n;
@@ -268,9 +268,10 @@ class Q4Matmul {
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
 
-        var qs = Bytes.alloc(batch * K);
-        var bsums = Bytes.alloc(batch * bpr * 16 * 4);
-        var dScales = Bytes.alloc(batch * bpr * 4);
+        var pooled = sp != null;
+        var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
+        var bsums = pooled ? sp.scratchBytes(1, batch * bpr * 16 * 4) : Bytes.alloc(batch * bpr * 16 * 4);
+        var dScales = pooled ? sp.scratchBytes(2, batch * bpr * 4) : Bytes.alloc(batch * bpr * 4);
         var aBase = qs.address();
         var dBase = dScales.address();
         // Contiguous F32 activation base — quantize reads it via inline
@@ -282,9 +283,11 @@ class Q4Matmul {
 
         var y = runBanded(qw, batch, K, aBase, bsums, dBase, sp);
 
-        qs.free();
-        bsums.free();
-        dScales.free();
+        if (!pooled) {
+            qs.free();
+            bsums.free();
+            dScales.free();
+        }
         return y;
     }
 
@@ -427,9 +430,10 @@ class Q4Matmul {
             // Prefill: quantize the shared activation ONCE, then one banded
             // pass per weight against the packed scratch.
             var bprB = K >> 8;
-            var qsB = Bytes.alloc(batch * K);
-            var bsumsB = Bytes.alloc(batch * bprB * 16 * 4);
-            var dScalesB = Bytes.alloc(batch * bprB * 4);
+            var pooledB = sp != null;
+            var qsB = pooledB ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
+            var bsumsB = pooledB ? sp.scratchBytes(1, batch * bprB * 16 * 4) : Bytes.alloc(batch * bprB * 16 * 4);
+            var dScalesB = pooledB ? sp.scratchBytes(2, batch * bprB * 4) : Bytes.alloc(batch * bprB * 4);
             var aB = qsB.address();
             var dB = dScalesB.address();
             var xB = x.data().raw();
@@ -441,16 +445,19 @@ class Q4Matmul {
                 runBanded(w1, batch, K, aB, bsumsB, dB, sp)
             ];
             if (w2 != null) outs.push(runBanded(w2, batch, K, aB, bsumsB, dB, sp));
-            qsB.free();
-            bsumsB.free();
-            dScalesB.free();
+            if (!pooledB) {
+                qsB.free();
+                bsumsB.free();
+                dScalesB.free();
+            }
             return outs;
         }
         var bpr = K >> 8;
 
-        var qs = Bytes.alloc(K);
-        var bsums = Bytes.alloc(bpr * 16 * 4);
-        var dScales = Bytes.alloc(bpr * 4);
+        var pooled = sp != null;
+        var qs = pooled ? sp.scratchBytes(0, K) : Bytes.alloc(K);
+        var bsums = pooled ? sp.scratchBytes(1, bpr * 16 * 4) : Bytes.alloc(bpr * 16 * 4);
+        var dScales = pooled ? sp.scratchBytes(2, bpr * 4) : Bytes.alloc(bpr * 4);
         var aBase = qs.address();
         var dBase = dScales.address();
         var xBase = x.data().raw();
@@ -501,9 +508,11 @@ class Q4Matmul {
         if (sp != null) sp.parallelRows(total, band);
         else band(0, total, 0);
 
-        qs.free();
-        bsums.free();
-        dScales.free();
+        if (!pooled) {
+            qs.free();
+            bsums.free();
+            dScales.free();
+        }
         var outs = [y0, y1];
         if (w2 != null) outs.push(y2);
         return outs;

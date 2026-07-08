@@ -8,7 +8,7 @@
 use super::DebugCommands;
 use anyhow::{anyhow, Result};
 use clap::ValueEnum;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,10 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         metric,
         timeout,
         no_cache_scrub,
+        release,
+        llvm,
+        native_libs,
+        debug_dumps,
         preset,
         tier_thresholds,
         preset_override_toml,
@@ -70,6 +74,10 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         tier_sample_rate,
         tier_start_interpreted,
         tier_promotion,
+        release,
+        llvm,
+        native_libs,
+        debug_dumps,
         decode_profile,
         cooldown_ms,
     };
@@ -93,6 +101,10 @@ pub(crate) struct BenchOptions {
     pub tier_sample_rate: Option<u64>,
     pub tier_start_interpreted: Option<bool>,
     pub tier_promotion: Option<bool>,
+    pub release: bool,
+    pub llvm: bool,
+    pub native_libs: Vec<PathBuf>,
+    pub debug_dumps: bool,
     pub decode_profile: bool,
     pub cooldown_ms: u64,
 }
@@ -106,6 +118,10 @@ impl Default for BenchOptions {
             tier_sample_rate: None,
             tier_start_interpreted: None,
             tier_promotion: None,
+            release: false,
+            llvm: false,
+            native_libs: Vec::new(),
+            debug_dumps: false,
             decode_profile: false,
             cooldown_ms: 0,
         }
@@ -182,6 +198,24 @@ pub(crate) fn run_bench_with_options(
     if let Some(tier_promotion) = options.tier_promotion {
         println!("promote: {tier_promotion}");
     }
+    if options.release {
+        println!("mode:    release");
+    }
+    if options.llvm {
+        println!("llvm:    enabled");
+    }
+    if !options.native_libs.is_empty() {
+        let libs = options
+            .native_libs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("native:  {libs}");
+    }
+    if options.debug_dumps {
+        println!("debug:   dumps enabled");
+    }
     if options.decode_profile {
         println!("decode:  tail-latency profile enabled");
     }
@@ -219,10 +253,14 @@ pub(crate) fn run_bench_with_options(
                     value,
                     label,
                     profile,
+                    pool_profile,
                 }) => {
                     accumulators[idx].samples.push(value);
                     if let Some(profile) = profile {
                         accumulators[idx].profiles.push(profile);
+                    }
+                    if let Some(pool_profile) = pool_profile {
+                        accumulators[idx].pool_profiles.push(pool_profile);
                     }
                     println!(
                         "  run {i:>3}  {:<14} ok       {label}",
@@ -279,6 +317,9 @@ pub(crate) fn run_bench_with_options(
             if options.decode_profile && !acc.profiles.is_empty() {
                 print_profile_summary(&acc.profiles);
             }
+            if !acc.pool_profiles.is_empty() {
+                print_pool_summary(&acc.pool_profiles);
+            }
         }
     }
 
@@ -312,6 +353,7 @@ struct VariantAccumulator {
     variant: BenchVariant,
     samples: Vec<f64>,
     profiles: Vec<DecodeProfile>,
+    pool_profiles: Vec<PoolProfile>,
     failed: usize,
 }
 
@@ -321,6 +363,7 @@ impl VariantAccumulator {
             variant,
             samples: Vec::new(),
             profiles: Vec::new(),
+            pool_profiles: Vec::new(),
             failed: 0,
         }
     }
@@ -331,6 +374,7 @@ enum SingleRunOutcome {
         value: f64,
         label: String,
         profile: Option<DecodeProfile>,
+        pool_profile: Option<PoolProfile>,
     },
     Fail {
         why: String,
@@ -391,9 +435,21 @@ fn run_one(
         .arg(file)
         .arg("--preset")
         .arg(&options.preset)
-        .arg("--stats")
-        .env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1")
-        .env("RAYZOR_DUMP_JIT_MAP", "1");
+        .arg("--stats");
+    if options.debug_dumps {
+        child
+            .env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1")
+            .env("RAYZOR_DUMP_JIT_MAP", "1");
+    }
+    if options.release {
+        child.arg("--release");
+    }
+    if options.llvm {
+        child.arg("--llvm");
+    }
+    for native_lib in &options.native_libs {
+        child.arg("--native-lib").arg(native_lib);
+    }
     if options.decode_profile {
         child.env("RAYZOR_PROFILE_DECODE", "1");
     }
@@ -454,6 +510,7 @@ fn run_one(
             } else {
                 None
             };
+            let pool_profile = extract_pool_profile(&combined);
             if options.decode_profile {
                 if let Some(profile) = profile {
                     label.push_str(&format!(
@@ -483,10 +540,20 @@ fn run_one(
                     label.push_str("  profile=missing");
                 }
             }
+            if let Some(pool) = pool_profile {
+                label.push_str(&format!(
+                    "  pool_band={:.1}ms pool_quant={:.1}ms pool_dispatches={}",
+                    pool.band_ms, pool.quant_ms, pool.dispatches
+                ));
+                if let Some(workers) = pool.workers {
+                    label.push_str(&format!(" pool_workers={workers}"));
+                }
+            }
             Ok(SingleRunOutcome::Ok {
                 value,
                 label,
                 profile,
+                pool_profile,
             })
         }
         _ => Ok(SingleRunOutcome::Fail {
@@ -579,6 +646,41 @@ fn print_profile_summary(profiles: &[DecodeProfile]) {
     }
 }
 
+fn print_pool_summary(profiles: &[PoolProfile]) {
+    let band = summarize(profiles.iter().map(|p| p.band_ms).collect::<Vec<_>>(), 0);
+    let quant = summarize(profiles.iter().map(|p| p.quant_ms).collect::<Vec<_>>(), 0);
+    let dispatches = summarize(
+        profiles
+            .iter()
+            .map(|p| p.dispatches as f64)
+            .collect::<Vec<_>>(),
+        0,
+    );
+    let workers = profiles
+        .iter()
+        .filter_map(|p| p.workers)
+        .map(|v| v.to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("/");
+    let worker_label = if workers.is_empty() {
+        String::new()
+    } else {
+        format!("  workers={workers}")
+    };
+    println!(
+        "{:14} pool: band_med={:.1}ms band_max={:.1}ms  quant_med={:.1}ms quant_max={:.1}ms  dispatches_med={:.0}{}",
+        "",
+        band.median,
+        band.max,
+        quant.median,
+        quant.max,
+        dispatches.median,
+        worker_label
+    );
+}
+
 fn failure_reason(combined: &str, exit_code: i32, died_to_signal: bool) -> String {
     if died_to_signal {
         let sig = combined
@@ -607,6 +709,14 @@ struct DecodeProfile {
     tier_events_all: TierEventCounts,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PoolProfile {
+    band_ms: f64,
+    quant_ms: f64,
+    dispatches: u64,
+    workers: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TierEventCounts {
     total: u64,
@@ -622,6 +732,31 @@ struct TierEventCounts {
 struct TierEvent {
     t: f64,
     kind: String,
+}
+
+fn extract_pool_profile(out: &str) -> Option<PoolProfile> {
+    let workers = out.lines().rev().find_map(|line| {
+        let (_, payload) = line.split_once("[pool] ")?;
+        parse_key(payload, "workers")?.parse::<u64>().ok()
+    });
+    let line = out
+        .lines()
+        .rev()
+        .find(|line| line.contains("[profile-pool] "))?;
+    let (_, payload) = line.split_once("[profile-pool] ")?;
+    Some(PoolProfile {
+        band_ms: parse_key(payload, "band_ms")?.parse::<f64>().ok()?,
+        quant_ms: parse_key(payload, "quant_ms")?.parse::<f64>().ok()?,
+        dispatches: parse_key(payload, "dispatches")?.parse::<u64>().ok()?,
+        workers,
+    })
+}
+
+fn parse_key<'a>(payload: &'a str, wanted: &str) -> Option<&'a str> {
+    payload.split_whitespace().find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (key == wanted).then_some(value)
+    })
 }
 
 fn extract_decode_profile(out: &str) -> Option<DecodeProfile> {

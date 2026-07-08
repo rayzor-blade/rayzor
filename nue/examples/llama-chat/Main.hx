@@ -5,6 +5,7 @@ import nue.loader.GGUFLoader;
 // when the cascade root is fixed.
 import nue.sampling.Sampler;
 import nue.sampling.GenerationLoop;
+import nue.sampling.SpeculativeGenerationLoop;
 import nue.tokenizer.Tokenizer;
 import nue.tokenizer.BPETokenizer;
 import nue.CausalLanguageModel;
@@ -382,11 +383,16 @@ class Main {
         // LM facet (forwardIds + resetCache). All `ArchBuilder`s
         // hand back a `CausalLanguageModel`, so the cast is safe.
         var model = cast(loaded.model, CausalLanguageModel);
+        var llama = cast(loaded.model, LlamaModel);
+        var profilePool = Sys.getEnv("RAYZOR_PROFILE_POOL") != null;
 
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
             + " layers=" + meta.numLayers + " heads=" + meta.numHeads
             + "/" + meta.numKvHeads + " ffn=" + meta.intermediateSize
             + " vocab=" + meta.vocabSize + " ctx=" + meta.maxSeqLen);
+        if (profilePool && llama.spinPool != null) {
+            trace("[pool] workers=" + llama.spinPool.workers());
+        }
         trace("[tok]  vocab=" + tok.vocabSize());
 
         // Llama 3 uses `<|end_of_text|>` for base and `<|eot_id|>` for
@@ -461,7 +467,10 @@ class Main {
             }
         }
 
-        var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
+        var specEnv = Sys.getEnv("RAYZOR_SPEC_DECODE");
+        var specOn = specEnv != null && specEnv != "0" && specEnv != ""
+            && specEnv.toLowerCase() != "false";
+        var silentStream = Sys.getEnv("RAYZOR_LLAMA_SILENT_STREAM") != null;
 
         trace("[gen] streaming...");
         // Live print: the callback receives each token's DELTA directly
@@ -473,16 +482,27 @@ class Main {
         // be visible to the outer scope. Arrays capture by reference.
         var nTokens = [0];
         var startedAt = Sys.time();
-        var output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
-            Sys.print(delta);
+        var emitToken = function(_id:Int, delta:String):Bool {
+            if (!silentStream) Sys.print(delta);
             nTokens[0] = nTokens[0] + 1;
             return true;
-        });
+        };
+        var output:String = "";
+        if (specOn) {
+            var specLoop = new SpeculativeGenerationLoop(llama, tok, sampler, eos, maxNew);
+            output = specLoop.generate(modelPrompt, emitToken);
+        } else {
+            var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
+            output = loop.generate(modelPrompt, emitToken);
+        }
         var elapsed = Sys.time() - startedAt;
-        Sys.println("");
+        if (!silentStream) Sys.println("");
         trace("");
         trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
             + fmt(nTokens[0] / elapsed) + " tok/s)");
+        if (profilePool && llama.spinPool != null) {
+            trace("[profile-pool] " + llama.spinPool.profReport());
+        }
         // The streaming callback above already printed every token. Gate
         // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
         // diagnostic runs (e.g. when comparing decoded text against
@@ -493,7 +513,7 @@ class Main {
         }
         // Join the Haxe-matmul spin pool's workers (no-op on the FFI path):
         // the runtime waits on all live threads before JIT teardown.
-        cast(loaded.model, LlamaModel).shutdownPool();
+        llama.shutdownPool();
     }
 
     static inline function fmt(x:Float):String {

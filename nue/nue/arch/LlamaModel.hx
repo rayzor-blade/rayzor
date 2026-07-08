@@ -104,6 +104,24 @@ class LlamaModel implements CausalLanguageModel {
         }
     }
 
+    public function cacheLen():Int {
+        if (blocks.length == 0) return 0;
+        var tb = cast(blocks[0], TransformerBlock);
+        var attn = cast(tb.attn, GQAttention);
+        if (attn == null || attn.cache == null) return 0;
+        return attn.cache.currentLen;
+    }
+
+    public function rewindCache(len:Int):Void {
+        for (i in 0...blocks.length) {
+            var tb = cast(blocks[i], TransformerBlock);
+            var attn = cast(tb.attn, GQAttention);
+            if (attn != null && attn.cache != null) {
+                attn.cache.rewind(len);
+            }
+        }
+    }
+
     public function parameters():Array<nue.Module.NamedTensor> {
         var ps = [];
         for (p in embedTokens.parameters())
