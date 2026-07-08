@@ -4199,6 +4199,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "rayzor_tensor_softmax" => Some("rayzor_tensor_softmax"),
             "rayzor_tensor_layer_norm" => Some("rayzor_tensor_layer_norm"),
             "rayzor_tensor_rms_norm" => Some("rayzor_tensor_rms_norm"),
+            "rayzor_tensor_rms_norm_weight" => Some("rayzor_tensor_rms_norm_weight"),
             "rayzor_tensor_free" => Some("rayzor_tensor_free"),
             "rayzor_tensor_data"
             | "rayzor_tensor_shape"

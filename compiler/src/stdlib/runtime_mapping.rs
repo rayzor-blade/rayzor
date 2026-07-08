@@ -3707,6 +3707,9 @@ impl StdlibMapping {
             // tensor.rmsNorm(eps: Float): Tensor
             map_method!(instance "rayzor_ds_Tensor", "rmsNorm" => "Tensor_rms_norm", params: 1, mir_wrapper,
                 types: &[PtrVoid, F64] => PtrVoid),
+            // tensor.rmsNormWeight(weight: Tensor, eps: Float): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "rmsNormWeight" => "Tensor_rms_norm_weight", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, F64] => PtrVoid),
             // tensor.rope(cos: Tensor, sin: Tensor, positionOffset: Int): Tensor
             map_method!(instance "rayzor_ds_Tensor", "rope" => "Tensor_rope", params: 3, mir_wrapper,
                 types: &[PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
