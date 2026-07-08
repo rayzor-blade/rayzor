@@ -182,9 +182,25 @@ class GQAttention implements Module {
         // dequantising into a 32-f32 stack buffer per block.
         // Pure-Haxe Q8 decode attention (guest-owned cache + SDOT kernel,
         // banded across kv-heads on the matmul pool).
-        if (seqQ == 1 && cache.useQ8H) {
+        if (seqQ == 1 && cache.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
             var ctx = FlashDecode.decode(
                 cache.keysQ8H, cache.valuesQ8H, q, cache.currentLen,
+                numQHeads, scale, qProj.pool
+            );
+            if (ctx != null) {
+                var hiddenSize = numQHeads * headDim;
+                var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
+                var out = oProj.forward(ctxFlat);
+                ctxFlat.free();
+                ctx.free();
+                q.free();
+                return out;
+            }
+        }
+        if (seqQ > 1 && seqQ <= FlashDecode.batchMax()
+            && cache.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
+            var ctx = FlashDecode.decodeBatch(
+                cache.keysQ8H, cache.valuesQ8H, q, positionOffset, seqQ,
                 numQHeads, scale, qProj.pool
             );
             if (ctx != null) {

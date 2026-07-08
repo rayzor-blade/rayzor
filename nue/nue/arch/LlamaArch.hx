@@ -81,8 +81,9 @@ class LlamaArch implements ArchBuilder {
         // explicit parameter: this build path is a proven-safe env-read
         // site, and an explicit param avoids gate resolution inside the
         // KVCache ctor.
+        var haxeMatmul = Linear.useHaxeMatmul();
         var flashEnv = Sys.getEnv("RAYZOR_HAXE_FLASH");
-        var useHaxeQ8 = useKvQ8
+        var useHaxeQ8 = useKvQ8 && haxeMatmul
             && (flashEnv != null && flashEnv != "0" && flashEnv != "" && flashEnv != "false");
 
         // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
@@ -109,7 +110,7 @@ class LlamaArch implements ArchBuilder {
         // One persistent spin pool shared by every quant Linear (pure-Haxe
         // matmul path only). Owned by the model; Main must shut it down.
         var sp:Null<rayzor.concurrent.SpinPool> = null;
-        if (Linear.useHaxeMatmul()) sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
+        if (haxeMatmul) sp = new rayzor.concurrent.SpinPool(Q4Matmul.workerCount());
 
         for (i in 0...meta.numLayers) {
             blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8, useHaxeQ8, sp));

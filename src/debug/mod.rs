@@ -44,7 +44,7 @@ pub enum DebugCommands {
     /// set up for you. Crashes produce resolved Haxe function names + lines
     /// instead of raw exit codes.
     Run {
-        /// Path to the Haxe source file
+        /// Path to the Haxe source file or compiled .rzb bundle
         file: PathBuf,
 
         /// Disable the JIT symbol map dump (default ON; cheap)
@@ -115,6 +115,22 @@ pub enum DebugCommands {
         /// Scrub the .rayzor cache between each run (default ON)
         #[arg(long)]
         no_cache_scrub: bool,
+
+        /// Pass --release to each child `rayzor run`
+        #[arg(long)]
+        release: bool,
+
+        /// Pass --llvm to each child `rayzor run`
+        #[arg(long)]
+        llvm: bool,
+
+        /// Load a raw native plugin dylib/so/dll in each child `rayzor run`
+        #[arg(long = "native-lib", value_name = "FILE")]
+        native_libs: Vec<PathBuf>,
+
+        /// Enable debug-only JIT/alloc dump env vars in each child run
+        #[arg(long)]
+        debug_dumps: bool,
 
         /// Tier preset passed to each child `rayzor run`
         #[arg(long, default_value = "application")]

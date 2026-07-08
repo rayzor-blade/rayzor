@@ -189,4 +189,15 @@ class KVCache {
     public function reset():Void {
         currentLen = 0;
     }
+
+    /** Rewind to an already-written prefix. The backing storage is append-only
+        and future writes overwrite stale rows, so truncating the visible
+        length is enough for speculative verification rollback. */
+    public function rewind(len:Int):Void {
+        if (len < 0) len = 0;
+        if (len > currentLen) {
+            throw "KVCache rewind beyond current length: " + len + " > " + currentLen;
+        }
+        currentLen = len;
+    }
 }

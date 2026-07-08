@@ -3,6 +3,7 @@ import nue.sampling.GenerationLoop;
 import nue.sampling.Sampler;
 import nue.tokenizer.Tokenizer;
 import nue.CausalLanguageModel;
+import nue.arch.LlamaModel;
 import rayzor.ds.Tensor;
 import haxe.io.Bytes;
 import sys.net.Host;
@@ -202,12 +203,17 @@ class Main {
         trace("[server] load_s=" + fmt(Sys.time() - loadStarted));
 
         var model = cast(loaded.model, CausalLanguageModel);
+        var llama = cast(loaded.model, LlamaModel);
+        var profilePool = Sys.getEnv("RAYZOR_PROFILE_POOL") != null;
         var tok = loaded.tokenizer;
         var meta = loaded.metadata;
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
             + " layers=" + meta.numLayers + " heads=" + meta.numHeads
             + "/" + meta.numKvHeads + " ffn=" + meta.intermediateSize
             + " vocab=" + meta.vocabSize + " ctx=" + meta.maxSeqLen);
+        if (profilePool && llama.spinPool != null) {
+            trace("[pool] workers=" + llama.spinPool.workers());
+        }
 
         var eos = tok.specialId("<|eot_id|>");
         if (eos < 0) eos = tok.specialId("<|end_of_text|>");
@@ -304,6 +310,10 @@ class Main {
                 + " seconds=" + fmt(seconds)
                 + " tok/s=" + fmt(tokens / seconds)
                 + " output_len=" + output.length);
+            if (profilePool && llama.spinPool != null) {
+                trace("[profile-pool] request=" + reqNo
+                    + " " + llama.spinPool.profReport());
+            }
             if (Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
                 trace("[output] request=" + reqNo + " " + output);
             }
@@ -320,6 +330,7 @@ class Main {
             + " tok/s=" + fmt(totalTokens / totalDecode));
         Sys.println("[done] " + totalTokens + " tokens in " + fmt(totalDecode)
             + "s (" + fmt(totalTokens / totalDecode) + " tok/s)");
+        llama.shutdownPool();
     }
 
     static function usage():Void {

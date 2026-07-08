@@ -5,6 +5,7 @@
 
 use log::debug;
 use std::alloc::{alloc, dealloc, Layout};
+use std::io::Write;
 use std::ptr;
 use std::slice;
 use std::str;
@@ -590,6 +591,7 @@ pub extern "C" fn haxe_string_print(s: *const HaxeString) {
             let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
             if let Ok(rust_str) = str::from_utf8(slice) {
                 print!("{}", rust_str);
+                let _ = std::io::stdout().flush();
             }
         }
     }

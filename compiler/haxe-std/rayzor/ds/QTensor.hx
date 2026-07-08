@@ -52,8 +52,9 @@ extern class QTensor {
     /**
      * Build a Q4_K_M QTensor from a `haxe.io.Bytes` whose underlying buffer
      * contains a contiguous sequence of `(rows * cols / 256)` Q4_K_M
-     * super-blocks (144 bytes each). The runtime copies the bytes into an
-     * owning buffer, so the source `Bytes` can be freed after this returns.
+     * super-blocks (144 bytes each). The runtime wraps the source bytes
+     * zero-copy, so the source buffer / mmap must stay alive as long as the
+     * QTensor.
      *
      * Intended caller: the GGUF loader handing the runtime a tensor slice
      * cut out of the on-disk weights file.

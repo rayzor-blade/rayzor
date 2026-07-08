@@ -6,7 +6,11 @@ cd "$SCRIPT_DIR"
 
 
 RAYZOR="${RAYZOR:-../../../target/release/rayzor}"
-MODEL_PATH="${RAYZOR_SERVER_MODEL:-${GGUF:-/Users/amaterasu/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct-GGUF/snapshots/b69aef112e9f895e6f98d7ae0949f72ff09aa401/Llama-3.2-1B-Instruct-Q4_K_M.gguf}}"
+DEFAULT_GGUF="/Users/amaterasu/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct-GGUF/snapshots/b69aef112e9f895e6f98d7ae0949f72ff09aa401/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+if [[ -z "${RAYZOR_SERVER_MODEL:-}" && -z "${GGUF:-}" && -f "$HOME/llama-q4.gguf" ]]; then
+  DEFAULT_GGUF="$HOME/llama-q4.gguf"
+fi
+MODEL_PATH="${RAYZOR_SERVER_MODEL:-${GGUF:-$DEFAULT_GGUF}}"
 PROMPTS="${PROMPTS:-Explain voronoi regions and their connection to delaunay computation.|||Describe vector graph database implementation.|||Give a compact Haxe example of an actor worker.}"
 REQUESTS="${REQUESTS:-3}"
 MAX_TOKENS="${MAX_TOKENS:-808}"
@@ -22,6 +26,8 @@ DECODE_PROFILE="${DECODE_PROFILE:-false}"
 LOAD_PROFILE="${LOAD_PROFILE:-false}"
 COLD_PROFILE="${COLD_PROFILE:-true}"
 REQUEST_PROFILE="${REQUEST_PROFILE:-true}"
+MEMORY_PROFILE="${MEMORY_PROFILE:-false}"
+MEMORY_SAMPLE_MS="${MEMORY_SAMPLE_MS:-250}"
 PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
 STREAM="${STREAM:-${RAYZOR_SERVER_STREAM:-false}}"
 REQUANT_LM_HEAD="${REQUANT_LM_HEAD:-${RAYZOR_REQUANT_LM_HEAD:-}}"
@@ -34,6 +40,39 @@ NO_CACHE="${NO_CACHE:-true}"
 # The .rzb skips the front-end compile; tier flags still apply at run time.
 BUNDLE="${BUNDLE:-}"
 NATIVE_LIB="${NATIVE_LIB:-../../../target/release/libnue_plugins.dylib}"
+USE_JEMALLOC="${USE_JEMALLOC:-auto}"
+
+maybe_enable_jemalloc() {
+  local mode="${USE_JEMALLOC:-auto}"
+  case "$mode" in
+    0|false|False|FALSE|no|No|NO|"") return 0 ;;
+  esac
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+  [[ "${LD_PRELOAD:-}" == *jemalloc* ]] && return 0
+  local lib=""
+  for candidate in \
+    /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+    /usr/lib64/libjemalloc.so.2 \
+    /usr/lib/libjemalloc.so.2
+  do
+    if [[ -f "$candidate" ]]; then
+      lib="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$lib" ]] && command -v ldconfig >/dev/null 2>&1; then
+    lib="$(ldconfig -p 2>/dev/null | awk '/libjemalloc\.so/ {print $NF; exit}')"
+  fi
+  if [[ -n "$lib" ]]; then
+    export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$lib"
+  elif [[ "$mode" != "auto" ]]; then
+    echo "error: USE_JEMALLOC=$mode requested but libjemalloc was not found" >&2
+    exit 1
+  fi
+}
+
+export RAYZOR_NO_PRELOAD_MMAP="${RAYZOR_NO_PRELOAD_MMAP:-1}"
+maybe_enable_jemalloc
 
 if [[ "$BUNDLE" == "auto" ]]; then
   BUNDLE="$SCRIPT_DIR/llama-chat-server.rzb"
@@ -56,13 +95,99 @@ mkdir -p "$TMP_DIR"
 : > "$COLD_RESULTS"
 
 CURRENT_PID=""
+CURRENT_MEM_PID=""
 cleanup() {
+  if [[ -n "$CURRENT_MEM_PID" ]] && kill -0 "$CURRENT_MEM_PID" 2>/dev/null; then
+    kill "$CURRENT_MEM_PID" 2>/dev/null || true
+    wait "$CURRENT_MEM_PID" 2>/dev/null || true
+  fi
   if [[ -n "$CURRENT_PID" ]] && kill -0 "$CURRENT_PID" 2>/dev/null; then
     kill "$CURRENT_PID" 2>/dev/null || true
     wait "$CURRENT_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
+
+memory_profile_enabled() {
+  [[ "$MEMORY_PROFILE" == "true" || "$MEMORY_PROFILE" == "1" || "$MEMORY_PROFILE" == "yes" ]]
+}
+
+start_memory_monitor() {
+  local pid="$1"
+  local out="$2"
+  if ! memory_profile_enabled; then
+    return 1
+  fi
+  if [[ "$(uname -s)" != "Linux" || ! -r "/proc/$pid/smaps_rollup" ]]; then
+    return 1
+  fi
+  /usr/bin/python3 - "$pid" "$MEMORY_SAMPLE_MS" "$out" >/dev/null 2>&1 <<'PY' &
+import os
+import sys
+import time
+
+pid = int(sys.argv[1])
+interval = max(10, int(sys.argv[2])) / 1000.0
+out_path = sys.argv[3]
+path = f"/proc/{pid}/smaps_rollup"
+keys = {
+    "Rss", "Anonymous", "Private_Clean", "Private_Dirty",
+    "Shared_Clean", "Shared_Dirty", "Swap",
+}
+
+def read_rollup():
+    vals = {k: 0 for k in keys}
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            if key in vals:
+                vals[key] = int(rest.strip().split()[0])
+    rss = vals["Rss"]
+    anon = vals["Anonymous"]
+    shared = vals["Shared_Clean"] + vals["Shared_Dirty"]
+    private = vals["Private_Clean"] + vals["Private_Dirty"]
+    file_backed = max(0, rss - anon)
+    return (
+        int(time.time() * 1000),
+        rss,
+        anon,
+        file_backed,
+        vals["Private_Clean"],
+        vals["Private_Dirty"],
+        shared,
+        private,
+        vals["Swap"],
+    )
+
+with open(out_path, "w") as out:
+    out.write("ms\trss_kb\tanon_kb\tfile_kb\tprivate_clean_kb\tprivate_dirty_kb\tshared_kb\tprivate_kb\tswap_kb\n")
+    while os.path.exists(path):
+        try:
+            out.write("\t".join(str(v) for v in read_rollup()) + "\n")
+            out.flush()
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        except PermissionError:
+            break
+        time.sleep(interval)
+PY
+  echo "$!"
+}
+
+stop_memory_monitor() {
+  local pid="$1"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  elif [[ -n "$pid" ]]; then
+    wait "$pid" 2>/dev/null || true
+  fi
+  if [[ "$CURRENT_MEM_PID" == "$pid" ]]; then
+    CURRENT_MEM_PID=""
+  fi
+}
 
 sleep_ms() {
   local ms="$1"
@@ -174,7 +299,8 @@ profile_label() {
   local log="$1"
   if [[ "$DECODE_PROFILE" != "true" && "$DECODE_PROFILE" != "1" && "$DECODE_PROFILE" != "yes" \
      && "$LOAD_PROFILE" != "true" && "$LOAD_PROFILE" != "1" && "$LOAD_PROFILE" != "yes" \
-     && "$COLD_PROFILE" != "true" && "$COLD_PROFILE" != "1" && "$COLD_PROFILE" != "yes" ]]; then
+     && "$COLD_PROFILE" != "true" && "$COLD_PROFILE" != "1" && "$COLD_PROFILE" != "yes" \
+     && ( "${RAYZOR_PROFILE_POOL:-}" == "" || "${RAYZOR_PROFILE_POOL:-}" == "0" ) ]]; then
     return 0
   fi
   /usr/bin/python3 - "$log" "$DECODE_PROFILE" "$COLD_PROFILE" "$LOAD_PROFILE" <<'PY'
@@ -184,9 +310,25 @@ cold_on = sys.argv[3].lower() in ("1", "true", "yes")
 load_on = sys.argv[4].lower() in ("1", "true", "yes")
 profiles = []
 load = None
+pool = None
+pool_workers = None
 ready_s = None
 client = []
 for line in open(sys.argv[1], errors="replace"):
+    if "[pool]" in line:
+        vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
+        if "workers" in vals:
+            pool_workers = int(float(vals["workers"]))
+    if "[profile-pool]" in line:
+        vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
+        try:
+            pool = (
+                float(vals["band_ms"]),
+                float(vals["quant_ms"]),
+                int(float(vals["dispatches"])),
+            )
+        except KeyError:
+            pass
     if "[bench-cold]" in line:
         vals = dict(re.findall(r"([a-z0-9_]+)=([0-9.]+)", line))
         if "ready_s" in vals:
@@ -279,6 +421,12 @@ if cold_on:
             extras.append(f"cold_ttft={ready_s + first_byte:.2f}s")
         extras.append(f"client_med={statistics.median(rtts):.2f}s")
 
+if pool is not None:
+    label = f"pool_band={pool[0]:.1f}ms pool_quant={pool[1]:.1f}ms pool_dispatches={pool[2]}"
+    if pool_workers is not None:
+        label += f" pool_workers={pool_workers}"
+    extras.append(label)
+
 if extras:
     print("  " + " ".join(extras))
 PY
@@ -336,6 +484,40 @@ print(f"  req_tps={req_tps} req_s={req_s} fb={first_b} bytes={bytes_s}")
 PY
 }
 
+memory_label() {
+  local mem_log="$1"
+  if ! memory_profile_enabled || [[ ! -s "$mem_log" ]]; then
+    return 0
+  fi
+  /usr/bin/python3 - "$mem_log" <<'PY'
+import csv
+import sys
+
+peaks = {}
+with open(sys.argv[1], errors="replace") as fh:
+    rows = csv.DictReader(fh, delimiter="\t")
+    for row in rows:
+        for key in ("rss_kb", "anon_kb", "file_kb", "swap_kb"):
+            try:
+                value = int(row[key])
+            except (KeyError, ValueError):
+                continue
+            peaks[key] = max(peaks.get(key, 0), value)
+
+if not peaks:
+    raise SystemExit(0)
+
+def mib(key):
+    return peaks.get(key, 0) / 1024.0
+
+print(
+    f"  mem=rss/anon/file/swap="
+    f"{mib('rss_kb'):.0f}/{mib('anon_kb'):.0f}/"
+    f"{mib('file_kb'):.0f}/{mib('swap_kb'):.0f}MiB"
+)
+PY
+}
+
 extract_cold_metrics() {
   local log="$1"
   local ready_s="$2"
@@ -378,6 +560,8 @@ run_one() {
   local port=$((PORT_BASE + ordinal))
   local log="$TMP_DIR/run-${run_no}-${variant//\//_}.log"
   local client_log="$TMP_DIR/client-${run_no}-${variant//\//_}.log"
+  local mem_log="$TMP_DIR/mem-${run_no}-${variant//\//_}.tsv"
+  local mem_pid=""
   local cmd
   if [[ -n "${SERVER_BIN:-}" ]]; then
     # Prebuilt server binary (e.g. `rayzor aot` output). Tier flags and
@@ -430,13 +614,20 @@ run_one() {
   launch_start="$(now_s)"
   "${env_cmd[@]}" "${cmd[@]}" > "$log" 2>&1 &
   CURRENT_PID=$!
+  mem_pid="$(start_memory_monitor "$CURRENT_PID" "$mem_log" || true)"
+  CURRENT_MEM_PID="$mem_pid"
 
   if ! wait_for_server "$log" "$CURRENT_PID"; then
     kill "$CURRENT_PID" 2>/dev/null || true
     wait "$CURRENT_PID" 2>/dev/null || true
     CURRENT_PID=""
+    stop_memory_monitor "$mem_pid"
     echo -e "${variant}\tFAIL" >> "$RESULTS"
     printf "  run %3d  %-14s FAIL     server did not reach listen\n" "$run_no" "$variant"
+    if [[ -s "$log" ]]; then
+      echo "               server log tail:"
+      tail -40 "$log" | sed 's/^/                 /'
+    fi
     return 0
   fi
   local ready_s
@@ -446,6 +637,7 @@ run_one() {
     kill "$CURRENT_PID" 2>/dev/null || true
     wait "$CURRENT_PID" 2>/dev/null || true
     CURRENT_PID=""
+    stop_memory_monitor "$mem_pid"
     echo -e "${variant}\tFAIL" >> "$RESULTS"
     printf "  run %3d  %-14s FAIL     client request failed\n" "$run_no" "$variant"
     return 0
@@ -457,6 +649,7 @@ run_one() {
       kill "$CURRENT_PID" 2>/dev/null || true
       wait "$CURRENT_PID" 2>/dev/null || true
       CURRENT_PID=""
+      stop_memory_monitor "$mem_pid"
       echo -e "${variant}\tFAIL" >> "$RESULTS"
       printf "  run %3d  %-14s FAIL     server timeout after requests\n" "$run_no" "$variant"
       return 0
@@ -465,6 +658,7 @@ run_one() {
   done
   wait "$CURRENT_PID" 2>/dev/null || true
   CURRENT_PID=""
+  stop_memory_monitor "$mem_pid"
 
   {
     printf "[bench-cold] ready_s=%s\n" "$ready_s"
@@ -485,11 +679,13 @@ run_one() {
   profile="$(profile_label "$log")"
   local requests
   requests="$(request_label "$log")"
+  local memory
+  memory="$(memory_label "$mem_log")"
   echo -e "${variant}\t$metric" >> "$RESULTS"
   if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
     echo -e "${variant}\t$(extract_cold_metrics "$log" "$ready_s")" >> "$COLD_RESULTS"
   fi
-  printf "  run %3d  %-14s ok       tok/s=%.2f%s%s\n" "$run_no" "$variant" "$metric" "$profile" "$requests"
+  printf "  run %3d  %-14s ok       tok/s=%.2f%s%s%s\n" "$run_no" "$variant" "$metric" "$profile" "$requests" "$memory"
 }
 
 print_summary() {
@@ -592,10 +788,22 @@ echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
 echo "prefill: morsels=$PREFILL_MORSELS"
 echo "stream:  $STREAM"
+if [[ "${LD_PRELOAD:-}" == *jemalloc* ]]; then
+  echo "alloc:   jemalloc"
+else
+  echo "alloc:   system"
+fi
+echo "mmap:    preload=$([[ "${RAYZOR_NO_PRELOAD_MMAP:-}" == "1" ]] && echo off || echo on)"
 if [[ -n "$REQUANT_LM_HEAD" ]]; then
   echo "lm_head: requant=$REQUANT_LM_HEAD"
 fi
 echo "request: per-request profile=$REQUEST_PROFILE"
+if memory_profile_enabled; then
+  echo "memory: smaps_rollup sample=${MEMORY_SAMPLE_MS}ms"
+fi
+if [[ "${RAYZOR_PROFILE_POOL:-}" != "" && "${RAYZOR_PROFILE_POOL:-}" != "0" ]]; then
+  echo "pool:   profile=true"
+fi
 if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then
   echo "cold:   launch/listen + client RTT enabled"
 fi
