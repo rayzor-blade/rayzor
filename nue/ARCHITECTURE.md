@@ -165,6 +165,43 @@ and keeping all eight P-cores computing (caller assist). **Prefill gets the
 parallel structure** — multi-token GEMM has rows to amortise; morsels landed
 (`RAYZOR_PREFILL_MORSELS`), cache-blocked micro-kernels are the open follow-on.
 
+### Future: NueGraph execution plans
+
+`nue` does not currently have a model graph IR. The runtime shape is deliberately
+call-based: arch builders instantiate `Module` trees, and generation walks those
+modules directly. The compiler's semantic graphs and MIR passes are useful for
+Rayzor language optimization, and `gpu/` has a lazy elementwise DAG, but neither
+is a high-level transformer execution graph.
+
+The planned direction is a `NueGraph` execution-plan IR, not a generic ONNX
+executor. Arch builders should be able to lower a loaded model into a static
+plan once metadata, tensor dtypes, quant schemes, head counts, and cache policy
+are known. Initial node vocabulary should track the transformer hot path:
+Embedding, RMSNorm, QuantLinear, FusedQKV, RoPE, KVAppend, FlashAttention,
+ResidualAdd, SwiGLU, LMHead, and Sampler.
+
+The first useful passes are:
+
+1. **Prefill/decode split planning**: select separate kernels and scheduling
+   strategies for multi-token prefill and single-token decode.
+2. **Fusion planning**: make QKV, gate+up, residual/add, small-batch Q8 flash,
+   and future norm/linear boundaries systematic instead of hand-wired per arch.
+3. **Memory planning**: compute tensor lifetimes, view ownership, reusable
+   scratch regions, KV layout, logits buffers, and early-free points before
+   running the model.
+4. **Placement planning**: choose CPU spin-pool, LLVM tier, runtime FFI, or GPU
+   kernels per node based on dtype, shape, context length, and host capability.
+5. **Serving plans**: express session KV reuse, prefix-cache policy,
+   speculative verifier paths, and warm-worker plan caches for `.rzb`, AOT, and
+   server deployments.
+
+This is primarily a stability and planning layer: it should reduce accidental
+temporary tensors, make fusions portable across model families, and give the GPU
+path a single place to make placement decisions. It is not expected to double
+NUC decode throughput by itself; the core decode limit remains Q4 matmul
+bandwidth and kernel density. The value is that it makes the next bandwidth and
+placement wins composable instead of one-off.
+
 ---
 
 ## Foundations: the Module Protocol
