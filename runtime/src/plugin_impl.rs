@@ -1886,6 +1886,10 @@ register_symbol!(
     "rayzor_tensor_rms_norm",
     crate::tensor::rayzor_tensor_rms_norm
 );
+register_symbol!(
+    "rayzor_tensor_rms_norm_weight",
+    crate::tensor::rayzor_tensor_rms_norm_weight
+);
 
 // Reductions
 register_symbol!("rayzor_tensor_sum", crate::tensor::rayzor_tensor_sum);

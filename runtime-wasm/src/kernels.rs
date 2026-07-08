@@ -112,9 +112,18 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
                     let s = slice::from_raw_parts_mut(scratch_ptr.add(t * cache_len), cache_len);
                     for q_head in lo..hi {
                         flash_attn::flash_attn_decode_one_qhead(
-                            q_head, group, head_dim, cache_len, kv_row_stride, scale,
-                            q_data as *const f32, k_data as *const f32, v_data as *const f32,
-                            out_data as *mut f32, s, libm::expf,
+                            q_head,
+                            group,
+                            head_dim,
+                            cache_len,
+                            kv_row_stride,
+                            scale,
+                            q_data as *const f32,
+                            k_data as *const f32,
+                            v_data as *const f32,
+                            out_data as *mut f32,
+                            s,
+                            libm::expf,
                         );
                     }
                 } else {
@@ -380,6 +389,41 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_f32(
         let out_row = slice::from_raw_parts_mut(out_p.add(r * n), n);
         rms_norm::rms_norm_row_f32(out_row, x_row, w_slice, eps, libm::sqrtf);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(x: i32, weight: i32, eps: f64) -> i32 {
+    if x == 0 || weight == 0 {
+        return 0;
+    }
+    let xr = &*(x as *const Tensor);
+    let wr = &*(weight as *const Tensor);
+    if xr.dtype != DTYPE_F32
+        || wr.dtype != DTYPE_F32
+        || xr.ndim == 0
+        || !xr.is_contiguous()
+        || !wr.is_contiguous()
+    {
+        return 0;
+    }
+    let shape = slice::from_raw_parts(xr.shape, xr.ndim);
+    let hidden = *shape.last().unwrap_or(&0);
+    if hidden == 0 || wr.numel != hidden {
+        return 0;
+    }
+    let out = crate::tensor::alloc_tensor(shape, DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    rayzor_tensor_rms_norm_f32(
+        (*out).data as i32,
+        xr.data as i32,
+        wr.data as i32,
+        eps as f32,
+        (xr.numel / hidden) as i32,
+        hidden as i32,
+    );
+    out as i32
 }
 
 #[no_mangle]
@@ -837,6 +881,46 @@ mod tests {
                     want
                 );
             }
+        }
+    }
+
+    #[test]
+    fn tensor_rms_norm_weight_export_matches_reference() {
+        unsafe {
+            let x = crate::tensor::alloc_tensor(&[1, 4], DTYPE_F32);
+            let weight = crate::tensor::alloc_tensor(&[4], DTYPE_F32);
+            assert!(!x.is_null());
+            assert!(!weight.is_null());
+
+            let xs = slice::from_raw_parts_mut((*x).data as *mut f32, 4);
+            xs.copy_from_slice(&[1.0, -2.0, 3.0, -4.0]);
+            let ws = slice::from_raw_parts_mut((*weight).data as *mut f32, 4);
+            ws.copy_from_slice(&[0.5, 0.25, 1.0, 2.0]);
+
+            let out = rayzor_tensor_rms_norm_weight(x as i32, weight as i32, 1e-6);
+            assert_ne!(out, 0);
+            let out_t = &*(out as *const Tensor);
+            let ys = slice::from_raw_parts(out_t.data as *const f32, 4);
+            let inv = 1.0 / ((1.0 + 4.0 + 9.0 + 16.0) / 4.0 + 1e-6f32).sqrt();
+            let want = [
+                1.0 * 0.5 * inv,
+                -2.0 * 0.25 * inv,
+                3.0 * 1.0 * inv,
+                -4.0 * 2.0 * inv,
+            ];
+            for i in 0..4 {
+                assert!(
+                    (ys[i] - want[i]).abs() < 1e-5,
+                    "i={} got={} want={}",
+                    i,
+                    ys[i],
+                    want[i]
+                );
+            }
+
+            crate::tensor::rayzor_tensor_free(out);
+            crate::tensor::rayzor_tensor_free(weight as i32);
+            crate::tensor::rayzor_tensor_free(x as i32);
         }
     }
 

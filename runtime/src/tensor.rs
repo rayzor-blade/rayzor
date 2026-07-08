@@ -17,12 +17,8 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
-// Pure-compute tensor helpers shared with `rayzor-runtime-wasm`. Currently
-// just the topk repetition-window scan; `flash_attn_decode_one_qhead`
-// stays native until runtime-core has a hardware-accelerated exp/expf path
-// (libm::expf under no_std is slower than the macOS Accelerate-tuned
-// libsystem_m route llvm picks for `f32::exp()` under std).
-use rayzor_runtime_core::tensor::topk::recent_contains;
+// Pure-compute tensor helpers shared with `rayzor-runtime-wasm`.
+use rayzor_runtime_core::tensor::{rms_norm, topk::recent_contains};
 
 // =============================================================================
 // Tensor-data alloc counters. The global TrackingAllocator (`#[global_allocator]`)
@@ -2764,6 +2760,56 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
             let v = load_f32_at(a.data, base + i, a.dtype);
             store_f32_at(r.data, base + i, a.dtype, v * inv);
         }
+    }
+    result
+}
+
+/// RMS normalization with a fused per-channel gain over the last dimension.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(
+    a_ptr: i64,
+    weight_ptr: i64,
+    eps: f64,
+) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm_weight");
+    if a_ptr == 0 || weight_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let weight = &*(weight_ptr as *const RayzorTensor);
+    if a.ndim == 0
+        || a.dtype != DTYPE_F32
+        || weight.dtype != DTYPE_F32
+        || !a.is_contiguous()
+        || !weight.is_contiguous()
+    {
+        return 0;
+    }
+
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let last = shape[a.ndim - 1];
+    if last == 0 || weight.numel != last {
+        return 0;
+    }
+
+    let result = alloc_tensor(shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let groups = a.numel.checked_div(last).unwrap_or(0);
+    let eps_f32 = eps as f32;
+    let a_data = a.data as *const f32;
+    let w_slice = std::slice::from_raw_parts(weight.data as *const f32, last);
+    let r_data = r.data as *mut f32;
+    for g in 0..groups {
+        let base = g * last;
+        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+        rms_norm::rms_norm_row_f32(r_row, a_row, w_slice, eps_f32, f32::sqrt);
     }
     result
 }

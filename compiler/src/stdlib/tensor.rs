@@ -76,6 +76,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     // Normalization
     build_tensor_layer_norm(builder);
     build_tensor_rms_norm(builder);
+    build_tensor_rms_norm_weight(builder);
 
     // Rotary position embedding (RoPE)
     build_tensor_rope(builder);
@@ -503,6 +504,17 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
             .build();
         builder.mark_as_extern(func_id);
     }
+
+    // Weighted RMSNorm: (tensor, weight, eps: f64) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_rms_norm_weight")
+        .param("tensor", i64_ty.clone())
+        .param("weight", i64_ty.clone())
+        .param("eps", f64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 
     // rope: (x, cos, sin, position_offset) -> i64
     let func_id = builder
@@ -1845,6 +1857,37 @@ fn build_tensor_rms_norm(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_tensor_rms_norm")
         .expect("rayzor_tensor_rms_norm not found");
     let result = builder.call(extern_id, vec![self_val, eps]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_rms_norm_weight(self: i64, weight: i64, eps: f64) -> i64
+fn build_tensor_rms_norm_weight(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_rms_norm_weight")
+        .param("self", i64_ty.clone())
+        .param("weight", i64_ty.clone())
+        .param("eps", f64_ty)
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let weight = builder.get_param(1);
+    let eps = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_rms_norm_weight")
+        .expect("rayzor_tensor_rms_norm_weight not found");
+    let result = builder
+        .call(extern_id, vec![self_val, weight, eps])
+        .unwrap();
     builder.ret(Some(result));
 }
 

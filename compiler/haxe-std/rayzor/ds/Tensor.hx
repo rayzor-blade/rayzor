@@ -413,6 +413,15 @@ extern class Tensor {
     public function rmsNorm(eps:Float):Tensor;
 
     /**
+     * RMS normalization with a per-channel gain fused into the same pass.
+     *
+     * `weight` must be a contiguous F32 tensor whose length matches the last
+     * dimension of `this`. Returns `x * weight / sqrt(mean(x*x) + eps)`.
+     */
+    @:native("tensor_rms_norm_weight")
+    public function rmsNormWeight(weight:Tensor, eps:Float):Tensor;
+
+    /**
      * Apply rotary position embedding (RoPE) to a tensor of shape
      * `[seq_len, num_heads, head_dim]` (or 2-D `[seq_len, head_dim]`).
      *
