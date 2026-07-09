@@ -40,6 +40,12 @@ extern "C" {
 const KERN_SUCCESS: c_int = 0;
 const THREAD_AFFINITY_POLICY_COUNT: c_uint =
     (std::mem::size_of::<ThreadAffinityPolicy>() / std::mem::size_of::<c_int>()) as c_uint;
+const QOS_CLASS_USER_INTERACTIVE: c_uint = 0x21;
+const QOS_CLASS_USER_INITIATED: c_uint = 0x19;
+
+extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: c_uint, relative_priority: c_int) -> c_int;
+}
 
 pub(super) fn available() -> bool {
     false
@@ -110,6 +116,20 @@ pub(super) fn bind_current_thread(node: i32) -> i32 {
         )
     };
     if rc == KERN_SUCCESS {
+        0
+    } else {
+        -1
+    }
+}
+
+pub(super) fn bind_current_thread_to_performance() -> i32 {
+    let qos = match std::env::var("RAYZOR_QOS").ok().as_deref() {
+        Some("initiated") => QOS_CLASS_USER_INITIATED,
+        _ => QOS_CLASS_USER_INTERACTIVE,
+    };
+    let qos_rc = unsafe { pthread_set_qos_class_self_np(qos, 0) };
+    let aff_rc = bind_current_thread(0);
+    if qos_rc == 0 && aff_rc == 0 {
         0
     } else {
         -1

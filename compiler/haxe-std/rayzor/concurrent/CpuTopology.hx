@@ -58,6 +58,12 @@ extern class CpuTopology {
     @:native("rayzor_topology_bind_to_node")
     public static function bindToNode(node:Int):Int;
 
+    /** Bias/pin the calling thread to the runtime's performance CPU set.
+        On macOS this is a high compute QoS hint; on hybrid Linux/x86 this
+        narrows affinity to max-frequency logical CPUs. Returns 0=ok. */
+    @:native("rayzor_topology_bind_performance")
+    public static function bindPerformance():Int;
+
     /** Clear any affinity hint on the calling thread. Returns 0=ok,
         -1=unsupported. */
     @:native("rayzor_topology_unbind")

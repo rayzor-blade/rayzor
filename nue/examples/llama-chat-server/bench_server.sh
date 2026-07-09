@@ -26,6 +26,7 @@ DECODE_PROFILE="${DECODE_PROFILE:-false}"
 LOAD_PROFILE="${LOAD_PROFILE:-false}"
 COLD_PROFILE="${COLD_PROFILE:-true}"
 REQUEST_PROFILE="${REQUEST_PROFILE:-true}"
+RUNTIME_STATS="${RUNTIME_STATS:-false}"
 MEMORY_PROFILE="${MEMORY_PROFILE:-false}"
 MEMORY_SAMPLE_MS="${MEMORY_SAMPLE_MS:-250}"
 PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
@@ -571,7 +572,10 @@ run_one() {
     # Precompiled .rzb bundle: no front-end compile, still JIT-tiered. Kernel
     # symbols come in via --native-lib (bundles carry no [build] native-libs).
     # Tier flags mirror the source path so bundle-vs-source is apples-to-apples.
-    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--preset" "$PRESET" "--stats")
+    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--preset" "$PRESET")
+    if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
+      cmd+=("--stats")
+    fi
     if [[ "$variant" != "toml" ]]; then
       cmd+=("--tier-thresholds" "$variant")
     fi
@@ -584,7 +588,10 @@ run_one() {
     if [[ "$NO_CACHE" == "true" || "$NO_CACHE" == "1" || "$NO_CACHE" == "yes" ]]; then
       cmd+=("--no-cache")
     fi
-    cmd+=("--safety-warnings" "off" "Main.hx" "--preset" "$PRESET" "--stats")
+    cmd+=("--safety-warnings" "off" "Main.hx" "--preset" "$PRESET")
+    if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
+      cmd+=("--stats")
+    fi
     if [[ "$variant" != "toml" ]]; then
       cmd+=("--tier-thresholds" "$variant")
     fi
@@ -786,6 +793,7 @@ if [[ ${#VARIANT_LIST[@]} -gt 1 ]]; then
 fi
 echo "start:   interpreted=$START_INTERPRETED"
 echo "promote: $TIER_PROMOTION"
+echo "stats:   runtime=$RUNTIME_STATS"
 echo "prefill: morsels=$PREFILL_MORSELS"
 echo "stream:  $STREAM"
 if [[ "${LD_PRELOAD:-}" == *jemalloc* ]]; then

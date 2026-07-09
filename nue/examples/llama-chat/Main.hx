@@ -1,287 +1,8 @@
 import nue.loader.GGUFLoader;
-// nue.sampling.ArgmaxSampler import deliberately omitted — even an
-// unused import of certain nue.sampling.* classes triggers the
-// trap-stub-on-import cascade per bugs_trap_stub_cascade. Reintroduce
-// when the cascade root is fixed.
-import nue.sampling.Sampler;
 import nue.sampling.GenerationLoop;
+import nue.sampling.LocalTempSampler;
 import nue.sampling.SpeculativeGenerationLoop;
-import nue.tokenizer.Tokenizer;
-import nue.tokenizer.BPETokenizer;
-import nue.CausalLanguageModel;
 import nue.arch.LlamaModel;
-import rayzor.ds.Tensor;
-
-/**
- * Local Top-K + temperature + repetition-penalty sampler.
- *
- * Walks the full logits vector once and tracks the K highest scores
- * in a sorted parallel-array pair (`topKLogits`, `topKIds`). With
- * `k = 50` and a 128k-vocab Llama tokenizer that's a single linear
- * scan plus an insertion sort into a 50-entry buffer — O(n * log k)
- * in practice with constant ~50 movements per replace, vs the
- * O(n²) full sort `TopPSampler` does.
- *
- * Sampling then runs the standard temperature-softmax + multinomial
- * draw, but over only `k` candidates — much sharper than pure
- * temperature over the full vocab and the standard chat-quality
- * recipe (Llama / GPT defaults to k=50 + temperature ≈ 0.7).
- *
- * Repetition penalty divides positive logits by `penalty` and
- * multiplies negative ones for every token in the recent-output
- * window (last RECENT_CAP samples) **before** Top-K selection, so a
- * recently-emitted token won't even land in the candidate pool. 1.0
- * disables it; 1.1–1.3 is the typical chat range. Breaks the
- * "in in in" loops the small 1B Instruct model otherwise hits.
- *
- * Why inline rather than reuse `nue.sampling.TemperatureSampler` /
- * `TopKSampler`: importing those classes currently triggers a trap-
- * stub cascade in unrelated functions even with no instance created.
- * Root cause under investigation; meanwhile this inline copy is the
- * working path.
- */
-class LocalTempSampler implements Sampler {
-    public var temperature:Float;
-    public var repetitionPenalty:Float;
-    public var topK:Int;
-    private var state:Int;
-    private var recent:Array<Int>;
-    private var recentWrite:Int;
-    private var topKLogits:Array<Float>;
-    private var topKIds:Array<Int>;
-    private var survIdx:Array<Int>;
-    // No-repeat-ngram state: a hash set of every emitted NG_N-gram + a ring of
-    // the last NG_N-1 tokens (the prefix). Only EXACT NG_N-token sequences are
-    // blocked. With NG_N large (8), this catches degenerate BLOCK loops (the
-    // 150-token verbatim repeats — full of repeated 8-grams) but NEVER touches
-    // normal term repetition (proper nouns / phrases are 2-7 tokens), so the
-    // sampler leaves spelling entirely to the model. (n=3/4 hard-blocked a
-    // recurring term's own token sequence, forcing a different spelling each
-    // time — deterministically, so temperature couldn't fix it.)
-    private var seen:Array<Int>;
-    private var ngPrefix:Array<Int>; // last NG_N-1 emitted tokens, oldest..newest
-    private var ngFilled:Int;
-    private static inline var NG_N:Int = 8;
-    private static inline var RECENT_CAP:Int = 64;
-    private static inline var NG_TABLE:Int = 1 << 16; // 65536 open-addressed slots
-    private static inline var NG_MASK:Int = (1 << 16) - 1;
-
-    public function new(temperature:Float, repetitionPenalty:Float, topK:Int, seed:Int) {
-        this.temperature = temperature;
-        this.repetitionPenalty = repetitionPenalty;
-        this.topK = topK;
-        this.state = seed;
-        this.recent = [for (_ in 0...RECENT_CAP) -1];
-        this.recentWrite = 0;
-        // Pre-allocate the Top-K scratch arrays; both get reset per
-        // `sample` call. Size always == topK; -1 / 0.0 fill is just
-        // an initial value — overwritten before any read.
-        var k = (topK > 0) ? topK : 1;
-        this.topKLogits = [for (_ in 0...k) 0.0];
-        this.topKIds = [for (_ in 0...k) -1];
-        this.survIdx = [for (_ in 0...k) 0];
-        this.seen = [for (_ in 0...NG_TABLE) -1];
-        this.ngPrefix = [for (_ in 0...(NG_N - 1)) -1];
-        this.ngFilled = 0;
-    }
-
-    /** Hash the NG_N-gram = ngPrefix[0..NG_N-2] + `cand` into a positive key. */
-    private function ngHashCand(cand:Int):Int {
-        var h = 0;
-        for (i in 0...(NG_N - 1)) {
-            h = (h ^ ngPrefix[i]) * 1000003;
-        }
-        h = (h ^ cand) * 1000003;
-        return h & 0x7FFFFFFF;
-    }
-
-    /** Would emitting `cand` repeat an already-seen NG_N-gram? */
-    private function ngContainsCand(cand:Int):Bool {
-        var h = ngHashCand(cand);
-        var slot = h & NG_MASK;
-        for (_ in 0...NG_TABLE) {
-            var v = seen[slot];
-            if (v == -1) return false;
-            if (v == h) return true;
-            slot = (slot + 1) & NG_MASK;
-        }
-        return false;
-    }
-
-    /** Record the NG_N-gram (ngPrefix + cand), then shift `cand` into prefix. */
-    private function ngPush(cand:Int):Void {
-        if (ngFilled >= NG_N - 1) {
-            var h = ngHashCand(cand);
-            var slot = h & NG_MASK;
-            for (_ in 0...NG_TABLE) {
-                var v = seen[slot];
-                if (v == -1) {
-                    seen[slot] = h;
-                    break;
-                }
-                if (v == h) break;
-                slot = (slot + 1) & NG_MASK;
-            }
-        }
-        for (i in 0...(NG_N - 2)) {
-            ngPrefix[i] = ngPrefix[i + 1];
-        }
-        ngPrefix[NG_N - 2] = cand;
-        if (ngFilled < NG_N - 1) ngFilled++;
-    }
-
-    // 0 = unread, 1 = on, 2 = off (cross-module-duplicate-safe pattern).
-    static var _dumpTopkGate:Int = 0;
-    static var _dumpStep:Int = 0;
-
-    static inline function dumpTopk():Bool {
-        if (_dumpTopkGate == 0) {
-            var v = Sys.getEnv("RAYZOR_DUMP_TOPK");
-            _dumpTopkGate = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
-        }
-        return _dumpTopkGate == 1;
-    }
-
-    public function sample(logits:Tensor):Int {
-        var shape = logits.shape();
-        var n = shape[shape.length - 1];
-        var t = (temperature <= 0.0) ? 0.00000001 : temperature;
-        var penalize = repetitionPenalty > 1.0;
-        var rp = repetitionPenalty;
-        var k = (topK > 0 && topK < n) ? topK : n;
-
-        // -------- Top-K selection ----------
-        // Single FFI call replaces the 128k-iter per-token scan + insertion
-        // sort + repetition-penalty loop. The runtime walks the contiguous
-        // F32 logits buffer in a tight Rust function and writes the top-K
-        // (logit, id) pairs straight into our pre-allocated arrays.
-        //
-        // Falls back to the per-element scan when topkScan reports `-1`
-        // (non-F32 / non-contiguous logits) — preserves correctness for any
-        // future logits backend that doesn't hit the fast path.
-        var penaltyArg = penalize ? rp : 1.0;
-        var sz = logits.topkScan(topKLogits, topKIds, k, recent, penaltyArg);
-        if (sz < 0) {
-            sz = topKScanFallback(logits, n, k, penalize, rp);
-        }
-
-        // RAYZOR_DUMP_TOPK=1: per-step top-5 (id:logit) for A/B'ing kernel
-        // backends numerically (identical prompt + temp 0 + penalty 1 makes
-        // the streams directly diffable).
-        if (dumpTopk()) {
-            var line = "[topk] step=" + _dumpStep;
-            var m = sz < 5 ? sz : 5;
-            for (i in 0...m) line += " " + topKIds[i] + ":" + topKLogits[i];
-            Sys.println(line);
-            _dumpStep++;
-        }
-
-        // -------- No-repeat-ngram filter ----------
-        // Drop top-K candidates that would repeat an already-seen 3-gram
-        // (prefix = the last two emitted tokens). This is what actually breaks
-        // degenerate block loops; the windowed penalty can't (too weak → loops,
-        // too strong → garbage). Fall back to the full top-K only if EVERY
-        // candidate is banned, so generation never dead-ends.
-        var nSurv = 0;
-        if (ngFilled >= NG_N - 1) {
-            for (i in 0...sz) {
-                if (!ngContainsCand(topKIds[i])) {
-                    survIdx[nSurv] = i;
-                    nSurv++;
-                }
-            }
-        }
-        if (nSurv == 0) {
-            for (i in 0...sz) survIdx[i] = i;
-            nSurv = sz;
-        }
-
-        // -------- Temperature softmax over the surviving candidates ----------
-        var maxLogit = topKLogits[survIdx[0]];
-        var total = 0.0;
-        for (s in 0...nSurv) {
-            total += Math.exp((topKLogits[survIdx[s]] - maxLogit) / t);
-        }
-
-        var r = nextFloat() * total;
-        var acc = 0.0;
-        var chosen = survIdx[nSurv - 1];
-        for (s in 0...nSurv) {
-            acc += Math.exp((topKLogits[survIdx[s]] - maxLogit) / t);
-            if (r <= acc) {
-                chosen = survIdx[s];
-                break;
-            }
-        }
-        var id = topKIds[chosen];
-        ngPush(id);
-        pushRecent(id);
-        return id;
-    }
-
-    /**
-     * Per-element fallback scan — invoked only when the runtime's bulk
-     * `topkScan` reports `-1` (logits not F32-contiguous). Mirrors the
-     * original Haxe loop exactly so tie-breaking + top-K output stays
-     * byte-identical to the fast path.
-     */
-    private function topKScanFallback(
-        logits:Tensor, n:Int, k:Int, penalize:Bool, rp:Float
-    ):Int {
-        var sz = 0;
-        for (i in 0...n) {
-            var lg = adjusted(logits.getFlat(i), i, penalize, rp);
-            if (sz < k) {
-                var pos = sz;
-                while (pos > 0 && topKLogits[pos - 1] < lg) {
-                    topKLogits[pos] = topKLogits[pos - 1];
-                    topKIds[pos] = topKIds[pos - 1];
-                    pos--;
-                }
-                topKLogits[pos] = lg;
-                topKIds[pos] = i;
-                sz++;
-            } else if (lg > topKLogits[k - 1]) {
-                var pos = k - 1;
-                while (pos > 0 && topKLogits[pos - 1] < lg) {
-                    topKLogits[pos] = topKLogits[pos - 1];
-                    topKIds[pos] = topKIds[pos - 1];
-                    pos--;
-                }
-                topKLogits[pos] = lg;
-                topKIds[pos] = i;
-            }
-        }
-        return sz;
-    }
-
-    /** Apply repetition penalty if `id` is in the recent window. */
-    private inline function adjusted(lg:Float, id:Int, penalize:Bool, rp:Float):Float {
-        if (!penalize) return lg;
-        if (!isRecent(id)) return lg;
-        return (lg > 0.0) ? lg / rp : lg * rp;
-    }
-
-    /** Linear scan of the 64-entry recent buffer — small enough that
-        a hashmap probe would cost more than the loop. */
-    private function isRecent(id:Int):Bool {
-        for (k in 0...RECENT_CAP) {
-            if (recent[k] == id) return true;
-        }
-        return false;
-    }
-
-    /** Rolling write into the recent-id ring buffer. */
-    private function pushRecent(id:Int):Void {
-        recent[recentWrite] = id;
-        recentWrite = (recentWrite + 1) % RECENT_CAP;
-    }
-
-    private function nextFloat():Float {
-        state = (state * 1664525 + 1013904223) & 0x7FFFFFFF;
-        return state / 2147483648.0;
-    }
-}
 
 /**
  * Phase 9 demo — load a real GGUF off disk, build the model + tokenizer,
@@ -379,18 +100,14 @@ class Main {
 
         var meta = loaded.metadata;
         var tok = loaded.tokenizer;
-        // Loader returns `Module`; `GenerationLoop` needs the causal
-        // LM facet (forwardIds + resetCache). All `ArchBuilder`s
-        // hand back a `CausalLanguageModel`, so the cast is safe.
-        var model = cast(loaded.model, CausalLanguageModel);
         var llama = cast(loaded.model, LlamaModel);
-        var profilePool = Sys.getEnv("RAYZOR_PROFILE_POOL") != null;
+        var profilePool = truthyEnv("RAYZOR_PROFILE_POOL");
 
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
             + " layers=" + meta.numLayers + " heads=" + meta.numHeads
             + "/" + meta.numKvHeads + " ffn=" + meta.intermediateSize
             + " vocab=" + meta.vocabSize + " ctx=" + meta.maxSeqLen);
-        if (profilePool && llama.spinPool != null) {
+        if (llama.spinPool != null) {
             trace("[pool] workers=" + llama.spinPool.workers());
         }
         trace("[tok]  vocab=" + tok.vocabSize());
@@ -422,7 +139,7 @@ class Main {
         // For greedy, topK stays 1 so it remains deterministic, but the penalty
         // is applied before the top-1 pick — a recently-repeated token gets
         // demoted so the loop breaks without introducing randomness.
-        var sampler:Sampler = (temperature > 0.0)
+        var sampler:LocalTempSampler = (temperature > 0.0)
             ? new LocalTempSampler(temperature, repPenalty, 50, 42)
             : new LocalTempSampler(1e-4, repPenalty, 8, 42);
         trace("rep-penalty: " + repPenalty + "  + no-repeat-8gram");
@@ -470,7 +187,8 @@ class Main {
         var specEnv = Sys.getEnv("RAYZOR_SPEC_DECODE");
         var specOn = specEnv != null && specEnv != "0" && specEnv != ""
             && specEnv.toLowerCase() != "false";
-        var silentStream = Sys.getEnv("RAYZOR_LLAMA_SILENT_STREAM") != null;
+        var silentStream = truthyEnv("RAYZOR_LLAMA_SILENT_STREAM");
+        var streamFlushMs = envInt("RAYZOR_STDOUT_FLUSH_MS", 50);
 
         trace("[gen] streaming...");
         // Live print: the callback receives each token's DELTA directly
@@ -481,9 +199,27 @@ class Main {
         // capture primitives by value — `nTokens++` inside the closure wouldn't
         // be visible to the outer scope. Arrays capture by reference.
         var nTokens = [0];
+        var firstTokenAt = [0.0];
         var startedAt = Sys.time();
+        var streamBuf:Array<Array<String>> = [[]];
+        var lastStreamFlush = [startedAt];
+        var flushStream = function(force:Bool):Void {
+            if (silentStream || streamBuf[0].length == 0) return;
+            var now = Sys.time();
+            if (!force && streamFlushMs > 0 && (now - lastStreamFlush[0]) * 1000.0 < streamFlushMs) {
+                return;
+            }
+            var chunk = streamBuf[0].join("");
+            streamBuf[0] = [];
+            lastStreamFlush[0] = now;
+            Sys.print(chunk);
+        }
         var emitToken = function(_id:Int, delta:String):Bool {
-            if (!silentStream) Sys.print(delta);
+            if (firstTokenAt[0] == 0.0) firstTokenAt[0] = Sys.time();
+            if (!silentStream) {
+                streamBuf[0].push(delta);
+                flushStream(streamFlushMs <= 0 || delta.indexOf("\n") >= 0);
+            }
             nTokens[0] = nTokens[0] + 1;
             return true;
         };
@@ -492,14 +228,16 @@ class Main {
             var specLoop = new SpeculativeGenerationLoop(llama, tok, sampler, eos, maxNew);
             output = specLoop.generate(modelPrompt, emitToken);
         } else {
-            var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
+            var loop = new GenerationLoop(llama, tok, sampler, eos, maxNew);
             output = loop.generate(modelPrompt, emitToken);
         }
+        flushStream(true);
         var elapsed = Sys.time() - startedAt;
         if (!silentStream) Sys.println("");
         trace("");
+        var ttft = (firstTokenAt[0] > 0.0) ? (firstTokenAt[0] - startedAt) : elapsed;
         trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
-            + fmt(nTokens[0] / elapsed) + " tok/s)");
+            + fmt(nTokens[0] / elapsed) + " tok/s, ttft=" + fmt(ttft) + "s)");
         if (profilePool && llama.spinPool != null) {
             trace("[profile-pool] " + llama.spinPool.profReport());
         }
@@ -519,4 +257,18 @@ class Main {
     static inline function fmt(x:Float):String {
         return Std.string(Math.round(x * 1000) / 1000);
     }
+
+    static function truthyEnv(name:String):Bool {
+        var v = Sys.getEnv(name);
+        return v != null && v != "0" && v != "" && v.toLowerCase() != "false";
+    }
+
+    static function envInt(name:String, fallback:Int):Int {
+        var v = Sys.getEnv(name);
+        if (v == null || v == "") return fallback;
+        var parsed = Std.parseInt(v);
+        if (parsed == null) return fallback;
+        return parsed + 0;
+    }
+
 }

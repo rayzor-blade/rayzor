@@ -54,6 +54,10 @@ pub(crate) fn bind_current_thread(node: i32) -> i32 {
     imp::bind_current_thread(node)
 }
 
+pub(crate) fn bind_current_thread_to_performance() -> i32 {
+    imp::bind_current_thread_to_performance()
+}
+
 pub(crate) fn unbind_current_thread() -> i32 {
     imp::unbind_current_thread()
 }

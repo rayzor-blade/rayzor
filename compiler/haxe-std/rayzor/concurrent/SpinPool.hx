@@ -67,6 +67,7 @@ class SpinPool {
     var _scratch0Cap:Int;
     var _scratch1Cap:Int;
     var _scratch2Cap:Int;
+    var _profile:Int;
 
     /** Cell layout, one 128-byte line per cell (false-sharing stride):
         cell 0 = pending, 1 = shutdown, 2 = cursor, 3 = rows, 4 = chunk,
@@ -118,9 +119,11 @@ class SpinPool {
         _scratch0Cap = 0;
         _scratch1Cap = 0;
         _scratch2Cap = 0;
+        _profile = 0;
         spinBudget = 0; // resolved lazily on first dispatch (env reads in a
                         // constructor mis-resolve; see bugs_sys_getenv_in_ctor)
         relaxHint = -1; // resolved lazily alongside spinBudget
+        CpuTopology.bindPerformance();
         // Bind `this` to an explicit local: an implicit `this` capture in a
         // loop-spawned closure does not resolve.
         var self = this;
@@ -134,6 +137,14 @@ class SpinPool {
     }
 
     public function workers():Int return _n;
+
+    public function profiling():Bool {
+        if (_profile == 0) {
+            var v = Sys.getEnv("RAYZOR_PROFILE_POOL");
+            _profile = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _profile == 1;
+    }
 
     /** Claim chunks from the shared cursor until exhausted. `who` is the
         claimant id (0 = caller) passed through as the band's node arg.
@@ -153,6 +164,7 @@ class SpinPool {
     }
 
     function workerLoop(w:Int):Int {
+        CpuTopology.bindPerformance();
         pidOf(w).store(Parker.registerParkable());
         // Hoist the atomic cells: cell() re-derives the control-block base
         // via an extern address() call per access, which is measurable in
@@ -237,9 +249,9 @@ class SpinPool {
                 relaxHint = (rx != "0" && rx != "" && rx != "false") ? 1 : 0;
             }
         }
-        // Record the inter-dispatch gap EWMA — workers size their idle
-        // hold from the pool's own cadence, so the policy adapts to the
-        // workload instead of a hand-tuned constant.
+        // Record the inter-dispatch gap EWMA. Workers size their idle hold
+        // from the pool's own cadence, so stale samples make wake/park timing
+        // unstable across otherwise identical decode runs.
         var nowUs:Int = Std.int((Sys.time() * 1e6) % 2000000000.);
         var last:Int = lastDispatchUs().load();
         lastDispatchUs().store(nowUs);
@@ -268,7 +280,8 @@ class SpinPool {
         rowsCell().store(rows);
         chunkCell().store(chunk);
         pending().store(_n - 1); // before ANY state flip
-        var t0 = Sys.time();
+        var profile = profiling();
+        var t0 = profile ? Sys.time() : 0.0;
         for (w in 1..._n) {
             stateOf(w).store(1);
             var pid = pidOf(w).load();
@@ -284,8 +297,10 @@ class SpinPool {
         } else {
             while (pendC.load() > 0) {}
         }
-        bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
-        dispatches().fetchAdd(1);
+        if (profile) {
+            bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
+            dispatches().fetchAdd(1);
+        }
     }
 
     /** Accumulate externally-timed quantize wall (microseconds). */

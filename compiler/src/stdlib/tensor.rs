@@ -62,6 +62,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_add_into(builder);
     build_tensor_sub(builder);
     build_tensor_mul(builder);
+    build_tensor_silu_mul(builder);
     build_tensor_div(builder);
 
     // Math (unary) / activations
@@ -492,6 +493,16 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
             .build();
         builder.mark_as_extern(func_id);
     }
+
+    // Fused binary activation: (tensor, other) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_silu_mul")
+        .param("tensor", i64_ty.clone())
+        .param("other", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 
     // Normalization ops: (tensor, eps: f64) -> i64
     for name in &["rayzor_tensor_layer_norm", "rayzor_tensor_rms_norm"] {
@@ -1087,6 +1098,11 @@ build_simple_i64_to_void!(build_tensor_free, "Tensor_free", "rayzor_tensor_free"
 build_binop_i64!(build_tensor_add, "Tensor_add", "rayzor_tensor_add");
 build_binop_i64!(build_tensor_sub, "Tensor_sub", "rayzor_tensor_sub");
 build_binop_i64!(build_tensor_mul, "Tensor_mul", "rayzor_tensor_mul");
+build_binop_i64!(
+    build_tensor_silu_mul,
+    "Tensor_siluMul",
+    "rayzor_tensor_silu_mul"
+);
 build_binop_i64!(build_tensor_div, "Tensor_div", "rayzor_tensor_div");
 build_binop_i64!(build_tensor_matmul, "Tensor_matmul", "rayzor_tensor_matmul");
 build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");

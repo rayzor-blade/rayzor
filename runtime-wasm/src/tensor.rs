@@ -945,6 +945,11 @@ pub unsafe extern "C" fn rayzor_tensor_mul(a: i32, b: i32) -> i32 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i32, b: i32) -> i32 {
+    tensor_binary(a, b, |x, y| (x / (1.0 + libm::expf(-x))) * y)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i32, b: i32) -> i32 {
     tensor_binary(a, b, |x, y| x / y)
 }

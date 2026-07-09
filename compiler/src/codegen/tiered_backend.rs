@@ -1330,6 +1330,39 @@ impl TieredBackend {
         }
     }
 
+    /// Human-readable per-function tier dump for performance diagnosis.
+    /// Kept opt-in because llama-chat bundles contain hundreds of functions.
+    pub fn format_tier_listing(&self) -> String {
+        let tiers = self.function_tiers.read().unwrap();
+        let modules = self.modules.read().unwrap();
+        let mut rows: Vec<(OptimizationTier, u32, String)> = Vec::new();
+        for module in modules.iter() {
+            for (id, func) in &module.functions {
+                let Some(tier) = tiers.get(id).copied() else {
+                    continue;
+                };
+                let name = func
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(func.name.as_str())
+                    .to_string();
+                rows.push((tier, id.0, name));
+            }
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
+
+        let mut out = String::from("Tier Listing:\n");
+        for (tier, id, name) in rows {
+            out.push_str(&format!(
+                "  {:>9}  fn{:05}  {}\n",
+                tier.event_label(),
+                id,
+                name
+            ));
+        }
+        out
+    }
+
     /// Read the installed JIT pointer for `func_id`, or `None` if no
     /// pointer has been installed yet. Used by tests to observe that
     /// the beadie path (or the legacy path) installed a callable

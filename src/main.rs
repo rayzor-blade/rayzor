@@ -1040,6 +1040,7 @@ fn run_bundle(
     verbose: bool,
     stats: bool,
     preset: Preset,
+    llvm: bool,
     preset_override_toml: bool,
     tier_thresholds: Option<TierThresholds>,
     tier_sample_rate: Option<u64>,
@@ -1171,7 +1172,10 @@ fn run_bundle(
         verbose,
         release,
     );
-    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry;
+    // Keep bundle execution consistent with source execution: `--llvm`
+    // is a direct request for whole-module LLVM even when the `.rzb` is
+    // shipped without its original rayzor.toml.
+    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 
@@ -1260,6 +1264,9 @@ fn run_bundle(
     if stats {
         let backend_stats = backend.get_statistics();
         println!("{}", backend_stats.format());
+        if std::env::var_os("RAYZOR_DUMP_TIERS").is_some() {
+            println!("{}", backend.format_tier_listing());
+        }
         let beadie_stats = backend.beadie_stats();
         println!(
             "Beadie: adapter={} routes={} (standard={} optimized={}) installs={} (standard={} optimized={}) beads={} (standard={} optimized={}) compiled={} (standard={} optimized={})",
@@ -1352,6 +1359,7 @@ fn run_file(
             verbose,
             stats,
             preset,
+            llvm,
             preset_override_toml,
             tier_thresholds,
             tier_sample_rate,
@@ -2056,6 +2064,9 @@ fn run_file(
         let backend_stats = backend.get_statistics();
         let beadie_stats = backend.beadie_stats();
         eprintln!("{}", backend_stats.format());
+        if std::env::var_os("RAYZOR_DUMP_TIERS").is_some() {
+            eprintln!("{}", backend.format_tier_listing());
+        }
         eprintln!(
             "Beadie: adapter={} routes={} (standard={} optimized={}) installs={} (standard={} optimized={}) beads={} (standard={} optimized={}) compiled={} (standard={} optimized={})",
             beadie_stats.adapter_enabled,

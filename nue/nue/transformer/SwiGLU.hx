@@ -48,7 +48,7 @@ class SwiGLU implements Module {
         var u:Tensor;
         var gwq = gate.qweight;
         var uwq = up.qweight;
-        if (Linear.useHaxeMatmul() && gwq != null && uwq != null) {
+        if (Linear.useHaxeMatmul() && nue.Q4Matmul.useFusedMatmul() && gwq != null && uwq != null) {
             var pair = nue.Q4Matmul.matmulFused(gwq, uwq, null, x, gate.pool);
             gLin = pair[0];
             u = pair[1];
@@ -58,10 +58,8 @@ class SwiGLU implements Module {
             xClone.free();
             u = up.forward(x);
         }
-        var g = gLin.silu();
+        var gu = gLin.siluMul(u);
         gLin.free();
-        var gu = g.mul(u);
-        g.free();
         u.free();
         var result = down.forward(gu);
         gu.free();

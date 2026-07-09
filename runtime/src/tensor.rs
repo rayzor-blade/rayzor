@@ -2243,6 +2243,40 @@ pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu_mul");
+    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+        let n = a_s.len();
+        let threads = crate::worker_pool::auto_kernel_threads();
+        let threshold = std::env::var("RAYZOR_SILU_MUL_PAR_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(65_536);
+        if threads > 1 && n >= threshold {
+            let a_addr = a_s.as_ptr() as usize;
+            let b_addr = b_s.as_ptr() as usize;
+            let r_addr = r_s.as_mut_ptr() as usize;
+            crate::worker_pool::global().parallel_rows(n, threads, move |lo, hi| unsafe {
+                let a_ptr = a_addr as *const f32;
+                let b_ptr = b_addr as *const f32;
+                let r_ptr = r_addr as *mut f32;
+                for i in lo..hi {
+                    let x = *a_ptr.add(i);
+                    *r_ptr.add(i) = (x / (1.0 + (-x).exp())) * *b_ptr.add(i);
+                }
+            });
+        } else {
+            for i in 0..n {
+                let x = a_s[i];
+                r_s[i] = (x / (1.0 + (-x).exp())) * b_s[i];
+            }
+        }
+        return result;
+    }
+    tensor_binop_scalar(a, b, |x, y| (x / (1.0 + (-x).exp())) * y)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
     match prepare_binop(a, b) {
         Some((a_s, b_s, r_s, result)) => {

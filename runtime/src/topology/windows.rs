@@ -202,6 +202,10 @@ pub(super) fn bind_current_thread(node: i32) -> i32 {
     }
 }
 
+pub(super) fn bind_current_thread_to_performance() -> i32 {
+    bind_current_thread(0)
+}
+
 pub(super) fn unbind_current_thread() -> i32 {
     // Build a "wide-open" affinity by setting every bit on group 0. Multi-group
     // systems will be partially unbound (group 0 only); the caller can iterate

@@ -11,7 +11,7 @@ import nue.transformer.RoPE;
 import nue.transformer.SwiGLU;
 import nue.transformer.KVCache;
 import nue.transformer.GQAttention;
-import nue.transformer.TransformerBlock;
+import nue.transformer.LlamaBlock;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
@@ -106,7 +106,7 @@ class LlamaArch implements ArchBuilder {
                 meta.vocabSize, meta.hiddenSize, "weight");
         }
 
-        var blocks:Array<Module> = [];
+        var blocks:Array<LlamaBlock> = [];
         // One persistent spin pool shared by every quant Linear (pure-Haxe
         // matmul path only). Owned by the model; Main must shut it down.
         var sp:Null<rayzor.concurrent.SpinPool> = null;
@@ -173,7 +173,7 @@ class LlamaArch implements ArchBuilder {
         meta:ModelMetadata, layerIndex:Int, dtype:DType,
         rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool, useHaxeQ8:Bool,
         ?sp:rayzor.concurrent.SpinPool
-    ):TransformerBlock {
+    ):LlamaBlock {
         var prefix = "blk." + layerIndex + ".";
         var attnNorm = new RMSNorm(
             takeWeight(weights, prefix + "attn_norm.weight"),
@@ -181,7 +181,7 @@ class LlamaArch implements ArchBuilder {
         );
 
         var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype,
-            useKvQ8, useHaxeQ8);
+            useKvQ8, useHaxeQ8, meta.numHeads);
         if (useKvQ8 && layerIndex == 0) {
             if (cache.useQ8H) {
                 Sys.println("[kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)");
@@ -212,7 +212,7 @@ class LlamaArch implements ArchBuilder {
             buildLinear(weights, prefix + "ffn_down.weight", null, sp)
         );
 
-        return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+        return new LlamaBlock(attnNorm, attn, ffnNorm, ffn, prefix);
     }
 
     /** Build a Linear from a weight name, picking the QTensor path when

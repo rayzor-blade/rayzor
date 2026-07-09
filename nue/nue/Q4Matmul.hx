@@ -29,6 +29,29 @@ import rayzor.concurrent.CpuTopology;
  * quantised to Q8_K here.
  */
 class Q4Matmul {
+    static var _useFused:Int = 0;
+    static var _dumpFusedGate:Int = 0;
+
+    public static function useFusedMatmul():Bool {
+        if (_useFused == 0) {
+            var v = Sys.getEnv("RAYZOR_HAXE_FUSED_MATMUL");
+            // The fused gate/up/qkv path is still experimental. It reduces
+            // dispatch count, but full llama-chat runs on macOS regressed
+            // versus the split Haxe kernels, so keep it opt-in until the
+            // fused row-space lowering is proven faster and bit-stable.
+            _useFused = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+            if (_dumpFusedGate == 0) {
+                var dump = Sys.getEnv("RAYZOR_DUMP_Q4_GATES");
+                _dumpFusedGate = (dump != null && dump != "0" && dump != "" && dump != "false") ? 1 : 2;
+            }
+            if (_dumpFusedGate == 1) {
+                Sys.println("[q4-gate] fused_matmul=" + (_useFused == 1 ? "on" : "off")
+                    + " env=" + (v == null ? "<unset>" : v));
+            }
+        }
+        return _useFused == 1;
+    }
+
     static inline function f16ToF32(bits:Int):Float {
         var sign:Int = (bits >> 15) & 1; var exp:Int = (bits >> 10) & 0x1F; var mant:Int = bits & 0x3FF;
         var sgn = (sign == 1) ? -1.0 : 1.0;
@@ -109,7 +132,9 @@ class Q4Matmul {
         (blocks are independent; per-block work ~1-3us). */
     static function quantizeAll(xBase:Usize, qsBase:Usize, bsums:Bytes,
             dBase:Usize, total:Int, sp:Null<SpinPool>):Void {
-        if (sp != null && total >= 16) {
+        var minParallel = sp != null ? sp.workers() * 8 : 0;
+        if (minParallel < 64) minParallel = 64;
+        if (sp != null && total >= minParallel) {
             var qband = function(lo:Int, hi:Int, node:Int):Void {
                 for (g in lo...hi) quantizeBlock(xBase, qsBase, bsums, dBase, g);
             };
@@ -240,7 +265,10 @@ class Q4Matmul {
     // Claimants = physical performance cores (caller included). E-core
     // claimants gate every band's fork-join tail on hybrid parts, so the
     // pool never sizes past the P-cluster; overridable with
-    // RAYZOR_HAXE_MATMUL_WORKERS.
+    // RAYZOR_HAXE_MATMUL_WORKERS. On Apple Silicon this is still the right
+    // default: logical CPU count selected 10 claimants on a local M-class
+    // machine and the long-context llama-chat run was killed under load,
+    // while explicit 8 has been the stable measured baseline.
     public static function workerCount():Int {
         var n = CpuTopology.perfCoreCount();
         var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
@@ -277,9 +305,10 @@ class Q4Matmul {
         // Contiguous F32 activation base — quantize reads it via inline
         // Mem.loadF32 instead of a per-element getFlat extern.
         var xBase = x.data().raw();
-        var _tq = Sys.time();
+        var _prof = sp != null && sp.profiling();
+        var _tq = _prof ? Sys.time() : 0.0;
         quantizeAll(xBase, aBase, bsums, dBase, batch * bpr, sp);
-        if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
+        if (_prof) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var y = runBanded(qw, batch, K, aBase, bsums, dBase, sp);
 
@@ -424,6 +453,11 @@ class Q4Matmul {
      * [1, rows_i] F32 tensor per weight.
      */
     public static function matmulFused(w0:QTensor, w1:QTensor, w2:QTensor, x:Tensor, ?sp:SpinPool):Array<Tensor> {
+        if (!useFusedMatmul()) {
+            var split = [matmul(w0, x, sp), matmul(w1, x, sp)];
+            if (w2 != null) split.push(matmul(w2, x, sp));
+            return split;
+        }
         var K = w0.cols();
         var batch = Std.int(x.numel() / K);
         if (batch != 1) {
@@ -437,14 +471,11 @@ class Q4Matmul {
             var aB = qsB.address();
             var dB = dScalesB.address();
             var xB = x.data().raw();
-            var _tqB = Sys.time();
+            var _profB = sp != null && sp.profiling();
+            var _tqB = _profB ? Sys.time() : 0.0;
             quantizeAll(xB, aB, bsumsB, dB, batch * bprB, sp);
-            if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
-            var outs = [
-                runBanded(w0, batch, K, aB, bsumsB, dB, sp),
-                runBanded(w1, batch, K, aB, bsumsB, dB, sp)
-            ];
-            if (w2 != null) outs.push(runBanded(w2, batch, K, aB, bsumsB, dB, sp));
+            if (_profB) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
+            var outs = runBandedFused(w0, w1, w2, batch, K, aB, bsumsB, dB, sp);
             if (!pooledB) {
                 qsB.free();
                 bsumsB.free();
@@ -461,9 +492,10 @@ class Q4Matmul {
         var aBase = qs.address();
         var dBase = dScales.address();
         var xBase = x.data().raw();
-        var _tq = Sys.time();
+        var _prof = sp != null && sp.profiling();
+        var _tq = _prof ? Sys.time() : 0.0;
         quantizeAll(xBase, aBase, bsums, dBase, bpr, sp);
-        if (sp != null) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
+        if (_prof) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var r0 = w0.rows();
         var r1 = w1.rows();
@@ -513,6 +545,105 @@ class Q4Matmul {
             bsums.free();
             dScales.free();
         }
+        var outs = [y0, y1];
+        if (w2 != null) outs.push(y2);
+        return outs;
+    }
+
+    static function runBandedFused(w0:QTensor, w1:QTensor, w2:QTensor,
+            batch:Int, K:Int, aBase:Usize, bsums:Bytes, dBase:Usize,
+            sp:Null<SpinPool>):Array<Tensor> {
+        var bpr = K >> 8;
+        var r0 = w0.rows();
+        var r1 = w1.rows();
+        var r2 = (w2 != null) ? w2.rows() : 0;
+        var e0 = r0;
+        var e1 = r0 + r1;
+        var total = r0 + r1 + r2;
+
+        var wb0 = w0.dataPtr();
+        var wb1 = w1.dataPtr();
+        var wb2 = (w2 != null) ? w2.dataPtr() : wb0;
+        var q60 = (w0.scheme() == QScheme.Q6_K);
+        var q61 = (w1.scheme() == QScheme.Q6_K);
+        var q62 = (w2 != null) && (w2.scheme() == QScheme.Q6_K);
+
+        var y0 = Tensor.uninit([batch, r0], DType.F32);
+        var y1 = Tensor.uninit([batch, r1], DType.F32);
+        var y2 = (w2 != null) ? Tensor.uninit([batch, r2], DType.F32) : null;
+        var yb0 = y0.data().raw();
+        var yb1 = y1.data().raw();
+        var yb2 = (w2 != null) ? y2.data().raw() : yb0;
+
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            for (g in n0...n1) {
+                var wBase:Usize; var isQ6:Bool; var n:Int; var yb:Usize; var outRows:Int;
+                if (g < e0) {
+                    wBase = wb0; isQ6 = q60; n = g; yb = yb0; outRows = r0;
+                } else if (g < e1) {
+                    wBase = wb1; isQ6 = q61; n = g - e0; yb = yb1; outRows = r1;
+                } else {
+                    wBase = wb2; isQ6 = q62; n = g - e1; yb = yb2; outRows = r2;
+                }
+                var blockBytes = isQ6 ? 210 : 144;
+                if (batch == 1) {
+                    var sum = 0.0;
+                    var base = n * bpr;
+                    for (b in 0...bpr) {
+                        var xdb = Mem.loadF32(dBase + Usize.fromInt(b << 2));
+                        sum += isQ6
+                            ? q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
+                            : q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
+                    }
+                    Mem.storeF32(yb + Usize.fromInt(n << 2), sum);
+                    continue;
+                }
+                var rt = 0;
+                while (rt + 4 <= batch) {
+                    var s0 = 0.0; var s1 = 0.0; var s2 = 0.0; var s3 = 0.0;
+                    for (b in 0...bpr) {
+                        var blkOff = (n * bpr + b) * blockBytes;
+                        var a0 = rt * K + b * 256;
+                        var i0 = (rt * bpr + b) * 16;
+                        var d0 = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
+                        var d1 = Mem.loadF32(dBase + Usize.fromInt(((rt + 1) * bpr + b) << 2));
+                        var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
+                        var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
+                        if (isQ6) {
+                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
+                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
+                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
+                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                        } else {
+                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
+                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
+                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
+                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                        }
+                    }
+                    Mem.storeF32(yb + Usize.fromInt((rt * outRows + n) << 2), s0);
+                    Mem.storeF32(yb + Usize.fromInt(((rt + 1) * outRows + n) << 2), s1);
+                    Mem.storeF32(yb + Usize.fromInt(((rt + 2) * outRows + n) << 2), s2);
+                    Mem.storeF32(yb + Usize.fromInt(((rt + 3) * outRows + n) << 2), s3);
+                    rt += 4;
+                }
+                while (rt < batch) {
+                    var sum = 0.0;
+                    for (b in 0...bpr) {
+                        var blkOff = (n * bpr + b) * blockBytes;
+                        var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
+                        sum += isQ6
+                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb)
+                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb);
+                    }
+                    Mem.storeF32(yb + Usize.fromInt((rt * outRows + n) << 2), sum);
+                    rt++;
+                }
+            }
+        };
+        if (sp != null) sp.parallelRows(total, band);
+        else band(0, total, 0);
+
         var outs = [y0, y1];
         if (w2 != null) outs.push(y2);
         return outs;

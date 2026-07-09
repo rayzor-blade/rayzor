@@ -3333,8 +3333,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     //
     // `Sys.getEnv` is the env-var gate LlamaArch.build + GGUFTokenizer use
     // to opt into RAYZOR_KV_Q8 et al. `Sys.time` is the wall-clock the
-    // benchmark prints. `Sys.println` writes diagnostic trace lines.
-    // `Sys.exit` aborts on bad CLI args.
+    // benchmark prints. `Sys.systemName`/`Sys.cpuArch` are used by shared
+    // Haxe kernels to choose architecture-specific fast paths. `Sys.println`
+    // writes diagnostic trace lines. `Sys.exit` aborts on bad CLI args.
     for (name, func_ty) in &rayzor_imports {
         if registered.contains(name) {
             continue;
@@ -3342,6 +3343,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let kind = match name.as_str() {
             "haxe_sys_get_env" => "get_env",
             "haxe_sys_time" => "time",
+            "haxe_sys_system_name" => "system_name",
+            "haxe_sys_cpu_arch" => "cpu_arch",
             "haxe_sys_println" => "println",
             "haxe_sys_exit" => "exit",
             _ => continue,
@@ -3375,6 +3378,14 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 .map(|d| d.as_secs_f64())
                                 .unwrap_or(0.0);
                             results[0] = Val::F64(secs.to_bits());
+                        }
+                        "system_name" => {
+                            let ptr = write_haxe_string(&mut caller, "Wasm");
+                            results[0] = ret_ptr(ptr, &rt);
+                        }
+                        "cpu_arch" => {
+                            let ptr = write_haxe_string(&mut caller, "wasm32");
+                            results[0] = ret_ptr(ptr, &rt);
                         }
                         "println" => {
                             let s = read_haxe_string(&mut caller, val_i32(&params[0]));

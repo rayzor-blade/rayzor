@@ -119,6 +119,13 @@ extern class Sys {
 	static function systemName():String;
 
 	/**
+		Returns the CPU architecture for the current Rayzor runtime, using Rust's
+		canonical architecture names such as `"aarch64"`, `"x86_64"` or `"wasm32"`.
+	**/
+	@:native("haxe_sys_cpu_arch")
+	static function cpuArch():String;
+
+	/**
 		Runs the given command. The command output will be printed to the same output as the current process.
 		The current process will block until the command terminates.
 		The return value is the exit code of the command (usually `0` indicates no error).

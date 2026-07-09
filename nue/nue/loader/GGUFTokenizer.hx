@@ -4,7 +4,6 @@ import nue.loader.GGUFReader.MetaValue;
 import nue.tokenizer.Vocab;
 import nue.tokenizer.MergeRule;
 import nue.tokenizer.BPETokenizer;
-import nue.tokenizer.Tokenizer;
 
 /**
  * Build a `BPETokenizer` from the metadata table of a parsed
@@ -37,7 +36,7 @@ import nue.tokenizer.Tokenizer;
  *     regular vocabulary entries.
  */
 class GGUFTokenizer {
-    public static function build(reader:GGUFReader):Tokenizer {
+    public static function build(reader:GGUFReader):BPETokenizer {
         var modelType = readStringOr(reader, "tokenizer.ggml.model", "gpt2");
         var byteLevel = (modelType == "gpt2");
 

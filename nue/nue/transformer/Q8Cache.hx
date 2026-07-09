@@ -9,16 +9,6 @@ import rayzor.Usize;
 /**
  * Pure-Haxe Q8_0 KV cache — the guest-owned counterpart to the plugin's
  * [KvCacheQ8], with identical storage layout so the two are byte-comparable.
- *
- * Layout: `maxSeqLen` rows, each row `numKvHeads * headDim/32` blocks of
- * 34 bytes (2-byte f16 scale + 32 i8 quants), heads contiguous within a
- * row. ~3.76x smaller than F32.
- *
- * Quantization per 32-block: scale = maxAbs/127 (f32), quants =
- * round-half-away-from-zero(x/scale) clamped to [-128,127]. The stored
- * scale is the f16 rounding (to nearest even) of the f32 scale, but the
- * quants divide by the UNROUNDED f32 scale — same convention as the
- * plugin kernel, so blocks match it bit-for-bit on identical input.
  */
 class Q8Cache {
     public var data:Bytes;
@@ -30,24 +20,14 @@ class Q8Cache {
     /** Bytes per cache row: numKvHeads * headBytes. */
     public var rowBytes:Int;
 
-    // Persistent decode-attention scratch (owned here so FlashDecode.decode
-    // reuses one allocation per layer instead of alloc/free'ing every token
-    // — the `scores` buffer grows with context, so per-call allocation is
-    // both a long-context throughput tax and a source of RSS churn). Sized
-    // to maxSeqLen on the first decode, when numQHeads becomes known; null
-    // until then. Declared after every pre-existing member.
+    // Persistent decode-attention scratch. Sized to maxSeqLen on first decode.
     public var scrQ:Bytes;
     public var scrQScale:Bytes;
     public var scrScores:Bytes;
     public var scrV:Bytes;
 
     // Precomputed per-block f32 scale (= f16ToF32 of the stored f16), one
-    // per (row, kv-head, block), filled once at append. The decode flash
-    // kernel re-scans the whole cache every token, so decoding the f16
-    // scale in-kernel re-does f16ToF32 for every prior position on every
-    // subsequent token — O(cacheLen) redundant work that grows with
-    // context. Reading this buffer instead is a single zero-copy load.
-    // blocksPerRow = numKvHeads * (headDim/32).
+    // per (row, kv-head, block), filled once at append.
     public var scaleF32:Bytes;
     /** Per-block signed sum of the 32 stored q8 lanes. Used by Q8 flash
         attention's shifted-query VNNI path:
@@ -71,32 +51,13 @@ class Q8Cache {
 
     /** Lazily allocate the decode scratch, sized to maxSeqLen so it never
         reallocates as context grows. Idempotent. */
-    public function ensureDecodeScratch(numQHeads:Int, rows:Int = 1):Void {
-        if (rows < 1) rows = 1;
-        var qRows = numQHeads * rows;
-        var needQ = qRows * headDim;
-        var needQScale = qRows * (headDim >> 5) * 4;
-        var needScores = qRows * maxSeqLen * 4;
-        var needV = rows * numKvHeads * 128;
-        if (scrScores != null
-            && scrQ.length >= needQ
-            && scrQScale.length >= needQScale
-            && scrScores.length >= needScores
-            && scrV.length >= needV) {
-            return;
-        }
-        if (scrScores != null) {
-            scrQ.free();
-            scrQScale.free();
-            scrScores.free();
-            scrV.free();
-            scrScores = null;
-        }
+    public function ensureDecodeScratch(numQHeads:Int):Void {
+        if (scrScores != null) return;
         var bph = headDim >> 5;
-        scrQ = Bytes.alloc(qRows * headDim);
-        scrQScale = Bytes.alloc(qRows * bph * 4);
-        scrScores = Bytes.alloc(qRows * maxSeqLen * 4);
-        scrV = Bytes.alloc(rows * numKvHeads * 128);
+        scrQ = Bytes.alloc(numQHeads * headDim);
+        scrQScale = Bytes.alloc(numQHeads * bph * 4);
+        scrScores = Bytes.alloc(numQHeads * maxSeqLen * 4);
+        scrV = Bytes.alloc(numKvHeads * 128);
     }
 
     public function free():Void {
@@ -131,10 +92,6 @@ class Q8Cache {
         var n = shp[0];
         if (row + n > maxSeqLen) return -1;
         if (shp[1] != numKvHeads || shp[2] != headDim) return -1;
-        // Locals along the address path are explicitly :Usize — an
-        // unannotated extern-return through a field-loaded receiver chain
-        // currently infers Float and turns pointer adds into fp adds
-        // (silent-decay compiler bug, repro in this file's history).
         var sBase:Usize = src.data().raw();
         var dBase:Usize = data.address();
         var scBase:Usize = scaleF32.address();
@@ -145,8 +102,6 @@ class Q8Cache {
             var dstRow:Usize = dBase + Usize.fromInt((row + r) * rowBytes);
             var scRow:Usize = scBase + Usize.fromInt((row + r) * blocksPerRow * 4);
             var sumRow:Usize = sumBase + Usize.fromInt((row + r) * blocksPerRow * 4);
-            // Heads are contiguous in both source and destination, so the
-            // whole row is one linear run of 32-float groups -> 34B blocks.
             for (b in 0...blocksPerRow) {
                 quantBlock(srcRow + Usize.fromInt(b * 128),
                     dstRow + Usize.fromInt(b * 34),
@@ -158,13 +113,7 @@ class Q8Cache {
     }
 
     /** Dequantize rows 0..len into caller-allocated `out`
-        (`[len, numKvHeads, headDim]` F32) — the prefill attention path.
-        Shaped as fill-into rather than allocate-and-return, and named
-        distinctly from the plugin extern's `dequantView`: cross-module
-        resolution currently fails on Haxe methods that RETURN an extern
-        class (forward-ref stub), and same-name cross-class dispatch
-        collapses to an unresolvable bare symbol. Tensor PARAMS resolve
-        fine (same shape as `append`). */
+        (`[len, numKvHeads, headDim]` F32) — the prefill attention path. */
     public function dequantInto(len:Int, out:Tensor):Void {
         var oBase:Usize = out.data().raw();
         var dBase:Usize = data.address();
@@ -194,16 +143,7 @@ class Q8Cache {
         return Mem.f32FromBits((sign << 31) | ((exp + 112) << 23) | (mant << 13));
     }
 
-    /** IEEE f32 -> f16 bits, round to nearest even (the storage rounding
-        for block scales). `cell` is a 4-byte scratch address for the
-        float -> bits reinterpret. Structured as straight-line early
-        returns with branchless mantissa-carry: `(e<<10) + q2` lets a
-        rounded-up mantissa overflow arithmetically into the exponent
-        (0x400 carry), and a cross-branch `q2 = 0; e += 1` reassignment
-        is exactly the conditional-int-reassign shape the MIR lowering
-        currently decays to Float (stealLoop family) — verified live:
-        scales just below powers of two came back as f32 bit patterns.
-        Bit-exact vs IEEE RNE on a 120k-value sweep. */
+    /** IEEE f32 -> f16 bits, round to nearest even. */
     static inline function f16FromF32(v:Float, cell:Usize):Int {
         Mem.storeF32(cell, v);
         var x:Int = Mem.loadI32(cell);
@@ -211,21 +151,19 @@ class Q8Cache {
         var exp:Int = (x >>> 23) & 0xFF;
         var man:Int = x & 0x7FFFFF;
         if (exp == 0xFF) return sign | 0x7C00 | (man != 0 ? 0x200 : 0);
-        var e:Int = exp - 112; // rebase bias 127 -> 15
+        var e:Int = exp - 112;
         if (e >= 0x1F) return sign | 0x7C00;
         if (e <= 0) {
-            if (e < -10) return sign; // underflow to signed zero
+            if (e < -10) return sign;
             var m:Int = man | 0x800000;
-            var shift:Int = 14 - e; // 14..24
+            var shift:Int = 14 - e;
             var half1:Int = (1 << (shift - 1)) - 1;
             var q:Int = (m + half1 + ((m >>> shift) & 1)) >>> shift;
-            // a carry out of the subnormal mantissa lands on exponent 1 —
-            // the bit pattern is already correct
             return sign | q;
         }
         var rounded:Int = man + 0xFFF + ((man >>> 13) & 1);
         var q2:Int = rounded >>> 13;
-        var bits:Int = (e << 10) + q2; // mantissa carry rolls into exponent
+        var bits:Int = (e << 10) + q2;
         if (bits >= 0x7C00) return sign | 0x7C00;
         return sign | bits;
     }
@@ -246,8 +184,6 @@ class Q8Cache {
         var bits = f16FromF32(scale, cell);
         Mem.storeU8(dst, bits & 0xFF);
         Mem.storeU8(dst + Usize.fromInt(1), (bits >>> 8) & 0xFF);
-        // Store the f16-decoded scale (= what the flash kernel reads) so the
-        // decode path loads it directly instead of re-decoding f16 per token.
         Mem.storeF32(scaleDst, f16ToF32(bits));
         var sum = 0;
         for (i in 0...32) {
