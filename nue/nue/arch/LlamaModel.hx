@@ -6,8 +6,8 @@ import nue.Embedding;
 import nue.Linear;
 import nue.transformer.RoPE;
 import nue.transformer.RMSNorm;
-import nue.transformer.TransformerBlock;
 import nue.transformer.GQAttention;
+import nue.transformer.LlamaBlock;
 import nue.model.ModelMetadata;
 import rayzor.ds.Tensor;
 
@@ -44,7 +44,7 @@ class LlamaModel implements CausalLanguageModel {
 
     public var metadata:ModelMetadata;
     public var embedTokens:Embedding;
-    public var blocks:Array<Module>;
+    public var blocks:Array<LlamaBlock>;
     public var outputNorm:RMSNorm;
     public var lmHead:Linear;
     public var sharedRope:RoPE;
@@ -52,7 +52,7 @@ class LlamaModel implements CausalLanguageModel {
     public function new(
         metadata:ModelMetadata,
         embedTokens:Embedding,
-        blocks:Array<Module>,
+        blocks:Array<LlamaBlock>,
         outputNorm:RMSNorm,
         lmHead:Linear,
         sharedRope:RoPE
@@ -77,6 +77,28 @@ class LlamaModel implements CausalLanguageModel {
         return result;
     }
 
+    public function forwardLastLogits(tokenIds:Array<Int>):Tensor {
+        var h = embedTokens.lookup(tokenIds);
+        for (block in blocks) {
+            h = block.forward(h);
+        }
+        var seqLen = h.shape()[0];
+        if (seqLen > 1) {
+            var last = h.slice(0, seqLen - 1, seqLen);
+            var normed = outputNorm.forward(last);
+            var result = lmHead.forward(normed);
+            normed.free();
+            last.free();
+            h.free();
+            return result;
+        }
+        var normed1 = outputNorm.forward(h);
+        var result1 = lmHead.forward(normed1);
+        normed1.free();
+        h.free();
+        return result1;
+    }
+
     public function forward(x:Tensor):Tensor {
         var shape = x.shape();
         var n = shape[0];
@@ -87,17 +109,8 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function resetCache():Void {
-        // Concrete downcasts, not `Dynamic` field access. The blocks are
-        // held as Array<Module>, so each element arrives here as an
-        // interface fat pointer (`obj_ptr @ offset 0, fn_ptr_N @ offset
-        // 8(N+1)`). Dynamic field access reads offset 0 as a class
-        // type-id header — for a fat pointer that's the inner obj_ptr's
-        // address truncated to i64, which lands on a class id that
-        // either doesn't exist or maps to an unrelated class. The
-        // class→class cast lowering unwraps the fat pointer correctly.
         for (i in 0...blocks.length) {
-            var tb = cast(blocks[i], TransformerBlock);
-            var attn = cast(tb.attn, GQAttention);
+            var attn = blocks[i].attn;
             if (attn != null && attn.cache != null) {
                 attn.cache.reset();
             }
@@ -106,16 +119,14 @@ class LlamaModel implements CausalLanguageModel {
 
     public function cacheLen():Int {
         if (blocks.length == 0) return 0;
-        var tb = cast(blocks[0], TransformerBlock);
-        var attn = cast(tb.attn, GQAttention);
+        var attn = blocks[0].attn;
         if (attn == null || attn.cache == null) return 0;
         return attn.cache.currentLen;
     }
 
     public function rewindCache(len:Int):Void {
         for (i in 0...blocks.length) {
-            var tb = cast(blocks[i], TransformerBlock);
-            var attn = cast(tb.attn, GQAttention);
+            var attn = blocks[i].attn;
             if (attn != null && attn.cache != null) {
                 attn.cache.rewind(len);
             }
@@ -123,18 +134,11 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function parameters():Array<nue.Module.NamedTensor> {
-        var ps = [];
-        for (p in embedTokens.parameters())
-            ps.push({ name: "token_embd." + p.name, tensor: p.tensor });
-        for (block in blocks) {
-            for (p in block.parameters()) ps.push(p);
-        }
-        for (p in outputNorm.parameters())
-            ps.push({ name: "output_norm." + p.name, tensor: p.tensor });
-        if (!metadata.tieWordEmbeddings) {
-            for (p in lmHead.parameters())
-                ps.push({ name: "output." + p.name, tensor: p.tensor });
-        }
-        return ps;
+        // Llama GGUF inference builds concrete tensors up front through the
+        // loader, and does not need recursive parameter introspection at run
+        // time. Keeping this inert avoids the current compiler resolver bug
+        // around `NamedTensor.name` typedef fields, which otherwise leaves a
+        // SIGILL stub in release bundles.
+        return [];
     }
 }

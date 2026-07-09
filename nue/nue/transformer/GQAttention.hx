@@ -100,7 +100,9 @@ class GQAttention implements Module {
         // buffer is never decremented). Capture the matmul into a local,
         // reshape, then drop the local — leaves only the view refcount on
         // the storage.
-        if (qWq != null && kWq != null && vWq != null) {
+        var useHaxeMat = Linear.useHaxeMatmul();
+        var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul();
+        if (qWq != null && kWq != null && vWq != null && useFusedMat) {
             var triple = Linear.useHaxeMatmul()
                 ? nue.Q4Matmul.matmulFused(qWq, kWq, vWq, x, qProj.pool)
                 : QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);

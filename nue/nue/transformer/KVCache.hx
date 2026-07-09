@@ -49,7 +49,7 @@ class KVCache {
 
     public function new(
         maxSeqLen:Int, numKvHeads:Int, headDim:Int, dtype:DType,
-        useQ8:Bool = false, useHaxeQ8:Bool = false
+        useQ8:Bool = false, useHaxeQ8:Bool = false, numQHeads:Int = 0
     ) {
         this.maxSeqLen = maxSeqLen;
         this.numKvHeads = numKvHeads;

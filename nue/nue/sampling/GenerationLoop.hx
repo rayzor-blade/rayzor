@@ -1,7 +1,7 @@
 package nue.sampling;
 
-import nue.CausalLanguageModel;
-import nue.tokenizer.Tokenizer;
+import nue.arch.LlamaModel;
+import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 
 /**
@@ -33,16 +33,16 @@ import rayzor.ds.Tensor;
  * arbitrary stop strings; for now EOS is the only stop sentinel.
  */
 class GenerationLoop {
-    public var model:CausalLanguageModel;
-    public var tokenizer:Tokenizer;
-    public var sampler:Sampler;
+    public var model:LlamaModel;
+    public var tokenizer:BPETokenizer;
+    public var sampler:LocalTempSampler;
     public var eosId:Int;
     public var maxNewTokens:Int;
 
     public function new(
-        model:CausalLanguageModel,
-        tokenizer:Tokenizer,
-        sampler:Sampler,
+        model:LlamaModel,
+        tokenizer:BPETokenizer,
+        sampler:LocalTempSampler,
         eosId:Int,
         maxNewTokens:Int
     ) {
@@ -90,6 +90,26 @@ class GenerationLoop {
         var _pStepMax = 0.0;
         var _pStepMaxIdx = -1;
         var _pStepMaxStart = 0.0;
+        var _pwEnv = Sys.getEnv("RAYZOR_PROFILE_DECODE_WINDOWS");
+        var _profileWindows = _profileOn && _pwEnv != null && _pwEnv != "0"
+            && _pwEnv != "" && _pwEnv.toLowerCase() != "false";
+        var _windowSize:Int = 64;
+        var _pwSize = Sys.getEnv("RAYZOR_PROFILE_DECODE_WINDOW");
+        if (_profileWindows && _pwSize != null) {
+            var _parsedWindow:Null<Int> = Std.parseInt(_pwSize);
+            if (_parsedWindow != null) {
+                var _unboxedWindow:Int = _parsedWindow + 0;
+                if (_unboxedWindow > 0) _windowSize = _unboxedWindow;
+            }
+        }
+        var _wStartTok = 0;
+        var _wStartTime = 0.0;
+        var _wForward = 0.0;
+        var _wSample = 0.0;
+        var _wDecodeStr = 0.0;
+        var _wFree = 0.0;
+        var _wLastRow = 0.0;
+        var _wMax = 0.0;
         if (_profileOn) {
             _pStepHist = [];
             for (_ in 0..._pHistBuckets) _pStepHist.push(0);
@@ -98,21 +118,25 @@ class GenerationLoop {
         model.resetCache();
 
         var _tPrefill = _profileOn ? Sys.time() : 0.0;
-        var ids = tokenizer.encode(prompt);
+        var ids:Array<Int> = tokenizer.encode(prompt);
         if (_profileOn) _pTokenize = Sys.time() - _tPrefill;
         if (ids.length == 0) return prompt;
         _pPromptTokens = ids.length;
 
-        // Prefill: feed the entire prompt; take the last row of logits
-        // as the prediction for "what comes after the prompt".
+        // Prefill: the last-logits specialization is an important TTFT lever,
+        // but keep it behind an opt-in gate until the sliced-hidden-row view
+        // path is proven equivalent for every Haxe matmul kernel. A strided
+        // row view fed to raw-pointer Q4 kernels can silently corrupt logits.
         _tPrefill = _profileOn ? Sys.time() : 0.0;
-        var logits = model.forwardIds(ids);
+        var logits:Tensor = useFastLastLogits()
+            ? model.forwardLastLogits(ids)
+            : model.forwardIds(ids);
         if (_profileOn) _pPrefillForward = Sys.time() - _tPrefill;
         _tPrefill = _profileOn ? Sys.time() : 0.0;
-        var lr0 = lastRow(logits);
+        var lr0:Tensor = lastRow(logits);
         if (_profileOn) _pPrefillLastRow = Sys.time() - _tPrefill;
         _tPrefill = _profileOn ? Sys.time() : 0.0;
-        var nextId = sampler.sample(lr0);
+        var nextId:Int = sampler.sample(lr0);
         if (_profileOn) _pPrefillSample = Sys.time() - _tPrefill;
         if (lr0 != logits) lr0.free();
 
@@ -127,8 +151,10 @@ class GenerationLoop {
         // Array (O(1) push, join once for the return value).
         var parts:Array<String> = [];
         var carryHolder = [haxe.io.Bytes.alloc(0)];
+        var skipText = skipTokenText();
         var step = 0;
         var _decodeStart = _profileOn ? Sys.time() : 0.0;
+        if (_profileWindows) _wStartTime = Sys.time();
         while (true) {
             if (nextId == eosId) break;
             if (maxNewTokens > 0 && step >= maxNewTokens) break;
@@ -137,10 +163,16 @@ class GenerationLoop {
             var _stepIndex = _pCount;
 
             var _t0 = _profileOn ? Sys.time() : 0.0;
-            var delta = tokenizer.decodeStreamStep(carryHolder, nextId);
-            if (_profileOn) _pDecodeStr += Sys.time() - _t0;
-            parts.push(delta);
-            ids.push(nextId);
+            var delta:String = "";
+            if (!skipText) {
+                delta = tokenizer.decodeStreamStep(carryHolder, nextId);
+                parts.push(delta);
+            }
+            if (_profileOn) {
+                var _dt = Sys.time() - _t0;
+                _pDecodeStr += _dt;
+                if (_profileWindows) _wDecodeStr += _dt;
+            }
 
             // Stream the per-token delta through the callback.
             if (onToken != null) {
@@ -149,6 +181,7 @@ class GenerationLoop {
 
             step++;
             _pCount++;
+            if (maxNewTokens > 0 && step >= maxNewTokens) break;
 
             // Decode step: only feed the latest token; KV cache
             // carries the rest of the context.
@@ -169,19 +202,35 @@ class GenerationLoop {
             // input (1-D logits at prefill seq_len=1), guard the free.
             var _t1 = _profileOn ? Sys.time() : 0.0;
             logits.free();
-            if (_profileOn) _pFreeLogits += Sys.time() - _t1;
+            if (_profileOn) {
+                var _dt = Sys.time() - _t1;
+                _pFreeLogits += _dt;
+                if (_profileWindows) _wFree += _dt;
+            }
 
             _t1 = _profileOn ? Sys.time() : 0.0;
-            logits = model.forwardIds([nextId]);
-            if (_profileOn) _pForward += Sys.time() - _t1;
+            logits = model.forwardLastLogits([nextId]);
+            if (_profileOn) {
+                var _dt = Sys.time() - _t1;
+                _pForward += _dt;
+                if (_profileWindows) _wForward += _dt;
+            }
 
             _t1 = _profileOn ? Sys.time() : 0.0;
-            var lrN = lastRow(logits);
-            if (_profileOn) _pLastRow += Sys.time() - _t1;
+            var lrN:Tensor = lastRow(logits);
+            if (_profileOn) {
+                var _dt = Sys.time() - _t1;
+                _pLastRow += _dt;
+                if (_profileWindows) _wLastRow += _dt;
+            }
 
             _t1 = _profileOn ? Sys.time() : 0.0;
             nextId = sampler.sample(lrN);
-            if (_profileOn) _pSample += Sys.time() - _t1;
+            if (_profileOn) {
+                var _dt = Sys.time() - _t1;
+                _pSample += _dt;
+                if (_profileWindows) _wSample += _dt;
+            }
 
             if (lrN != logits) lrN.free();
 
@@ -196,7 +245,49 @@ class GenerationLoop {
                     _pStepMaxIdx = _stepIndex;
                     _pStepMaxStart = _stepStart;
                 }
+                if (_profileWindows) {
+                    if (_stepWall > _wMax) _wMax = _stepWall;
+                    var _wTokens = _pCount - _wStartTok;
+                    if (_wTokens >= _windowSize) {
+                        var _wWall = Sys.time() - _wStartTime;
+                        trace("[profile-window] tokens=" + _wStartTok + ".." + _pCount
+                            + " cache_len=" + model.cacheLen()
+                            + " wall_s=" + _wWall
+                            + " tok_s=" + (_wTokens / _wWall)
+                            + " avg_ms=" + ((_wWall * 1000.0) / _wTokens)
+                            + " max_ms=" + (_wMax * 1000.0)
+                            + " fwd_s=" + _wForward
+                            + " sample_s=" + _wSample
+                            + " decodeStr_s=" + _wDecodeStr
+                            + " lastRow_s=" + _wLastRow
+                            + " free_s=" + _wFree);
+                        _wStartTok = _pCount;
+                        _wStartTime = Sys.time();
+                        _wForward = 0.0;
+                        _wSample = 0.0;
+                        _wDecodeStr = 0.0;
+                        _wLastRow = 0.0;
+                        _wFree = 0.0;
+                        _wMax = 0.0;
+                    }
+                }
             }
+        }
+
+        if (_profileWindows && _pCount > _wStartTok) {
+            var _wTokens = _pCount - _wStartTok;
+            var _wWall = Sys.time() - _wStartTime;
+            trace("[profile-window] tokens=" + _wStartTok + ".." + _pCount
+                + " cache_len=" + model.cacheLen()
+                + " wall_s=" + _wWall
+                + " tok_s=" + (_wTokens / _wWall)
+                + " avg_ms=" + ((_wWall * 1000.0) / _wTokens)
+                + " max_ms=" + (_wMax * 1000.0)
+                + " fwd_s=" + _wForward
+                + " sample_s=" + _wSample
+                + " decodeStr_s=" + _wDecodeStr
+                + " lastRow_s=" + _wLastRow
+                + " free_s=" + _wFree);
         }
 
         if (_profileOn && _pCount > 0) {
@@ -249,6 +340,7 @@ class GenerationLoop {
         // Full text = prompt + every emitted delta + any incomplete trailing
         // codepoint still in the carry (flushed leniently, matching what a
         // whole-buffer decodeBuffer would have produced at the end).
+        if (skipText) return prompt;
         var tail = (carryHolder[0].length > 0) ? carryHolder[0].toString() : "";
         return prompt + parts.join("") + tail;
     }
@@ -270,6 +362,7 @@ class GenerationLoop {
     private static function lastRow(logits:Tensor):Tensor {
         var shape = logits.shape();
         if (shape.length <= 1) return logits;
+        if (shape[0] == 1) return logits.reshape([shape[shape.length - 1]]);
         var lastIdx = shape[0] - 1;
         // `slice` keeps the sliced axis (`[lastIdx, lastIdx+1)`),
         // returning shape `[1, vocab_size]`. Samplers index logits
@@ -283,6 +376,19 @@ class GenerationLoop {
         var reshaped = sliced.reshape([vocab]);
         sliced.free();
         return reshaped;
+    }
+
+    private static function useFastLastLogits():Bool {
+        var v = Sys.getEnv("RAYZOR_PREFILL_LAST_LOGITS");
+        return v != null && v != "0" && v != "" && v.toLowerCase() != "false";
+    }
+
+    private static function skipTokenText():Bool {
+        var silent = Sys.getEnv("RAYZOR_LLAMA_SILENT_STREAM");
+        if (silent == null || silent == "0" || silent == "" || silent.toLowerCase() == "false") {
+            return false;
+        }
+        return Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") == null;
     }
 
 }

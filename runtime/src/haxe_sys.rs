@@ -1509,6 +1509,18 @@ pub extern "C" fn haxe_sys_system_name() -> *mut HaxeString {
     }))
 }
 
+/// Get the CPU architecture for the current runtime.
+#[no_mangle]
+pub extern "C" fn haxe_sys_cpu_arch() -> *mut HaxeString {
+    let arch = std::env::consts::ARCH;
+
+    Box::into_raw(Box::new(HaxeString {
+        ptr: arch.as_ptr() as *mut u8,
+        len: arch.len(),
+        cap: 0,
+    }))
+}
+
 /// Get CPU time for current process (in seconds)
 #[no_mangle]
 pub extern "C" fn haxe_sys_cpu_time() -> f64 {

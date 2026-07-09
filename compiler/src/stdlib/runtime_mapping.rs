@@ -1710,6 +1710,8 @@ impl StdlibMapping {
             // System info
             map_method!(static "Sys", "systemName" => "haxe_sys_system_name", params: 0, returns: complex,
                 types: &[] => PtrString),
+            map_method!(static "Sys", "cpuArch" => "haxe_sys_cpu_arch", params: 0, returns: complex,
+                types: &[] => PtrString),
             map_method!(static "Sys", "programPath" => "haxe_sys_program_path", params: 0, returns: complex,
                 types: &[] => PtrString),
             map_method!(static "Sys", "executablePath" => "haxe_sys_program_path", params: 0, returns: complex,
@@ -3663,6 +3665,9 @@ impl StdlibMapping {
             // tensor.mul(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "mul" => "Tensor_mul", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.siluMul(other: Tensor): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "siluMul" => "Tensor_siluMul", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // tensor.div(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "div" => "Tensor_div", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
@@ -3931,6 +3936,9 @@ impl StdlibMapping {
             map_method!(static "rayzor_concurrent_CpuTopology", "bindToNode"
                 => "rayzor_topology_bind_to_node",
                 params: 1, returns: primitive, types: &[I32] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "bindPerformance"
+                => "rayzor_topology_bind_performance",
+                params: 0, returns: primitive, types: &[] => I32),
             map_method!(static "rayzor_concurrent_CpuTopology", "unbind"
                 => "rayzor_topology_unbind",
                 params: 0, returns: primitive, types: &[] => I32),

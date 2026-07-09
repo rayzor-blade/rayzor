@@ -518,6 +518,7 @@ register_symbol!(
     "haxe_sys_system_name",
     crate::haxe_sys::haxe_sys_system_name
 );
+register_symbol!("haxe_sys_cpu_arch", crate::haxe_sys::haxe_sys_cpu_arch);
 register_symbol!("haxe_sys_cpu_time", crate::haxe_sys::haxe_sys_cpu_time);
 register_symbol!(
     "haxe_sys_program_path",
@@ -1865,6 +1866,10 @@ register_symbol!(
 );
 register_symbol!("rayzor_tensor_sub", crate::tensor::rayzor_tensor_sub);
 register_symbol!("rayzor_tensor_mul", crate::tensor::rayzor_tensor_mul);
+register_symbol!(
+    "rayzor_tensor_silu_mul",
+    crate::tensor::rayzor_tensor_silu_mul
+);
 register_symbol!("rayzor_tensor_div", crate::tensor::rayzor_tensor_div);
 
 // Math / activations / normalization
@@ -2077,6 +2082,10 @@ register_symbol!(
 register_symbol!(
     "rayzor_topology_bind_to_node",
     crate::topology::rayzor_topology_bind_to_node
+);
+register_symbol!(
+    "rayzor_topology_bind_performance",
+    crate::topology::rayzor_topology_bind_performance
 );
 register_symbol!(
     "rayzor_topology_unbind",

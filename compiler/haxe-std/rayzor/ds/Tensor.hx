@@ -245,6 +245,14 @@ extern class Tensor {
     @:op(A * B)
     public function mul(other:Tensor):Tensor;
 
+    /**
+     * Fused SiLU and element-wise multiply: `silu(this) * other`.
+     * Used by transformer SwiGLU blocks to avoid materialising the
+     * intermediate activation tensor.
+     */
+    @:native("tensor_silu_mul")
+    public function siluMul(other:Tensor):Tensor;
+
     /** Element-wise division */
     @:native("tensor_div")
     @:op(A / B)

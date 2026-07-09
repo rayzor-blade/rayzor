@@ -1,7 +1,7 @@
 package nue.sampling;
 
 import nue.arch.LlamaModel;
-import nue.tokenizer.Tokenizer;
+import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 
 /**
@@ -14,8 +14,8 @@ import rayzor.ds.Tensor;
  */
 class SpeculativeGenerationLoop {
     public var model:LlamaModel;
-    public var tokenizer:Tokenizer;
-    public var sampler:Sampler;
+    public var tokenizer:BPETokenizer;
+    public var sampler:LocalTempSampler;
     public var eosId:Int;
     public var maxNewTokens:Int;
     public var maxDraft:Int;
@@ -32,8 +32,8 @@ class SpeculativeGenerationLoop {
 
     public function new(
         model:LlamaModel,
-        tokenizer:Tokenizer,
-        sampler:Sampler,
+        tokenizer:BPETokenizer,
+        sampler:LocalTempSampler,
         eosId:Int,
         maxNewTokens:Int
     ) {
@@ -68,7 +68,9 @@ class SpeculativeGenerationLoop {
         var ids:Array<Int> = tokenizer.encode(prompt);
         if (ids.length == 0) return prompt;
 
-        var logits:Tensor = model.forwardIds(ids);
+        var logits:Tensor = useFastLastLogits()
+            ? model.forwardLastLogits(ids)
+            : model.forwardIds(ids);
         var lr0:Tensor = lastRow(logits);
         var nextId:Int = sampler.sample(lr0);
         if (lr0 != logits) lr0.free();
@@ -144,7 +146,7 @@ class SpeculativeGenerationLoop {
                                 if (!terminalAfterReject) {
                                     verifyLogits.free();
                                     var replacementIds:Array<Int> = [target];
-                                    logits = model.forwardIds(replacementIds);
+                                    logits = model.forwardLastLogits(replacementIds);
                                     var lrR:Tensor = lastRow(logits);
                                     nextId = sampler.sample(lrR);
                                     if (lrR != logits) lrR.free();
@@ -182,10 +184,11 @@ class SpeculativeGenerationLoop {
             ids.push(nextId);
             if (!emitToken(nextId, parts, carryHolder, onToken)) break;
             step++;
+            if (maxNewTokens > 0 && step >= maxNewTokens) break;
 
             logits.free();
             var nextIds:Array<Int> = [nextId];
-            logits = model.forwardIds(nextIds);
+            logits = model.forwardLastLogits(nextIds);
             var lrN:Tensor = lastRow(logits);
             nextId = sampler.sample(lrN);
             if (lrN != logits) lrN.free();
@@ -228,6 +231,11 @@ class SpeculativeGenerationLoop {
         var reshaped:Tensor = sliced.reshape([vocab]);
         sliced.free();
         return reshaped;
+    }
+
+    static function useFastLastLogits():Bool {
+        var v = Sys.getEnv("RAYZOR_PREFILL_LAST_LOGITS");
+        return v != null && v != "0" && v != "" && v.toLowerCase() != "false";
     }
 
     static function rowAt(logits:Tensor, row:Int):Tensor {

@@ -124,6 +124,11 @@ pub enum DebugCommands {
         #[arg(long)]
         llvm: bool,
 
+        /// Pass --stats to each child `rayzor run`. This is diagnostic and
+        /// can perturb latency-sensitive workloads, so it is opt-in.
+        #[arg(long)]
+        runtime_stats: bool,
+
         /// Load a raw native plugin dylib/so/dll in each child `rayzor run`
         #[arg(long = "native-lib", value_name = "FILE")]
         native_libs: Vec<PathBuf>,

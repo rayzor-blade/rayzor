@@ -27,6 +27,13 @@ interface CausalLanguageModel extends Module {
      */
     function forwardIds(tokenIds:Array<Int>):Tensor;
 
+    /**
+     * Forward pass on a sequence of token IDs, returning only the logits for
+     * the final position as `[1, vocab_size]`. The full sequence still flows
+     * through the transformer blocks so KV cache prefill remains correct.
+     */
+    function forwardLastLogits(tokenIds:Array<Int>):Tensor;
+
     /** Clear every layer's KV cache. Call between independent prompts. */
     function resetCache():Void;
 }

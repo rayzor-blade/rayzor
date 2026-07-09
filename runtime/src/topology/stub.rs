@@ -42,6 +42,10 @@ pub(super) fn bind_current_thread(_node: i32) -> i32 {
     0
 }
 
+pub(super) fn bind_current_thread_to_performance() -> i32 {
+    0
+}
+
 pub(super) fn unbind_current_thread() -> i32 {
     0
 }

@@ -9,6 +9,7 @@ import nue.model.NamedTensorMap;
 import nue.loader.GGUFReader.MetaValue;
 import nue.loader.GGUFTokenizer;
 import nue.tokenizer.Tokenizer;
+import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
@@ -72,7 +73,7 @@ class GGUFLoader implements ModelLoader {
      * Mistral, Qwen, …) carry the tokenizer inline so a single
      * `.gguf` file is enough to encode prompts and decode generations.
      */
-    public function tokenizer(path:String):Tokenizer {
+    public function tokenizer(path:String):BPETokenizer {
         var bytes = File.getBytes(path);
         var reader = new GGUFReader(bytes);
         return GGUFTokenizer.build(reader);
@@ -320,6 +321,6 @@ class GGUFLoader implements ModelLoader {
 
 typedef LoadedModel = {
     var model:Module;
-    var tokenizer:Tokenizer;
+    var tokenizer:BPETokenizer;
     var metadata:ModelMetadata;
 };

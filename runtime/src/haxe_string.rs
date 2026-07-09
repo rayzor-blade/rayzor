@@ -9,6 +9,8 @@ use std::io::Write;
 use std::ptr;
 use std::slice;
 use std::str;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Haxe String representation (pointer-based, no struct returns)
 #[repr(C)]
@@ -20,6 +22,50 @@ pub struct HaxeString {
 }
 
 const INITIAL_CAPACITY: usize = 32;
+
+fn stdout_flush_interval() -> Duration {
+    static INTERVAL: OnceLock<Duration> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let ms = std::env::var("RAYZOR_STDOUT_FLUSH_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50);
+        Duration::from_millis(ms)
+    })
+}
+
+fn write_stdout_buffered(bytes: &[u8], force: bool) {
+    static BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
+    let interval = stdout_flush_interval();
+
+    let Ok(mut buffer) = BUFFER
+        .get_or_init(|| Mutex::new(Vec::with_capacity(4096)))
+        .lock()
+    else {
+        return;
+    };
+    buffer.extend_from_slice(bytes);
+
+    let now = Instant::now();
+    let mut should_flush = force || interval.is_zero() || buffer.len() >= 4096;
+    if !should_flush {
+        if let Ok(last) = LAST_FLUSH.get_or_init(|| Mutex::new(now)).lock() {
+            should_flush = now.duration_since(*last) >= interval;
+        }
+    }
+    if !should_flush {
+        return;
+    }
+
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(&buffer);
+    let _ = stdout.flush();
+    buffer.clear();
+    if let Ok(mut last) = LAST_FLUSH.get_or_init(|| Mutex::new(now)).lock() {
+        *last = now;
+    }
+}
 
 // ============================================================================
 // String Creation
@@ -589,9 +635,8 @@ pub extern "C" fn haxe_string_print(s: *const HaxeString) {
         let s_ref = &*s;
         if s_ref.len > 0 {
             let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
-            if let Ok(rust_str) = str::from_utf8(slice) {
-                print!("{}", rust_str);
-                let _ = std::io::stdout().flush();
+            if str::from_utf8(slice).is_ok() {
+                write_stdout_buffered(slice, slice.contains(&b'\n'));
             }
         }
     }
@@ -601,7 +646,7 @@ pub extern "C" fn haxe_string_print(s: *const HaxeString) {
 #[no_mangle]
 pub extern "C" fn haxe_string_println(s: *const HaxeString) {
     haxe_string_print(s);
-    println!();
+    write_stdout_buffered(b"\n", true);
 }
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`.

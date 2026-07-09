@@ -12,22 +12,26 @@ fi
 GGUF="${GGUF:-$DEFAULT_GGUF}"
 PROMPT="${PROMPT:-Explain voronoi regions, and their connection to delauney computation and graph memory models. With coding examples. Describe vector graph database implementation}"
 MAX_TOKENS="${MAX_TOKENS:-5000}"
-TEMP="${TEMP:-0.7}"
+CTX="${CTX:-4096}"
+TEMP="${TEMP:-0.5}"
 RUNS="${RUNS:-6}"
 TIMEOUT="${TIMEOUT:-240}"
 COOLDOWN_MS="${COOLDOWN_MS:-15000}"
 PRESET="${PRESET:-server}"
+BENCH_ENGINE="${BENCH_ENGINE:-direct}" # direct|debug
 RELEASE="${RELEASE:-true}"
 LLVM="${LLVM:-true}"
 CACHE_SCRUB="${CACHE_SCRUB:-false}"
-START_INTERPRETED="${START_INTERPRETED:-}"
-TIER_PROMOTION="${TIER_PROMOTION:-}"
+START_INTERPRETED="${START_INTERPRETED:-false}"
+TIER_PROMOTION="${TIER_PROMOTION:-true}"
 VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
+RUNTIME_STATS="${RUNTIME_STATS:-false}"
 POOL_PROFILE="${POOL_PROFILE:-${RAYZOR_PROFILE_POOL:-false}}"
 WORKER_VARIANTS="${WORKER_VARIANTS:-}"
 SILENT_STREAM="${SILENT_STREAM:-true}"
 USE_JEMALLOC="${USE_JEMALLOC:-auto}"
+KILL_RAYZOR_BETWEEN_RUNS="${KILL_RAYZOR_BETWEEN_RUNS:-true}"
 BUNDLE="${BUNDLE:-auto}"
 BENCH_TARGET="${BENCH_TARGET:-}"
 
@@ -87,7 +91,15 @@ maybe_enable_jemalloc() {
   fi
 }
 
-export RAYZOR_NO_PRELOAD_MMAP="${RAYZOR_NO_PRELOAD_MMAP:-1}"
+if [[ -z "${RAYZOR_NO_PRELOAD_MMAP:-}" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    export RAYZOR_NO_PRELOAD_MMAP=0
+  else
+    export RAYZOR_NO_PRELOAD_MMAP=1
+  fi
+else
+  export RAYZOR_NO_PRELOAD_MMAP
+fi
 maybe_enable_jemalloc
 if [[ "$POOL_PROFILE" == "true" || "$POOL_PROFILE" == "1" || "$POOL_PROFILE" == "yes" ]]; then
   export RAYZOR_PROFILE_POOL=1
@@ -96,7 +108,9 @@ export RAYZOR_HAXE_MATMUL="${RAYZOR_HAXE_MATMUL:-1}"
 export RAYZOR_HAXE_FLASH="${RAYZOR_HAXE_FLASH:-1}"
 export RAYZOR_KV_Q8="${RAYZOR_KV_Q8:-1}"
 export RAYZOR_REQUANT_LM_HEAD="${RAYZOR_REQUANT_LM_HEAD:-${REQUANT_LM_HEAD:-1}}"
-export RAYZOR_STATIC_BANDS="${RAYZOR_STATIC_BANDS:-1}"
+if [[ -n "${RAYZOR_STATIC_BANDS:-}" ]]; then
+  export RAYZOR_STATIC_BANDS
+fi
 if [[ "$SILENT_STREAM" == "true" || "$SILENT_STREAM" == "1" || "$SILENT_STREAM" == "yes" ]]; then
   export RAYZOR_LLAMA_SILENT_STREAM=1
 else
@@ -121,10 +135,13 @@ if [[ "$IS_BUNDLE" == "1" ]]; then
 fi
 echo "mmap preload: $([[ "${RAYZOR_NO_PRELOAD_MMAP:-}" == "1" ]] && echo off || echo on)"
 echo "preset: $PRESET"
+echo "engine: $BENCH_ENGINE"
 echo "release: $RELEASE"
 echo "stack traces: $([[ "$RELEASE" == "true" || "$RELEASE" == "1" || "$RELEASE" == "yes" ]] && echo off || echo manifest/preset)"
 echo "llvm: $LLVM"
+echo "runtime stats: $RUNTIME_STATS"
 echo "cache scrub: $CACHE_SCRUB"
+echo "kill stale rayzor: $KILL_RAYZOR_BETWEEN_RUNS"
 echo "silent stream: $SILENT_STREAM"
 if [[ -n "$START_INTERPRETED" ]]; then
   echo "start interpreted override: $START_INTERPRETED"
@@ -133,7 +150,8 @@ if [[ -n "$TIER_PROMOTION" ]]; then
   echo "tier promotion override: $TIER_PROMOTION"
 fi
 echo "pool profile: $([[ "${RAYZOR_PROFILE_POOL:-}" == "1" ]] && echo on || echo off)"
-echo "haxe: matmul=$RAYZOR_HAXE_MATMUL flash=$RAYZOR_HAXE_FLASH kv_q8=$RAYZOR_KV_Q8 lm_head_requant=$RAYZOR_REQUANT_LM_HEAD"
+echo "haxe: matmul=$RAYZOR_HAXE_MATMUL flash=$RAYZOR_HAXE_FLASH flash_batch_max=${RAYZOR_HAXE_FLASH_BATCH_MAX:-auto} kv_q8=$RAYZOR_KV_Q8 lm_head_requant=$RAYZOR_REQUANT_LM_HEAD static_bands=${RAYZOR_STATIC_BANDS:-auto}"
+echo "generation: max_tokens=$MAX_TOKENS ctx=$CTX temp=$TEMP"
 if [[ -n "$WORKER_VARIANTS" ]]; then
   echo "worker variants: $WORKER_VARIANTS"
 fi
@@ -148,6 +166,11 @@ run_bench() {
     fi
     echo
     echo "=== worker variant: $worker ==="
+  fi
+
+  if [[ "$BENCH_ENGINE" == "direct" ]]; then
+    run_direct_bench
+    return
   fi
 
   local cmd=(
@@ -174,6 +197,9 @@ run_bench() {
   if [[ "$LLVM" == "true" || "$LLVM" == "1" || "$LLVM" == "yes" ]]; then
     cmd+=(--llvm)
   fi
+  if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
+    cmd+=(--runtime-stats)
+  fi
   if [[ "$CACHE_SCRUB" != "true" && "$CACHE_SCRUB" != "1" && "$CACHE_SCRUB" != "yes" ]]; then
     cmd+=(--no-cache-scrub)
   fi
@@ -194,10 +220,139 @@ run_bench() {
 
   cmd+=(
     --cooldown-ms "$COOLDOWN_MS"
-    -- "$GGUF" "$PROMPT" "$MAX_TOKENS" "$TEMP"
+    -- "$GGUF" "$PROMPT" "$MAX_TOKENS" "$CTX" "$TEMP"
   )
 
   "${cmd[@]}"
+}
+
+run_direct_bench() {
+  local tmp_dir="${TMPDIR:-/tmp}/rayzor-llama-chat-bench.$$"
+  local results="$tmp_dir/results.tsv"
+  mkdir -p "$tmp_dir"
+  : > "$results"
+
+  echo "=== rayzor direct bench ==="
+  echo "file:    $BENCH_FILE"
+  echo "runs:    $RUNS per variant ($((RUNS * ${#VARIANT_LIST[@]})) subprocesses)"
+  echo "metric:  tok/s"
+  echo "preset:  $PRESET"
+  if [[ ${#VARIANT_LIST[@]} -gt 1 ]]; then
+    local labels
+    labels="$(printf "%s, " "${VARIANT_LIST[@]}")"
+    echo "variants: ${labels%, }"
+    echo "order:   round-robin"
+  fi
+  echo
+
+  local ordinal=0
+  for ((run_no = 1; run_no <= RUNS; run_no++)); do
+    for variant in "${VARIANT_LIST[@]}"; do
+      ordinal=$((ordinal + 1))
+      if [[ "$CACHE_SCRUB" == "true" || "$CACHE_SCRUB" == "1" || "$CACHE_SCRUB" == "yes" ]]; then
+        rm -rf .rayzor/cache .rayzor/blade/cache
+      fi
+      if [[ "$KILL_RAYZOR_BETWEEN_RUNS" == "true" || "$KILL_RAYZOR_BETWEEN_RUNS" == "1" || "$KILL_RAYZOR_BETWEEN_RUNS" == "yes" ]]; then
+        pkill -9 -f target/release/rayzor 2>/dev/null || true
+        sleep 0.2
+      fi
+
+      local cmd=("$RAYZOR" run "$BENCH_FILE" "--preset" "$PRESET")
+      if [[ "$IS_BUNDLE" == "1" ]]; then
+        cmd+=("--native-lib" "$NATIVE_LIB")
+      fi
+      if [[ "$RELEASE" == "true" || "$RELEASE" == "1" || "$RELEASE" == "yes" ]]; then
+        cmd+=("--release")
+      fi
+      if [[ "$LLVM" == "true" || "$LLVM" == "1" || "$LLVM" == "yes" ]]; then
+        cmd+=("--llvm")
+      fi
+      if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
+        cmd+=("--stats")
+      fi
+      if [[ -n "$START_INTERPRETED" ]]; then
+        cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
+      fi
+      if [[ -n "$TIER_PROMOTION" ]]; then
+        cmd+=("--tier-promotion" "$TIER_PROMOTION")
+      fi
+      if [[ "$variant" != "toml" ]]; then
+        cmd+=("--tier-thresholds" "$variant")
+      fi
+      cmd+=("--" "$GGUF" "$PROMPT" "$MAX_TOKENS" "$CTX" "$TEMP")
+
+      local output status tps ttft label
+      set +e
+      if command -v timeout >/dev/null 2>&1; then
+        output="$(timeout "$TIMEOUT" "${cmd[@]}" 2>&1)"
+      else
+        output="$("${cmd[@]}" 2>&1)"
+      fi
+      status=$?
+      set -e
+      tps="$(printf "%s\n" "$output" | sed -n 's/.*(\([0-9][0-9.]*\) tok\/s.*/\1/p' | tail -1)"
+      ttft="$(printf "%s\n" "$output" | sed -n 's/.*ttft=\([0-9][0-9.]*\)s.*/\1/p' | tail -1)"
+      if [[ "$status" == "0" && -n "$tps" ]]; then
+        label="tok/s=$(printf "%.2f" "$tps")"
+        if [[ -n "$ttft" ]]; then
+          label="$label  ttft=$(printf "%.3f" "$ttft")s"
+        fi
+        printf "%s\t%s\tok\t%s\t%s\n" "$run_no" "$variant" "$tps" "$ttft" >> "$results"
+        printf "  run %3d  %-14s ok       %s\n" "$run_no" "$variant" "$label"
+      else
+        printf "%s\t%s\tfail\t\t\n" "$run_no" "$variant" >> "$results"
+        printf "  run %3d  %-14s FAIL     exit=%s no [done] metric\n" "$run_no" "$variant" "$status"
+        printf "%s\n" "$output" | tail -8 | sed 's/^/               | /'
+      fi
+
+      if (( COOLDOWN_MS > 0 && ordinal < RUNS * ${#VARIANT_LIST[@]} )); then
+        sleep "$(awk "BEGIN { printf \"%.3f\", $COOLDOWN_MS / 1000.0 }")"
+      fi
+    done
+  done
+
+  echo
+  echo "=== summary ==="
+  for variant in "${VARIANT_LIST[@]}"; do
+    local total ok sorted
+    total="$(awk -F'\t' -v v="$variant" '$2 == v { n++ } END { print n + 0 }' "$results")"
+    ok="$(awk -F'\t' -v v="$variant" '$2 == v && $3 == "ok" { n++ } END { print n + 0 }' "$results")"
+    echo "$variant         successful: $ok/$total"
+    if [[ "$ok" != "0" ]]; then
+      sorted="$tmp_dir/${variant//\//_}.sorted"
+      awk -F'\t' -v v="$variant" '$2 == v && $3 == "ok" { print $4 }' "$results" | sort -n > "$sorted"
+      awk '
+        { a[++n] = $1; sum += $1; sumsq += $1 * $1 }
+        END {
+          min = a[1]; max = a[n];
+          if (n % 2) median = a[(n + 1) / 2];
+          else median = (a[n / 2] + a[n / 2 + 1]) / 2;
+          mean = sum / n;
+          variance = (sumsq / n) - (mean * mean);
+          if (variance < 0) variance = 0;
+          stddev = sqrt(variance);
+          drift = a[n] - a[1];
+          printf "               tok/s: min=%.2f  median=%.2f  mean=%.2f  max=%.2f  stddev=%.2f  drift=%.2f\n",
+            min, median, mean, max, stddev, drift;
+        }
+      ' "$sorted"
+      local ttft_sorted
+      ttft_sorted="$tmp_dir/${variant//\//_}.ttft.sorted"
+      awk -F'\t' -v v="$variant" '$2 == v && $3 == "ok" && $5 != "" { print $5 }' "$results" | sort -n > "$ttft_sorted"
+      if [[ -s "$ttft_sorted" ]]; then
+        awk '
+          { a[++n] = $1; sum += $1 }
+          END {
+            if (n % 2) median = a[(n + 1) / 2];
+            else median = (a[n / 2] + a[n / 2 + 1]) / 2;
+            printf "               ttft:  min=%.3fs median=%.3fs mean=%.3fs max=%.3fs\n",
+              a[1], median, sum / n, a[n];
+          }
+        ' "$ttft_sorted"
+      fi
+    fi
+  done
+  rm -rf "$tmp_dir"
 }
 
 for worker in "${WORKER_VARIANT_LIST[@]}"; do

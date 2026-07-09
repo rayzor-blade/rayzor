@@ -69,13 +69,19 @@ pub extern "C" fn rayzor_topology_perf_core_count() -> i32 {
 /// idle-branch cost is not worth it. `RAYZOR_HAXE_POOL_RELAX` overrides.
 #[no_mangle]
 pub extern "C" fn rayzor_pool_relax_default() -> i32 {
-    // Always on. Emitting PAUSE/YIELD each idle spin is universally good in
-    // a busy-wait: it drops core power, so less heat and less throttling —
-    // which even a thermally-generous M-series hits under sustained serving
-    // (measured: relax-on held drift +3.7 vs -17.4 off on M1, floor 68 vs
-    // 57), and on x86 it also avoids memory-order machine-clears. Lowered
-    // to a single inline instruction, so effectively free when idle-branch.
-    1
+    // Platform-derived default. On macOS/M-series the Haxe-level relax path
+    // still flows through a wrapper call in tight joins, so the call overhead
+    // costs more than the power win in the active decode loop. On x86/Linux,
+    // PAUSE avoids memory-order machine-clears and reins in thermal load on
+    // constrained hybrid boxes. `RAYZOR_HAXE_POOL_RELAX` remains the A/B knob.
+    #[cfg(target_os = "macos")]
+    {
+        0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        1
+    }
 }
 
 /// Calibrate how many `spin_loop()` iterations run per microsecond on THIS
@@ -132,12 +138,15 @@ fn park_wake_latency_us() -> f64 {
     samples[samples.len() / 2]
 }
 
-/// System-DERIVED (not hardcoded) tight-spin budget: keep spinning only
-/// while spinning is cheaper than a park+wake cycle, then block so the core
-/// can drop frequency. budget_iters = (iters/us on this core) x (park->wake
-/// us) — the classic adaptive-spin break-even, with the CPU-speed term
-/// measured so it is meaningful on any machine. Computed once (OnceLock);
-/// `RAYZOR_HAXE_POOL_SPINS` still overrides. Clamped to a sane band.
+/// System-derived tight-spin budget: keep spinning only while spinning is
+/// cheaper than a park+wake cycle, then block so the core can drop frequency.
+/// budget_iters = (iters/us on this core) x (park->wake us) — the classic
+/// adaptive-spin break-even, with the CPU-speed term measured so it is
+/// meaningful on any machine. On Apple Silicon the decode loop dispatches many
+/// short matmul jobs; a low calibrated budget pushes workers into yield/park
+/// between hot dispatches and costs far more than the spin itself. Keep those
+/// workers resident by default on that platform. `RAYZOR_HAXE_POOL_SPINS`
+/// still overrides. Clamped to a sane band, then platform-adjusted.
 #[no_mangle]
 pub extern "C" fn rayzor_pool_spin_default() -> i32 {
     use std::sync::OnceLock;
@@ -146,7 +155,11 @@ pub extern "C" fn rayzor_pool_spin_default() -> i32 {
         let iters_per_us = spin_iters_per_us();
         let park_wake_us = park_wake_latency_us();
         let budget = (iters_per_us * park_wake_us).round();
-        let clamped = (budget as i64).clamp(200, 50_000) as i32;
+        let mut clamped = (budget as i64).clamp(200, 50_000) as i32;
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        {
+            clamped = clamped.max(200_000);
+        }
         if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
             eprintln!(
                 "[pool-spin-calib] iters_per_us={iters_per_us:.1} park_wake_us={park_wake_us:.2} budget={budget} -> clamped={clamped}"
@@ -193,6 +206,32 @@ pub unsafe extern "C" fn rayzor_topology_node_cpus(node: i32, out_buf: *mut i32,
 #[no_mangle]
 pub extern "C" fn rayzor_topology_bind_to_node(node: i32) -> i32 {
     platform::bind_current_thread(node)
+}
+
+/// Bias/pin the calling thread to the platform's performance CPU set.
+///
+/// macOS maps this to a high compute QoS hint; Linux maps it to the logical
+/// CPUs whose max frequency matches the machine maximum; other platforms
+/// fall back to the normal node affinity/no-op behavior. Set
+/// `RAYZOR_NO_PERF_AFFINITY=1` to opt out for A/B runs.
+#[no_mangle]
+pub extern "C" fn rayzor_topology_bind_performance() -> i32 {
+    if std::env::var("RAYZOR_NO_PERF_AFFINITY")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        return 0;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let opt_in = std::env::var("RAYZOR_MAC_PERF_AFFINITY")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        if !opt_in {
+            return 0;
+        }
+    }
+    platform::bind_current_thread_to_performance()
 }
 
 /// Clear any affinity hint on the calling thread.

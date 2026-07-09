@@ -49,6 +49,7 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         no_cache_scrub,
         release,
         llvm,
+        runtime_stats,
         native_libs,
         debug_dumps,
         preset,
@@ -76,6 +77,7 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         tier_promotion,
         release,
         llvm,
+        runtime_stats,
         native_libs,
         debug_dumps,
         decode_profile,
@@ -103,6 +105,7 @@ pub(crate) struct BenchOptions {
     pub tier_promotion: Option<bool>,
     pub release: bool,
     pub llvm: bool,
+    pub runtime_stats: bool,
     pub native_libs: Vec<PathBuf>,
     pub debug_dumps: bool,
     pub decode_profile: bool,
@@ -120,6 +123,7 @@ impl Default for BenchOptions {
             tier_promotion: None,
             release: false,
             llvm: false,
+            runtime_stats: false,
             native_libs: Vec::new(),
             debug_dumps: false,
             decode_profile: false,
@@ -203,6 +207,9 @@ pub(crate) fn run_bench_with_options(
     }
     if options.llvm {
         println!("llvm:    enabled");
+    }
+    if options.runtime_stats {
+        println!("stats:   runtime tier/beadie summary enabled");
     }
     if !options.native_libs.is_empty() {
         let libs = options
@@ -434,8 +441,10 @@ fn run_one(
         .arg("run")
         .arg(file)
         .arg("--preset")
-        .arg(&options.preset)
-        .arg("--stats");
+        .arg(&options.preset);
+    if options.runtime_stats {
+        child.arg("--stats");
+    }
     if options.debug_dumps {
         child
             .env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1")
