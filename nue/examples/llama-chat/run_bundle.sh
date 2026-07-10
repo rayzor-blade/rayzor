@@ -90,16 +90,12 @@ fi
 if [[ -n "${RAYZOR_STDOUT_FLUSH_MS:-${RAYZOR_LLAMA_STREAM_FLUSH_MS:-}}" ]]; then
   export RAYZOR_STDOUT_FLUSH_MS="${RAYZOR_STDOUT_FLUSH_MS:-$RAYZOR_LLAMA_STREAM_FLUSH_MS}"
 fi
-# Avoid force-faulting the entire GGUF mmap before inference on Linux/NUC,
-# where it adds startup thermal pressure. Keep the macOS default on the mmap
-# path: that is the known-fast baseline for local llama-chat runs.
-if [[ -z "${RAYZOR_NO_PRELOAD_MMAP:-}" ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    export RAYZOR_NO_PRELOAD_MMAP=0
-  else
-    export RAYZOR_NO_PRELOAD_MMAP=1
-  fi
-else
+# mmap preload: let the runtime choose (default = preload ON) unless the
+# caller sets RAYZOR_NO_PRELOAD_MMAP explicitly for an A/B. Forcing it off on
+# Linux traded a small startup saving for 140-250ms page-fault stalls in the
+# first decode steps (NUC: step p99 144ms -> 31.5ms and ttft 1.35s -> 0.88s
+# with preload back on; 300-token avg equal or better).
+if [[ -n "${RAYZOR_NO_PRELOAD_MMAP:-}" ]]; then
   export RAYZOR_NO_PRELOAD_MMAP
 fi
 
