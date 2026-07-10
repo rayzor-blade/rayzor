@@ -92,8 +92,13 @@ The main root causes we isolated:
 
 - Pool profiling is env-gated and no longer charges every dispatch by default.
 - `CpuTopology.bindPerformance()` exists for runtime/platform affinity.
-- macOS performance affinity is opt-in through `RAYZOR_MAC_PERF_AFFINITY`;
-  do not force it from scripts.
+- Performance affinity is opt-in on EVERY platform (`RAYZOR_PERF_AFFINITY=1`;
+  macOS also honors the older `RAYZOR_MAC_PERF_AFFINITY`). The earlier
+  Linux-default P-core pin was the NUC 40→30 tok/s regression: decode is
+  memory-bandwidth-bound and pinning to the 4 P-cores forfeits the E-cores'
+  memory-level parallelism (A/B at identical thermal state: pinned 30.2 tok/s
+  / step p50 32ms / ttft 0.96s vs unpinned 41.7 tok/s / 22ms / 0.60s).
+  Do not force it from scripts.
 - macOS relax default is off because the Haxe-level relax wrapper costs too
   much in hot joins. Linux/x86 default remains relax-on for thermal and
   memory-order reasons.

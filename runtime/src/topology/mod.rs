@@ -210,26 +210,35 @@ pub extern "C" fn rayzor_topology_bind_to_node(node: i32) -> i32 {
 
 /// Bias/pin the calling thread to the platform's performance CPU set.
 ///
-/// macOS maps this to a high compute QoS hint; Linux maps it to the logical
-/// CPUs whose max frequency matches the machine maximum; other platforms
-/// fall back to the normal node affinity/no-op behavior. Set
-/// `RAYZOR_NO_PERF_AFFINITY=1` to opt out for A/B runs.
+/// macOS maps this to a high compute QoS hint; Linux maps it to a hard
+/// affinity mask over the logical CPUs whose max frequency matches the
+/// machine maximum; other platforms fall back to the normal node
+/// affinity/no-op behavior.
+///
+/// Opt-in on every platform: set `RAYZOR_PERF_AFFINITY=1` (macOS also honors
+/// the older `RAYZOR_MAC_PERF_AFFINITY=1`). The default is NO pin — on a
+/// hybrid CPU a memory-bandwidth-bound worker pool loses the E-cores'
+/// memory-level parallelism when pinned to P-cores (measured -28% decode
+/// throughput and +60% ttft on a 4P+8E i5-1250P at identical thermal state).
+/// `RAYZOR_NO_PERF_AFFINITY=1` forces the pin off even when opted in.
 #[no_mangle]
 pub extern "C" fn rayzor_topology_bind_performance() -> i32 {
-    if std::env::var("RAYZOR_NO_PERF_AFFINITY")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-    {
+    fn truthy(name: &str) -> bool {
+        std::env::var(name)
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }
+    if truthy("RAYZOR_NO_PERF_AFFINITY") {
         return 0;
     }
+    #[allow(unused_mut)]
+    let mut opt_in = truthy("RAYZOR_PERF_AFFINITY");
     #[cfg(target_os = "macos")]
     {
-        let opt_in = std::env::var("RAYZOR_MAC_PERF_AFFINITY")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        if !opt_in {
-            return 0;
-        }
+        opt_in = opt_in || truthy("RAYZOR_MAC_PERF_AFFINITY");
+    }
+    if !opt_in {
+        return 0;
     }
     platform::bind_current_thread_to_performance()
 }
