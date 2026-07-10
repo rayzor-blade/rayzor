@@ -72,13 +72,23 @@ maybe_enable_jemalloc() {
   fi
 }
 
-export RAYZOR_NO_PRELOAD_MMAP="${RAYZOR_NO_PRELOAD_MMAP:-1}"
+# mmap preload: let the runtime choose (default preload ON; forcing it off
+# reintroduces first-decode page-fault stalls — see run_bundle.sh).
+if [[ -n "${RAYZOR_NO_PRELOAD_MMAP:-}" ]]; then
+  export RAYZOR_NO_PRELOAD_MMAP
+fi
 maybe_enable_jemalloc
 
 if [[ "$BUNDLE" == "auto" ]]; then
   BUNDLE="$SCRIPT_DIR/llama-chat-server.rzb"
-  echo "[bench] building bundle -> $BUNDLE"
-  "$RAYZOR" bundle Main.hx -o "$BUNDLE" >/dev/null || { echo "bundle build failed" >&2; exit 1; }
+  # Rebuild only on BUILD=1 or when the bundle is missing — rebuilding every
+  # bench run rerolls bundle content and muddies A/Bs.
+  if [[ "${BUILD:-0}" == "1" || ! -f "$BUNDLE" ]]; then
+    echo "[bench] building bundle -> $BUNDLE"
+    "$RAYZOR" bundle Main.hx -o "$BUNDLE" >/dev/null || { echo "bundle build failed" >&2; exit 1; }
+  else
+    echo "[bench] reusing bundle $BUNDLE (BUILD=1 to rebuild)"
+  fi
 fi
 
 if [[ -n "$VARIANTS" ]]; then
@@ -647,6 +657,10 @@ run_one() {
     stop_memory_monitor "$mem_pid"
     echo -e "${variant}\tFAIL" >> "$RESULTS"
     printf "  run %3d  %-14s FAIL     client request failed\n" "$run_no" "$variant"
+    if [[ -s "$log" ]]; then
+      echo "               server log tail:"
+      tail -20 "$log" | sed 's/^/                 /'
+    fi
     return 0
   fi
 
