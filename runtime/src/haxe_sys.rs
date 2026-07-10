@@ -2996,7 +2996,30 @@ pub fn haxe_bytes_mmap_file(path: &str) -> *mut HaxeBytes {
             // Defeat dead-code elimination — `sink` must escape so the
             // touch loop isn't optimised away.
             std::ptr::write_volatile(&mut sink as *mut u64, sink);
-            libc::madvise(ptr, len, libc::MADV_RANDOM);
+
+            // Preloaded pages are still CLEAN FILE-BACKED memory — the
+            // kernel's cheapest reclaim target. On a memory-pressured host
+            // they get dropped mid-run and every re-fault stalls a decode
+            // step (measured: step p50 9.75ms -> 17.5ms with 60-236ms p95
+            // spikes on a 92%-swap-full 16GB box). mlock wires the mapping
+            // so eviction cannot touch it; the preload above already paid
+            // the population cost. On failure (Linux RLIMIT_MEMLOCK
+            // defaults, or extreme pressure) fall back to the evictable
+            // behavior and say so once. Opt out via RAYZOR_NO_MLOCK_MMAP=1.
+            let want_mlock = std::env::var_os("RAYZOR_NO_MLOCK_MMAP").is_none();
+            let locked = want_mlock && libc::mlock(ptr, len) == 0;
+            if want_mlock && !locked {
+                eprintln!(
+                    "  warning: mlock of {} MB model mapping failed (errno {}); \
+                     pages stay evictable under memory pressure \
+                     (raise RLIMIT_MEMLOCK or free memory)",
+                    len / (1024 * 1024),
+                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                );
+            }
+            if !locked {
+                libc::madvise(ptr, len, libc::MADV_RANDOM);
+            }
         }
 
         Box::into_raw(Box::new(HaxeBytes {
