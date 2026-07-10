@@ -1925,14 +1925,8 @@ impl PassManager {
                 manager.add_pass(LICMPass::new());
                 // Loop unrolling after LICM
                 manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
-                // LoopVectorizationPass is deliberately NOT in the O3 pipeline.
-                // MIR-level loop vectorization rewrites hot loops into MIR
-                // vector ops whose lowered LLVM IR the backend can no longer
-                // fold into its own (better) vector patterns — measured on the
-                // llama decode kernels as step p50 10ms -> 16-17.5ms (~55%
-                // throughput loss), and removing the pass restores O2-level
-                // codegen exactly. Re-add only with an A/B showing a win on a
-                // real workload, not a microbenchmark.
+                // Loop vectorization after LICM (LICM prepares loops for vectorization)
+                manager.add_pass(super::vectorization::LoopVectorizationPass::new());
                 manager.add_pass(TailCallOptimizationPass::new());
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
