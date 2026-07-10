@@ -146,7 +146,7 @@ else
 fi
 echo "mmap preload: $([[ "${RAYZOR_NO_PRELOAD_MMAP:-}" == "1" ]] && echo off || echo on)"
 echo "kernels: haxe_matmul=${RAYZOR_HAXE_MATMUL} fused_matmul=${RAYZOR_HAXE_FUSED_MATMUL:-auto} workers=${RAYZOR_HAXE_MATMUL_WORKERS:-auto} haxe_flash=${RAYZOR_HAXE_FLASH} flash_pool=${RAYZOR_HAXE_FLASH_POOL:-auto} flash_shifted_q=${RAYZOR_HAXE_FLASH_SHIFTED_Q:-auto} flash_batch_max=${RAYZOR_HAXE_FLASH_BATCH_MAX:-auto} kv_q8=${RAYZOR_KV_Q8} lm_head_requant=${RAYZOR_REQUANT_LM_HEAD} prefill_last_logits=${RAYZOR_PREFILL_LAST_LOGITS}"
-echo "pool: spins=${RAYZOR_HAXE_POOL_SPINS:-auto} relax=${RAYZOR_HAXE_POOL_RELAX:-auto} perf_affinity=${RAYZOR_MAC_PERF_AFFINITY:-auto} recycle=${RAYZOR_POOL:-off}"
+echo "pool: spins=${RAYZOR_HAXE_POOL_SPINS:-auto} relax=${RAYZOR_HAXE_POOL_RELAX:-auto} perf_affinity=${RAYZOR_PERF_AFFINITY:-off} recycle=${RAYZOR_POOL:-off}"
 echo "tier: promotion=${TIER_PROMOTION} start_interpreted=${START_INTERPRETED} thresholds=${INTERP_THRESHOLD}/${WARM_THRESHOLD}/${HOT_THRESHOLD}/${BLAZING_THRESHOLD}"
 echo "diag: spec_decode=${RAYZOR_SPEC_DECODE:-off} silent_stream=${RAYZOR_LLAMA_SILENT_STREAM:-0} stdout_flush_ms=${RAYZOR_STDOUT_FLUSH_MS:-auto} profile_decode=${RAYZOR_PROFILE_DECODE:-off} profile_pool=${RAYZOR_PROFILE_POOL:-off} dump_block_shapes=${RAYZOR_DUMP_BLOCK_SHAPES:-off}"
 echo "generation: max_tokens=${MAX_TOKENS} ctx=${CTX} temp=${TEMP}"
