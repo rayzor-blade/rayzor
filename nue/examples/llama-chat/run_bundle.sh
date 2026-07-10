@@ -104,7 +104,7 @@ maybe_enable_jemalloc
 # Optional rebuild.
 if [[ "${BUILD:-0}" == "1" ]]; then
   echo ">> building $BUNDLE"
-  "$RAYZOR" bundle Main.hx -o "$BUNDLE" --no-cache -O3
+  "$RAYZOR" bundle Main.hx -o "$BUNDLE" --no-cache
 fi
 
 if [[ ! -f "$BUNDLE" ]]; then
