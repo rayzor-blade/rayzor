@@ -7,33 +7,21 @@
 //! countdown. Each worker spin-waits on its own flag; once flipped, runs
 //! the trampoline, decrements the global countdown, returns to spin.
 //!
-//! Why spin-wait: post c5ab136 (llama.cpp kernel port), per-worker
-//! matmul work dropped 187.5 → 70.9 us. The earlier condvar-based wake
-//! cost ~5-15 us per wake which was sub-noise relative to 187.5 us of
-//! work but is now 7-20% of every per-worker call. Spin-wait wakes in
-//! ~50-100 ns (atomic load loop with `spin_loop()` hint) — two orders
-//! of magnitude faster.
+//! Why spin-wait: a condvar-based wake costs ~5-15 us. For fine-grained
+//! fork-join where per-worker work is tens of microseconds, that wake is
+//! 7-20% of every call. Spin-wait wakes in ~50-100 ns (an atomic load loop
+//! with a `spin_loop()` hint) — two orders of magnitude faster. The trade
+//! suits tight, back-to-back fork-join: it burns power when idle and shows
+//! more variance for sparse dispatch under contention, so it is not a
+//! general-purpose pool.
 //!
-//! Empirical: long-form 807-token sustained decode hits ~64 tok/s with
-//! spin pool vs ~50 tok/s with condvar pool. Short-form decode (80
-//! tokens, low total fork-joins) shows higher variance because OS
-//! scheduling effects don't get amortised; under contention from other
-//! foreground apps short-prompt latency can degrade. The trade is the
-//! right one for sustained inference workloads.
-//!
-//! Power: spin-wait burns power when idle. For LLM inference workers
-//! are >95% active during decode; the idle case is a non-goal. After
-//! `SPIN_LIMIT` iterations the worker checks the shutdown flag — no
-//! condvar fallback because LLM decode is a steady pipeline of
-//! fork-joins ≤ 1 ms apart.
+//! Power: after `SPIN_LIMIT` iterations a worker checks the shutdown flag;
+//! there is no condvar fallback.
 //!
 //! Closures must be `Fn + Send + Sync + 'static`. `parallel_rows` blocks
 //! until every worker has marked done, so non-`'static` data the closure
 //! references logically outlives the call — but the type system can't see
 //! that, so callers either pass `'static` data or use `Arc`.
-//!
-//! Legacy condvar+mpsc path is reachable via `RAYZOR_LEGACY_POOL=1` for
-//! A/B regression testing.
 
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -746,10 +734,11 @@ fn park_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RAYZOR_NO_PARK").map_or(true, |v| v != "1"))
 }
 
-/// Matches the guest-side gate (`Linear.useHaxeMatmul`): set AND not
-/// `"0"`/`""`/`"false"`. A bare `RAYZOR_HAXE_MATMUL=0` must behave like
-/// unset — presence-only detection silently shrank the FFI-path pool to 1
-/// worker and halved throughput.
+/// TODO(move): decouple — the caller should declare its pool width via a
+/// hint instead of the core reading this flag. Folded into the Tensor/QTensor
+/// -> Nue move (the kernels that use this pool are what relocate). For now the
+/// core still reads it: set AND not `"0"`/`""`/`"false"` (a bare `=0` behaves
+/// like unset — presence-only detection would misread it and halve throughput).
 fn haxe_matmul_active() -> bool {
     std::env::var("RAYZOR_HAXE_MATMUL")
         .map(|v| !v.is_empty() && v != "0" && v != "false")
@@ -775,20 +764,15 @@ pub fn global() -> &'static WorkerPool {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or_else(|| {
-                // On the pure-Haxe matmul path the guest SpinPool owns the
-                // cores; a full-width Rust pool spin-waits against it and
-                // caps the guest bands at ~2x scaling (measured: shrinking
-                // this pool to 1 took llama-chat decode 65 -> 27.5 ms/token).
-                // One worker (+ caller band) still covers the us-scale
-                // attention/activation kernels.
                 if haxe_matmul_active() {
+                    // A caller whose own pool owns the cores; a full-width pool
+                    // here would spin-wait against it and cap its scaling.
                     1
                 } else {
-                    // Compute width = P-cores - 1 (caller participates, so
-                    // workers = P - 2). E-cores are excluded — one straggler
-                    // band on an E-core gates every fork-join — and one
-                    // P-core stays free for the sequential glue between
-                    // kernels (sampler, tokenizer, harness I/O).
+                    // P-cores - 1 (caller participates, so workers = P-2).
+                    // E-cores excluded — one straggler band on an E-core gates
+                    // every fork-join — and one P-core stays free for the
+                    // sequential glue between dispatches.
                     (crate::topology::rayzor_topology_perf_core_count() as usize)
                         .saturating_sub(2)
                         .max(1)
