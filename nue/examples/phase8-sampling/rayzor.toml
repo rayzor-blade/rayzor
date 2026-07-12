@@ -3,4 +3,4 @@ name = "phase8-sampling"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../"]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]

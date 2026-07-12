@@ -3,7 +3,7 @@ name = "llama-chat-server"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../"]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 native-libs = ["../../../target/release/libnue_plugins.dylib"]
 
 # Worker/server profile:

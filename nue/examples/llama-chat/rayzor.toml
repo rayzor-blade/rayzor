@@ -3,7 +3,10 @@ name = "llama-chat"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../"]
+# "../../" = nue/ ; the rayzor-tensors plugin provides rayzor.ds.*/rayzor.gpu.*
+# (lifted out of the bundled stdlib; namespaces unchanged). Its native kernels
+# are still linked in rayzor-runtime, so no extra native-lib is needed yet.
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 # Loads nue-plugins (Q8_0 KV cache + flash kernel) at compile time
 # via the plugin ABI handshake. Path is relative to this manifest.
 native-libs = ["../../../target/release/libnue_plugins.dylib"]
