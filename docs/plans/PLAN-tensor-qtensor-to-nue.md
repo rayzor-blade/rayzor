@@ -4,25 +4,39 @@ Status: PLANNED (pick up later). Author handoff for Claude/any next agent.
 Prereqs in flight: env-var decoupling (keep Rayzor core env-pure), pool-profile
 work already landed (`1fab8e78`).
 
-## 0. Confirmed architecture (3 layers)
+## 0. Confirmed architecture (4 layers, plugin-based)
 
-- **Rayzor core** — general language/compiler/runtime, PURE. General primitives
+- **Rayzor CORE** — general language/compiler/runtime, PURE. General primitives
   (`Bytes`, `Atomic`, `Ptr`, `Mem`, `String`, `Array`/`Map`, concurrency,
   `SIMD4f`) + compiler intrinsics (the only things that inline/fuse). NO ML, NO
   GPU, no inference env, no downstream doc-context.
-- **Nue** — the ML engine. `Tensor`/`QTensor` (`nue.*`), pure-Haxe portable CPU
-  kernels as the **baseline that runs on every target (native + wasm)**.
-- **Plugins (FFI-bound, opt-in accelerators)** — platform-specific backends
-  behind the Nue backend interface; pure-Haxe is always the fallback:
-  - Apple Accelerate/AMX (CPU) — plugin.
-  - **GPU / Metal / MPS — a plugin. GPU is inherently FFI** (needs the native
-    GPU API); it is NOT core and NOT pure-Haxe. Today's `compiler/tests/gpu/*`
-    Tensor-on-GPU tests move with Tensor into the Nue/GPU-plugin world.
-  - x86 VNNI — intrinsic or plugin.
+- **`rayzor-tensors` PLUGIN** (shared tensor layer) — owns `Tensor`/`QTensor`
+  (+ `DType`/`Device`/`QScheme`) and the CPU kernels: pure-Haxe portable
+  baseline (native + wasm) + FFI accelerator backends. Consumed by BOTH Nue and
+  the GPU plugin, so it lives here (not inside Nue) to avoid duplication —
+  GPU needs `Tensor` interop (`createBuffer(tensor)`/`toTensor(buffer)`), Nue
+  needs it for inference.
+- **Nue PLUGIN** (inference engine) — LLM specifics: attention/flash, sampling,
+  GGUF, the decode loop. Depends on `rayzor-tensors`.
+- **GPU PLUGIN** (Metal/MPS) — inherently FFI (native GPU API), NOT core, NOT
+  pure-Haxe. Depends on `rayzor-tensors` for `Tensor`↔`GpuBuffer` interop.
+  Today's `rayzor.gpu.*` stdlib + `compiler/tests/gpu/*` move here.
+- Platform CPU accelerators (Apple Accelerate/AMX, x86 VNNI) are backends
+  WITHIN `rayzor-tensors`, behind its kernel interface; pure-Haxe is the
+  always-available fallback.
 
-Decision (user, 2026-07): **full move** — both `Tensor` and `QTensor` leave
-`rayzor.ds` for `nue.*`; Rayzor stdlib keeps NO tensor types; GPU is a plugin.
-The 11 Rayzor `test_tensor_*`/`test_gpu_*` tests relocate to Nue (or drop).
+Two enabling facts (user, 2026-07):
+1. **Namespace is free** — a plugin can provide any package incl. `rayzor.*`
+   (Haxe package resolution). So the move keeps the existing namespace
+   (`rayzor.ds.*` or a chosen `rayzor.tensors.*`); **importers do NOT churn**,
+   which SIDESTEPS the x-module member-resolution hazard entirely. The move is a
+   CODE-LOCATION change (core stdlib -> plugin classpath), not a rename.
+2. **Shared plugin** — `rayzor-tensors` is the shared dependency of Nue + GPU.
+
+So the "move" = extract `rayzor/ds/*` + `rayzor/gpu/*` (Haxe) and `quant.rs` +
+`tensor.rs` (Rust kernels) OUT of core into the `rayzor-tensors` (+ `gpu`)
+plugin(s), keeping namespaces stable. Core stdlib ends with NO tensor/GPU code;
+importers unchanged; the 11 stdlib tests move to the plugin's own test dir.
 
 ## 1. Vision / end state
 
@@ -122,12 +136,40 @@ Mechanics (verified): `haxe-std/` is UNIVERSAL classpath (every program sees
   bit-exact argmax vs the FFI baseline on the long Voronoi prompt after the
   move, not just "it compiles/runs".
 
-Execution order (each a validated commit):
-1. Copy 5 files `rayzor.ds` -> `nue/nue/ds/`, `package nue.ds`; sed
-   `rayzor.ds.*` -> `nue.ds.*` in `nue/` + `tools/` + `examples/`. Delete the
-   old `rayzor.ds` files. Build + run model, **argmax-match vs baseline**.
-2. Re-home the 11 tests (new `nue/tests/` + `rayzor.toml`), run them.
-3. (later) kernels `quant.rs`/`tensor.rs` ML half -> `nue-plugins`.
+Execution recipe — COLOCATE Haxe in the plugin; rpkg + class-paths do discovery
+(namespaces UNCHANGED, so NO importer edits):
+
+Structure: a top-level `rayzor-tensors/` package (sibling of `nue/`):
+- `rayzor-tensors/rayzor.toml`: `[project] name="rayzor-tensors" type="library"`;
+  `[build] class-paths=["haxe"]` (+ `native-libs` once kernels move).
+- `rayzor-tensors/haxe/rayzor/ds/*.hx` — the 5 classes, `package rayzor.ds;`
+  UNCHANGED (Haxe path convention: `<root>/haxe` + `package rayzor.ds` ->
+  `haxe/rayzor/ds/Tensor.hx`).
+- `rayzor-tensors/haxe/rayzor/gpu/*.hx` — GPU classes (depend on ds; move too
+  since stdlib can't depend on a plugin). Split to a separate `rayzor-gpu`
+  package later; colocate initially.
+- `rayzor-tensors/src/` (Rust kernels) — LATER; keep `quant.rs`/`tensor.rs` in
+  `rayzor-runtime` for the first increment (pure-Haxe package; @:native binds
+  resolve to the linked runtime symbols).
+
+Discovery: remove `rayzor/ds/*` + `rayzor/gpu/*` from `compiler/haxe-std`
+(they stop being universally bundled). Consumers declare
+`[dependencies] rayzor-tensors = { path = "..." }` (`resolve_dependencies`
+packs to `.rpkg` and adds its Haxe source to the classpath + loads native).
+Consumers: `nue/rayzor.toml`, the llama-chat/server examples, gpu examples,
+tools/llama-diff, and a new test dir for the 11 moved tests.
+
+EMPIRICAL UNKNOWN to test FIRST (canary): does `@:native("tensor_*")` on a class
+that is NOT in `haxe-std` (now in a plugin package) still map to the
+`rayzor_tensor_*` linked runtime symbol? The `rayzor_` prefix + name mangling
+may be stdlib-path-specific. Stand up the package with ONE consumer (the model),
+build, and confirm (a) it resolves and (b) **argmax matches baseline** before
+moving tests/examples. If the mapping is stdlib-specific, either add `@:native`
+full-symbol overrides or register the plugin's method table via rpkg
+(`NativeMethodDesc`, `compilation.rs:7594`/`7682`).
+
+Then: re-home the 11 tests (own dir + `rayzor.toml` dep on rayzor-tensors);
+(later) move the Rust kernels into the plugin crate; (later) split `rayzor-gpu`.
 - Move `Tensor.hx`/`QTensor.hx` from `compiler/haxe-std/rayzor/ds/` → `nue.*`
   (e.g. `nue/nue/ds/`). Update all nue imports. General stdlib externs
   (`Bytes`/`Atomic`/`Ptr`/`Mem`/`String`/concurrency/`SIMD4f`) are untouched —
