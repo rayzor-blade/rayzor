@@ -3,6 +3,19 @@ import nue.sampling.GenerationLoop;
 import nue.sampling.LocalTempSampler;
 import nue.sampling.SpeculativeGenerationLoop;
 import nue.arch.LlamaModel;
+import rayzor.concurrent.Arc;
+import rayzor.concurrent.Channel;
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class StreamMsg {
+    public var text:String;
+    public var done:Bool;
+    public function new(text:String, done:Bool) {
+        this.text = text;
+        this.done = done;
+    }
+}
 
 /**
  * Phase 9 demo — load a real GGUF off disk, build the model + tokenizer,
@@ -203,6 +216,22 @@ class Main {
         var startedAt = Sys.time();
         var streamBuf:Array<Array<String>> = [[]];
         var lastStreamFlush = [startedAt];
+        var writerOff = Sys.getEnv("RAYZOR_STREAM_WRITER") == "0";
+        var streamArc:Arc<Channel<StreamMsg>> = null;
+        var writer:Thread<Int> = null;
+        if (!silentStream && !writerOff) {
+            var chArc = new Arc(new Channel(256));
+            var writerCh = chArc.clone();
+            streamArc = chArc;
+            writer = Thread.spawn(function():Int {
+                while (true) {
+                    var m:StreamMsg = writerCh.get().receive();
+                    if (m == null || m.done) break;
+                    Sys.print(m.text);
+                }
+                return 0;
+            });
+        }
         var flushStream = function(force:Bool):Void {
             if (silentStream || streamBuf[0].length == 0) return;
             var now = Sys.time();
@@ -212,7 +241,8 @@ class Main {
             var chunk = streamBuf[0].join("");
             streamBuf[0] = [];
             lastStreamFlush[0] = now;
-            Sys.print(chunk);
+            if (streamArc != null) streamArc.get().send(new StreamMsg(chunk, false));
+            else Sys.print(chunk);
         }
         var emitToken = function(_id:Int, delta:String):Bool {
             if (firstTokenAt[0] == 0.0) firstTokenAt[0] = Sys.time();
@@ -232,6 +262,10 @@ class Main {
             output = loop.generate(modelPrompt, emitToken);
         }
         flushStream(true);
+        if (streamArc != null) {
+            streamArc.get().send(new StreamMsg("", true));
+            writer.join();
+        }
         var elapsed = Sys.time() - startedAt;
         if (!silentStream) Sys.println("");
         trace("");
