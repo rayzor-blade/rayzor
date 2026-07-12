@@ -205,13 +205,24 @@ class SpinPool {
                 if (holdUs > 20000) holdUs = 20000;
                 var idleStart = Sys.time();
                 var parked = false;
+                var holdSpins = 0;
                 while (stateC.load() != 1) {
                     if (shutC.load() == 1) return 0;
-                    if ((Sys.time() - idleStart) * 1e6 > holdUs) {
-                        parked = true;
-                        break;
+                    // Sys.time() + yieldNow() are SYSCALLS; issued per
+                    // iteration they dominate idle cost (profiled: 52% of
+                    // decode CPU landed in libsystem under workerLoop, and
+                    // covering the gap with tight spin instead measured
+                    // +32% tok/s). Relax-spin between checks and only pay
+                    // the time+yield syscalls every 256 iterations.
+                    holdSpins++;
+                    if (rlx == 1) Thread.cpuRelax();
+                    if ((holdSpins & 255) == 0) {
+                        if ((Sys.time() - idleStart) * 1e6 > holdUs) {
+                            parked = true;
+                            break;
+                        }
+                        Thread.yieldNow();
                     }
-                    Thread.yieldNow();
                 }
                 if (parked) Parker.park();
                 spins = 0;
