@@ -34596,7 +34596,23 @@ impl<'a> HirToMirContext<'a> {
     ) -> LambdaContext {
         // Allocate function ID
         let func_id = self.builder.module.alloc_function_id();
-        let lambda_name = format!("<lambda_{}>", self.lambda_counter);
+        // Qualify the lambda name with its module. `lambda_counter` only
+        // resets per lowering instance, so a bare `<lambda_N>` is unique
+        // WITHIN a file but not across them — every file's first closure is
+        // `<lambda_0>`. The backend binds functions by name, so two identically
+        // named closures from different modules COLLAPSE: the SpinPool worker
+        // spawn closure and a user file's first closure both being `<lambda_0>`
+        // made a `Thread.spawn` capture the wrong body/env and dispatch a pool
+        // worker into `rayzor_channel_receive`. Prefix with the sanitized module
+        // name so cross-module closures never alias.
+        let module_prefix: String = self
+            .builder
+            .module
+            .name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let lambda_name = format!("<lambda_{}__{}>", module_prefix, self.lambda_counter);
         self.lambda_counter += 1;
 
         // Build environment layout if we have captures

@@ -4338,6 +4338,17 @@ impl CompilationUnit {
             import_mir.extern_functions.insert(new_id, efunc);
         }
 
+        // Re-key the module's name records to the renumbered ids. These
+        // entries are the qualified-name ground truth for every later
+        // name-first repair (fixup passes, merge verification); leaving them
+        // keyed by pre-renumber ids detaches them from the instructions and
+        // silently degrades cross-module resolution to raw-number trust.
+        let old_ext_names = std::mem::take(&mut import_mir.external_function_names);
+        for (old_id, name) in old_ext_names {
+            let new_id = id_map.get(&old_id).copied().unwrap_or(old_id);
+            import_mir.external_function_names.insert(new_id, name);
+        }
+
         // Update all accumulated maps to point to renumbered IDs
         for (_sym, func_id) in self.stdlib_function_map.iter_mut() {
             if let Some(&new_id) = id_map.get(func_id) {
@@ -5866,10 +5877,46 @@ impl CompilationUnit {
                     if self.import_own_func_ids.contains(&func_id) && !is_known_stdlib_wrapper {
                         merged_import_func_ids.insert(func_id);
                     }
+                    // Import id ranges are disjoint by construction (per-module
+                    // base + stride); an occupied slot with a DIFFERENT name is
+                    // an id-space collision. Last-writer-wins here silently
+                    // rebinds every call site of the loser to an unrelated
+                    // function (observed: a SpinPool worker's stdlib-extern
+                    // call dispatching into rayzor_channel_receive once the
+                    // import count pushed a module's base into another range).
+                    if let Some(prev) = mir_module.functions.get(&func_id) {
+                        let prev_name = prev.qualified_name.as_deref().unwrap_or(&prev.name);
+                        let new_name = func.qualified_name.as_deref().unwrap_or(&func.name);
+                        if prev_name != new_name {
+                            panic!(
+                                "MIR merge id collision: function id {:?} is '{}' but module '{}' \
+                                 provides '{}' at the same id. Import id ranges overlapped — this \
+                                 build would silently misroute calls.",
+                                func_id, prev_name, import_module.name, new_name
+                            );
+                        }
+                    }
                     mir_module.functions.insert(func_id, func);
                 }
                 for (func_id, extern_func) in import_module.extern_functions {
+                    if let Some(prev) = mir_module.extern_functions.get(&func_id) {
+                        if prev.name != extern_func.name {
+                            panic!(
+                                "MIR merge id collision: extern id {:?} is '{}' but module '{}' \
+                                 provides '{}' at the same id.",
+                                func_id, prev.name, import_module.name, extern_func.name
+                            );
+                        }
+                    }
                     mir_module.extern_functions.insert(func_id, extern_func);
+                }
+                // Carry the import's name records into the merged module so the
+                // post-merge fixup/verification passes keep their ground truth.
+                for (func_id, name) in import_module.external_function_names {
+                    mir_module
+                        .external_function_names
+                        .entry(func_id)
+                        .or_insert(name);
                 }
             }
 
