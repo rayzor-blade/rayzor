@@ -1,125 +1,12 @@
 import nue.loader.GGUFLoader;
 import nue.sampling.GenerationLoop;
-import nue.sampling.Sampler;
+import nue.sampling.LocalTempSampler;
 import nue.tokenizer.Tokenizer;
-import nue.CausalLanguageModel;
 import nue.arch.LlamaModel;
 import rayzor.ds.Tensor;
 import haxe.io.Bytes;
 import sys.net.Host;
 import sys.net.Socket;
-
-class LocalTempSampler implements Sampler {
-    public var temperature:Float;
-    public var repetitionPenalty:Float;
-    public var topK:Int;
-    private var state:Int;
-    private var recent:Array<Int>;
-    private var recentWrite:Int;
-    private var topKLogits:Array<Float>;
-    private var topKIds:Array<Int>;
-    private static inline var RECENT_CAP:Int = 64;
-
-    public function new(temperature:Float, repetitionPenalty:Float, topK:Int, seed:Int) {
-        this.temperature = temperature;
-        this.repetitionPenalty = repetitionPenalty;
-        this.topK = topK;
-        this.state = seed;
-        this.recent = [for (_ in 0...RECENT_CAP) -1];
-        this.recentWrite = 0;
-        var k = (topK > 0) ? topK : 1;
-        this.topKLogits = [for (_ in 0...k) 0.0];
-        this.topKIds = [for (_ in 0...k) -1];
-    }
-
-    public function sample(logits:Tensor):Int {
-        var shape = logits.shape();
-        var n = shape[shape.length - 1];
-        var t = (temperature <= 0.0) ? 0.00000001 : temperature;
-        var penalize = repetitionPenalty > 1.0;
-        var rp = repetitionPenalty;
-        var k = (topK > 0 && topK < n) ? topK : n;
-
-        var penaltyArg = penalize ? rp : 1.0;
-        var sz = logits.topkScan(topKLogits, topKIds, k, recent, penaltyArg);
-        if (sz < 0) {
-            sz = topKScanFallback(logits, n, k, penalize, rp);
-        }
-
-        var maxLogit = topKLogits[0];
-        var total = 0.0;
-        for (i in 0...sz) {
-            total += Math.exp((topKLogits[i] - maxLogit) / t);
-        }
-
-        var r = nextFloat() * total;
-        var acc = 0.0;
-        for (i in 0...sz) {
-            acc += Math.exp((topKLogits[i] - maxLogit) / t);
-            if (r <= acc) {
-                var id = topKIds[i];
-                pushRecent(id);
-                return id;
-            }
-        }
-        var id = topKIds[sz - 1];
-        pushRecent(id);
-        return id;
-    }
-
-    private function topKScanFallback(
-        logits:Tensor, n:Int, k:Int, penalize:Bool, rp:Float
-    ):Int {
-        var sz = 0;
-        for (i in 0...n) {
-            var lg = adjusted(logits.getFlat(i), i, penalize, rp);
-            if (sz < k) {
-                var pos = sz;
-                while (pos > 0 && topKLogits[pos - 1] < lg) {
-                    topKLogits[pos] = topKLogits[pos - 1];
-                    topKIds[pos] = topKIds[pos - 1];
-                    pos--;
-                }
-                topKLogits[pos] = lg;
-                topKIds[pos] = i;
-                sz++;
-            } else if (lg > topKLogits[k - 1]) {
-                var pos = k - 1;
-                while (pos > 0 && topKLogits[pos - 1] < lg) {
-                    topKLogits[pos] = topKLogits[pos - 1];
-                    topKIds[pos] = topKIds[pos - 1];
-                    pos--;
-                }
-                topKLogits[pos] = lg;
-                topKIds[pos] = i;
-            }
-        }
-        return sz;
-    }
-
-    private inline function adjusted(lg:Float, id:Int, penalize:Bool, rp:Float):Float {
-        if (!penalize) return lg;
-        if (!isRecent(id)) return lg;
-        return (lg > 0.0) ? lg / rp : lg * rp;
-    }
-
-    private function isRecent(id:Int):Bool {
-        for (k in 0...RECENT_CAP) {
-            if (recent[k] == id) return true;
-        }
-        return false;
-    }
-
-    private function pushRecent(id:Int):Void {
-        recent[recentWrite] = id;
-        recentWrite = (recentWrite + 1) % RECENT_CAP;
-    }
-
-    private function nextFloat():Float {
-        state = (state * 1664525 + 1013904223) & 0x7FFFFFFF;
-        return state / 2147483648.0;
-    }
-}
 
 class Main {
     static inline var DEFAULT_MAX_TOKENS = 128;
@@ -202,7 +89,6 @@ class Main {
         var loaded = loader.loadWithTokenizer(path, ctx);
         trace("[server] load_s=" + fmt(Sys.time() - loadStarted));
 
-        var model = cast(loaded.model, CausalLanguageModel);
         var llama = cast(loaded.model, LlamaModel);
         var profilePool = Sys.getEnv("RAYZOR_PROFILE_POOL") != null;
         var tok = loaded.tokenizer;
@@ -253,10 +139,12 @@ class Main {
                 if (prompt.length == 0) prompt = DEFAULT_PROMPT;
             }
 
-            var sampler:Sampler = (temperature > 0.0)
+            var sampler:LocalTempSampler = (temperature > 0.0)
                 ? new LocalTempSampler(temperature, 1.15, 50, 42 + reqNo)
                 : new LocalTempSampler(1e-4, 1.0, 1, 42 + reqNo);
-            var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
+            // Concrete LlamaModel + shared LocalTempSampler: the hot path must
+            // not cross an interface boundary (open x-module iface dispatch bug).
+            var loop = new GenerationLoop(llama, tok, sampler, eos, maxNew);
 
             var promptLen = prompt.length;
             var startHdr = tok.specialId("<|start_header_id|>");
