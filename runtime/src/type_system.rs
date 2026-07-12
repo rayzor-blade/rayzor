@@ -2617,6 +2617,31 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
     }
 }
 
+/// Channel-scoped tag-aware unbox for the statically-erased receive arm.
+/// Channel payloads are always self-describing DynamicValue boxes: primitives
+/// via haxe_box_*_ptr, references via haxe_box_reference_ptr with their real
+/// class id. When the receiver type erases to i64 the compiler cannot tell a
+/// boxed primitive from a boxed reference, so the tag decides: numeric prim
+/// tags return the scalar value, every other tag (string/class/enum/anon/array)
+/// returns the raw payload pointer. A null box (empty channel) -> 0.
+#[no_mangle]
+pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
+    if box_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let dynamic = *(box_ptr as *const DynamicValue);
+        if dynamic.type_id == TYPE_INT
+            || dynamic.type_id == TYPE_FLOAT
+            || dynamic.type_id == TYPE_BOOL
+        {
+            haxe_unbox_int(dynamic)
+        } else {
+            dynamic.value_ptr as i64
+        }
+    }
+}
+
 // Dynamic arithmetic is handled at the compiler level:
 // 1. Unbox both Dynamic operands to f64 via haxe_unbox_float_ptr
 // 2. Perform normal MIR arithmetic (FAdd, FSub, etc.)
@@ -3052,4 +3077,40 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
         }
     }
     0
+}
+
+#[cfg(test)]
+mod channel_unbox_tests {
+    use super::*;
+
+    // The null-safety crux the whole uniform-boxing scheme exists for:
+    // a sent 0 is a real non-null box that unboxes to 0, and must stay
+    // distinct from an empty channel (a null box).
+    #[test]
+    fn boxed_zero_is_not_empty() {
+        let boxed = haxe_box_int_ptr(0);
+        assert!(
+            !boxed.is_null(),
+            "boxed 0 must be a real heap box, not null"
+        );
+        assert_eq!(haxe_channel_unbox_erased(boxed), 0);
+        assert_eq!(haxe_channel_unbox_erased(std::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn numeric_prims_return_value() {
+        assert_eq!(haxe_channel_unbox_erased(haxe_box_int_ptr(42)), 42);
+        assert_eq!(haxe_channel_unbox_erased(haxe_box_float_ptr(2.5)), 2); // f64->i64 trunc
+        assert_eq!(haxe_channel_unbox_erased(haxe_box_bool_ptr(false)), 0);
+        assert_eq!(haxe_channel_unbox_erased(haxe_box_bool_ptr(true)), 1);
+    }
+
+    #[test]
+    fn reference_returns_raw_payload_ptr() {
+        let mut obj: u64 = 0xABCD;
+        let obj_ptr = &mut obj as *mut u64 as *mut u8;
+        // Real class id (>= 6) — not a numeric prim tag — must round-trip the ptr.
+        let boxed = haxe_box_reference_ptr(obj_ptr, 1000);
+        assert_eq!(haxe_channel_unbox_erased(boxed), obj_ptr as i64);
+    }
 }

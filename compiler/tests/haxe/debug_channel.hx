@@ -18,7 +18,7 @@ class Main {
         });
 
         var count = sender.join();
-        trace(count);
+        if (count != 5) throw "sender count = " + count + " (expected 5)";
 
         var sum = 0;
         var j = 0;
@@ -28,7 +28,7 @@ class Main {
             j++;
         }
 
-        trace(sum);
-        trace("done");
+        if (sum != 100) throw "tryReceive sum = " + sum + " (expected 100)";
+        Sys.println("PASS debug-channel sum=" + sum);
     }
 }

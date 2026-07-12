@@ -13379,7 +13379,20 @@ impl<'a> HirToMirContext<'a> {
                                                         .unwrap_or(false)
                                                 };
 
-                                            let final_reg = if is_type_erased_ptr
+                                            let final_reg = if (runtime_func == "Channel_send"
+                                                || runtime_func == "Channel_trySend")
+                                                && i >= 1
+                                            {
+                                                // Uniformly box Channel payloads (refs too) so the
+                                                // erased receive can tag-dispatch. i==0 is the channel
+                                                // handle — never box it.
+                                                self.box_channel_payload(
+                                                    reg,
+                                                    arg.ty,
+                                                    &actual_ty,
+                                                    &expected_ty,
+                                                )?
+                                            } else if is_type_erased_ptr
                                                 && matches!(&expected_ty, IrType::Ptr(_))
                                             {
                                                 // Cast I64 → Ptr(U8) for type-erased pointers
@@ -13502,6 +13515,19 @@ impl<'a> HirToMirContext<'a> {
                                             IrType::I64,
                                         )?;
                                         return self.builder.build_cast(i64v, IrType::I64, ptr_u8);
+                                    }
+
+                                    // Channel payloads are uniformly boxed DynamicValues; route the
+                                    // return through the tag-aware unbox (fixes erased prim receive,
+                                    // recovers boxed refs) instead of the raw shared path.
+                                    if runtime_func == "Channel_receive"
+                                        || runtime_func == "Channel_tryReceive"
+                                    {
+                                        return self.unbox_channel_return(
+                                            call_result,
+                                            &resolved_expected,
+                                            runtime_func == "Channel_tryReceive",
+                                        );
                                     }
 
                                     return self.maybe_unbox_for_extern_return(
@@ -14762,7 +14788,21 @@ impl<'a> HirToMirContext<'a> {
                                                                 | Some(IrType::F64)
                                                                 | Some(IrType::Bool)
                                                         );
-                                                        let final_reg = if is_erased_type_param
+                                                        let final_reg = if (mir_func_name
+                                                            == "Channel_send"
+                                                            || mir_func_name == "Channel_trySend")
+                                                            && i >= 1
+                                                        {
+                                                            // Uniformly box Channel payloads (refs too)
+                                                            // so the erased receive can tag-dispatch.
+                                                            // i==0 is the channel handle — never box it.
+                                                            self.box_channel_payload(
+                                                                reg,
+                                                                arg.ty,
+                                                                &actual_ty,
+                                                                &expected_ty,
+                                                            )?
+                                                        } else if is_erased_type_param
                                                             && matches!(actual_ty, IrType::I64)
                                                             && matches!(
                                                                 &expected_ty,
@@ -14876,12 +14916,22 @@ impl<'a> HirToMirContext<'a> {
                                                             .or(from_optional)
                                                             .unwrap_or_else(|| result_type.clone())
                                                     };
-                                                    let final_result = self
-                                                        .maybe_unbox_for_extern_return(
+                                                    let final_result = if mir_func_name
+                                                        == "Channel_receive"
+                                                        || mir_func_name == "Channel_tryReceive"
+                                                    {
+                                                        self.unbox_channel_return(
+                                                            call_result,
+                                                            &resolved_expected,
+                                                            mir_func_name == "Channel_tryReceive",
+                                                        )
+                                                    } else {
+                                                        self.maybe_unbox_for_extern_return(
                                                             call_result,
                                                             &mir_return_type,
                                                             &resolved_expected,
-                                                        );
+                                                        )
+                                                    };
 
                                                     // Store class hint for the result register to enable
                                                     // disambiguation of subsequent method calls on this value.
@@ -15295,11 +15345,26 @@ impl<'a> HirToMirContext<'a> {
                                                     .as_ref()
                                                     .and_then(|params| params.get(i).cloned())
                                                     .unwrap_or_else(|| actual_ty.clone());
-                                                let final_reg = self.maybe_box_for_extern_call(
-                                                    reg,
-                                                    &actual_ty,
-                                                    &expected_ty,
-                                                )?;
+                                                // Channel payloads are uniformly boxed (refs too) so
+                                                // the erased receive arm can tag-dispatch. i==0 is the
+                                                // channel handle — never box it.
+                                                let final_reg = if (mir_func_name == "Channel_send"
+                                                    || mir_func_name == "Channel_trySend")
+                                                    && i >= 1
+                                                {
+                                                    self.box_channel_payload(
+                                                        reg,
+                                                        arg.ty,
+                                                        &actual_ty,
+                                                        &expected_ty,
+                                                    )?
+                                                } else {
+                                                    self.maybe_box_for_extern_call(
+                                                        reg,
+                                                        &actual_ty,
+                                                        &expected_ty,
+                                                    )?
+                                                };
                                                 arg_regs.push(final_reg);
                                                 param_types.push(expected_ty);
                                             }
@@ -15402,11 +15467,21 @@ impl<'a> HirToMirContext<'a> {
 
                                         // Auto-unbox if MIR wrapper returns Ptr(U8) but caller expects primitive
                                         // (e.g., Channel<Int>.tryReceive() returns boxed int that needs unboxing)
-                                        let final_result = self.maybe_unbox_for_extern_return(
-                                            call_result,
-                                            &mir_actual_return,
-                                            &resolved_result_type,
-                                        );
+                                        let final_result = if mir_func_name == "Channel_receive"
+                                            || mir_func_name == "Channel_tryReceive"
+                                        {
+                                            self.unbox_channel_return(
+                                                call_result,
+                                                &resolved_result_type,
+                                                mir_func_name == "Channel_tryReceive",
+                                            )
+                                        } else {
+                                            self.maybe_unbox_for_extern_return(
+                                                call_result,
+                                                &mir_actual_return,
+                                                &resolved_result_type,
+                                            )
+                                        };
 
                                         // Set class hint on the FINAL result register (after potential unboxing)
                                         // to enable disambiguation of subsequent method calls.
@@ -16748,13 +16823,27 @@ impl<'a> HirToMirContext<'a> {
                                                             .cloned()
                                                             .unwrap_or_else(|| actual_ty.clone());
 
-                                                        // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive
-                                                        let final_reg = self
-                                                            .maybe_box_for_extern_call(
+                                                        // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive.
+                                                        // Channel payloads box uniformly (refs too); i==0 is the
+                                                        // channel handle/self (a reference) — never box it.
+                                                        let final_reg = if (mir_func_name
+                                                            == "Channel_send"
+                                                            || mir_func_name == "Channel_trySend")
+                                                            && i >= 1
+                                                        {
+                                                            self.box_channel_payload(
+                                                                reg,
+                                                                arg.ty,
+                                                                &actual_ty,
+                                                                &expected_ty,
+                                                            )?
+                                                        } else {
+                                                            self.maybe_box_for_extern_call(
                                                                 reg,
                                                                 &actual_ty,
                                                                 &expected_ty,
-                                                            )?;
+                                                            )?
+                                                        };
                                                         arg_regs.push(final_reg);
                                                     }
                                                 }
@@ -16785,6 +16874,15 @@ impl<'a> HirToMirContext<'a> {
                                                 "[MIR WRAPPER INSTANCE] call_result={:?}, mir_return_type={:?}, result_type={:?}",
                                                 call_result, mir_return_type, result_type
                                             );
+                                                if mir_func_name == "Channel_receive"
+                                                    || mir_func_name == "Channel_tryReceive"
+                                                {
+                                                    return self.unbox_channel_return(
+                                                        call_result,
+                                                        &result_type,
+                                                        mir_func_name == "Channel_tryReceive",
+                                                    );
+                                                }
                                                 return self.maybe_unbox_for_extern_return(
                                                     call_result,
                                                     &mir_return_type,
@@ -24154,6 +24252,165 @@ impl<'a> HirToMirContext<'a> {
                     value_kind_cloned
                 );
                 Some(value) // Skip boxing for unsupported types
+            }
+        }
+    }
+
+    /// Box a `Channel<T>` send payload into a self-describing DynamicValue so
+    /// the receive side can tag-dispatch (see `haxe_channel_unbox_erased`).
+    /// References carry their real class id (keeps `Std.is`/`Type.typeof`
+    /// honest); String uses the HaxeString wrapper; primitives keep the
+    /// existing extern-boxing path byte-for-byte. Channel-scoped: only the
+    /// `Channel_send`/`Channel_trySend` call sites route through here.
+    fn box_channel_payload(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        actual_ty: &IrType,
+        expected_ty: &IrType,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let value_kind = self.type_table.get(value_ty).map(|t| t.kind.clone());
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        match &value_kind {
+            Some(TypeKind::Class { .. })
+            | Some(TypeKind::Enum { .. })
+            | Some(TypeKind::Interface { .. })
+            | Some(TypeKind::Anonymous { .. })
+            | Some(TypeKind::Array { .. }) => {
+                let type_id_const = self.builder.build_const(IrValue::U32(value_ty.as_raw()))?;
+                let box_func_id = self.get_or_register_extern_function(
+                    "haxe_box_reference_ptr",
+                    vec![ptr_u8.clone(), IrType::U32],
+                    ptr_u8.clone(),
+                );
+                self.builder
+                    .build_call_direct(box_func_id, vec![value, type_id_const], ptr_u8)
+            }
+            Some(TypeKind::String) => {
+                let value_as_ptr = self
+                    .builder
+                    .build_bitcast(value, ptr_u8.clone())
+                    .unwrap_or(value);
+                let box_func_id = self.get_or_register_extern_function(
+                    "haxe_box_haxestring_ptr",
+                    vec![ptr_u8.clone()],
+                    ptr_u8.clone(),
+                );
+                self.builder
+                    .build_call_direct(box_func_id, vec![value_as_ptr], ptr_u8)
+            }
+            Some(TypeKind::Function { .. }) => self.box_value_for_dynamic(value, value_ty),
+            // Primitives (Int/Float/Bool) and anything else keep today's path.
+            _ => self.maybe_box_for_extern_call(value, actual_ty, expected_ty),
+        }
+    }
+
+    /// Tag-aware unbox for `Channel<T>` receive/tryReceive returns. The payload
+    /// is always a self-describing DynamicValue (see `box_channel_payload`).
+    /// Mirrors `maybe_unbox_for_extern_return`, changing only two arms: the
+    /// erased I64 arm tag-dispatches via `haxe_channel_unbox_erased` (resolves
+    /// the boxed-prim-vs-ref ambiguity that the raw reinterpret got wrong), and
+    /// the reference arm unboxes the box (refs are boxed now, not raw). A
+    /// `tryReceive` whose nullable stays `Ptr(U8)` is passed through so
+    /// downstream `auto_unbox_optional` / `!= null` keep working; the concrete
+    /// unbox fns null-guard, so an empty channel (0) resolves to 0/null.
+    fn unbox_channel_return(
+        &mut self,
+        value: IrId,
+        resolved_expected: &IrType,
+        is_try: bool,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        if is_try
+            && matches!(resolved_expected, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
+        {
+            return Some(value);
+        }
+
+        // Null<prim> nullable -> inner primitive (same unwrap as maybe_unbox).
+        let target_type = match resolved_expected {
+            IrType::Ptr(inner) => match inner.as_ref() {
+                IrType::I32 | IrType::I64 | IrType::Bool | IrType::F32 | IrType::F64 => {
+                    inner.as_ref()
+                }
+                _ => resolved_expected,
+            },
+            _ => resolved_expected,
+        };
+
+        match target_type {
+            IrType::I32 => {
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_int_ptr",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                let v = self
+                    .builder
+                    .build_call_direct(f, vec![value], IrType::I64)?;
+                self.builder.build_cast(v, IrType::I64, IrType::I32)
+            }
+            IrType::I64 => {
+                // Erased receive: the DynamicValue tag decides prim value vs raw ref ptr.
+                let f = self.get_or_register_extern_function(
+                    "haxe_channel_unbox_erased",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                self.builder.build_call_direct(f, vec![value], IrType::I64)
+            }
+            IrType::Bool => {
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_bool_ptr",
+                    vec![ptr_u8],
+                    IrType::Bool,
+                );
+                self.builder.build_call_direct(f, vec![value], IrType::Bool)
+            }
+            IrType::F32 => {
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_float_ptr",
+                    vec![ptr_u8],
+                    IrType::F64,
+                );
+                let v = self
+                    .builder
+                    .build_call_direct(f, vec![value], IrType::F64)?;
+                self.builder.build_cast(v, IrType::F64, IrType::F32)
+            }
+            IrType::F64 => {
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_float_ptr",
+                    vec![ptr_u8],
+                    IrType::F64,
+                );
+                self.builder.build_call_direct(f, vec![value], IrType::F64)
+            }
+            IrType::String => {
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_u8],
+                    IrType::String,
+                );
+                self.builder
+                    .build_call_direct(f, vec![value], IrType::String)
+            }
+            // Reference payload (class/enum/anon/array): boxed now, so recover the
+            // raw ref and type it as the expected pointer for downstream access.
+            other => {
+                let ret_ty = if matches!(other, IrType::Ptr(_)) {
+                    other.clone()
+                } else {
+                    ptr_u8.clone()
+                };
+                let f = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_u8],
+                    ret_ty.clone(),
+                );
+                self.builder.build_call_direct(f, vec![value], ret_ty)
             }
         }
     }
