@@ -711,17 +711,25 @@ pub struct BladeModuleSymbols {
     pub dependencies: Vec<String>,
 }
 
+
+/// Timestamp for build metadata. Deterministic by default (0) so identical
+/// sources produce bit-identical artifacts — same-input bundles must hash
+/// equal for cache validation and A/B integrity. Set `SOURCE_DATE_EPOCH`
+/// (the reproducible-builds convention) to embed a specific epoch instead.
+/// Nothing reads these fields programmatically; they are debug metadata.
+fn build_metadata_timestamp() -> u64 {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 /// Save a symbol manifest to file
 pub fn save_symbol_manifest(
     path: impl AsRef<Path>,
     modules: Vec<BladeModuleSymbols>,
 ) -> Result<(), BladeError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = build_metadata_timestamp();
 
     let manifest = BladeSymbolManifest {
         magic: *SYMBOL_MAGIC,
@@ -871,12 +879,7 @@ impl RayzorBundle {
         entry_function: &str,
         symbols: Option<BladeSymbolManifest>,
     ) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = build_metadata_timestamp();
 
         // Build module table
         let module_table: Vec<ModuleTableEntry> = modules
