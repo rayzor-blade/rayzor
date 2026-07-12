@@ -262,22 +262,64 @@ class Q4Matmul {
         return xd * (sumTerm1 - sumTerm2);
     }
 
-    // Claimants = physical performance cores (caller included). E-core
-    // claimants gate every band's fork-join tail on hybrid parts, so the
-    // pool never sizes past the P-cluster; overridable with
-    // RAYZOR_HAXE_MATMUL_WORKERS. On Apple Silicon this is still the right
-    // default: logical CPU count selected 10 claimants on a local M-class
-    // machine and the long-context llama-chat run was killed under load,
-    // while explicit 8 has been the stable measured baseline.
+    // Matmul pool policy — Nue owns it; the SpinPool primitive is env-agnostic
+    // and receives the resolved config. Profiles trade peak for co-runner
+    // robustness: throughput (all P-cores, default), cooperative (P-1, gentle
+    // spin so idle workers cede cores), latency (P-1, minimal spin).
+    static function envOr(name:String, alias:String):String {
+        var v = Sys.getEnv(name);
+        if (v == null) v = Sys.getEnv(alias);
+        return v;
+    }
+
+    public static function poolProfile():String {
+        var p = envOr("NUE_POOL_PROFILE", "RAYZOR_HAXE_POOL_PROFILE");
+        if (p == null || p == "") return "throughput";
+        return p;
+    }
+
+    // Claimants = physical P-cores (caller included), never past the P-cluster.
+    // cooperative/latency leave one P-core free — that slack keeps a co-runner
+    // (or the OS) from preempting a spinning worker / the coordinator, which
+    // otherwise ~halves throughput under contention.
     public static function workerCount():Int {
         var n = CpuTopology.perfCoreCount();
-        var env = Sys.getEnv("RAYZOR_HAXE_MATMUL_WORKERS");
+        var prof = poolProfile();
+        if ((prof == "cooperative" || prof == "latency") && n > 2) n = n - 1;
+        var env = envOr("NUE_MATMUL_WORKERS", "RAYZOR_HAXE_MATMUL_WORKERS");
         if (env != null) {
             var v:Int = Std.int(Std.parseFloat(env));
             if (v > 0) n = v;
         }
         if (n < 1) n = 1;
         return n;
+    }
+
+    /** Tight-spin budget; 0 = platform default. Lower = cede cores sooner. */
+    public static function poolSpins():Int {
+        var prof = poolProfile();
+        var s:Int = 0;
+        if (prof == "cooperative") s = 20000;
+        else if (prof == "latency") s = 2000;
+        var env = envOr("NUE_POOL_SPINS", "RAYZOR_HAXE_POOL_SPINS");
+        if (env != null) {
+            var v:Int = Std.int(Std.parseFloat(env));
+            if (v > 0) s = v;
+        }
+        return s;
+    }
+
+    /** Per-spin relax hint; -1 = platform default. */
+    public static function poolRelax():Int {
+        var env = envOr("NUE_POOL_RELAX", "RAYZOR_HAXE_POOL_RELAX");
+        if (env != null) return (env != "0" && env != "" && env != "false") ? 1 : 0;
+        return -1;
+    }
+
+    /** Pool dispatch timing; 1 = on. */
+    public static function poolProfiling():Int {
+        var env = envOr("NUE_PROFILE_POOL", "RAYZOR_PROFILE_POOL");
+        return (env != null && env != "0" && env != "" && env != "false") ? 1 : 0;
     }
 
 
