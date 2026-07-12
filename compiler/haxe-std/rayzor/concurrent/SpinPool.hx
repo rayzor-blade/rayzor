@@ -104,8 +104,12 @@ class SpinPool {
 
     inline function pidOf(w:Int):Atomic<Int> return cell(10 + (_n - 1) + (w - 1));
 
-    /** Spawn `n - 1` persistent workers (the caller is also a claimant). */
-    public function new(n:Int) {
+    /** Spawn `n - 1` persistent workers (the caller is also a claimant).
+        `spinBudget` (0 = platform default), `relaxHint` (-1 = platform
+        default) and `profile` (1 = time each dispatch) are supplied by the
+        caller: this pool primitive is env-agnostic, so scheduling POLICY lives
+        with the caller (Nue for inference) rather than inside stdlib. */
+    public function new(n:Int, spinBudget:Int = 0, relaxHint:Int = -1, profile:Int = 0) {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
@@ -119,10 +123,9 @@ class SpinPool {
         _scratch0Cap = 0;
         _scratch1Cap = 0;
         _scratch2Cap = 0;
-        _profile = 0;
-        spinBudget = 0; // resolved lazily on first dispatch (env reads in a
-                        // constructor mis-resolve; see bugs_sys_getenv_in_ctor)
-        relaxHint = -1; // resolved lazily alongside spinBudget
+        _profile = profile;
+        this.spinBudget = spinBudget; // 0 = resolve to platform default on first dispatch
+        this.relaxHint = relaxHint; // -1 = resolve to platform default
         CpuTopology.bindPerformance();
         // Bind `this` to an explicit local: an implicit `this` capture in a
         // loop-spawned closure does not resolve.
@@ -139,10 +142,6 @@ class SpinPool {
     public function workers():Int return _n;
 
     public function profiling():Bool {
-        if (_profile == 0) {
-            var v = Sys.getEnv("RAYZOR_PROFILE_POOL");
-            _profile = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
-        }
         return _profile == 1;
     }
 
@@ -242,23 +241,17 @@ class SpinPool {
             fn(0, rows, 0);
             return;
         }
+        // Resolve platform-derived defaults for any config the caller left
+        // unset (spinBudget 0 / relaxHint -1). These come from the runtime
+        // (arch/thermal profile), not hand-set constants. The pool is
+        // env-agnostic — the caller (Nue for inference) owns policy and passes
+        // explicit values, so there are no Sys.getEnv reads in this primitive.
         if (spinBudget == 0) {
-            // Defaults are DERIVED FROM THE PLATFORM (arch/thermal profile,
-            // computed once in the runtime) — not hand-set constants. The
-            // env vars only OVERRIDE for a specific box. Tight-spin window
-            // before the yield-hold phase; see workerLoop.
             spinBudget = CpuTopology.poolSpinDefault();
             if (spinBudget <= 0) spinBudget = 2000;
-            var sb = Sys.getEnv("RAYZOR_HAXE_POOL_SPINS");
-            if (sb != null) {
-                var v:Null<Int> = Std.parseInt(sb);
-                if (v != null && v > 0) spinBudget = v;
-            }
+        }
+        if (relaxHint == -1) {
             relaxHint = CpuTopology.poolRelaxDefault();
-            var rx = Sys.getEnv("RAYZOR_HAXE_POOL_RELAX");
-            if (rx != null) {
-                relaxHint = (rx != "0" && rx != "" && rx != "false") ? 1 : 0;
-            }
         }
         // Record the inter-dispatch gap EWMA. Workers size their idle hold
         // from the pool's own cadence, so stale samples make wake/park timing
