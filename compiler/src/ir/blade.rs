@@ -711,7 +711,6 @@ pub struct BladeModuleSymbols {
     pub dependencies: Vec<String>,
 }
 
-
 /// Timestamp for build metadata. Deterministic by default (0) so identical
 /// sources produce bit-identical artifacts — same-input bundles must hash
 /// equal for cache validation and A/B integrity. Set `SOURCE_DATE_EPOCH`

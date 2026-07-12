@@ -1,0 +1,5 @@
+[project]
+name = "rayzor-tensors-tests"
+type = "application"
+[build]
+class-paths = [".", "../haxe"]

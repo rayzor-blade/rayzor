@@ -3,5 +3,5 @@ name = "transformer-pieces"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../"]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 native-libs = ["../../../target/release/libnue_plugins.dylib"]

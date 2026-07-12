@@ -3,7 +3,7 @@ name = "tiny-transformer"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../"]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 # nue-plugins delivers extern classes that KVCache transitively
 # imports (e.g. KvCacheQ8). The JIT compiles all reachable IR
 # including dead branches, so the symbols must resolve even when
