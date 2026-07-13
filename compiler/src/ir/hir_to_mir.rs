@@ -19801,21 +19801,33 @@ impl<'a> HirToMirContext<'a> {
                         // Store the new value back to the operand
                         match &operand.kind {
                             HirExprKind::Variable { symbol, .. } => {
-                                // If we're inside a lambda with captured variables, also store back to environment
-                                if let Some(ref env_layout) = self.current_env_layout {
-                                    if env_layout.find_field(*symbol).is_some() {
-                                        // This is a captured variable - store it back to environment
-                                        let env_ptr = IrId::new(0); // First parameter in lambda is environment pointer
-                                        env_layout.store_field(
-                                            &mut self.builder,
-                                            env_ptr,
-                                            *symbol,
-                                            new_value,
-                                        );
+                                // Static field referenced bare: it lives in
+                                // GLOBAL storage, not an SSA local — rebinding
+                                // symbol_map silently dropped the write, so
+                                // `staticCounter++` was a lost store (plain
+                                // `x = x + 1` assignment already routed
+                                // through build_store_global).
+                                if let Some(&global_id) =
+                                    self.global_symbol_map.get(symbol)
+                                {
+                                    self.builder.build_store_global(global_id, new_value);
+                                } else {
+                                    // If we're inside a lambda with captured variables, also store back to environment
+                                    if let Some(ref env_layout) = self.current_env_layout {
+                                        if env_layout.find_field(*symbol).is_some() {
+                                            // This is a captured variable - store it back to environment
+                                            let env_ptr = IrId::new(0); // First parameter in lambda is environment pointer
+                                            env_layout.store_field(
+                                                &mut self.builder,
+                                                env_ptr,
+                                                *symbol,
+                                                new_value,
+                                            );
+                                        }
                                     }
-                                }
 
-                                self.symbol_map.insert(*symbol, new_value);
+                                    self.symbol_map.insert(*symbol, new_value);
+                                }
                             }
                             HirExprKind::Field { object, field } => {
                                 // Field access (e.g., this.length++) — store new value back
