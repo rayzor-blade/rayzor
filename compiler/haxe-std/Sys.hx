@@ -58,6 +58,17 @@ extern class Sys {
 	static function getEnv(s:String):String;
 
 	/**
+		Returns the value of environment variable `name`, or the value of the
+		legacy `alias` if `name` is unset, or `null` if neither is set. Lets a
+		renamed variable keep honouring its old name during a transition.
+	**/
+	static function getEnvOr(name:String, alias:String):String {
+		var v = getEnv(name);
+		if (v == null) v = getEnv(alias);
+		return v;
+	}
+
+	/**
 		Sets the value of the given environment variable.
 
 		If `v` is `null`, the environment variable is removed.

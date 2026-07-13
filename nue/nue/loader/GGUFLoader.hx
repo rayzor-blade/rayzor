@@ -146,7 +146,7 @@ class GGUFLoader implements ModelLoader {
         // those QTensor views for native inference. On wasm this still matters:
         // owned linear-memory file buffers are reclaimed instead of sitting as
         // ~0.77 GB of dead heap. Default-on; set RAYZOR_FREE_GGUF_BYTES=0 to opt out.
-        if (Sys.getEnv("RAYZOR_FREE_GGUF_BYTES") != "0") {
+        if (Sys.getEnvOr("NUE_FREE_GGUF_BYTES", "RAYZOR_FREE_GGUF_BYTES") != "0") {
             bytes.free();
         }
         if (profileOn) {

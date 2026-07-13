@@ -69,7 +69,7 @@ class GenerationLoop {
         // (p50/p95/p99/max) instead of only final tok/s.
         // VALUE-gated, not presence-gated: `=0`/`=false`/empty/unset all mean
         // OFF (the old `!= null` treated `=0` as enabled — on both backends).
-        var _pdEnv = Sys.getEnv("RAYZOR_PROFILE_DECODE");
+        var _pdEnv = Sys.getEnvOr("NUE_PROFILE_DECODE", "RAYZOR_PROFILE_DECODE");
         var _profileOn = _pdEnv != null && _pdEnv != "0" && _pdEnv != ""
             && _pdEnv.toLowerCase() != "false";
         var _pForward = 0.0;
@@ -90,11 +90,11 @@ class GenerationLoop {
         var _pStepMax = 0.0;
         var _pStepMaxIdx = -1;
         var _pStepMaxStart = 0.0;
-        var _pwEnv = Sys.getEnv("RAYZOR_PROFILE_DECODE_WINDOWS");
+        var _pwEnv = Sys.getEnvOr("NUE_PROFILE_DECODE_WINDOWS", "RAYZOR_PROFILE_DECODE_WINDOWS");
         var _profileWindows = _profileOn && _pwEnv != null && _pwEnv != "0"
             && _pwEnv != "" && _pwEnv.toLowerCase() != "false";
         var _windowSize:Int = 64;
-        var _pwSize = Sys.getEnv("RAYZOR_PROFILE_DECODE_WINDOW");
+        var _pwSize = Sys.getEnvOr("NUE_PROFILE_DECODE_WINDOW", "RAYZOR_PROFILE_DECODE_WINDOW");
         if (_profileWindows && _pwSize != null) {
             var _parsedWindow:Null<Int> = Std.parseInt(_pwSize);
             if (_parsedWindow != null) {
@@ -379,16 +379,16 @@ class GenerationLoop {
     }
 
     private static function useFastLastLogits():Bool {
-        var v = Sys.getEnv("RAYZOR_PREFILL_LAST_LOGITS");
+        var v = Sys.getEnvOr("NUE_PREFILL_LAST_LOGITS", "RAYZOR_PREFILL_LAST_LOGITS");
         return v != null && v != "0" && v != "" && v.toLowerCase() != "false";
     }
 
     private static function skipTokenText():Bool {
-        var silent = Sys.getEnv("RAYZOR_LLAMA_SILENT_STREAM");
+        var silent = Sys.getEnvOr("NUE_LLAMA_SILENT_STREAM", "RAYZOR_LLAMA_SILENT_STREAM");
         if (silent == null || silent == "0" || silent == "" || silent.toLowerCase() == "false") {
             return false;
         }
-        return Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") == null;
+        return Sys.getEnvOr("NUE_LLAMA_DUMP_OUTPUT", "RAYZOR_LLAMA_DUMP_OUTPUT") == null;
     }
 
 }

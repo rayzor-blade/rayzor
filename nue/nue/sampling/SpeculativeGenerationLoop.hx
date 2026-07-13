@@ -234,7 +234,7 @@ class SpeculativeGenerationLoop {
     }
 
     static function useFastLastLogits():Bool {
-        var v = Sys.getEnv("RAYZOR_PREFILL_LAST_LOGITS");
+        var v = Sys.getEnvOr("NUE_PREFILL_LAST_LOGITS", "RAYZOR_PREFILL_LAST_LOGITS");
         return v != null && v != "0" && v != "" && v.toLowerCase() != "false";
     }
 

@@ -15,7 +15,7 @@ import rayzor.concurrent.SpinPool;
 import rayzor.concurrent.CpuTopology;
 
 /**
- * Q4_K_M × Q8_K quantized matmul (gated by RAYZOR_HAXE_MATMUL).
+ * Q4_K_M × Q8_K quantized matmul (gated by NUE_MATMUL).
  *
  * Kernel: per 256-weight super-block, 8 SDOT sub-block dots into 4 i32x4
  * accumulators (`SIMD4i32.dot`); weight scales/mins decode inline from the
@@ -34,14 +34,14 @@ class Q4Matmul {
 
     public static function useFusedMatmul():Bool {
         if (_useFused == 0) {
-            var v = Sys.getEnv("RAYZOR_HAXE_FUSED_MATMUL");
+            var v = Sys.getEnvOr("NUE_FUSED_MATMUL", "RAYZOR_HAXE_FUSED_MATMUL");
             // The fused gate/up/qkv path is still experimental. It reduces
             // dispatch count, but full llama-chat runs on macOS regressed
             // versus the split Haxe kernels, so keep it opt-in until the
             // fused row-space lowering is proven faster and bit-stable.
             _useFused = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
             if (_dumpFusedGate == 0) {
-                var dump = Sys.getEnv("RAYZOR_DUMP_Q4_GATES");
+                var dump = Sys.getEnvOr("NUE_DUMP_Q4_GATES", "RAYZOR_DUMP_Q4_GATES");
                 _dumpFusedGate = (dump != null && dump != "0" && dump != "" && dump != "false") ? 1 : 2;
             }
             if (_dumpFusedGate == 1) {
@@ -266,14 +266,8 @@ class Q4Matmul {
     // and receives the resolved config. Profiles trade peak for co-runner
     // robustness: throughput (all P-cores, default), cooperative (P-1, gentle
     // spin so idle workers cede cores), latency (P-1, minimal spin).
-    static function envOr(name:String, alias:String):String {
-        var v = Sys.getEnv(name);
-        if (v == null) v = Sys.getEnv(alias);
-        return v;
-    }
-
     public static function poolProfile():String {
-        var p = envOr("NUE_POOL_PROFILE", "RAYZOR_HAXE_POOL_PROFILE");
+        var p = Sys.getEnvOr("NUE_POOL_PROFILE", "RAYZOR_HAXE_POOL_PROFILE");
         if (p == null || p == "") return "throughput";
         return p;
     }
@@ -286,7 +280,7 @@ class Q4Matmul {
         var n = CpuTopology.perfCoreCount();
         var prof = poolProfile();
         if ((prof == "cooperative" || prof == "latency") && n > 2) n = n - 1;
-        var env = envOr("NUE_MATMUL_WORKERS", "RAYZOR_HAXE_MATMUL_WORKERS");
+        var env = Sys.getEnvOr("NUE_MATMUL_WORKERS", "RAYZOR_HAXE_MATMUL_WORKERS");
         if (env != null) {
             var v:Int = Std.int(Std.parseFloat(env));
             if (v > 0) n = v;
@@ -301,7 +295,7 @@ class Q4Matmul {
         var s:Int = 0;
         if (prof == "cooperative") s = 20000;
         else if (prof == "latency") s = 2000;
-        var env = envOr("NUE_POOL_SPINS", "RAYZOR_HAXE_POOL_SPINS");
+        var env = Sys.getEnvOr("NUE_POOL_SPINS", "RAYZOR_HAXE_POOL_SPINS");
         if (env != null) {
             var v:Int = Std.int(Std.parseFloat(env));
             if (v > 0) s = v;
@@ -311,14 +305,14 @@ class Q4Matmul {
 
     /** Per-spin relax hint; -1 = platform default. */
     public static function poolRelax():Int {
-        var env = envOr("NUE_POOL_RELAX", "RAYZOR_HAXE_POOL_RELAX");
+        var env = Sys.getEnvOr("NUE_POOL_RELAX", "RAYZOR_HAXE_POOL_RELAX");
         if (env != null) return (env != "0" && env != "" && env != "false") ? 1 : 0;
         return -1;
     }
 
     /** Pool dispatch timing; 1 = on. */
     public static function poolProfiling():Int {
-        var env = envOr("NUE_PROFILE_POOL", "RAYZOR_PROFILE_POOL");
+        var env = Sys.getEnvOr("NUE_PROFILE_POOL", "RAYZOR_PROFILE_POOL");
         return (env != null && env != "0" && env != "" && env != "false") ? 1 : 0;
     }
 

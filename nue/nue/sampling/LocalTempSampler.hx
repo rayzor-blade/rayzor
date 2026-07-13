@@ -90,7 +90,7 @@ class LocalTempSampler implements Sampler {
 
     static inline function dumpTopk():Bool {
         if (_dumpTopkGate == 0) {
-            var v = Sys.getEnv("RAYZOR_DUMP_TOPK");
+            var v = Sys.getEnvOr("NUE_DUMP_TOPK", "RAYZOR_DUMP_TOPK");
             _dumpTopkGate = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _dumpTopkGate == 1;
