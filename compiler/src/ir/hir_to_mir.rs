@@ -24323,10 +24323,32 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-        if is_try
-            && matches!(resolved_expected, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void))
-        {
-            return Some(value);
+        if is_try {
+            if let IrType::Ptr(inner) = resolved_expected {
+                match inner.as_ref() {
+                    // Truly opaque payload — nothing to unbox, pass the box through.
+                    IrType::Void => return Some(value),
+                    // Boxed reference payload (class/enum/anon/array erases to
+                    // Ptr(U8)). The bare pass-through returned the DynamicValue
+                    // BOX, so a later field access (`n.text`) read box memory as
+                    // the class → UAF (garbage String ptr, SIGSEGV in the writer
+                    // coalesce loop). Unbox to the raw object ptr like the
+                    // non-try `other` arm does; haxe_unbox_reference_ptr
+                    // null-guards, so an empty channel (0) stays null and
+                    // `n != null` still works.
+                    IrType::U8 => {
+                        let f = self.get_or_register_extern_function(
+                            "haxe_unbox_reference_ptr",
+                            vec![ptr_u8.clone()],
+                            resolved_expected.clone(),
+                        );
+                        return self
+                            .builder
+                            .build_call_direct(f, vec![value], resolved_expected.clone());
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Null<prim> nullable -> inner primitive (same unwrap as maybe_unbox).
