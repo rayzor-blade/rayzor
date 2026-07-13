@@ -3,8 +3,9 @@ name = "rayzor-tensors"
 version = "0.1.0"
 type = "library"
 
-# Shared tensor layer (Tensor/QTensor + GPU), consumed by Nue and GPU plugins.
-# Haxe classes keep their rayzor.ds.* / rayzor.gpu.* packages (namespace-stable);
-# native kernels are still linked in rayzor-runtime for now (moved later).
+# Shared tensor layer (Tensor/QTensor), consumed by the Nue and GPU plugins.
+# Haxe classes keep their rayzor.ds.* packages (namespace-stable); the native
+# kernels ship in the rayzor-tensors cdylib (loaded via a consumer's
+# native-libs). The GPU plugin lives in its own package (../gpu).
 [build]
 class-paths = ["haxe"]

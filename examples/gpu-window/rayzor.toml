@@ -3,7 +3,7 @@ name = "gpu-window"
 entry = "Main.hx"
 
 [build]
-class-paths = [".", "../../compiler/haxe-std", "../../rayzor-tensors/haxe"]
+class-paths = [".", "../../compiler/haxe-std", "../../gpu/haxe", "../../rayzor-tensors/haxe"]
 
 [wasm]
 hosts = { "rayzor-gpu" = "../../gpu/pkg/rayzor_gpu.js", "rayzor-window" = "../../window/pkg/rayzor_window.js" }

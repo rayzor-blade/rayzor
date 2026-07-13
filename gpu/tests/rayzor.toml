@@ -1,0 +1,8 @@
+[project]
+name = "rayzor-gpu-tests"
+type = "application"
+
+# GPU plugin tests. Reach the gpu Haxe (../haxe) plus rayzor-tensors (Tensor
+# interop). Kept out of the run_haxe_tests glob — GPU tests need a device.
+[build]
+class-paths = [".", "../haxe", "../../rayzor-tensors/haxe"]
