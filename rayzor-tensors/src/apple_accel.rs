@@ -95,8 +95,59 @@ pub fn sgemm_nt(m: usize, k: usize, n: usize, a: &[f32], b: &[f32], c: &mut [f32
 // vs F32's 4), the only AMX route worth shipping for a Q4 model. BNNSMatMul is
 // __API_DEPRECATED (macOS 15, "use BNNSGraph") but still functional — fine for a
 // measurement; a real integration would move to BNNSGraph.
+// PROBED (accel_bench): int8 combos are REJECTED — the public matmul is
+// float-only. f16 passes at 1.0-1.6 TF/s, so the shipping AMX route is
+// f16 x f16 -> f32 below.
 
 use std::os::raw::c_void;
+
+// ---- f32 -> f16 bulk conversion via vImage (correct rounding + subnormals) --
+
+#[repr(C)]
+struct VImageBuffer {
+    data: *mut c_void,
+    height: usize, // vImagePixelCount
+    width: usize,
+    row_bytes: usize,
+}
+
+extern "C" {
+    fn vImageConvert_PlanarFtoPlanar16F(
+        src: *const VImageBuffer,
+        dest: *const VImageBuffer,
+        flags: u32,
+    ) -> isize; // vImage_Error, 0 = success
+}
+
+/// Convert `src` f32 values to IEEE binary16 bits in `dst` (same length).
+/// Chunked so a multi-hundred-MB weight never presents vImage a single
+/// giant row. Returns false if vImage reports an error.
+pub fn f32_to_f16(src: &[f32], dst: &mut [u16]) -> bool {
+    assert_eq!(src.len(), dst.len());
+    const CHUNK: usize = 1 << 20;
+    let mut off = 0;
+    while off < src.len() {
+        let n = CHUNK.min(src.len() - off);
+        let sb = VImageBuffer {
+            data: src[off..].as_ptr() as *mut c_void,
+            height: 1,
+            width: n,
+            row_bytes: n * 4,
+        };
+        let db = VImageBuffer {
+            data: dst[off..].as_mut_ptr() as *mut c_void,
+            height: 1,
+            width: n,
+            row_bytes: n * 2,
+        };
+        let rc = unsafe { vImageConvert_PlanarFtoPlanar16F(&sb, &db, 0) };
+        if rc != 0 {
+            return false;
+        }
+        off += n;
+    }
+    true
+}
 
 #[repr(C)]
 struct BnnsNdArrayDescriptor {

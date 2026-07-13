@@ -1017,20 +1017,22 @@ fn amx_prefill_min_batch() -> usize {
     })
 }
 
-/// F32 dequant of a Q4 weight, cached by QTensor pointer and reused across
-/// prefills. Dequanting a fresh F32 tensor per matmul (alloc + zero + fill +
-/// free of up to 1 GB for the LM head) sinks the AMX win; the weights are fixed
-/// so we pay it once. The cached tensors are intentionally leaked — bounded by
-/// the model's weight set, and the process outlives them. macOS-only (AMX).
+/// f16 dequant of a Q4 weight, cached by QTensor pointer and reused across
+/// prefills. Weights are fixed, so Q4 -> f32 (staging) -> f16 is a one-time
+/// cost; f16 halves the resident copy vs an F32 cache (~1.65 GB vs 3.3 GB for
+/// the 1B model) and AMX runs f16 GEMM faster than f32 (BNNS probes:
+/// 1.0-1.6 TF/s). The staging f32 tensor is freed after narrowing (vImage,
+/// correct rounding + subnormals); the f16 buffer is intentionally leaked —
+/// bounded by the model's weight set, and the process outlives it.
 #[cfg(target_os = "macos")]
-fn cached_f32_weight(qt_w: i64) -> i64 {
+fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
+    static CACHE: Mutex<Option<HashMap<i64, usize>>> = Mutex::new(None);
     let mut g = CACHE.lock().unwrap();
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some(&t) = map.get(&qt_w) {
-        return t;
+    if let Some(&p) = map.get(&qt_w) {
+        return p as *const u16;
     }
     let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
     let t0 = if dbg {
@@ -1039,21 +1041,36 @@ fn cached_f32_weight(qt_w: i64) -> i64 {
         None
     };
     let t = unsafe { rayzor_qtensor_dequant(qt_w) };
+    if t == 0 {
+        return std::ptr::null();
+    }
+    #[repr(C)]
+    struct Head {
+        data: *mut u8,
+    }
+    let f32_data = unsafe { (*(t as *const Head)).data as *const f32 };
+    let src = unsafe { std::slice::from_raw_parts(f32_data, len) };
+    let mut buf = vec![0u16; len];
+    let ok = crate::apple_accel::f32_to_f16(src, &mut buf);
+    unsafe { crate::tensor::rayzor_tensor_free(t) }; // drop the f32 staging copy
+    if !ok {
+        return std::ptr::null();
+    }
+    let p = Box::leak(buf.into_boxed_slice()).as_ptr();
     if let Some(t0) = t0 {
         eprintln!(
-            "[amx-dequant] MISS qt={qt_w:#x} us={:.0}",
+            "[amx-dequant] MISS(f16) qt={qt_w:#x} us={:.0}",
             t0.elapsed().as_secs_f64() * 1e6
         );
     }
-    if t != 0 {
-        map.insert(qt_w, t); // never freed (leaked): one F32 copy per weight
-    }
-    t
+    map.insert(qt_w, p as usize); // never freed (leaked): one f16 copy per weight
+    p
 }
 
-/// out[batch,n] = x[batch,k] · dequant(qt)[n,k]^T via Accelerate (AMX). Uses the
-/// cached F32 weight (dequant once), then `sgemm_nt`. Returns the out-tensor
-/// handle, or None to fall back to the SDOT path.
+/// out[batch,n] = x[batch,k] · dequant(qt)[n,k]^T via Accelerate (AMX f16).
+/// Uses the cached f16 weight (dequant once), converts the f32 activation to
+/// f16 per call (cheap: batch*k), then BNNS f16 x f16 -> f32 GEMM straight
+/// into the out tensor. Returns the out-tensor handle, or None to fall back.
 #[cfg(target_os = "macos")]
 unsafe fn amx_prefill_matmul(
     x_tensor: i64,
@@ -1072,45 +1089,58 @@ unsafe fn amx_prefill_matmul(
     } else {
         None
     };
-    let fw_tensor = cached_f32_weight(qt_w);
+    let fw16 = cached_f16_weight(qt_w, n * k);
     let cache_us = t_cache
         .map(|t| t.elapsed().as_secs_f64() * 1e6)
         .unwrap_or(0.0);
-    if fw_tensor == 0 {
+    if fw16.is_null() {
         return None;
     }
-    let fw_data = (*(fw_tensor as *const Head)).data as *const f32;
     let x_data = (*(x_tensor as *const Head)).data as *const f32;
-    let t_zeros = if dbg {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
-    let out_tensor = crate::tensor::rayzor_tensor_zeros([batch, n].as_ptr() as i64, 2, 0);
-    if let Some(t) = t_zeros {
-        eprintln!(
-            "[amx-glue] cache_us={cache_us:.0} zeros_us={:.0} batch={batch} n={n}",
-            t.elapsed().as_secs_f64() * 1e6
-        );
-    }
-    if out_tensor == 0 {
-        return None;
-    }
-    let out_data = (*(out_tensor as *const Head)).data as *mut f32;
     let x = std::slice::from_raw_parts(x_data, batch * k);
-    let fw = std::slice::from_raw_parts(fw_data, n * k);
-    let out = std::slice::from_raw_parts_mut(out_data, batch * n);
-    let t0 = if dbg {
+    // Per-call activation narrowing into a reused thread-local scratch.
+    thread_local! {
+        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let t_x = if dbg {
         Some(std::time::Instant::now())
     } else {
         None
     };
-    crate::apple_accel::sgemm_nt(batch, k, n, x, fw, out);
-    if let Some(t0) = t0 {
-        let us = t0.elapsed().as_secs_f64() * 1e6;
-        let gflops = 2.0 * batch as f64 * k as f64 * n as f64 / (us * 1e3);
-        eprintln!("[amx] batch={batch} n={n} k={k} sgemm_us={us:.0} GFLOP/s={gflops:.0}");
-    }
+    let out_tensor = X16.with(|cell| {
+        let mut x16 = cell.borrow_mut();
+        x16.resize(batch * k, 0);
+        if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+            return None;
+        }
+        let xconv_us = t_x
+            .map(|t| t.elapsed().as_secs_f64() * 1e6)
+            .unwrap_or(0.0);
+        let out_tensor = crate::tensor::rayzor_tensor_zeros([batch, n].as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return None;
+        }
+        let out_data = (*(out_tensor as *const Head)).data as *mut f32;
+        let fw = std::slice::from_raw_parts(fw16, n * k);
+        let out = std::slice::from_raw_parts_mut(out_data, batch * n);
+        let t0 = if dbg {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        if !crate::apple_accel::matmul_f16f32_nt(batch, k, n, &x16, fw, out) {
+            crate::tensor::rayzor_tensor_free(out_tensor);
+            return None;
+        }
+        if let Some(t0) = t0 {
+            let us = t0.elapsed().as_secs_f64() * 1e6;
+            let gflops = 2.0 * batch as f64 * k as f64 * n as f64 / (us * 1e3);
+            eprintln!(
+                "[amx] batch={batch} n={n} k={k} cache_us={cache_us:.0} xconv_us={xconv_us:.0} gemm16_us={us:.0} GFLOP/s={gflops:.0}"
+            );
+        }
+        Some(out_tensor)
+    })?;
     Some(out_tensor)
 }
 
