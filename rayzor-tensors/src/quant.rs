@@ -993,6 +993,127 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
 ///
 /// Returns a fresh F32 tensor; returns 0 on shape mismatch.
 #[no_mangle]
+/// Opt-in gate for the AMX prefill path (default off — a Mac-only accelerator).
+#[cfg(target_os = "macos")]
+fn amx_prefill_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::env_var("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL").is_ok_and(|v| v == "1")
+    })
+}
+
+/// Minimum batch (prompt length) for the AMX path — below this, dequant does
+/// not amortize and SDOT (bandwidth-optimal) wins.
+#[cfg(target_os = "macos")]
+fn amx_prefill_min_batch() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        crate::env_var("RZT_AMX_MIN_BATCH", "RAYZOR_AMX_MIN_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16)
+    })
+}
+
+/// F32 dequant of a Q4 weight, cached by QTensor pointer and reused across
+/// prefills. Dequanting a fresh F32 tensor per matmul (alloc + zero + fill +
+/// free of up to 1 GB for the LM head) sinks the AMX win; the weights are fixed
+/// so we pay it once. The cached tensors are intentionally leaked — bounded by
+/// the model's weight set, and the process outlives them. macOS-only (AMX).
+#[cfg(target_os = "macos")]
+fn cached_f32_weight(qt_w: i64) -> i64 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<i64, i64>>> = Mutex::new(None);
+    let mut g = CACHE.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some(&t) = map.get(&qt_w) {
+        return t;
+    }
+    let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
+    let t0 = if dbg {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let t = unsafe { rayzor_qtensor_dequant(qt_w) };
+    if let Some(t0) = t0 {
+        eprintln!(
+            "[amx-dequant] MISS qt={qt_w:#x} us={:.0}",
+            t0.elapsed().as_secs_f64() * 1e6
+        );
+    }
+    if t != 0 {
+        map.insert(qt_w, t); // never freed (leaked): one F32 copy per weight
+    }
+    t
+}
+
+/// out[batch,n] = x[batch,k] · dequant(qt)[n,k]^T via Accelerate (AMX). Uses the
+/// cached F32 weight (dequant once), then `sgemm_nt`. Returns the out-tensor
+/// handle, or None to fall back to the SDOT path.
+#[cfg(target_os = "macos")]
+unsafe fn amx_prefill_matmul(
+    x_tensor: i64,
+    qt_w: i64,
+    batch: usize,
+    k: usize,
+    n: usize,
+) -> Option<i64> {
+    #[repr(C)]
+    struct Head {
+        data: *mut u8,
+    }
+    let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
+    let t_cache = if dbg {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let fw_tensor = cached_f32_weight(qt_w);
+    let cache_us = t_cache
+        .map(|t| t.elapsed().as_secs_f64() * 1e6)
+        .unwrap_or(0.0);
+    if fw_tensor == 0 {
+        return None;
+    }
+    let fw_data = (*(fw_tensor as *const Head)).data as *const f32;
+    let x_data = (*(x_tensor as *const Head)).data as *const f32;
+    let t_zeros = if dbg {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let out_tensor = crate::tensor::rayzor_tensor_zeros([batch, n].as_ptr() as i64, 2, 0);
+    if let Some(t) = t_zeros {
+        eprintln!(
+            "[amx-glue] cache_us={cache_us:.0} zeros_us={:.0} batch={batch} n={n}",
+            t.elapsed().as_secs_f64() * 1e6
+        );
+    }
+    if out_tensor == 0 {
+        return None;
+    }
+    let out_data = (*(out_tensor as *const Head)).data as *mut f32;
+    let x = std::slice::from_raw_parts(x_data, batch * k);
+    let fw = std::slice::from_raw_parts(fw_data, n * k);
+    let out = std::slice::from_raw_parts_mut(out_data, batch * n);
+    let t0 = if dbg {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    crate::apple_accel::sgemm_nt(batch, k, n, x, fw, out);
+    if let Some(t0) = t0 {
+        let us = t0.elapsed().as_secs_f64() * 1e6;
+        let gflops = 2.0 * batch as f64 * k as f64 * n as f64 / (us * 1e3);
+        eprintln!("[amx] batch={batch} n={n} k={k} sgemm_us={us:.0} GFLOP/s={gflops:.0}");
+    }
+    Some(out_tensor)
+}
+
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     x_tensor: i64,
     qt_w: i64,
@@ -1011,6 +1132,42 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         Some(p) => p,
         None => return 0,
     };
+
+    // AMX prefill fast path (macOS): a compute-bound batch (prefill processes
+    // the whole prompt at once) amortizes a one-shot Q4->F32 dequant, then
+    // Accelerate's AMX sgemm runs at 400-1300 GFLOP/s vs ~57 for the SDOT
+    // band loop. Decode (batch below the threshold) stays on SDOT — bandwidth-
+    // bound, where dequant-to-F32 would be a net loss. Opt-in via RZT_AMX_PREFILL.
+    #[cfg(target_os = "macos")]
+    {
+        if amx_prefill_enabled() && std::env::var_os("RZT_AMX_DEBUG").is_some() {
+            let fire = qt.scheme == QSCHEME_Q4_K_M
+                && batch >= amx_prefill_min_batch()
+                && x_is_contiguous(x_tensor);
+            eprintln!(
+                "[amx-gate] batch={batch} n={n} k={k} q4={} contig={} fire={fire}",
+                qt.scheme == QSCHEME_Q4_K_M,
+                x_is_contiguous(x_tensor)
+            );
+        }
+        if qt.scheme == QSCHEME_Q4_K_M
+            && amx_prefill_enabled()
+            && batch >= amx_prefill_min_batch()
+            && x_is_contiguous(x_tensor)
+        {
+            let t_all = if std::env::var_os("RZT_AMX_DEBUG").is_some() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            if let Some(out) = amx_prefill_matmul(x_tensor, qt_w, batch, k, n) {
+                if let Some(t) = t_all {
+                    eprintln!("[amx-total] us={:.0}", t.elapsed().as_secs_f64() * 1e6);
+                }
+                return out;
+            }
+        }
+    }
 
     let out_shape = [batch, n];
     let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);

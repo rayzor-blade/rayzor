@@ -31,6 +31,21 @@ import rayzor.concurrent.CpuTopology;
 class Q4Matmul {
     static var _useFused:Int = 0;
     static var _dumpFusedGate:Int = 0;
+    static var _amx:Int = 0;
+    static inline var AMX_MIN_BATCH:Int = 16;
+
+    /** Opt-in Mac AMX prefill routing (RZT_AMX_PREFILL=1): compute-bound
+        batches hand off to the runtime kernel whose Accelerate path runs the
+        dequant-once + sgemm experiment. Default off; decode and non-Mac are
+        never routed. */
+    static function amxPrefill():Bool {
+        if (_amx == 0) {
+            var v = Sys.getEnvOr("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL");
+            var on = (v != null && v == "1") && (Sys.systemName() == "Mac");
+            _amx = on ? 1 : 2;
+        }
+        return _amx == 1;
+    }
 
     public static function useFusedMatmul():Bool {
         if (_useFused == 0) {
@@ -357,6 +372,16 @@ class Q4Matmul {
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
 
+        // Opt-in AMX prefill experiment: compute-bound Q4_K_M batches hand off
+        // to the runtime kernel (Accelerate dequant-once + sgemm). Q4_K_M ONLY:
+        // the runtime kernel's AMX and morsel paths both require Q4_K_M, so a
+        // routed Q6_K falls to its legacy per-block fallback (~700ms/call at
+        // batch=497 — measured, the whole "AMX long-prompt bleed"). Q6_K and
+        // decode stay on the Haxe band loop below.
+        if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() != QScheme.Q6_K) {
+            return qw.matmulXTQThreaded(x, 0);
+        }
+
         var pooled = sp != null;
         var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
         var bsums = pooled ? sp.scratchBytes(1, batch * bpr * 16 * 4) : Bytes.alloc(batch * bpr * 16 * 4);
@@ -522,6 +547,18 @@ class Q4Matmul {
         var K = w0.cols();
         var batch = Std.int(x.numel() / K);
         if (batch != 1) {
+            // Opt-in AMX prefill experiment (see matmul): route each fused
+            // weight through the runtime kernel. Q4_K_M only — a Q6_K weight
+            // (attn_v in the QKV triple) would hit the runtime's legacy
+            // fallback; keep such triples on the banded path. matmulXTQThreaded
+            // does NOT free x, so the shared activation survives all calls.
+            var anyQ6 = (w0.scheme() == QScheme.Q6_K) || (w1.scheme() == QScheme.Q6_K)
+                || (w2 != null && w2.scheme() == QScheme.Q6_K);
+            if (batch >= AMX_MIN_BATCH && amxPrefill() && !anyQ6) {
+                var outs = [w0.matmulXTQThreaded(x, 0), w1.matmulXTQThreaded(x, 0)];
+                if (w2 != null) outs.push(w2.matmulXTQThreaded(x, 0));
+                return outs;
+            }
             // Prefill: quantize the shared activation ONCE, then one banded
             // pass per weight against the packed scratch.
             var bprB = K >> 8;
