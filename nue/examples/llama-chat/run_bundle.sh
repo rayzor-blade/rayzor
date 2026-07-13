@@ -73,7 +73,10 @@ WARM_THRESHOLD="${WARM_THRESHOLD:-30}"
 HOT_THRESHOLD="${HOT_THRESHOLD:-5}"
 BLAZING_THRESHOLD="${BLAZING_THRESHOLD:-max}"
 TIER_PROMOTION="${TIER_PROMOTION:-true}"
-START_INTERPRETED="${START_INTERPRETED:-true}"
+# The bundle is a standalone executable: this script pins the FULL tier
+# config on the CLI so behavior is identical anywhere a rayzor CLI runs it —
+# no manifest is consulted. Start at a compiled tier (matches bench_server).
+START_INTERPRETED="${START_INTERPRETED:-false}"
 
 # nue serving config (kernel + KV + flash + lm_head requant + static bands).
 export NUE_MATMUL="${NUE_MATMUL:-1}"
