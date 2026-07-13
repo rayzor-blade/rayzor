@@ -108,4 +108,51 @@ fn main() {
             );
         }
     }
+
+    // --- Dequant amortization: Q4 weight -> F32 -> AMX sgemm ---
+    // Weights are FIXED, so dequant is a ONE-TIME cost (dequant once at load,
+    // cache the F32). "cached" = sgemm alone (the steady-state prefill cost);
+    // "per-call" = dequant+sgemm every forward (the no-cache lower bound).
+    use rayzor_runtime_core::quant::q4_k_m::dequant_q4_k_block;
+    use rayzor_runtime_core::quant::types::{Q4KBlock, Q4_K_M_BLOCK_SIZE};
+    let blk = Q4KBlock {
+        d: 0.02,
+        dmin: 0.01,
+        scales: [0.02; 8],
+        mins: [0.01; 8],
+        quants: [0x53u8; 128],
+    };
+    println!("\n-- Q4 dequant amortization (dequant once + AMX, vs per-call) --");
+    println!(
+        "{:<26} {:<10} {:>10} {:>10} {:>12} {:>12}",
+        "case", "batch", "dequant_us", "gemm_us", "cached_GF/s", "percall_GF/s"
+    );
+    for (cname, k, n) in cases {
+        let nblocks = (n * k) / Q4_K_M_BLOCK_SIZE;
+        let mut fw = vec![0.0f32; n * k];
+        let t_deq = bench(20, || {
+            let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+            for bi in 0..nblocks {
+                dequant_q4_k_block(&blk, &mut stage);
+                let off = bi * Q4_K_M_BLOCK_SIZE;
+                fw[off..off + Q4_K_M_BLOCK_SIZE].copy_from_slice(&stage);
+            }
+        });
+        for (bname, m) in &[("decode M=1", 1usize), ("prefill M=32", 32), ("prefill M=128", 128)] {
+            let a = fill(m * k, 0x77 ^ *m as u64);
+            let mut c = vec![0.0f32; m * n];
+            let iters = if *n > 50000 { 20 } else { 100 };
+            let t_gemm = bench(iters, || sgemm_nt(*m, *k, *n, &a, &fw, &mut c));
+            let flops = 2.0 * (*m as f64) * (*k as f64) * (*n as f64);
+            println!(
+                "{:<26} {:<10} {:>10.0} {:>10.0} {:>12.0} {:>12.0}",
+                cname,
+                bname,
+                t_deq * 1e6,
+                t_gemm * 1e6,
+                flops / t_gemm / 1e9,
+                flops / (t_deq + t_gemm) / 1e9,
+            );
+        }
+    }
 }
