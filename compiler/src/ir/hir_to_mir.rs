@@ -116,6 +116,10 @@ pub struct HirToMirContext<'a> {
     /// literal). Without this the writer and reader sort over different
     /// shapes and slot indices diverge — see anon-field scramble bug.
     object_literal_target_ty: Option<TypeId>,
+    /// Declared type of the enclosing `var x:T = <call>` — lets erased-generic
+    /// returns (inferred `Channel<T>.receive()`) pick the right unbox when the
+    /// receiver's type parameter carries no information.
+    let_target_type_hint: Option<TypeId>,
 
     /// Mapping from HIR function symbols to MIR function IDs
     function_map: BTreeMap<SymbolId, crate::ir::IrFunctionId>,
@@ -675,6 +679,7 @@ impl<'a> HirToMirContext<'a> {
             symbol_ir_types: BTreeMap::new(),
             symbol_type_ids: BTreeMap::new(),
             object_literal_target_ty: None,
+            let_target_type_hint: None,
             function_map: BTreeMap::new(),
             global_symbol_map: BTreeMap::new(),
             external_function_map: BTreeMap::new(),
@@ -4697,6 +4702,14 @@ impl<'a> HirToMirContext<'a> {
                     // Bypass that and lower the literal with the declared
                     // `Array<Interface>` slot type so each Class element gets
                     // wrapped in a fat pointer at construction.
+                    // Erased-generic returns (inferred Channel<T>.receive())
+                    // need the declared type to pick the right unbox; carry
+                    // the Let's type_hint across the init lowering (same
+                    // save/restore pattern as object_literal_target_ty).
+                    let prev_let_hint = self.let_target_type_hint.take();
+                    if matches!(&init_expr.kind, HirExprKind::Call { .. }) {
+                        self.let_target_type_hint = *type_hint;
+                    }
                     let value = if let (HirExprKind::Array { elements }, Some(target_ty)) =
                         (&init_expr.kind, type_hint)
                     {
@@ -4728,6 +4741,7 @@ impl<'a> HirToMirContext<'a> {
                         self.object_literal_target_ty = prev_target;
                         v
                     };
+                    self.let_target_type_hint = prev_let_hint;
 
                     // If Copy type, emit shallow copy and mark as heap alloc for drop tracking
                     let value = if let (Some(class_sym), Some(val)) = (copy_class_sym, value) {
@@ -13529,10 +13543,28 @@ impl<'a> HirToMirContext<'a> {
                                     if runtime_func == "Channel_receive"
                                         || runtime_func == "Channel_tryReceive"
                                     {
+                                        let is_try = runtime_func == "Channel_tryReceive";
+                                        // Inferred channels erase T to I64, whose unbox
+                                        // int-truncates a Float payload (4.75 -> 4). The
+                                        // enclosing `var x:Float = ...` declared type is the
+                                        // ground truth — refine to the float arm. Scoped to
+                                        // floats + non-try (tryReceive keeps the tag-driven
+                                        // unbox so nullables stay correct).
+                                        let refined = if !is_try
+                                            && matches!(resolved_expected, IrType::I64)
+                                        {
+                                            self.let_target_type_hint
+                                                .map(|t| self.convert_type(t))
+                                                .filter(|t| {
+                                                    matches!(t, IrType::F64 | IrType::F32)
+                                                })
+                                        } else {
+                                            None
+                                        };
                                         return self.unbox_channel_return(
                                             call_result,
-                                            &resolved_expected,
-                                            runtime_func == "Channel_tryReceive",
+                                            refined.as_ref().unwrap_or(&resolved_expected),
+                                            is_try,
                                         );
                                     }
 
@@ -24344,21 +24376,17 @@ impl<'a> HirToMirContext<'a> {
         if is_try {
             if let IrType::Ptr(inner) = resolved_expected {
                 match inner.as_ref() {
-                    // Boxed reference payload. An erased/inferred class arrives
-                    // as Ptr(U8); an EXPLICIT `Channel<SomeClass>` resolves the
-                    // concrete class, which converts to Ptr(Void). Both are the
-                    // same DynamicValue box: passing it through raw made a later
-                    // field access (`n.text`) read box memory as the class →
-                    // garbage/SIGSEGV (the streaming-writer crash was the U8
-                    // shape; the explicit-generic shape was the Void arm).
-                    // Unbox to the raw object ptr like the non-try `other` arm;
-                    // haxe_unbox_reference_ptr null-guards, so an empty channel
-                    // (0) stays null and `n != null` still works. Concrete
-                    // prims never reach here (Int → I32, Null<Int> → Ptr(I32)),
-                    // so the prim arms below are unaffected.
+                    // Ptr(U8) (erased/inferred) and Ptr(Void) (explicit class,
+                    // and Null<prim>!) are statically indistinguishable here —
+                    // a class payload must unwrap to the raw object ptr (the
+                    // raw-box passthrough was the streaming-writer SIGSEGV),
+                    // while a Null<prim> payload must KEEP its box (unwrapping
+                    // handed back the malloc'd value slot → garbage/null). Only
+                    // the DynamicValue tag can tell them apart, so dispatch at
+                    // runtime: haxe_channel_unbox_try (null-guarded).
                     IrType::Void | IrType::U8 => {
                         let f = self.get_or_register_extern_function(
-                            "haxe_unbox_reference_ptr",
+                            "haxe_channel_unbox_try",
                             vec![ptr_u8.clone()],
                             resolved_expected.clone(),
                         );

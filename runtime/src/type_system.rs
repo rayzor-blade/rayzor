@@ -2642,6 +2642,32 @@ pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
     }
 }
 
+/// Tag-aware unbox for `tryReceive` results whose static target is a nullable
+/// POINTER type. At the MIR boundary `Ptr(U8)`/`Ptr(Void)` covers BOTH
+/// `Null<prim>` and class payloads — statically indistinguishable, so the tag
+/// decides: reference tags unwrap to the raw object pointer (field access
+/// works, `!= null` works); primitive tags keep the BOX (it IS the nullable
+/// representation — `Null<Int>` machinery null-checks and unboxes it
+/// downstream; unwrapping here handed back the malloc'd value slot, which
+/// read as garbage). Null (empty channel) stays null either way.
+#[no_mangle]
+pub extern "C" fn haxe_channel_unbox_try(box_ptr: *mut u8) -> *mut u8 {
+    if box_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let dynamic = *(box_ptr as *const DynamicValue);
+        if dynamic.type_id == TYPE_INT
+            || dynamic.type_id == TYPE_FLOAT
+            || dynamic.type_id == TYPE_BOOL
+        {
+            box_ptr
+        } else {
+            dynamic.value_ptr
+        }
+    }
+}
+
 // Dynamic arithmetic is handled at the compiler level:
 // 1. Unbox both Dynamic operands to f64 via haxe_unbox_float_ptr
 // 2. Perform normal MIR arithmetic (FAdd, FSub, etc.)
