@@ -190,14 +190,14 @@ class Main {
         // tools/llama-diff/compare.sh): one `[dbg.prompt-id]` line per
         // token. Gated behind RAYZOR_LLAMA_DUMP_PROMPT=1 so normal runs
         // stay quiet.
-        if (Sys.getEnv("RAYZOR_LLAMA_DUMP_PROMPT") != null) {
+        if (Sys.getEnvOr("NUE_LLAMA_DUMP_PROMPT", "RAYZOR_LLAMA_DUMP_PROMPT") != null) {
             trace("[dbg.prompt-len] " + promptIds.length);
             for (i in 0...promptIds.length) {
                 trace("[dbg.prompt-id] " + i + " " + promptIds[i]);
             }
         }
 
-        var specEnv = Sys.getEnv("RAYZOR_SPEC_DECODE");
+        var specEnv = Sys.getEnvOr("NUE_SPEC_DECODE", "RAYZOR_SPEC_DECODE");
         var specOn = specEnv != null && specEnv != "0" && specEnv != ""
             && specEnv.toLowerCase() != "false";
         var silentStream = truthyEnv("RAYZOR_LLAMA_SILENT_STREAM");
@@ -216,7 +216,7 @@ class Main {
         var startedAt = Sys.time();
         var streamBuf:Array<Array<String>> = [[]];
         var lastStreamFlush = [startedAt];
-        var writerOff = Sys.getEnv("RAYZOR_STREAM_WRITER") == "0";
+        var writerOff = Sys.getEnvOr("NUE_STREAM_WRITER", "RAYZOR_STREAM_WRITER") == "0";
         var streamArc:Arc<Channel<StreamMsg>> = null;
         var writer:Thread<Int> = null;
         if (!silentStream && !writerOff) {
@@ -280,7 +280,7 @@ class Main {
         // diagnostic runs (e.g. when comparing decoded text against
         // llama.cpp byte-for-byte). Default off — users see the stream
         // exactly once.
-        if (Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
+        if (Sys.getEnvOr("NUE_LLAMA_DUMP_OUTPUT", "RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
             trace("[output] " + output);
         }
         // Join the Haxe-matmul spin pool's workers (no-op on the FFI path):

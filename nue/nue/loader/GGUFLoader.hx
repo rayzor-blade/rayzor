@@ -81,8 +81,8 @@ class GGUFLoader implements ModelLoader {
 
     /** Truthy-env check: ON iff the var is set to a value that isn't
      *  `0`/`false`/empty (so `=0` disables, matching the rest of the CLI). */
-    static function _profEnvOn(name:String):Bool {
-        var v = Sys.getEnv(name);
+    static function _profEnvOn(name:String, alias:String):Bool {
+        var v = Sys.getEnvOr(name, alias);
         if (v == null) return false;
         var lv = v.toLowerCase();
         return lv != "0" && lv != "" && lv != "false" && lv != "no";
@@ -95,8 +95,8 @@ class GGUFLoader implements ModelLoader {
      */
     public function loadWithTokenizer(path:String, maxCtx:Int = 0):LoadedModel {
         // VALUE-gated: `=0`/`=false`/empty/unset mean OFF (not `!= null`).
-        var profileOn = _profEnvOn("RAYZOR_PROFILE_LOAD")
-            || _profEnvOn("RAYZOR_PROFILE_DECODE");
+        var profileOn = _profEnvOn("NUE_PROFILE_LOAD", "RAYZOR_PROFILE_LOAD")
+            || _profEnvOn("NUE_PROFILE_DECODE", "RAYZOR_PROFILE_DECODE");
         var totalStart = profileOn ? Sys.time() : 0.0;
         var phaseStart = totalStart;
         var fileS = 0.0;
