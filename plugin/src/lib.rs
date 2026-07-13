@@ -95,7 +95,7 @@ pub type QTensorHandle = i64;
 // dtype tags
 // ============================================================================
 
-/// Tensor dtype tags. Mirror of `rayzor_runtime::tensor::DTYPE_*` —
+/// Tensor dtype tags. Mirror of `rayzor_tensors::tensor::DTYPE_*` —
 /// the values here are part of the ABI and bumping any one of them
 /// requires bumping [`ABI_VERSION`].
 pub mod dtype {

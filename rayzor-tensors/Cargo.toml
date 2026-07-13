@@ -1,0 +1,19 @@
+[package]
+name = "rayzor-tensors"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rayzor-runtime-core = { path = "../runtime-core" }
+# ABI crate: the `rayzor_plugin_abi_version` handshake export + version constant
+# the host checks at dlopen before binding any symbol.
+rayzor-plugin = { path = "../plugin" }
+half = "2"
+libc = "0.2"
+lazy_static = "1.4"
+parking_lot = "0.12"
+log = "0.4"
+rayon = "1.8"

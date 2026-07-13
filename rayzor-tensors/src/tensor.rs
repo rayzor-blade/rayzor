@@ -2602,7 +2602,7 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
 fn neon_silu_opted_in() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| std::env::var("RAYZOR_NEON_SILU").map_or(false, |v| v == "1"))
+    *CACHED.get_or_init(|| std::env::var("RAYZOR_NEON_SILU").is_ok_and(|v| v == "1"))
 }
 
 /// Softmax over the last dimension.

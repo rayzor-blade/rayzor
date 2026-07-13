@@ -11,6 +11,7 @@ members = [
     "lsp",
     "plugin",
     "nue-plugins",
+    "rayzor-tensors",
     "wasm-opt-helper"
 ]
 # runtime-wasm is excluded from workspace — built separately for wasm32-wasip1
