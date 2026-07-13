@@ -50,7 +50,9 @@ fn main() {
         let mut s = seed;
         (0..n)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
             })
             .collect()
@@ -138,7 +140,11 @@ fn main() {
                 fw[off..off + Q4_K_M_BLOCK_SIZE].copy_from_slice(&stage);
             }
         });
-        for (bname, m) in &[("decode M=1", 1usize), ("prefill M=32", 32), ("prefill M=128", 128)] {
+        for (bname, m) in &[
+            ("decode M=1", 1usize),
+            ("prefill M=32", 32),
+            ("prefill M=128", 128),
+        ] {
             let a = fill(m * k, 0x77 ^ *m as u64);
             let mut c = vec![0.0f32; m * n];
             let iters = if *n > 50000 { 20 } else { 100 };
@@ -152,6 +158,197 @@ fn main() {
                 t_gemm * 1e6,
                 flops / t_gemm / 1e9,
                 flops / (t_deq + t_gemm) / 1e9,
+            );
+        }
+    }
+
+    // --- BNNSMatMul dtype probes: which input types does the AMX path accept? ---
+    use rayzor_tensors::apple_accel::{
+        matmul_f16_nt, matmul_f16f32_nt, matmul_f32_bnns_nt, matmul_i8_nt, matmul_i8f32_nt,
+    };
+
+    // IEEE binary16 bits for small exact values (probe/fill values only).
+    fn f16_bits(x: f32) -> u16 {
+        let bits = x.to_bits();
+        let sign = ((bits >> 16) & 0x8000) as u16;
+        if x == 0.0 {
+            return sign;
+        }
+        let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+        let mant = ((bits & 0x7f_ffff) >> 13) as u16;
+        sign | ((exp as u16) << 10) | mant
+    }
+
+    // Correctness gates FIRST — never trust throughput from a rejected call.
+    // A[2x3]=[[1,2,3],[4,5,6]], B[2x3]=[[1,0,1],[0,1,0]], C=A·B^T=[[4,2],[10,5]].
+    let af: [f32; 6] = [1., 2., 3., 4., 5., 6.];
+    let bf: [f32; 6] = [1., 0., 1., 0., 1., 0.];
+    let mut cf = [0f32; 4];
+    let f32_ok = matmul_f32_bnns_nt(2, 3, 2, &af, &bf, &mut cf) && cf == [4., 2., 10., 5.];
+    println!("\n-- BNNSMatMul dtype probes (want [4,2,10,5]) --");
+    println!(
+        "f32          : {} {:?}",
+        if f32_ok { "PASS" } else { "FAIL" },
+        cf
+    );
+
+    let ah: Vec<u16> = af.iter().map(|&x| f16_bits(x)).collect();
+    let bh: Vec<u16> = bf.iter().map(|&x| f16_bits(x)).collect();
+    let mut ch = [0u16; 4];
+    let f16_rc = matmul_f16_nt(2, 3, 2, &ah, &bh, &mut ch);
+    let want_h: Vec<u16> = [4f32, 2., 10., 5.].iter().map(|&x| f16_bits(x)).collect();
+    let f16_ok = f16_rc && ch == want_h[..];
+    println!(
+        "f16->f16     : {} rc_ok={} got={:04x?}",
+        if f16_ok { "PASS" } else { "FAIL" },
+        f16_rc,
+        ch
+    );
+
+    let mut chf = [0f32; 4];
+    let f16f32_ok = matmul_f16f32_nt(2, 3, 2, &ah, &bh, &mut chf) && chf == [4., 2., 10., 5.];
+    println!(
+        "f16->f32     : {} {:?}",
+        if f16f32_ok { "PASS" } else { "FAIL" },
+        chf
+    );
+
+    let a8: [i8; 6] = [1, 2, 3, 4, 5, 6];
+    let b8: [i8; 6] = [1, 0, 1, 0, 1, 0];
+    let mut c8 = [0i32; 4];
+    let i8_ok = matmul_i8_nt(2, 3, 2, &a8, &b8, &mut c8) && c8 == [4, 2, 10, 5];
+    let mut c8f = [0f32; 4];
+    let i8f32_ok = matmul_i8f32_nt(2, 3, 2, &a8, &b8, &mut c8f) && c8f == [4., 2., 10., 5.];
+    println!(
+        "int8->int32  : {} {:?}",
+        if i8_ok { "PASS" } else { "FAIL" },
+        c8
+    );
+    println!(
+        "int8->f32    : {} {:?}",
+        if i8f32_ok { "PASS" } else { "FAIL" },
+        c8f
+    );
+
+    // f16 throughput at model shapes (only if the gate passed).
+    if f16_ok || f16f32_ok {
+        println!(
+            "\n-- f16 BNNSMatMul throughput (AMX f16 ~2x f32 rate; cblas f32 was 400-900 GF/s) --"
+        );
+        println!(
+            "{:<26} {:<14} {:>12} {:>12}",
+            "case", "batch", "f16f16_GF/s", "f16f32_GF/s"
+        );
+        for (cname, k, n) in cases {
+            let bw: Vec<u16> = (0..(n * k))
+                .map(|i| f16_bits(((i * 7 + 3) % 15) as f32 - 7.0))
+                .collect();
+            for (bname, m) in &[
+                ("decode M=1", 1usize),
+                ("prefill M=32", 32),
+                ("prefill M=194", 194),
+            ] {
+                let a: Vec<u16> = (0..(m * k))
+                    .map(|i| f16_bits(((i * 5 + 1) % 15) as f32 - 7.0))
+                    .collect();
+                let mut c16 = vec![0u16; m * n];
+                let mut c32 = vec![0f32; m * n];
+                let iters = if *n > 50000 { 20 } else { 50 };
+                let flops = 2.0 * (*m as f64) * (*k as f64) * (*n as f64);
+                let g16 = if f16_ok {
+                    let t = bench(iters, || {
+                        matmul_f16_nt(*m, *k, *n, &a, &bw, &mut c16);
+                    });
+                    flops / t / 1e9
+                } else {
+                    0.0
+                };
+                let g32 = if f16f32_ok {
+                    let t = bench(iters, || {
+                        matmul_f16f32_nt(*m, *k, *n, &a, &bw, &mut c32);
+                    });
+                    flops / t / 1e9
+                } else {
+                    0.0
+                };
+                println!("{:<26} {:<14} {:>12.0} {:>12.0}", cname, bname, g16, g32);
+            }
+        }
+    }
+
+    // NEON i8 reference (scalar-ish i32 accumulate, the honest lower bound; the
+    // in-model SDOT path runs ~120 GFLOP/s effective).
+    #[inline]
+    fn neon_i8_nt(m: usize, k: usize, n: usize, a: &[i8], b: &[i8], c: &mut [i32]) {
+        use std::arch::aarch64::*;
+        unsafe {
+            for mi in 0..m {
+                let arow = &a[mi * k..mi * k + k];
+                for ni in 0..n {
+                    let wrow = &b[ni * k..ni * k + k];
+                    // Stable NEON widening MAC (no nightly sdot): 8-bit ->
+                    // 16-bit products, pairwise-accumulated into i32.
+                    let mut acc = vdupq_n_s32(0);
+                    let mut ki = 0;
+                    while ki + 16 <= k {
+                        let av = vld1q_s8(arow.as_ptr().add(ki));
+                        let wv = vld1q_s8(wrow.as_ptr().add(ki));
+                        let plo = vmull_s8(vget_low_s8(av), vget_low_s8(wv));
+                        let phi = vmull_s8(vget_high_s8(av), vget_high_s8(wv));
+                        acc = vpadalq_s16(acc, plo);
+                        acc = vpadalq_s16(acc, phi);
+                        ki += 16;
+                    }
+                    let mut sum = vaddvq_s32(acc);
+                    while ki < k {
+                        sum += arow[ki] as i32 * wrow[ki] as i32;
+                        ki += 1;
+                    }
+                    c[mi * n + ni] = sum;
+                }
+            }
+        }
+    }
+
+    if !i8_ok {
+        println!("\n-- int8 throughput SKIPPED: BNNSMatMul rejects int8 (public matmul is float-only) --");
+        return;
+    }
+    println!("\n-- int8-AMX (BNNS) vs NEON sdot, model shapes --");
+    println!(
+        "{:<26} {:<12} {:>12} {:>12} {:>8} {:>10}",
+        "case", "batch", "AMX8_GF/s", "NEON8_GF/s", "speedup", "maxdiff"
+    );
+    for (cname, k, n) in cases {
+        let bw: Vec<i8> = (0..(n * k)).map(|i| ((i * 7 + 3) % 15) as i8 - 7).collect();
+        for (bname, m) in &[
+            ("decode M=1", 1usize),
+            ("prefill M=32", 32),
+            ("prefill M=194", 194),
+        ] {
+            let a: Vec<i8> = (0..(m * k)).map(|i| ((i * 5 + 1) % 15) as i8 - 7).collect();
+            let mut c_amx = vec![0i32; m * n];
+            let mut c_neon = vec![0i32; m * n];
+            let iters = if *n > 50000 { 20 } else { 50 };
+            let t_amx = bench(iters, || {
+                matmul_i8_nt(*m, *k, *n, &a, &bw, &mut c_amx);
+            });
+            let t_neon = bench(iters, || neon_i8_nt(*m, *k, *n, &a, &bw, &mut c_neon));
+            let diff = c_amx
+                .iter()
+                .zip(&c_neon)
+                .map(|(x, y)| (x - y).abs())
+                .max()
+                .unwrap_or(0);
+            let flops = 2.0 * (*m as f64) * (*k as f64) * (*n as f64);
+            println!(
+                "{:<26} {:<12} {:>12.0} {:>12.0} {:>7.1}x {:>10}",
+                cname,
+                bname,
+                flops / t_amx / 1e9,
+                flops / t_neon / 1e9,
+                t_neon / t_amx,
+                diff
             );
         }
     }
