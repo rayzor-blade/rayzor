@@ -212,8 +212,19 @@ class Q4Matmul {
         0..63 → −32..31 bias folds into 32·Σx via the per-16 bsums. Mirrors
         runtime-core `vec_dot_q6_K_q8_K`. Safe to call concurrently across
         output-row bands (no shared scratch). */
+    /** Signed-i8 scale byte at `wBase+off`, matching SIMD16i8.get()'s
+        sign-extend contract. Reading the Q6_K sub-block scale via a loaded
+        `SIMD16i8.get(dynamic-lane)` lowered to a 16-way extract+select chain
+        (SIMD16i8_extract); a direct memory byte-load is bit-identical and skips
+        the scalarization. */
+    static inline function scaleI8(wBase:Usize, off:Int):Int {
+        var b = Mem.loadU8(wBase + Usize.fromInt(off));
+        return (b << 24) >> 24;
+    }
+
     static inline function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
-        var scVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 192)));
+        // scales are read per-(n,j) with a dynamic index — take them straight
+        // from memory via scaleI8 (see there); dVec keeps its constant-lane gets.
         var dVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 194)));
         var d = f16ToF32((dVec[14] & 0xFF) | ((dVec[15] & 0xFF) << 8));
         var mask = SIMD16i8.splat(0x0F);
@@ -251,8 +262,8 @@ class Q4Matmul {
                 var xHi = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan + 16)));
                 var sdotLo = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xLo, qLo).sum();
                 var sdotHi = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xHi, qHi).sum();
-                var dScLo:Float = d * scVec.get(scOff + 2 * j);
-                var dScHi:Float = d * scVec.get(scOff + 2 * j + 1);
+                var dScLo:Float = d * scaleI8(wBase, wBlk + 192 + scOff + 2 * j);
+                var dScHi:Float = d * scaleI8(wBase, wBlk + 192 + scOff + 2 * j + 1);
                 sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
                 var bi = bsBase + ((outOff + j * 32) >> 4);
                 sumTerm2 += 32.0 * dScLo * loadI32(bsums, bi * 4)
