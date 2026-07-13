@@ -10,5 +10,9 @@
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-undefined,dynamic_lookup");
+        // Accelerate provides AMX-backed BLAS (cblas_sgemm) + BNNS/vDSP. Linked
+        // only on macOS; the `apple_accel` module is cfg'd to match. Portable
+        // (Linux/NUC) paths never reference it.
+        println!("cargo:rustc-link-lib=framework=Accelerate");
     }
 }

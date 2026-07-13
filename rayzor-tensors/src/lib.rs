@@ -9,6 +9,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(target_os = "macos")]
+pub mod apple_accel;
 pub mod haxe_sys;
 pub mod heap_check;
 pub mod kernel_timing;
