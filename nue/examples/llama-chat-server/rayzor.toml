@@ -4,7 +4,7 @@ entry = "Main.hx"
 
 [build]
 class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
-native-libs = ["../../../target/release/libnue_plugins.dylib"]
+native-libs = ["../../../target/release/libnue_plugins.dylib", "../../../target/release/librayzor_tensors.dylib"]
 
 # Worker/server profile:
 # compile Haxe orchestration to baseline before entering Main.main, then keep
