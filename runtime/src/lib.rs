@@ -70,7 +70,6 @@ pub mod safety; // Safety validation and error reporting
 pub mod topology; // CPU topology + thread affinity (rayzor.concurrent.CpuTopology / WorkerPool)
 pub mod type_system; // Runtime type information for Dynamic values
 pub mod vec_plugin;
-pub mod worker_pool; // Persistent CPU worker pool for ML kernels (fork-join via condvar queue) // Pointer-based Vec API // Exception handling (setjmp/longjmp)
 
 pub mod plugin_impl; // Plugin registration
 
@@ -82,13 +81,9 @@ pub mod cstring_runtime;
 
 // Tensor runtime — N-dimensional array (rayzor.ds.Tensor)
 pub mod heap_check;
-pub mod tensor;
-pub mod tensor_pool;
-pub mod tensor_simd;
 
 // Quantised tensor runtime — INT8 / Q4_K_M storage + dequant-fused matmul
 // (rayzor.ds.QTensor)
-pub mod quant;
 
 // TinyCC runtime API (rayzor.runtime.CC)
 #[cfg(feature = "tcc-runtime")]
@@ -277,7 +272,6 @@ pub mod profile;
 #[cfg(feature = "profile")]
 pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
 
-pub mod kernel_timing;
 
 /// Allocate tracked heap memory using Rust's global allocator.
 ///

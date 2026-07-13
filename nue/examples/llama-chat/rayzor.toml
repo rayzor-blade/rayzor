@@ -4,12 +4,13 @@ entry = "Main.hx"
 
 [build]
 # "../../" = nue/ ; the rayzor-tensors plugin provides rayzor.ds.*/rayzor.gpu.*
-# (lifted out of the bundled stdlib; namespaces unchanged). Its native kernels
-# are still linked in rayzor-runtime, so no extra native-lib is needed yet.
+# (lifted out of the bundled stdlib; namespaces unchanged).
 class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
-# Loads nue-plugins (Q8_0 KV cache + flash kernel) at compile time
-# via the plugin ABI handshake. Path is relative to this manifest.
-native-libs = ["../../../target/release/libnue_plugins.dylib"]
+# Both dylibs load at compile time via the plugin ABI handshake (paths
+# relative to this manifest): nue-plugins (Q8_0 KV cache + flash kernel) and
+# rayzor-tensors (the Tensor/QTensor kernel symbols, dispatched by the
+# compiler's built-in mapping table).
+native-libs = ["../../../target/release/libnue_plugins.dylib", "../../../target/release/librayzor_tensors.dylib"]
 
 # nue-tuned tier config.
 #

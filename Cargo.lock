@@ -2864,6 +2864,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayzor-tensors"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "lazy_static",
+ "libc",
+ "log",
+ "parking_lot",
+ "rayon",
+ "rayzor-plugin",
+ "rayzor-runtime-core",
+]
+
+[[package]]
 name = "rayzor-wasm-opt-helper"
 version = "0.1.0"
 dependencies = [

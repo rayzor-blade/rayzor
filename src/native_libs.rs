@@ -60,8 +60,14 @@ pub fn load_manifest_native_lib(
             break;
         }
     }
+    // A plugin may omit `plugin_describe` entirely and instead provide only a
+    // runtime symbol table (`plugin_init`) when its classes are dispatched by
+    // the compiler's built-in mapping table (e.g. the tensor/quant kernels).
+    // In that case the describe table is legitimately empty; fail only if the
+    // symbol table below is also empty (the dylib provides nothing).
+    let describe_was_empty = plugin.is_none();
     let plugin =
-        plugin.ok_or_else(|| "no `plugin_describe` export with a non-empty table".to_string())?;
+        plugin.unwrap_or_else(|| compiler::compiler_plugin::NativePlugin::empty(plugin_name));
 
     type InitFn = unsafe extern "C" fn(*mut usize) -> *const SymbolEntry;
     let init_names: &[&[u8]] = &[b"plugin_init", b"rayzor_plugin_init"];
@@ -80,6 +86,13 @@ pub fn load_manifest_native_lib(
             }
             break;
         }
+    }
+
+    if describe_was_empty && runtime_symbols.is_empty() {
+        return Err(
+            "provides neither a `plugin_describe` method table nor a `plugin_init` symbol table"
+                .to_string(),
+        );
     }
 
     Ok((lib, plugin, runtime_symbols))

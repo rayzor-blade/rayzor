@@ -355,6 +355,19 @@ impl NativePlugin {
         }
     }
 
+    /// A plugin that provides only runtime symbols and no method descriptors.
+    ///
+    /// Valid for a plugin whose classes are dispatched by the compiler's own
+    /// built-in mapping table rather than plugin-supplied descriptors: it
+    /// exposes the kernel symbols (via `plugin_init`) for JIT linkage but has
+    /// no method mappings of its own.
+    pub fn empty(name: &str) -> Self {
+        NativePlugin {
+            plugin_name: name.to_string(),
+            methods: Vec::new(),
+        }
+    }
+
     /// Create a NativePlugin from deserialized method entries (rpkg format).
     ///
     /// This is the safe counterpart to `from_descriptors` — takes owned Rust
