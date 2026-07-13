@@ -6,4 +6,4 @@ entry = "DumpLayers.hx"
 class-paths = [".", "../../nue/", "../../rayzor-tensors/haxe"]
 # Same plugin load as llama-chat's manifest — DumpLayers exercises the same
 # forward path (Q8 KV / flash kernels resolve from nue-plugins).
-native-libs = ["../../target/release/libnue_plugins.dylib", "../../target/release/librayzor_tensors.dylib"]
+native-libs = ["../../target/release/librayzor_tensors.dylib", "../../target/release/libnue_plugins.dylib"]

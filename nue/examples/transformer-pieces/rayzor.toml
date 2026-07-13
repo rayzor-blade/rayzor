@@ -4,4 +4,4 @@ entry = "Main.hx"
 
 [build]
 class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
-native-libs = ["../../../target/release/libnue_plugins.dylib", "../../../target/release/librayzor_tensors.dylib"]
+native-libs = ["../../../target/release/librayzor_tensors.dylib", "../../../target/release/libnue_plugins.dylib"]

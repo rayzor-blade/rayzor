@@ -54,8 +54,25 @@ pub fn load_manifest_native_lib(
         }
     };
     let path = resolved.as_ref();
-    let lib =
-        unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {}", e))?;
+    // Load with RTLD_GLOBAL on unix so one plugin's symbols are visible to the
+    // next: since the core split, nue-plugins' flash kernel resolves tensor
+    // symbols (`rayzor_plugin_tensor_*`) out of librayzor_tensors, so that lib
+    // must be loaded first AND its symbols promoted to the global scope. macOS'
+    // flat namespace + `-undefined dynamic_lookup` hid this; Linux defaults to
+    // RTLD_LOCAL, which left the cross-plugin symbols unresolved.
+    let lib = {
+        #[cfg(unix)]
+        {
+            use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_LAZY};
+            unsafe { UnixLibrary::open(Some(path), RTLD_LAZY | RTLD_GLOBAL) }
+                .map(libloading::Library::from)
+                .map_err(|e| format!("dlopen failed: {}", e))?
+        }
+        #[cfg(not(unix))]
+        {
+            unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {}", e))?
+        }
+    };
 
     let plugin_name = path
         .file_stem()
