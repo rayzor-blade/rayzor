@@ -171,29 +171,32 @@ full-symbol overrides or register the plugin's method table via rpkg
 INCREMENT 1 DONE + validated (3a52274c) — Haxe classes lifted, discovery via
 class-paths, model coherent, harness 166/166.
 
-INCREMENT 2 (Rust kernels) — harder, needs a design choice (NOT mechanical):
-- FINDING: `runtime-core` (no_std, native+wasm-shared) ALREADY holds the portable
-  compute — `quant/{matmul,q4_k_m,q8_k,sdot}`, `simd`, `tensor`. So `runtime/src/
-  quant.rs` + `tensor.rs` are the C-ABI ENTRY POINTS wrapping runtime-core and
-  orchestrating via the runtime SINGLETONS: `worker_pool::global()` (8+ sites,
-  takes a Rust closure), `tensor_pool::global()`, `kernel_timing`, `haxe_sys`,
-  `tensor_simd`.
-- THE CRUX: a plugin cdylib cannot own its own copy of `worker_pool`/`tensor_pool`
-  (duplicate singletons = two pools = broken). It must SHARE the binary's.
-- APPROACH (matches the nue-plugins pattern): the `rayzor-tensors` cdylib
-  (a) depends on `runtime-core` for the portable kernels (no singletons, safe to
-  link), and (b) declares `extern "C"` for a small set of runtime SERVICE symbols
-  resolved from the main binary at dlopen (RTLD_GLOBAL). rayzor-runtime must
-  expose C-ABI wrappers for the services the kernels need — the hard one is
-  `worker_pool::parallel_rows(closure)`: add `rayzor_worker_pool_parallel_rows(
-  rows, threads, fn_ptr, ctx)` with a trampoline (same shape as the SpinPool band
-  marshalling), and rewrite the 8+ closure call sites to fn-ptr+ctx. tensor_pool/
-  kernel_timing get thin C-ABI getters.
-- Then move `quant.rs` + `tensor.rs` into the plugin crate, delete from
-  rayzor-runtime, wire `native-libs` in the rayzor-tensors package + consumers.
-  Bit-exact argmax validate (the closure-trampoline rewrite is the risk).
-- This is a focused, careful effort — the singleton sharing + closure marshalling
-  are subtle; rushing risks duplicate-pool bugs that present as wrong output.
+INCREMENT 2 (Rust kernels) — a MECHANICAL crate extraction, NOT a trampoline.
+Earlier "shared-singleton / closure-trampoline" framing was a FALSE premise:
+- `worker_pool::global()` and `tensor_pool::global()` are used by NOTHING but
+  `quant.rs`/`tensor.rs` (verified). They are inference-only -> they MOVE WITH the
+  kernels into the plugin crate and are used via the plain Rust API there. No
+  sharing with core -> NO C-ABI trampoline, NO closure marshalling.
+- We rebuild ALL packages + rzb + clear caches, so there is no ABI-compat or
+  stale-cache constraint; the plugin<->runtime interface is defined freely.
+- `runtime-core` (no_std) already holds the portable compute; the moving files
+  are the C-ABI entry points + their private pools.
+
+Move to the `rayzor-tensors` cdylib (depends on `runtime-core`): `quant.rs`,
+`tensor.rs`, `worker_pool.rs`, `tensor_pool.rs`, `tensor_simd.rs`,
+`kernel_timing.rs`. Residual deps on core-that-stays are small:
+- `topology` (1) + `haxe_sys` (4 C-ABI fns): plugin declares `extern "C"`,
+  resolved from the binary at dlopen (RTLD_GLOBAL) — nue-plugins pattern.
+- `heap_check` (21, a debug guard, no shared state that matters): a duplicate
+  copy in the plugin is harmless.
+- `plugin_impl.rs` (141 tensor refs = the tensor method-table registrations):
+  move those to the plugin's own `declare_native_methods`; core `plugin_impl`
+  keeps the general registrations.
+
+Delete the moved files from rayzor-runtime, wire `native-libs` (the plugin dylib)
+in the rayzor-tensors package + consuming entries, rebuild everything + clear
+caches, bit-exact argmax validate. Mechanical; the risk is missed cross-refs
+caught by the build, not silent wrong output.
 
 Also: re-home the 11 tests DONE (rayzor-tensors/tests/ + rayzor.toml);
 (later) split `rayzor-gpu` into its own package.
