@@ -266,10 +266,24 @@ class Q4Matmul {
     // and receives the resolved config. Profiles trade peak for co-runner
     // robustness: throughput (all P-cores, default), cooperative (P-1, gentle
     // spin so idle workers cede cores), latency (P-1, minimal spin).
+    //
+    // Resolution order: NUE_POOL_PROFILE env (explicit runtime choice) wins,
+    // then a code-set override (an app that knows its own scenario — e.g. a
+    // decode loop that also runs a stream-writer thread and wants to leave the
+    // P-cluster a free core), then the throughput default.
+    static var _profileOverride:String = null;
+
+    /** Set the pool profile from code. `null` clears it. NUE_POOL_PROFILE still
+        takes precedence, so this is a scenario default, not a hard override. */
+    public static function setPoolProfile(profile:String):Void {
+        _profileOverride = profile;
+    }
+
     public static function poolProfile():String {
         var p = Sys.getEnvOr("NUE_POOL_PROFILE", "RAYZOR_HAXE_POOL_PROFILE");
-        if (p == null || p == "") return "throughput";
-        return p;
+        if (p != null && p != "") return p;
+        if (_profileOverride != null && _profileOverride != "") return _profileOverride;
+        return "throughput";
     }
 
     // Claimants = physical P-cores (caller included), never past the P-cluster.

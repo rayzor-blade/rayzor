@@ -220,14 +220,28 @@ class Main {
         var streamArc:Arc<Channel<StreamMsg>> = null;
         var writer:Thread<Int> = null;
         if (!silentStream && !writerOff) {
-            var chArc = new Arc(new Channel(256));
+            // Unbounded channel (capacity 0): `send` never blocks, so the
+            // decode thread is fully decoupled from terminal I/O even when the
+            // tty applies flow control. A bounded channel would block `send`
+            // once full, stalling decode at the terminal's render rate.
+            var chArc = new Arc(new Channel(0));
             var writerCh = chArc.clone();
             streamArc = chArc;
             writer = Thread.spawn(function():Int {
+                // Coalesce: block for one message, then drain everything queued
+                // into a single print. Fewer, larger writes cut per-write tty
+                // overhead so the writer keeps pace with a fast producer.
                 while (true) {
                     var m:StreamMsg = writerCh.get().receive();
                     if (m == null || m.done) break;
-                    Sys.print(m.text);
+                    var out = m.text;
+                    var n:StreamMsg = writerCh.get().tryReceive();
+                    while (n != null) {
+                        if (n.done) { Sys.print(out); return 0; }
+                        out += n.text;
+                        n = writerCh.get().tryReceive();
+                    }
+                    Sys.print(out);
                 }
                 return 0;
             });
