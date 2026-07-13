@@ -1,0 +1,12 @@
+[project]
+name = "rayzor-gpu"
+version = "0.1.0"
+type = "library"
+
+# The GPU plugin: rayzor.gpu.* Haxe classes (compute + graphics) over the
+# rayzor-gpu native crate (Metal / WebGPU backends). Depends on rayzor-tensors
+# for Tensor <-> GpuBuffer interop, so a consumer puts both haxe roots on its
+# class-paths. Namespaces are stable (rayzor.gpu.*); this is a code-location
+# home, not a rename.
+[build]
+class-paths = ["haxe"]
