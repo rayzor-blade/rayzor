@@ -595,6 +595,7 @@ run_one() {
     cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
     cmd+=("--tier-promotion" "$TIER_PROMOTION")
     cmd+=("--release")
+    cmd+=("--llvm")
     cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   else
     cmd=("$RAYZOR" run)
@@ -611,10 +612,16 @@ run_one() {
     cmd+=("--tier-start-interpreted" "$START_INTERPRETED")
     cmd+=("--tier-promotion" "$TIER_PROMOTION")
     cmd+=("--release")
+    cmd+=("--llvm")
     cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   fi
 
-  local env_cmd=("env" "NUE_SERVER_MODEL=$MODEL_PATH")
+  # Fast-path kernel gates default ON (overridable) — without them the server
+  # falls back to the slow default matmul (~5.5 vs ~43 tok/s on the NUC). Mirror
+  # of the flags run_bundle.sh sets for llama-chat.
+  local env_cmd=("env" "NUE_SERVER_MODEL=$MODEL_PATH"
+    "NUE_MATMUL=${NUE_MATMUL:-1}" "NUE_FLASH=${NUE_FLASH:-1}" "NUE_KV_Q8=${NUE_KV_Q8:-1}"
+    "NUE_PREFILL_LAST_LOGITS=${NUE_PREFILL_LAST_LOGITS:-1}")
   if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
     env_cmd+=("NUE_PROFILE_DECODE=1")
   fi
