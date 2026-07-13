@@ -24,7 +24,7 @@ class Main {
         var temperature = DEFAULT_TEMP;
         var requests = DEFAULT_REQUESTS;
         var listenPort = 0;
-        var stream = Sys.getEnv("RAYZOR_SERVER_STREAM") != null;
+        var stream = Sys.getEnvOr("NUE_SERVER_STREAM", "RAYZOR_SERVER_STREAM") != null;
         var prompts:Array<String> = [];
 
         var i = 0;
@@ -65,7 +65,7 @@ class Main {
             Sys.exit(1);
         }
 
-        var envPrompts = Sys.getEnv("RAYZOR_SERVER_PROMPTS");
+        var envPrompts = Sys.getEnvOr("NUE_SERVER_PROMPTS", "RAYZOR_SERVER_PROMPTS");
         if (prompts.length == 0 && envPrompts != null && envPrompts.length > 0) {
             prompts = envPrompts.split("|||");
         }
@@ -90,7 +90,7 @@ class Main {
         trace("[server] load_s=" + fmt(Sys.time() - loadStarted));
 
         var llama = cast(loaded.model, LlamaModel);
-        var profilePool = Sys.getEnv("RAYZOR_PROFILE_POOL") != null;
+        var profilePool = Sys.getEnvOr("NUE_PROFILE_POOL", "RAYZOR_PROFILE_POOL") != null;
         var tok = loaded.tokenizer;
         var meta = loaded.metadata;
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
@@ -202,7 +202,7 @@ class Main {
                 trace("[profile-pool] request=" + reqNo
                     + " " + llama.spinPool.profReport());
             }
-            if (Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
+            if (Sys.getEnvOr("NUE_LLAMA_DUMP_OUTPUT", "RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
                 trace("[output] request=" + reqNo + " " + output);
             }
             totalTokens += tokens;
@@ -228,7 +228,7 @@ class Main {
     }
 
     static function modelPathFromEnv():String {
-        var path = Sys.getEnv("RAYZOR_SERVER_MODEL");
+        var path = Sys.getEnvOr("NUE_SERVER_MODEL", "RAYZOR_SERVER_MODEL");
         if (!isEmpty(path)) return path;
         path = Sys.getEnv("GGUF");
         if (!isEmpty(path)) return path;

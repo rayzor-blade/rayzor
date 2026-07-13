@@ -7,10 +7,10 @@ cd "$SCRIPT_DIR"
 
 RAYZOR="${RAYZOR:-../../../target/release/rayzor}"
 DEFAULT_GGUF="/Users/amaterasu/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct-GGUF/snapshots/b69aef112e9f895e6f98d7ae0949f72ff09aa401/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
-if [[ -z "${RAYZOR_SERVER_MODEL:-}" && -z "${GGUF:-}" && -f "$HOME/llama-q4.gguf" ]]; then
+if [[ -z "${NUE_SERVER_MODEL:-}" && -z "${GGUF:-}" && -f "$HOME/llama-q4.gguf" ]]; then
   DEFAULT_GGUF="$HOME/llama-q4.gguf"
 fi
-MODEL_PATH="${RAYZOR_SERVER_MODEL:-${GGUF:-$DEFAULT_GGUF}}"
+MODEL_PATH="${NUE_SERVER_MODEL:-${GGUF:-$DEFAULT_GGUF}}"
 PROMPTS="${PROMPTS:-Explain voronoi regions and their connection to delaunay computation.|||Describe vector graph database implementation.|||Give a compact Haxe example of an actor worker.}"
 REQUESTS="${REQUESTS:-3}"
 MAX_TOKENS="${MAX_TOKENS:-808}"
@@ -29,9 +29,9 @@ REQUEST_PROFILE="${REQUEST_PROFILE:-true}"
 RUNTIME_STATS="${RUNTIME_STATS:-false}"
 MEMORY_PROFILE="${MEMORY_PROFILE:-false}"
 MEMORY_SAMPLE_MS="${MEMORY_SAMPLE_MS:-250}"
-PREFILL_MORSELS="${PREFILL_MORSELS:-${RAYZOR_PREFILL_MORSELS:-false}}"
-STREAM="${STREAM:-${RAYZOR_SERVER_STREAM:-false}}"
-REQUANT_LM_HEAD="${REQUANT_LM_HEAD:-${RAYZOR_REQUANT_LM_HEAD:-}}"
+PREFILL_MORSELS="${PREFILL_MORSELS:-${RZT_PREFILL_MORSELS:-false}}"
+STREAM="${STREAM:-${NUE_SERVER_STREAM:-false}}"
+REQUANT_LM_HEAD="${REQUANT_LM_HEAD:-${NUE_REQUANT_LM_HEAD:-}}"
 PRESET="${PRESET:-application}"
 PORT_BASE="${PORT_BASE:-19890}"
 NO_CACHE="${NO_CACHE:-true}"
@@ -311,7 +311,7 @@ profile_label() {
   if [[ "$DECODE_PROFILE" != "true" && "$DECODE_PROFILE" != "1" && "$DECODE_PROFILE" != "yes" \
      && "$LOAD_PROFILE" != "true" && "$LOAD_PROFILE" != "1" && "$LOAD_PROFILE" != "yes" \
      && "$COLD_PROFILE" != "true" && "$COLD_PROFILE" != "1" && "$COLD_PROFILE" != "yes" \
-     && ( "${RAYZOR_PROFILE_POOL:-}" == "" || "${RAYZOR_PROFILE_POOL:-}" == "0" ) ]]; then
+     && ( "${NUE_PROFILE_POOL:-}" == "" || "${NUE_PROFILE_POOL:-}" == "0" ) ]]; then
     return 0
   fi
   /usr/bin/python3 - "$log" "$DECODE_PROFILE" "$COLD_PROFILE" "$LOAD_PROFILE" <<'PY'
@@ -611,21 +611,21 @@ run_one() {
     cmd+=("--" "--requests" "$REQUESTS" "--max" "$MAX_TOKENS" "--ctx" "$CTX" "--temp" "$TEMP" "--listen" "$port")
   fi
 
-  local env_cmd=("env" "RAYZOR_SERVER_MODEL=$MODEL_PATH")
+  local env_cmd=("env" "NUE_SERVER_MODEL=$MODEL_PATH")
   if [[ "$DECODE_PROFILE" == "true" || "$DECODE_PROFILE" == "1" || "$DECODE_PROFILE" == "yes" ]]; then
-    env_cmd+=("RAYZOR_PROFILE_DECODE=1")
+    env_cmd+=("NUE_PROFILE_DECODE=1")
   fi
   if [[ "$LOAD_PROFILE" == "true" || "$LOAD_PROFILE" == "1" || "$LOAD_PROFILE" == "yes" ]]; then
-    env_cmd+=("RAYZOR_PROFILE_LOAD=1")
+    env_cmd+=("NUE_PROFILE_LOAD=1")
   fi
   if [[ "$PREFILL_MORSELS" == "true" || "$PREFILL_MORSELS" == "1" || "$PREFILL_MORSELS" == "yes" ]]; then
-    env_cmd+=("RAYZOR_PREFILL_MORSELS=1")
+    env_cmd+=("RZT_PREFILL_MORSELS=1")
   fi
   if [[ -n "$REQUANT_LM_HEAD" ]]; then
-    env_cmd+=("RAYZOR_REQUANT_LM_HEAD=$REQUANT_LM_HEAD")
+    env_cmd+=("NUE_REQUANT_LM_HEAD=$REQUANT_LM_HEAD")
   fi
   if [[ "$STREAM" == "true" || "$STREAM" == "1" || "$STREAM" == "yes" ]]; then
-    env_cmd+=("RAYZOR_SERVER_STREAM=1")
+    env_cmd+=("NUE_SERVER_STREAM=1")
   fi
   local launch_start
   launch_start="$(now_s)"
@@ -823,7 +823,7 @@ echo "request: per-request profile=$REQUEST_PROFILE"
 if memory_profile_enabled; then
   echo "memory: smaps_rollup sample=${MEMORY_SAMPLE_MS}ms"
 fi
-if [[ "${RAYZOR_PROFILE_POOL:-}" != "" && "${RAYZOR_PROFILE_POOL:-}" != "0" ]]; then
+if [[ "${NUE_PROFILE_POOL:-}" != "" && "${NUE_PROFILE_POOL:-}" != "0" ]]; then
   echo "pool:   profile=true"
 fi
 if [[ "$COLD_PROFILE" == "true" || "$COLD_PROFILE" == "1" || "$COLD_PROFILE" == "yes" ]]; then

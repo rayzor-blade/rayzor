@@ -76,16 +76,16 @@ TIER_PROMOTION="${TIER_PROMOTION:-true}"
 START_INTERPRETED="${START_INTERPRETED:-true}"
 
 # nue serving config (kernel + KV + flash + lm_head requant + static bands).
-export RAYZOR_HAXE_MATMUL="${RAYZOR_HAXE_MATMUL:-1}"
-export RAYZOR_HAXE_FLASH="${RAYZOR_HAXE_FLASH:-1}"
-export RAYZOR_KV_Q8="${RAYZOR_KV_Q8:-1}"
-export RAYZOR_REQUANT_LM_HEAD="${RAYZOR_REQUANT_LM_HEAD:-${REQUANT_LM_HEAD:-1}}"
-export RAYZOR_PREFILL_LAST_LOGITS="${RAYZOR_PREFILL_LAST_LOGITS:-1}"
-if [[ -n "${RAYZOR_HAXE_FUSED_MATMUL:-}" ]]; then
-  export RAYZOR_HAXE_FUSED_MATMUL
+export NUE_MATMUL="${NUE_MATMUL:-1}"
+export NUE_FLASH="${NUE_FLASH:-1}"
+export NUE_KV_Q8="${NUE_KV_Q8:-1}"
+export NUE_REQUANT_LM_HEAD="${NUE_REQUANT_LM_HEAD:-${REQUANT_LM_HEAD:-1}}"
+export NUE_PREFILL_LAST_LOGITS="${NUE_PREFILL_LAST_LOGITS:-1}"
+if [[ -n "${NUE_FUSED_MATMUL:-}" ]]; then
+  export NUE_FUSED_MATMUL
 fi
-if [[ -n "${RAYZOR_HAXE_FLASH_POOL:-}" ]]; then
-  export RAYZOR_HAXE_FLASH_POOL
+if [[ -n "${NUE_FLASH_POOL:-}" ]]; then
+  export NUE_FLASH_POOL
 fi
 if [[ -n "${RAYZOR_STDOUT_FLUSH_MS:-${RAYZOR_LLAMA_STREAM_FLUSH_MS:-}}" ]]; then
   export RAYZOR_STDOUT_FLUSH_MS="${RAYZOR_STDOUT_FLUSH_MS:-$RAYZOR_LLAMA_STREAM_FLUSH_MS}"
@@ -145,10 +145,10 @@ else
   echo "allocator: system"
 fi
 echo "mmap preload: $([[ "${RAYZOR_NO_PRELOAD_MMAP:-}" == "1" ]] && echo off || echo on)"
-echo "kernels: haxe_matmul=${RAYZOR_HAXE_MATMUL} fused_matmul=${RAYZOR_HAXE_FUSED_MATMUL:-auto} workers=${RAYZOR_HAXE_MATMUL_WORKERS:-auto} haxe_flash=${RAYZOR_HAXE_FLASH} flash_pool=${RAYZOR_HAXE_FLASH_POOL:-auto} flash_shifted_q=${RAYZOR_HAXE_FLASH_SHIFTED_Q:-auto} flash_batch_max=${RAYZOR_HAXE_FLASH_BATCH_MAX:-auto} kv_q8=${RAYZOR_KV_Q8} lm_head_requant=${RAYZOR_REQUANT_LM_HEAD} prefill_last_logits=${RAYZOR_PREFILL_LAST_LOGITS}"
-echo "pool: spins=${RAYZOR_HAXE_POOL_SPINS:-auto} relax=${RAYZOR_HAXE_POOL_RELAX:-auto} perf_affinity=${RAYZOR_PERF_AFFINITY:-off} recycle=${RAYZOR_POOL:-off}"
+echo "kernels: haxe_matmul=${NUE_MATMUL} fused_matmul=${NUE_FUSED_MATMUL:-auto} workers=${NUE_MATMUL_WORKERS:-auto} haxe_flash=${NUE_FLASH} flash_pool=${NUE_FLASH_POOL:-auto} flash_shifted_q=${NUE_FLASH_SHIFTED_Q:-auto} flash_batch_max=${RAYZOR_HAXE_FLASH_BATCH_MAX:-auto} kv_q8=${NUE_KV_Q8} lm_head_requant=${NUE_REQUANT_LM_HEAD} prefill_last_logits=${NUE_PREFILL_LAST_LOGITS}"
+echo "pool: spins=${NUE_POOL_SPINS:-auto} relax=${NUE_POOL_RELAX:-auto} perf_affinity=${RAYZOR_PERF_AFFINITY:-off} recycle=${RZT_POOL:-off}"
 echo "tier: promotion=${TIER_PROMOTION} start_interpreted=${START_INTERPRETED} thresholds=${INTERP_THRESHOLD}/${WARM_THRESHOLD}/${HOT_THRESHOLD}/${BLAZING_THRESHOLD}"
-echo "diag: spec_decode=${RAYZOR_SPEC_DECODE:-off} silent_stream=${RAYZOR_LLAMA_SILENT_STREAM:-0} stdout_flush_ms=${RAYZOR_STDOUT_FLUSH_MS:-auto} profile_decode=${RAYZOR_PROFILE_DECODE:-off} profile_pool=${RAYZOR_PROFILE_POOL:-off} dump_block_shapes=${RAYZOR_DUMP_BLOCK_SHAPES:-off}"
+echo "diag: spec_decode=${NUE_SPEC_DECODE:-off} silent_stream=${NUE_LLAMA_SILENT_STREAM:-0} stdout_flush_ms=${RAYZOR_STDOUT_FLUSH_MS:-auto} profile_decode=${NUE_PROFILE_DECODE:-off} profile_pool=${NUE_PROFILE_POOL:-off} dump_block_shapes=${NUE_DUMP_BLOCK_SHAPES:-off}"
 echo "generation: max_tokens=${MAX_TOKENS} ctx=${CTX} temp=${TEMP}"
 echo
 exec "${cmd[@]}"

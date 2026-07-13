@@ -50,7 +50,7 @@ binaries). Three rules learned the hard way:
   attempts washed out because the overhead they amortised was assumed, not
   measured.
 - **Never compare profiled and unprofiled runs.** `DECODE_PROFILE=1` costs
-  2-3 tok/s; `RAYZOR_KERNEL_TIMING=1` ~7%. Use them for fractions, not walls.
+  2-3 tok/s; `RZT_KERNEL_TIMING=1` ~7%. Use them for fractions, not walls.
 - **Scrub `.rayzor` caches after any compiler rebuild** before a
   `NO_CACHE=false` bench — stale BLADE caches poison imports.
 
@@ -60,26 +60,26 @@ binaries). Three rules learned the hard way:
 |---|---|---|
 | Fused flash-attn decode kernel | +40.7% | `rayzor_tensor_flash_attn_decode` |
 | JIT trap-stub/inlining fix | +71.7% long-form (correctness-as-perf) | compiler 655d7ac |
-| llama.cpp NEON Q4_K kernel port | +15.4% | quant.rs (RAYZOR_LEGACY_KERNEL=1 reverts) |
+| llama.cpp NEON Q4_K kernel port | +15.4% | quant.rs (RZT_LEGACY_KERNEL=1 reverts) |
 | FFI-batched top-k scan | +23% canonical / +3% long | `rayzor_tensor_topk_scan` |
 | NEON SIMD top-k scan | +6.3% | same kernel |
-| Persistent spin-wait worker pool | condvar → >70 tok/s steady | worker_pool.rs (RAYZOR_LEGACY_POOL=1) |
+| Persistent spin-wait worker pool | condvar → >70 tok/s steady | worker_pool.rs (RZT_LEGACY_POOL=1) |
 | Q4_K_M SDOT 4-way partial-acc unroll | +1.4% short / +7% long | quant.rs |
 | Q4_K_M 2-block paired SDOT (register tiling) | +3.0% | `dot_q4_k_q8_kblock_2` |
 | flash-attn per-q_head parallelisation | +4.5% at long context | gated cache_len ≥ 256 |
-| lm_head requant Q6_K → Q4_K_M | ~+21% on long-form | `RAYZOR_REQUANT_LM_HEAD` (default on) |
+| lm_head requant Q6_K → Q4_K_M | ~+21% on long-form | `NUE_REQUANT_LM_HEAD` (default on) |
 | Fused QKV projection | 1 dispatch + 1 activation-quant for q/k/v | `fusedQkvMatmul` |
-| Prefill morsels | prefill 0.64s → 0.23s | `RAYZOR_PREFILL_MORSELS=1` |
+| Prefill morsels | prefill 0.64s → 0.23s | `RZT_PREFILL_MORSELS=1` |
 | Tier tuning `1/30/5`, `start_interpreted=false` | ~70-74 → ~81 band | rayzor.toml (locked in) |
-| Caller-assist fork-join | +0.5%, frees a P-core | worker_pool.rs (RAYZOR_NO_CALLER_BAND=1 reverts) |
+| Caller-assist fork-join | +0.5%, frees a P-core | worker_pool.rs (RZT_NO_CALLER_BAND=1 reverts) |
 | QoS-pin orchestrator + GQA per-token frees | ~+3 tok/s (AOT) | worker_pool.rs + GQAttention.hx |
-| Pool-wide `auto_kernel_threads` | unblocks RAYZOR_WORKERS sweeps | was 5× hardcoded 6 |
+| Pool-wide `auto_kernel_threads` | unblocks RZT_WORKERS sweeps | was 5× hardcoded 6 |
 | AOT compilation of the server | cold TTFT 8.4s → 0.56s; decode parity | `rayzor aot` (manifest mode) |
-| Q8_0 KV cache | 3.76× smaller KV; parity at short ctx, expected win >4k | `RAYZOR_KV_Q8=1` (opt-in) |
+| Q8_0 KV cache | 3.76× smaller KV; parity at short ctx, expected win >4k | `NUE_KV_Q8=1` (opt-in) |
 | NEON q8_K activation quantizer | +2.5 tok/s median (ABBA), bit-identical (FCVTAS ties-away = roundf) | runtime-core q8_k.rs |
-| Prefill morsels default ON | bare deployments no longer 2.8× slower prefill | `RAYZOR_PREFILL_MORSELS=0` opts out |
+| Prefill morsels default ON | bare deployments no longer 2.8× slower prefill | `RZT_PREFILL_MORSELS=0` opts out |
 | Hot-path env::var hoist | ~490 env-lock hits/token removed | `llamacpp_kernel_enabled()` OnceLock |
-| Dynamic chunk stealing | variance: σ 33.6→1.5, min 7.6→80.9 on busy box; median +9 vs static bands same conditions | worker_pool.rs (`RAYZOR_STATIC_BANDS=1` reverts) |
+| Dynamic chunk stealing | variance: σ 33.6→1.5, min 7.6→80.9 on busy box; median +9 vs static bands same conditions | worker_pool.rs (`RZT_STATIC_BANDS=1` reverts) |
 
 ### Refuted (do not retry without changed conditions)
 
@@ -92,10 +92,10 @@ binaries). Three rules learned the hard way:
 | Q4_K_M 2-row SDOT tile; 4-block pairing; Q6_K SDOT; Q6_K 8-way unroll | each washed out or regressed — M1 OoO/prefetch already saturated at those widths |
 | F32 flash-attn GQA restructure | tie — L1 absorbs the redundant K/V loads |
 | mpsc → atomic-countdown fork-join | wash; std::mpsc already tuned |
-| TensorPool default-on | 65% hit rate, +0.3% sub-noise; alloc ceiling is 0.5-2.3% of wall (stays opt-in `RAYZOR_POOL=1`) |
+| TensorPool default-on | 65% hit rate, +0.3% sub-noise; alloc ceiling is 0.5-2.3% of wall (stays opt-in `RZT_POOL=1`) |
 | `-O3` AOT | no change vs `-O2` |
 | ggml 4×8 repack GEMV | refuted on M1 Pro — llama-bench ABBA sign 3-3, median +0.4 within noise; port killed at zero LOC |
-| NEON silu (vector exp) | 0-3 ABBA pairs; true scalar cost ~0.1ms/token (KERNEL_TIMING had inflated it); in tree behind `RAYZOR_NEON_SILU=1` |
+| NEON silu (vector exp) | 0-3 ABBA pairs; true scalar cost ~0.1ms/token (KERNEL_TIMING had inflated it); in tree behind `RZT_NEON_SILU=1` |
 | Speculative decoding (on CPU) | pre-refuted by measurement: prefill GEMM is only 12% cheaper per token than decode GEMV (compute-bound at batch>1) — batch-verify pays only on GPU |
 
 ### Open levers (current state of the hunt)
@@ -163,7 +163,7 @@ to exhaustion. What remains, ranked by evidence:
 weight reuse, so the wins are register tiling, fused kernels, fewer bytes,
 and keeping all eight P-cores computing (caller assist). **Prefill gets the
 parallel structure** — multi-token GEMM has rows to amortise; morsels landed
-(`RAYZOR_PREFILL_MORSELS`), cache-blocked micro-kernels are the open follow-on.
+(`RZT_PREFILL_MORSELS`), cache-blocked micro-kernels are the open follow-on.
 
 ### Future: NueGraph execution plans
 
@@ -325,9 +325,9 @@ codebase.
 
 Two opt-in optimisations are gated by env vars in `LlamaArch`:
 
-- `RAYZOR_KV_Q8=1` → KV cache uses Q8_0 storage (3.76× memory reduction, see
+- `NUE_KV_Q8=1` → KV cache uses Q8_0 storage (3.76× memory reduction, see
   `bugs_q8_kv_cache_attempted` for the parity discussion).
-- `RAYZOR_REQUANT_LM_HEAD=1` → when the embedding is Q6_K and the LM head ties
+- `NUE_REQUANT_LM_HEAD=1` → when the embedding is Q6_K and the LM head ties
   to it, build a Q4_K_M view of the table via
   `qtensor_requant_q6k_to_q4km` so the LM head's SDOT path is faster (Q4_K_M
   has lower per-block dequant overhead than Q6_K).
@@ -361,7 +361,7 @@ before delegating. `llama-chat`'s `LocalTempSampler` is an example.
 | [TemperatureSampler.hx](nue/sampling/TemperatureSampler.hx) | Temperature-scaled softmax with an embedded 31-bit LCG RNG state. |
 | [TopKSampler.hx](nue/sampling/TopKSampler.hx) | Selection-sort over logits to the top K candidates, then temperature softmax over the nucleus. |
 | [TopPSampler.hx](nue/sampling/TopPSampler.hx) | Insertion-sort descending by probability, cumulative-mass cutoff. |
-| [GenerationLoop.hx](nue/sampling/GenerationLoop.hx) | The autoregressive driver. Owns the prefill→decode lifecycle, the streaming callback, and the explicit `.free()` calls that prevent logits accumulation across decode steps. Optional wall-time profiling via `RAYZOR_PROFILE_DECODE=1` breaks down `fwd / lastRow / sample / decode_str / free`. |
+| [GenerationLoop.hx](nue/sampling/GenerationLoop.hx) | The autoregressive driver. Owns the prefill→decode lifecycle, the streaming callback, and the explicit `.free()` calls that prevent logits accumulation across decode steps. Optional wall-time profiling via `NUE_PROFILE_DECODE=1` breaks down `fwd / lastRow / sample / decode_str / free`. |
 
 All three stochastic samplers pre-allocate `Array<Float>` and assign by index
 instead of using `Array.push` because of a Haxe JIT bug in `Array<Float>.push`
@@ -406,7 +406,7 @@ end-to-end:
 - **Q6_K** — token embeddings and (by default) the LM head when tied. Row
   dequantisation is selective: `qtensor_gather_rows_q6_k` only decodes the
   rows touched by the prompt, not the full `[vocab, hidden]` table.
-- **Q8_0** — opt-in KV cache storage (`RAYZOR_KV_Q8=1`). The decode path uses
+- **Q8_0** — opt-in KV cache storage (`NUE_KV_Q8=1`). The decode path uses
   `flashAttnDecodeQ8` which dequantises inline; prefill materialises a F32
   view on demand.
 - **F32 / F16** — fallback path. Used when no quantised weight is present in
