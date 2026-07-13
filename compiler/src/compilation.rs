@@ -4271,7 +4271,7 @@ impl CompilationUnit {
 
     /// Renumber import MIR function IDs to avoid collisions and push to import_mir_modules
     fn renumber_and_push_import_mir(&mut self, mut import_mir: IrModule) {
-        use crate::ir::{IrFunctionId, IrInstruction};
+        use crate::ir::{IrFunctionId, IrGlobalId, IrInstruction};
 
         let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
 
@@ -4285,6 +4285,18 @@ impl CompilationUnit {
             id_map
                 .entry(*old_id)
                 .or_insert(IrFunctionId(old_id.0 + import_base));
+        }
+
+        // Globals get the same disjoint-range treatment as functions: every
+        // module numbers its globals densely from 0, so an unrenumbered
+        // import's LoadGlobal/StoreGlobal aliases the main module's slots
+        // 1:1 (observed: a user static read back Math's LN2 — each module's
+        // __init__ wrote the same @g0/@g1). Backends key global storage by
+        // raw id value, so sparse renumbered ids are safe.
+        let mut global_id_map: std::collections::BTreeMap<IrGlobalId, IrGlobalId> =
+            std::collections::BTreeMap::new();
+        for old_id in import_mir.globals.keys() {
+            global_id_map.insert(*old_id, IrGlobalId(old_id.0 + import_base));
         }
 
         // Renumber functions
@@ -4318,6 +4330,12 @@ impl CompilationUnit {
                                 *func_id = *new_func_id;
                             }
                         }
+                        IrInstruction::LoadGlobal { global_id, .. }
+                        | IrInstruction::StoreGlobal { global_id, .. } => {
+                            if let Some(&new_gid) = global_id_map.get(global_id) {
+                                *global_id = new_gid;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -4336,6 +4354,15 @@ impl CompilationUnit {
                 .unwrap_or(IrFunctionId(old_id.0 + import_base));
             efunc.id = new_id;
             import_mir.extern_functions.insert(new_id, efunc);
+        }
+
+        // Renumber the globals table to match the rewritten instructions.
+        let old_globals: std::collections::BTreeMap<_, _> =
+            std::mem::take(&mut import_mir.globals);
+        for (old_id, mut g) in old_globals {
+            let new_id = *global_id_map.get(&old_id).unwrap();
+            g.id = new_id;
+            import_mir.globals.insert(new_id, g);
         }
 
         // Re-key the module's name records to the renumbered ids. These
@@ -5865,6 +5892,24 @@ impl CompilationUnit {
                     let new_type_def_id = mir_module.alloc_typedef_id();
                     typedef.id = new_type_def_id;
                     mir_module.types.insert(new_type_def_id, typedef);
+                }
+                // Imported globals were renumbered into a disjoint id range
+                // (renumber_and_push_import_mir); carry them into the merged
+                // module so its globals table matches the instructions.
+                // Previously they were dropped entirely while the imports'
+                // LoadGlobal/StoreGlobal kept their dense-from-0 ids —
+                // aliasing the main module's statics slot-for-slot.
+                for (global_id, global) in import_module.globals {
+                    if let Some(prev) = mir_module.globals.get(&global_id) {
+                        if prev.name != global.name {
+                            panic!(
+                                "MIR merge id collision: global id {:?} is '{}' but module '{}' \
+                                 provides '{}' at the same id.",
+                                global_id, prev.name, import_module.name, global.name
+                            );
+                        }
+                    }
+                    mir_module.globals.insert(global_id, global);
                 }
                 for (func_id, func) in import_module.functions {
                     // Only protect source-level declarations (methods, constructors).
