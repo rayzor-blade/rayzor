@@ -18,6 +18,13 @@ pub mod tensor_pool;
 pub mod tensor_simd;
 pub mod worker_pool;
 
+/// Read an env var by its current `RZT_`/`NUE_` name, falling back to the
+/// legacy `RAYZOR_` name. Kept Result-typed so call sites keep their existing
+/// `.ok()`/`.map`/`.map_or`/`match` shape. The legacy alias is transitional.
+pub(crate) fn env_var(primary: &str, legacy: &str) -> Result<String, std::env::VarError> {
+    std::env::var(primary).or_else(|_| std::env::var(legacy))
+}
+
 /// Host-runtime services resolved from the loading binary.
 pub mod topology {
     extern "C" {

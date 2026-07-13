@@ -74,7 +74,7 @@ class LlamaArch implements ArchBuilder {
         // Read here (in a method, threaded through ctor) rather than
         // inside KVCache.new so the per-layer construction is free of
         // env-lookup overhead and the build chain stays self-contained.
-        var kvQ8Env = Sys.getEnv("RAYZOR_KV_Q8");
+        var kvQ8Env = Sys.getEnvOr("NUE_KV_Q8", "RAYZOR_KV_Q8");
         var useKvQ8 = (kvQ8Env != null && kvQ8Env != "0" && kvQ8Env != "");
         // Guest-owned Q8 cache + pure-Haxe flash decode (see FlashDecode).
         // Read here, alongside RAYZOR_KV_Q8, and threaded through as an
@@ -82,7 +82,7 @@ class LlamaArch implements ArchBuilder {
         // site, and an explicit param avoids gate resolution inside the
         // KVCache ctor.
         var haxeMatmul = Linear.useHaxeMatmul();
-        var flashEnv = Sys.getEnv("RAYZOR_HAXE_FLASH");
+        var flashEnv = Sys.getEnvOr("NUE_FLASH", "RAYZOR_HAXE_FLASH");
         var useHaxeQ8 = useKvQ8 && haxeMatmul
             && (flashEnv != null && flashEnv != "0" && flashEnv != "" && flashEnv != "false");
 
@@ -147,7 +147,7 @@ class LlamaArch implements ArchBuilder {
                 // safety hatch in case a future model exposes the naive
                 // encoder's small per-block quality loss.
                 var lmQt = embed.qweight;
-                var optOut = Sys.getEnv("RAYZOR_REQUANT_LM_HEAD");
+                var optOut = Sys.getEnvOr("NUE_REQUANT_LM_HEAD", "RAYZOR_REQUANT_LM_HEAD");
                 if (optOut != "0") {
                     var rq = embed.qweight.requantQ6KToQ4KM();
                     if (rq != null) {
@@ -237,7 +237,7 @@ class LlamaArch implements ArchBuilder {
             // no-ops (returns null) on already-Q4 weights, so this hits only
             // the Q6_K ones. Trades a little quantisation accuracy on those
             // weights for speed — gated OFF by default; set RAYZOR_REQUANT_Q6K=1.
-            if (Sys.getEnv("RAYZOR_REQUANT_Q6K") == "1") {
+            if (Sys.getEnvOr("NUE_REQUANT_Q6K", "RAYZOR_REQUANT_Q6K") == "1") {
                 var rq = qw.requantQ6KToQ4KM();
                 if (rq != null) {
                     Sys.println("[requant] " + weightName + " Q6_K → Q4_K_M");

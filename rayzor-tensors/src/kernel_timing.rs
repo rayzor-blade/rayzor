@@ -1,4 +1,4 @@
-//! Per-kernel wall-time accumulators. When `RAYZOR_KERNEL_TIMING=1` is
+//! Per-kernel wall-time accumulators. When `RZT_KERNEL_TIMING=1` is
 //! set, every instrumented FFI entry wraps its body with `Instant::now()`
 //! / `elapsed()` and adds to a static `KernelTimer` (atomic nanos + call
 //! count). At process exit (atexit), all timers dump to stderr in
@@ -104,12 +104,12 @@ pub static MATMUL_QT_T_DISPATCH_WAIT: KernelTimer = KernelTimer::new("matmul_qt_
 pub static MATMUL_QT_T_WORK_PER_WORKER: KernelTimer =
     KernelTimer::new("matmul_qt_t.work_per_worker");
 
-/// Idempotent init. Reads `RAYZOR_KERNEL_TIMING` once, sets `ENABLED`,
+/// Idempotent init. Reads `RZT_KERNEL_TIMING` once, sets `ENABLED`,
 /// registers an atexit dumper. Call from program start or lazily from
 /// `time_kernel!` — `Once` makes both safe.
 pub fn init() {
     INIT.call_once(|| {
-        let on = std::env::var("RAYZOR_KERNEL_TIMING")
+        let on = crate::env_var("RZT_KERNEL_TIMING", "RAYZOR_KERNEL_TIMING")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         ENABLED.store(on, MemOrdering::Relaxed);
@@ -131,7 +131,7 @@ pub fn is_enabled() -> bool {
 
 /// Print all timers to stderr in decreasing wall-time order. Safe to
 /// call from anywhere (no locks taken beyond stderr's). Called from
-/// atexit when `RAYZOR_KERNEL_TIMING=1`.
+/// atexit when `RZT_KERNEL_TIMING=1`.
 pub fn dump_all() {
     let mut rows: Vec<(&'static str, u64, u64)> = TIMERS
         .iter()

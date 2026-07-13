@@ -60,7 +60,7 @@ class Linear implements Module {
 
     public static function useHaxeMatmul():Bool {
         if (_haxeMatmul == 0) {
-            var v = Sys.getEnv("RAYZOR_HAXE_MATMUL");
+            var v = Sys.getEnvOr("NUE_MATMUL", "RAYZOR_HAXE_MATMUL");
             _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _haxeMatmul == 1;

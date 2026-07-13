@@ -36,7 +36,7 @@ class LlamaBlock {
 
     static function debugShapeMode():Int {
         if (_debugShapes == 0) {
-            var v = Sys.getEnv("RAYZOR_DUMP_BLOCK_SHAPES");
+            var v = Sys.getEnvOr("NUE_DUMP_BLOCK_SHAPES", "RAYZOR_DUMP_BLOCK_SHAPES");
             if (v == null || v == "0" || v == "" || v == "false") {
                 _debugShapes = 2;
             } else if (v == "trace") {

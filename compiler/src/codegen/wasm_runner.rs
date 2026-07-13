@@ -3339,11 +3339,10 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     // -- Register Sys host stubs --
     //
-    // `Sys.getEnv` is the env-var gate LlamaArch.build + GGUFTokenizer use
-    // to opt into RAYZOR_KV_Q8 et al. `Sys.time` is the wall-clock the
-    // benchmark prints. `Sys.systemName`/`Sys.cpuArch` are used by shared
-    // Haxe kernels to choose architecture-specific fast paths. `Sys.println`
-    // writes diagnostic trace lines. `Sys.exit` aborts on bad CLI args.
+    // Guest programs reach the host through the Haxe `Sys` API: `Sys.getEnv`
+    // reads process env vars, `Sys.time` the wall clock, `Sys.systemName`/
+    // `Sys.cpuArch` select architecture-specific code paths, `Sys.println`
+    // writes trace lines, and `Sys.exit` aborts. Register a stub for each.
     for (name, func_ty) in &rayzor_imports {
         if registered.contains(name) {
             continue;

@@ -95,7 +95,7 @@ struct PoolInner {
     /// when the pool has been idle long enough to release cores.
     parked_count: AtomicUsize,
     shutdown: AtomicBool,
-    /// Legacy condvar-pool fallback (RAYZOR_LEGACY_POOL=1). Initialised
+    /// Legacy condvar-pool fallback (RZT_LEGACY_POOL=1). Initialised
     /// only when the env var is set so the spin-wait path stays clean.
     legacy: Option<Arc<LegacyInner>>,
 }
@@ -129,13 +129,13 @@ const SPIN_LIMIT: u32 = 8192;
 /// next dispatch just pays a one-off ~µs unpark. Parking engages between
 /// requests, when the process is idle, or when it has been orphaned —
 /// exactly the cases where spinning a core is pure waste (and, for orphans,
-/// a benchmark-contaminating hazard). `RAYZOR_NO_PARK=1` disables.
+/// a benchmark-contaminating hazard). `RZT_NO_PARK=1` disables.
 const PARK_AFTER_ROUNDS: u32 = 2048;
 
 impl WorkerPool {
     pub fn new(n_workers: usize) -> Self {
         let n = n_workers.min(MAX_WORKERS);
-        let legacy_mode = std::env::var("RAYZOR_LEGACY_POOL")
+        let legacy_mode = crate::env_var("RZT_LEGACY_POOL", "RAYZOR_LEGACY_POOL")
             .map(|v| v == "1")
             .unwrap_or(false);
 
@@ -232,9 +232,9 @@ impl WorkerPool {
         // on an 8-P-core M1 Pro that capped compute at `workers` threads
         // and made `workers = 8` catastrophically oversubscribed
         // (9 runnable → E-core straggler gates every join → 2.3x decode
-        // collapse, measured). With participation, RAYZOR_WORKERS=7 means
+        // collapse, measured). With participation, RZT_WORKERS=7 means
         // 8 compute threads on 8 P-cores with zero oversubscription.
-        // `RAYZOR_NO_CALLER_BAND=1` restores the old spin-only join.
+        // `RZT_NO_CALLER_BAND=1` restores the old spin-only join.
         let caller_assists = caller_band_enabled() && !self.legacy_mode;
         let max_width = if caller_assists { self.n + 1 } else { self.n };
         let n = threads.min(max_width).min(rows);
@@ -255,7 +255,7 @@ impl WorkerPool {
         // band — measured as 10-20 tok/s dips on an otherwise ~90 tok/s
         // decode. With stealing, a preempted thread delays at most one
         // chunk. Each row is still computed wholly by one thread, so
-        // outputs stay bit-identical. `RAYZOR_STATIC_BANDS=1` reverts.
+        // outputs stay bit-identical. `RZT_STATIC_BANDS=1` reverts.
         if chunk_stealing_enabled() {
             return self.parallel_rows_stealing(rows, n, caller_assists, f);
         }
@@ -670,7 +670,7 @@ fn legacy_worker_loop(inner: Arc<PoolInner>) {
 /// straggler caps the achievable speedup, so the higher priority
 /// pays for itself.
 ///
-/// Set `RAYZOR_QOS=initiated` to fall back to USER_INITIATED — kept
+/// Set `RZT_QOS=initiated` to fall back to USER_INITIATED — kept
 /// as an escape hatch in case INTERACTIVE causes priority inversion
 /// with other user-visible work (e.g. running rayzor alongside a
 /// foreground GUI app where it should yield).
@@ -686,7 +686,7 @@ fn bias_to_performance_core() {
                 relative_priority: std::ffi::c_int,
             ) -> std::ffi::c_int;
         }
-        let qos = match std::env::var("RAYZOR_QOS").ok().as_deref() {
+        let qos = match crate::env_var("RZT_QOS", "RAYZOR_QOS").ok().as_deref() {
             Some("initiated") => QOS_CLASS_USER_INITIATED,
             _ => QOS_CLASS_USER_INTERACTIVE,
         };
@@ -697,13 +697,13 @@ fn bias_to_performance_core() {
 }
 
 /// Band count kernels should use for fork-join fan-out. Follows the global
-/// pool's worker count, so `RAYZOR_WORKERS` sweeps the WHOLE dispatch width.
+/// pool's worker count, so `RZT_WORKERS` sweeps the WHOLE dispatch width.
 /// Historically five kernel call sites hardcoded 6 bands independently of
 /// the pool size, which silently capped the dominant matmul at 6 threads on
 /// 8-P-core machines regardless of the env knob.
 ///
 /// With caller participation (the calling thread computes band 0), total
-/// compute width is `workers + 1` — RAYZOR_WORKERS=7 → 8 compute threads.
+/// compute width is `workers + 1` — RZT_WORKERS=7 → 8 compute threads.
 pub fn auto_kernel_threads() -> usize {
     let w = global().workers();
     if caller_band_enabled() {
@@ -714,24 +714,24 @@ pub fn auto_kernel_threads() -> usize {
 }
 
 /// Whether `parallel_rows` runs band 0 on the calling thread.
-/// `RAYZOR_NO_CALLER_BAND=1` restores the pre-participation spin-only join.
+/// `RZT_NO_CALLER_BAND=1` restores the pre-participation spin-only join.
 fn caller_band_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1"))
+    *ON.get_or_init(|| crate::env_var("RZT_NO_CALLER_BAND", "RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1"))
 }
 
 /// Whether fork-joins use dynamic chunk stealing (default) instead of one
-/// static band per thread. `RAYZOR_STATIC_BANDS=1` reverts.
+/// static band per thread. `RZT_STATIC_BANDS=1` reverts.
 fn chunk_stealing_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1"))
+    *ON.get_or_init(|| crate::env_var("RZT_STATIC_BANDS", "RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1"))
 }
 
 /// Whether idle workers park after `PARK_AFTER_ROUNDS` (default on).
-/// `RAYZOR_NO_PARK=1` keeps the pre-park behaviour (spin forever when idle).
+/// `RZT_NO_PARK=1` keeps the pre-park behaviour (spin forever when idle).
 fn park_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RAYZOR_NO_PARK").map_or(true, |v| v != "1"))
+    *ON.get_or_init(|| crate::env_var("RZT_NO_PARK", "RAYZOR_NO_PARK").map_or(true, |v| v != "1"))
 }
 
 /// TODO(move): decouple — the caller should declare its pool width via a
@@ -740,13 +740,13 @@ fn park_enabled() -> bool {
 /// core still reads it: set AND not `"0"`/`""`/`"false"` (a bare `=0` behaves
 /// like unset — presence-only detection would misread it and halve throughput).
 fn haxe_matmul_active() -> bool {
-    std::env::var("RAYZOR_HAXE_MATMUL")
+    crate::env_var("NUE_MATMUL", "RAYZOR_HAXE_MATMUL")
         .map(|v| !v.is_empty() && v != "0" && v != "false")
         .unwrap_or(false)
 }
 
 /// Process-wide singleton. Lazily constructed on first `global()` call with a
-/// worker count picked from `RAYZOR_WORKERS`, defaulting to a width derived
+/// worker count picked from `RZT_WORKERS`, defaulting to a width derived
 /// from the machine's performance-core count.
 pub fn global() -> &'static WorkerPool {
     static POOL: std::sync::OnceLock<WorkerPool> = std::sync::OnceLock::new();
@@ -759,7 +759,7 @@ pub fn global() -> &'static WorkerPool {
         // max-QoS spinners and can be demoted to an E-core under
         // thermal pressure, inflating the glue slice of every token.
         bias_to_performance_core();
-        let n = std::env::var("RAYZOR_WORKERS")
+        let n = crate::env_var("RZT_WORKERS", "RAYZOR_WORKERS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)

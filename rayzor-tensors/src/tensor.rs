@@ -81,7 +81,7 @@ pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
     // / `TENSOR_POOL_EVICTED` atomics were declared but never
     // incremented — they always printed 0 regardless of pool activity,
     // which masked the fact that the pool defaults to OFF without
-    // RAYZOR_POOL=1).
+    // RZT_POOL=1).
     let pool = crate::tensor_pool::global();
     let pool_disabled = pool.is_disabled();
     let pool_snap = pool.stats.snapshot();
@@ -125,8 +125,8 @@ pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
 
 // =============================================================================
 // Alloc histogram (env-gated): writes one CSV line per `alloc_tensor` call.
-// Enabled when `RAYZOR_TENSOR_ALLOC_HISTOGRAM=1`. Output file controlled by
-// `RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH`, defaults to /tmp/alloc_hist.csv.
+// Enabled when `RZT_TENSOR_ALLOC_HISTOGRAM=1`. Output file controlled by
+// `RZT_TENSOR_ALLOC_HISTOGRAM_PATH`, defaults to /tmp/alloc_hist.csv.
 //
 // This is for the tensor-pool design audit. Each line:
 //   dtype,ndim,shape0,shape1,...
@@ -143,11 +143,11 @@ struct AllocHistogramSink {
 fn alloc_histogram_sink() -> &'static Option<Mutex<AllocHistogramSink>> {
     static SINK: OnceLock<Option<Mutex<AllocHistogramSink>>> = OnceLock::new();
     SINK.get_or_init(|| {
-        match std::env::var("RAYZOR_TENSOR_ALLOC_HISTOGRAM") {
+        match crate::env_var("RZT_TENSOR_ALLOC_HISTOGRAM", "RAYZOR_TENSOR_ALLOC_HISTOGRAM") {
             Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {}
             _ => return None,
         }
-        let path = std::env::var("RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH")
+        let path = crate::env_var("RZT_TENSOR_ALLOC_HISTOGRAM_PATH", "RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH")
             .unwrap_or_else(|_| "/tmp/alloc_hist.csv".to_string());
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -2248,7 +2248,7 @@ pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
         let n = a_s.len();
         let threads = crate::worker_pool::auto_kernel_threads();
-        let threshold = std::env::var("RAYZOR_SILU_MUL_PAR_THRESHOLD")
+        let threshold = crate::env_var("RZT_SILU_MUL_PAR_THRESHOLD", "RAYZOR_SILU_MUL_PAR_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(65_536);
@@ -2568,7 +2568,7 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
-    // NEON silu (vectorized Cephes exp) exists behind RAYZOR_NEON_SILU=1
+    // NEON silu (vectorized Cephes exp) exists behind RZT_NEON_SILU=1
     // but is OFF by default: decode A/B on Llama 3.2 1B lost all three
     // ABBA pairs (-3/-12/-6 tok/s under thermal drift). The 17µs/call
     // sizing that motivated it came from a KERNEL_TIMING run whose
@@ -2602,7 +2602,7 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
 fn neon_silu_opted_in() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| std::env::var("RAYZOR_NEON_SILU").is_ok_and(|v| v == "1"))
+    *CACHED.get_or_init(|| crate::env_var("RZT_NEON_SILU", "RAYZOR_NEON_SILU").is_ok_and(|v| v == "1"))
 }
 
 /// Softmax over the last dimension.

@@ -5493,9 +5493,20 @@ impl CompilationUnit {
             });
             let has_extern_decls =
                 !typed_file.classes.is_empty() || !typed_file.abstracts.is_empty();
+            // An extern class may still declare a concrete (non-`@:native`) method
+            // with a body — e.g. a small helper over other extern methods. Those
+            // bodies need MIR: the per-method guards in hir_to_mir already skip the
+            // bodyless extern methods, so only the concrete ones get lowered.
+            let has_concrete_method = typed_file
+                .classes
+                .iter()
+                .flat_map(|c| c.methods.iter())
+                .chain(typed_file.abstracts.iter().flat_map(|a| a.methods.iter()))
+                .any(|m| !m.body.is_empty());
             let is_extern_only = has_extern_decls
                 && !has_non_extern_class
                 && !has_non_extern_abstract
+                && !has_concrete_method
                 && typed_file.functions.is_empty()
                 && typed_file.enums.is_empty();
             if is_extern_only {
@@ -7425,6 +7436,14 @@ impl CompilationUnit {
 
             // Extract method entries
             for method in &class.methods {
+                // A concrete (body-bearing) method on an extern class is compiled
+                // to MIR and dispatched as a direct call. Registering it as a
+                // bare-name extern mapping would make the call resolve to a
+                // runtime symbol that does not exist ("can't resolve symbol X").
+                // Only the bodyless `@:native` methods belong in this table.
+                if !method.body.is_empty() {
+                    continue;
+                }
                 let method_name = self
                     .string_interner
                     .get(method.name)

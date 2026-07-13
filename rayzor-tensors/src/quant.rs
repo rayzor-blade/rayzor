@@ -65,7 +65,7 @@
 //!    the SDOT path. Anything else (built without `+dotprod`, or built
 //!    with it but running on a pre-ARMv8.2 core via SDK pinning) falls
 //!    back to the F32 dequant-then-FMA path.
-//! 3. **Env override** (`RAYZOR_USE_SDOT=0`) for A/B testing.
+//! 3. **Env override** (`RZT_USE_SDOT=0`) for A/B testing.
 //!
 //! On non-AArch64 targets (x86_64 / wasm32) and AArch64 builds without
 //! `+dotprod`, the SDOT gate is hard-off; the qmatmul chunk impls
@@ -176,7 +176,7 @@ impl RayzorQTensor {
 /// 2. The running CPU actually supports `dotprod` (probed via
 ///    `std::arch::is_aarch64_feature_detected!`). Process-wide cached
 ///    in a `OnceLock` — same pattern as `worker_pool::global`.
-/// 3. `RAYZOR_USE_SDOT` is unset / non-empty / not `"0"`.
+/// 3. `RZT_USE_SDOT` is unset / non-empty / not `"0"`.
 ///
 /// If gate (1) fails this function is replaced by an `#[inline] false`
 /// stub via cfg — callers compile out the whole SDOT path.
@@ -197,7 +197,7 @@ fn sdot_enabled() -> bool {
         if !std::arch::is_aarch64_feature_detected!("dotprod") {
             return false;
         }
-        std::env::var("RAYZOR_USE_SDOT")
+        crate::env_var("RZT_USE_SDOT", "RAYZOR_USE_SDOT")
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(true) // default ON when both compile- and run-time gates pass
     })
@@ -251,7 +251,7 @@ use rayzor_runtime_core::quant::sdot::{
 // layout types) plus the `quantize_row_q8_K` row encoder live in
 // `rayzor_runtime_core::quant::{types, q8_k}` and are re-imported above.
 // `vec_dot_q4_K_q8_K` stays here because the SDOT-gate check (`sdot_enabled`)
-// reads `std::env::var(RAYZOR_USE_SDOT)` and lives native-only.
+// reads `std::env::var(RZT_USE_SDOT)` and lives native-only.
 // ============================================================================
 
 /// `vec_dot_q4_K_q8_K` — single-super-block dot product between a Q4_K_M
@@ -1580,7 +1580,7 @@ fn sdot_enabled_runtime() -> bool {
     }
 }
 
-/// Cached `RAYZOR_LEGACY_KERNEL` gate. This used to be a raw
+/// Cached `RZT_LEGACY_KERNEL` gate. This used to be a raw
 /// `std::env::var` in the per-chunk matmul workers — ~490 environment
 /// lock acquisitions per decoded token across the fork-join fan-out.
 #[inline]
@@ -1588,7 +1588,7 @@ fn fast_kernel_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        !std::env::var("RAYZOR_LEGACY_KERNEL")
+        !crate::env_var("RZT_LEGACY_KERNEL", "RAYZOR_LEGACY_KERNEL")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
@@ -1602,9 +1602,9 @@ fn prefill_morsels_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     // Default ON since 2026-06: 2.8x prefill speedup (0.64s → 0.23s on a
     // 21-token Llama 3.2 1B prompt), stable across every JIT/AOT bench.
-    // `RAYZOR_PREFILL_MORSELS=0` opts out.
+    // `RZT_PREFILL_MORSELS=0` opts out.
     *CACHED.get_or_init(|| {
-        std::env::var("RAYZOR_PREFILL_MORSELS")
+        crate::env_var("RZT_PREFILL_MORSELS", "RAYZOR_PREFILL_MORSELS")
             .map(|v| v != "0" && !v.is_empty())
             .unwrap_or(true)
     })
@@ -1813,7 +1813,7 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
 
     // Llama.cpp-pattern kernel is 2.12x faster in standalone microbench
     // (perf_q4km_llamacpp_kernel_port). Default ON; set
-    // RAYZOR_LEGACY_KERNEL=1 to fall back to the 2-block paired path
+    // RZT_LEGACY_KERNEL=1 to fall back to the 2-block paired path
     // for A/B or in case of numerical regression on a specific workload.
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     let use_fast = fast_kernel_enabled();
@@ -1836,7 +1836,7 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
             }
         } else if use_pairs {
             // Legacy path: 2-block paired SDOT (acb80e5). Keep behind
-            // RAYZOR_LEGACY_KERNEL=1 for A/B regression testing.
+            // RZT_LEGACY_KERNEL=1 for A/B regression testing.
             #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
             {
                 let mut b_idx = 0;
@@ -2043,7 +2043,7 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
     // SDOT path (use_sdot_q6k): pre-quantise X to Q8 once per block,
     // reuse across both rows in the tile. Falls back to dequant+f32-dot
     // when SDOT isn't available (non-aarch64, !+dotprod, or
-    // RAYZOR_USE_SDOT=0).
+    // RZT_USE_SDOT=0).
     let mut row_start = lo;
     if batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K {
         let tiled_end = lo + ((hi - lo) & !1usize); // largest even <= (hi-lo) + lo
@@ -2106,7 +2106,7 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
 
         if batch == 1 && x_contig {
             // Decode fast path: single batch row, contiguous X. Q4_K_M
-            // can route through the SDOT kernel when `RAYZOR_USE_SDOT=1`
+            // can route through the SDOT kernel when `RZT_USE_SDOT=1`
             // is set; the F32 path remains the default until A/B
             // measurement shows SDOT wins on this hardware.
             let mut sum = 0.0f32;

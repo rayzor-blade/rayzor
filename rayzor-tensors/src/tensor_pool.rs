@@ -2,7 +2,7 @@
 //!
 //! # Opt-in status (as of this commit)
 //!
-//! The pool is **opt-in via the `RAYZOR_POOL=1` env var**. With the var unset
+//! The pool is **opt-in via the `RZT_POOL=1` env var**. With the var unset
 //! (the default), `TensorPool::global()` returns a singleton in its disabled
 //! state — every `try_pop` immediately returns `None` and every `push`
 //! immediately evicts via the supplied `freer`, so the pool adds no Mutex
@@ -11,9 +11,9 @@
 //! (`InsertFreePass` on transient activation tensors OR KV-cache reference
 //! release). When that gap closes, the default will flip to opt-out.
 //!
-//! Set `RAYZOR_POOL=1` to exercise the bucket-pool machinery (and the related
-//! `RAYZOR_POOL_MAX_PER_BUCKET` / `RAYZOR_POOL_MAX_TOTAL_MB` / `RAYZOR_POOL_STATS`
-//! knobs); set `RAYZOR_POOL_DISABLE=1` to force-disable even if `RAYZOR_POOL=1`
+//! Set `RZT_POOL=1` to exercise the bucket-pool machinery (and the related
+//! `RZT_POOL_MAX_PER_BUCKET` / `RZT_POOL_MAX_TOTAL_MB` / `RZT_POOL_STATS`
+//! knobs); set `RZT_POOL_DISABLE=1` to force-disable even if `RZT_POOL=1`
 //! is also set (the explicit disable wins, for A/B bisection runs).
 //!
 //! # Motivation
@@ -21,7 +21,7 @@
 //! `runtime/src/tensor.rs::alloc_tensor` performs FOUR `malloc` calls per
 //! tensor (data, shape array, strides array, RayzorTensor struct) and the
 //! corresponding FOUR `free`s on drop. Audit instrumentation gated behind
-//! `RAYZOR_TENSOR_ALLOC_HISTOGRAM` revealed that a 24-token Llama 3.2 1B
+//! `RZT_TENSOR_ALLOC_HISTOGRAM` revealed that a 24-token Llama 3.2 1B
 //! decode allocates ~3000 tensors across only 35 distinct shape classes, so
 //! the hot path is the same handful of `(dtype, shape)` tuples being
 //! allocated and freed over and over.
@@ -66,24 +66,24 @@
 //!
 //! # Env flags
 //!
-//! - `RAYZOR_POOL` — opt-in master switch. When set to `1`, the pool is
-//!   active (subject to `RAYZOR_POOL_DISABLE` below). When unset / anything
+//! - `RZT_POOL` — opt-in master switch. When set to `1`, the pool is
+//!   active (subject to `RZT_POOL_DISABLE` below). When unset / anything
 //!   else, the pool is **disabled by default**: `try_pop` always returns
 //!   `None` and `push` immediately evicts (free-through), so no Mutex or
 //!   HashMap lookup happens on the alloc / free hot path.
-//! - `RAYZOR_POOL_DISABLE` — when set (any non-empty value), force-disables
-//!   the pool even if `RAYZOR_POOL=1` is also set. The explicit disable
+//! - `RZT_POOL_DISABLE` — when set (any non-empty value), force-disables
+//!   the pool even if `RZT_POOL=1` is also set. The explicit disable
 //!   wins, which keeps A/B benchmarks and bug bisection runs unambiguous.
-//! - `RAYZOR_POOL_MAX_PER_BUCKET` — max retained entries per bucket
+//! - `RZT_POOL_MAX_PER_BUCKET` — max retained entries per bucket
 //!   (default 8). Over the cap, `push` evicts (calls the supplied `freer`
 //!   on the eldest entry).
-//! - `RAYZOR_POOL_MAX_TOTAL_MB` — global cap on retained bytes (default
+//! - `RZT_POOL_MAX_TOTAL_MB` — global cap on retained bytes (default
 //!   256 MB). Over the cap, `push` evicts the eldest entry from the same
 //!   bucket; if the bucket has only one entry, `push` evicts that newly-
 //!   incoming tensor instead.
-//! - `RAYZOR_POOL_STATS` — when set, an `atexit` hook prints the running
+//! - `RZT_POOL_STATS` — when set, an `atexit` hook prints the running
 //!   statistics on process shutdown.
-//! - `RAYZOR_TENSOR_POOL_POISON` — when set, the pool fills the data
+//! - `RZT_TENSOR_POOL_POISON` — when set, the pool fills the data
 //!   buffer of every parked entry with `0xCD` BEFORE releasing the bucket
 //!   lock, and again fills the data buffer of every popped entry with
 //!   `0xCD` BEFORE returning it to the caller. A buggy caller that reads
@@ -242,7 +242,7 @@ pub fn hash_shape(shape: &[usize]) -> u64 {
 /// alone is not authoritative.
 ///
 /// `alloc_bytes` is the data-buffer size; tracked for the
-/// `RAYZOR_POOL_MAX_TOTAL_MB` budget.
+/// `RZT_POOL_MAX_TOTAL_MB` budget.
 ///
 /// `qtensor_meta_ptr` / `qtensor_meta_bytes` are non-null iff the entry is
 /// an INT8 QTensor with a separately-allocated f32 scales array. They are
@@ -616,9 +616,9 @@ impl TensorPool {
 
 static GLOBAL_POOL: OnceLock<TensorPool> = OnceLock::new();
 
-/// Cached result of the `RAYZOR_POOL` env-var read. Read once on first
+/// Cached result of the `RZT_POOL` env-var read. Read once on first
 /// `TensorPool::global()` call; `Some(true)` means the pool is opt-in-
-/// active (i.e. `RAYZOR_POOL=1`). The `OnceLock` avoids re-reading the
+/// active (i.e. `RZT_POOL=1`). The `OnceLock` avoids re-reading the
 /// environment on every push / pop, which would otherwise be a serialised
 /// stdlib call on the hot path.
 ///
@@ -643,7 +643,7 @@ pub(crate) fn _test_set_pool_opt_in_override(enabled: Option<bool>) {
     POOL_OPT_IN_TEST_OVERRIDE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Cached result of the `RAYZOR_TENSOR_POOL_POISON` env-var read. Read
+/// Cached result of the `RZT_TENSOR_POOL_POISON` env-var read. Read
 /// once on first poll; `Some(true)` means poison every park + pop. The
 /// `OnceLock` avoids re-reading the environment on every push/pop, which
 /// would otherwise be a serialised stdlib call on the hot path.
@@ -674,7 +674,7 @@ pub(crate) fn _test_set_poison_override(enabled: Option<bool>) {
 /// (`-842150451`) sentinels in a casual `printf`.
 const POISON_BYTE: u8 = 0xCD;
 
-/// Returns true iff `RAYZOR_TENSOR_POOL_POISON` was set when the pool
+/// Returns true iff `RZT_TENSOR_POOL_POISON` was set when the pool
 /// first observed it. Cached for the process lifetime via `OnceLock`.
 /// Under `#[cfg(test)]`, `POISON_TEST_OVERRIDE` wins to make per-test
 /// state deterministic — see `_test_set_poison_override`.
@@ -689,7 +689,7 @@ pub fn poison_enabled() -> bool {
         }
     }
     *POISON_ENABLED.get_or_init(|| {
-        std::env::var("RAYZOR_TENSOR_POOL_POISON")
+        crate::env_var("RZT_TENSOR_POOL_POISON", "RAYZOR_TENSOR_POOL_POISON")
             .map(|v| !v.is_empty())
             .unwrap_or(false)
     })
@@ -726,18 +726,18 @@ unsafe fn poison_entry_data(entry: &PooledEntry) {
     }
 }
 
-/// Default per-bucket entry cap when `RAYZOR_POOL_MAX_PER_BUCKET` is unset.
+/// Default per-bucket entry cap when `RZT_POOL_MAX_PER_BUCKET` is unset.
 const DEFAULT_MAX_PER_BUCKET: usize = 8;
-/// Default global byte cap (256 MB) when `RAYZOR_POOL_MAX_TOTAL_MB` is unset.
+/// Default global byte cap (256 MB) when `RZT_POOL_MAX_TOTAL_MB` is unset.
 const DEFAULT_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 
-fn parse_usize_env(name: &str) -> Option<usize> {
-    std::env::var(name)
+fn parse_usize_env(primary: &str, legacy: &str) -> Option<usize> {
+    crate::env_var(primary, legacy)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
 }
 
-/// Returns true iff `RAYZOR_POOL=1` was set when the pool first observed
+/// Returns true iff `RZT_POOL=1` was set when the pool first observed
 /// the environment. Cached for the process lifetime via `OnceLock`. The
 /// match is strict (`== "1"`) rather than "any non-empty value" so the
 /// opt-in is unambiguous; future revisions may broaden this.
@@ -752,37 +752,37 @@ pub fn pool_opt_in_enabled() -> bool {
         }
     }
     *POOL_ENABLED.get_or_init(|| {
-        std::env::var("RAYZOR_POOL")
+        crate::env_var("RZT_POOL", "RAYZOR_POOL")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
 }
 
 /// Return the process-wide pool, initialising on first call. Env flags
-/// applied: `RAYZOR_POOL` (master opt-in), `RAYZOR_POOL_DISABLE` (override),
-/// `RAYZOR_POOL_MAX_PER_BUCKET`, `RAYZOR_POOL_MAX_TOTAL_MB`,
-/// `RAYZOR_POOL_STATS`.
+/// applied: `RZT_POOL` (master opt-in), `RZT_POOL_DISABLE` (override),
+/// `RZT_POOL_MAX_PER_BUCKET`, `RZT_POOL_MAX_TOTAL_MB`,
+/// `RZT_POOL_STATS`.
 ///
-/// **Default behaviour** (`RAYZOR_POOL` unset): the pool is constructed in
+/// **Default behaviour** (`RZT_POOL` unset): the pool is constructed in
 /// its disabled state, so `try_pop` short-circuits to `None` and `push`
 /// short-circuits to `freer(entry)`. No Mutex traffic on the hot path.
 pub fn global() -> &'static TensorPool {
     GLOBAL_POOL.get_or_init(|| {
-        let max_per_bucket =
-            parse_usize_env("RAYZOR_POOL_MAX_PER_BUCKET").unwrap_or(DEFAULT_MAX_PER_BUCKET);
-        let max_total_bytes = parse_usize_env("RAYZOR_POOL_MAX_TOTAL_MB")
+        let max_per_bucket = parse_usize_env("RZT_POOL_MAX_PER_BUCKET", "RAYZOR_POOL_MAX_PER_BUCKET")
+            .unwrap_or(DEFAULT_MAX_PER_BUCKET);
+        let max_total_bytes = parse_usize_env("RZT_POOL_MAX_TOTAL_MB", "RAYZOR_POOL_MAX_TOTAL_MB")
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(DEFAULT_MAX_TOTAL_BYTES);
         // Master opt-in: pool is OFF by default. The explicit
-        // `RAYZOR_POOL_DISABLE` env-var still wins so a benchmark harness
-        // can force-disable even if `RAYZOR_POOL=1` is exported from a
+        // `RZT_POOL_DISABLE` env-var still wins so a benchmark harness
+        // can force-disable even if `RZT_POOL=1` is exported from a
         // wrapper script.
-        let explicit_disable = std::env::var("RAYZOR_POOL_DISABLE")
+        let explicit_disable = crate::env_var("RZT_POOL_DISABLE", "RAYZOR_POOL_DISABLE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         let disabled = explicit_disable || !pool_opt_in_enabled();
 
-        if std::env::var("RAYZOR_POOL_STATS")
+        if crate::env_var("RZT_POOL_STATS", "RAYZOR_POOL_STATS")
             .map(|v| !v.is_empty())
             .unwrap_or(false)
         {
@@ -1291,7 +1291,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // (D) RAYZOR_TENSOR_POOL_POISON — sentinel-fill park + pop
+    // (D) RZT_TENSOR_POOL_POISON — sentinel-fill park + pop
     // ------------------------------------------------------------------
     //
     // When the env flag is set, `push` fills the data buffer with 0xCD
@@ -1347,16 +1347,16 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // RAYZOR_POOL opt-in master switch
+    // RZT_POOL opt-in master switch
     // ------------------------------------------------------------------
     //
-    // The `pool_opt_in_enabled()` helper reads `RAYZOR_POOL` once and
+    // The `pool_opt_in_enabled()` helper reads `RZT_POOL` once and
     // caches the result in `POOL_ENABLED`. The test process inherits the
     // ambient env; this test only asserts the helper agrees with the
     // ambient setting (it does NOT mutate global env state, which would
     // race with other parallel tests). The real default-disabled
     // behaviour is exercised end-to-end by `tools/llama-diff/bench.sh`
-    // with `RAYZOR_POOL` unset — see project memory for the steady-state
+    // with `RZT_POOL` unset — see project memory for the steady-state
     // baseline.
     #[test]
     fn pool_opt_in_helper_matches_env() {

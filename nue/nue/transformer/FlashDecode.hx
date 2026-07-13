@@ -29,7 +29,7 @@ class FlashDecode {
     /** RAYZOR_HAXE_FLASH gates the pure-Haxe decode-attention path. */
     public static function enabled():Bool {
         if (_enabled == 0) {
-            var v = Sys.getEnv("RAYZOR_HAXE_FLASH");
+            var v = Sys.getEnvOr("NUE_FLASH", "RAYZOR_HAXE_FLASH");
             _enabled = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _enabled == 1;
@@ -37,7 +37,7 @@ class FlashDecode {
 
     static function shiftedQ():Bool {
         if (_shiftedQ == 0) {
-            var v = Sys.getEnv("RAYZOR_HAXE_FLASH_SHIFTED_Q");
+            var v = Sys.getEnvOr("NUE_FLASH_SHIFTED_Q", "RAYZOR_HAXE_FLASH_SHIFTED_Q");
             if (v != null && v != "") {
                 _shiftedQ = (v != "0" && v.toLowerCase() != "false") ? 1 : 2;
             } else {
@@ -53,7 +53,7 @@ class FlashDecode {
 
     static function usePool():Bool {
         if (_pool == 0) {
-            var v = Sys.getEnv("RAYZOR_HAXE_FLASH_POOL");
+            var v = Sys.getEnvOr("NUE_FLASH_POOL", "RAYZOR_HAXE_FLASH_POOL");
             if (v == null || v == "") {
                 // Keep decode flash parallel by default. Long-prompt llama
                 // runs on Apple Silicon lose a measurable slice of throughput
