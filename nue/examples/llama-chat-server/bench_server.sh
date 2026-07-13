@@ -585,7 +585,7 @@ run_one() {
     # Precompiled .rzb bundle: no front-end compile, still JIT-tiered. Kernel
     # symbols come in via --native-lib (bundles carry no [build] native-libs).
     # Tier flags mirror the source path so bundle-vs-source is apples-to-apples.
-    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--native-lib" "$TENSORS_LIB" "--preset" "$PRESET")
+    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$TENSORS_LIB" "--native-lib" "$NATIVE_LIB" "--preset" "$PRESET")
     if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
       cmd+=("--stats")
     fi

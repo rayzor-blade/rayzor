@@ -8,7 +8,7 @@ class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 # imports (e.g. KvCacheQ8). The JIT compiles all reachable IR
 # including dead branches, so the symbols must resolve even when
 # the Q8 path isn't taken at runtime.
-native-libs = ["../../../target/release/libnue_plugins.dylib", "../../../target/release/librayzor_tensors.dylib"]
+native-libs = ["../../../target/release/librayzor_tensors.dylib", "../../../target/release/libnue_plugins.dylib"]
 
 # nue-tuned tier config.
 #

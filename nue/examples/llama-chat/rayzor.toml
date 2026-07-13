@@ -10,7 +10,7 @@ class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
 # relative to this manifest): nue-plugins (Q8_0 KV cache + flash kernel) and
 # rayzor-tensors (the Tensor/QTensor kernel symbols, dispatched by the
 # compiler's built-in mapping table).
-native-libs = ["../../../target/release/libnue_plugins.dylib", "../../../target/release/librayzor_tensors.dylib"]
+native-libs = ["../../../target/release/librayzor_tensors.dylib", "../../../target/release/libnue_plugins.dylib"]
 
 # nue-tuned tier config.
 #
