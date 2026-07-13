@@ -41,6 +41,9 @@ NO_CACHE="${NO_CACHE:-true}"
 # The .rzb skips the front-end compile; tier flags still apply at run time.
 BUNDLE="${BUNDLE:-}"
 NATIVE_LIB="${NATIVE_LIB:-../../../target/release/libnue_plugins.dylib}"
+# Tensor/quant kernels live in their own plugin since the core split; the .rzb
+# path carries no [build] native-libs, so it must be passed explicitly too.
+TENSORS_LIB="${TENSORS_LIB:-../../../target/release/librayzor_tensors.dylib}"
 USE_JEMALLOC="${USE_JEMALLOC:-auto}"
 
 maybe_enable_jemalloc() {
@@ -582,7 +585,7 @@ run_one() {
     # Precompiled .rzb bundle: no front-end compile, still JIT-tiered. Kernel
     # symbols come in via --native-lib (bundles carry no [build] native-libs).
     # Tier flags mirror the source path so bundle-vs-source is apples-to-apples.
-    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--preset" "$PRESET")
+    cmd=("$RAYZOR" run "$BUNDLE" "--native-lib" "$NATIVE_LIB" "--native-lib" "$TENSORS_LIB" "--preset" "$PRESET")
     if [[ "$RUNTIME_STATS" == "true" || "$RUNTIME_STATS" == "1" || "$RUNTIME_STATS" == "yes" ]]; then
       cmd+=("--stats")
     fi
