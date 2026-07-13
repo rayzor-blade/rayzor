@@ -168,8 +168,35 @@ moving tests/examples. If the mapping is stdlib-specific, either add `@:native`
 full-symbol overrides or register the plugin's method table via rpkg
 (`NativeMethodDesc`, `compilation.rs:7594`/`7682`).
 
-Then: re-home the 11 tests (own dir + `rayzor.toml` dep on rayzor-tensors);
-(later) move the Rust kernels into the plugin crate; (later) split `rayzor-gpu`.
+INCREMENT 1 DONE + validated (3a52274c) — Haxe classes lifted, discovery via
+class-paths, model coherent, harness 166/166.
+
+INCREMENT 2 (Rust kernels) — harder, needs a design choice (NOT mechanical):
+- FINDING: `runtime-core` (no_std, native+wasm-shared) ALREADY holds the portable
+  compute — `quant/{matmul,q4_k_m,q8_k,sdot}`, `simd`, `tensor`. So `runtime/src/
+  quant.rs` + `tensor.rs` are the C-ABI ENTRY POINTS wrapping runtime-core and
+  orchestrating via the runtime SINGLETONS: `worker_pool::global()` (8+ sites,
+  takes a Rust closure), `tensor_pool::global()`, `kernel_timing`, `haxe_sys`,
+  `tensor_simd`.
+- THE CRUX: a plugin cdylib cannot own its own copy of `worker_pool`/`tensor_pool`
+  (duplicate singletons = two pools = broken). It must SHARE the binary's.
+- APPROACH (matches the nue-plugins pattern): the `rayzor-tensors` cdylib
+  (a) depends on `runtime-core` for the portable kernels (no singletons, safe to
+  link), and (b) declares `extern "C"` for a small set of runtime SERVICE symbols
+  resolved from the main binary at dlopen (RTLD_GLOBAL). rayzor-runtime must
+  expose C-ABI wrappers for the services the kernels need — the hard one is
+  `worker_pool::parallel_rows(closure)`: add `rayzor_worker_pool_parallel_rows(
+  rows, threads, fn_ptr, ctx)` with a trampoline (same shape as the SpinPool band
+  marshalling), and rewrite the 8+ closure call sites to fn-ptr+ctx. tensor_pool/
+  kernel_timing get thin C-ABI getters.
+- Then move `quant.rs` + `tensor.rs` into the plugin crate, delete from
+  rayzor-runtime, wire `native-libs` in the rayzor-tensors package + consumers.
+  Bit-exact argmax validate (the closure-trampoline rewrite is the risk).
+- This is a focused, careful effort — the singleton sharing + closure marshalling
+  are subtle; rushing risks duplicate-pool bugs that present as wrong output.
+
+Also: re-home the 11 tests DONE (rayzor-tensors/tests/ + rayzor.toml);
+(later) split `rayzor-gpu` into its own package.
 - Move `Tensor.hx`/`QTensor.hx` from `compiler/haxe-std/rayzor/ds/` → `nue.*`
   (e.g. `nue/nue/ds/`). Update all nue imports. General stdlib externs
   (`Bytes`/`Atomic`/`Ptr`/`Mem`/`String`/concurrency/`SIMD4f`) are untouched —
