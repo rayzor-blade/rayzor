@@ -13308,6 +13308,12 @@ impl<'a> HirToMirContext<'a> {
                                 let has_return = runtime_call.has_return;
                                 let explicit_return_type =
                                     runtime_call.return_type.map(|t| t.to_ir_type());
+                                if std::env::var_os("RAYZOR_TRACE_STDLIB_DISPATCH").is_some() {
+                                    eprintln!(
+                                        "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
+                                        class_name, method_name, runtime_func, is_instance_method, is_mir_wrapper
+                                    );
+                                }
                                 debug!(
                                     "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
                                     class_name,
@@ -24312,9 +24318,9 @@ impl<'a> HirToMirContext<'a> {
     /// erased I64 arm tag-dispatches via `haxe_channel_unbox_erased` (resolves
     /// the boxed-prim-vs-ref ambiguity that the raw reinterpret got wrong), and
     /// the reference arm unboxes the box (refs are boxed now, not raw). A
-    /// `tryReceive` whose nullable stays `Ptr(U8)` is passed through so
-    /// downstream `auto_unbox_optional` / `!= null` keep working; the concrete
-    /// unbox fns null-guard, so an empty channel (0) resolves to 0/null.
+    /// `tryReceive` reference payload (Ptr(U8) erased, Ptr(Void) concrete)
+    /// unboxes null-guarded, so an empty channel (0) resolves to null and
+    /// `!= null` keeps working; prim payloads take the typed arms below.
     fn unbox_channel_return(
         &mut self,
         value: IrId,
@@ -24326,17 +24332,19 @@ impl<'a> HirToMirContext<'a> {
         if is_try {
             if let IrType::Ptr(inner) = resolved_expected {
                 match inner.as_ref() {
-                    // Truly opaque payload — nothing to unbox, pass the box through.
-                    IrType::Void => return Some(value),
-                    // Boxed reference payload (class/enum/anon/array erases to
-                    // Ptr(U8)). The bare pass-through returned the DynamicValue
-                    // BOX, so a later field access (`n.text`) read box memory as
-                    // the class → UAF (garbage String ptr, SIGSEGV in the writer
-                    // coalesce loop). Unbox to the raw object ptr like the
-                    // non-try `other` arm does; haxe_unbox_reference_ptr
-                    // null-guards, so an empty channel (0) stays null and
-                    // `n != null` still works.
-                    IrType::U8 => {
+                    // Boxed reference payload. An erased/inferred class arrives
+                    // as Ptr(U8); an EXPLICIT `Channel<SomeClass>` resolves the
+                    // concrete class, which converts to Ptr(Void). Both are the
+                    // same DynamicValue box: passing it through raw made a later
+                    // field access (`n.text`) read box memory as the class →
+                    // garbage/SIGSEGV (the streaming-writer crash was the U8
+                    // shape; the explicit-generic shape was the Void arm).
+                    // Unbox to the raw object ptr like the non-try `other` arm;
+                    // haxe_unbox_reference_ptr null-guards, so an empty channel
+                    // (0) stays null and `n != null` still works. Concrete
+                    // prims never reach here (Int → I32, Null<Int> → Ptr(I32)),
+                    // so the prim arms below are unaffected.
+                    IrType::Void | IrType::U8 => {
                         let f = self.get_or_register_extern_function(
                             "haxe_unbox_reference_ptr",
                             vec![ptr_u8.clone()],
