@@ -28,9 +28,32 @@ pub fn load_manifest_native_lib(
     ),
     String,
 > {
-    if !path.exists() {
-        return Err(format!("file not found: {}", path.display()));
-    }
+    // Manifests carry one platform's extension (e.g. `.dylib`), but the same
+    // logical plugin builds to `.so` on Linux / `.dll` on Windows. If the exact
+    // path is missing, retry with the host's dynamic-library extension so a
+    // single `[build] native-libs` entry works cross-platform.
+    let resolved: std::borrow::Cow<Path> = if path.exists() {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        let host_ext = if cfg!(target_os = "macos") {
+            "dylib"
+        } else if cfg!(target_os = "windows") {
+            "dll"
+        } else {
+            "so"
+        };
+        let alt = path.with_extension(host_ext);
+        if alt.exists() {
+            std::borrow::Cow::Owned(alt)
+        } else {
+            return Err(format!(
+                "file not found: {} (also tried {})",
+                path.display(),
+                alt.display()
+            ));
+        }
+    };
+    let path = resolved.as_ref();
     let lib =
         unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {}", e))?;
 
