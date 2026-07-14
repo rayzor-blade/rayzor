@@ -254,24 +254,43 @@ pub fn matmul_f16_nt(m: usize, k: usize, n: usize, a: &[u16], b: &[u16], c: &mut
     rc == 0
 }
 
-/// f16 inputs -> f32 output probe (wider accumulate/output).
+extern "C" {
+    fn BNNSMatMulWorkspaceSize(
+        trans_a: bool,
+        trans_b: bool,
+        alpha: f32,
+        input_a: *const BnnsNdArrayDescriptor,
+        input_b: *const BnnsNdArrayDescriptor,
+        output: *const BnnsNdArrayDescriptor,
+        filter_params: *const c_void,
+    ) -> isize;
+}
+
+/// f16 inputs -> f32 output (wider accumulate/output). Passes a reused
+/// thread-local workspace: with `workspace = null` BNNSMatMul allocates
+/// internally on EVERY call — measurable against the probe's 1.0-1.6 TF/s.
 pub fn matmul_f16f32_nt(m: usize, k: usize, n: usize, a: &[u16], b: &[u16], c: &mut [f32]) -> bool {
     let da = desc_2d(m, k, a.as_ptr() as *mut c_void, BNNS_DTYPE_F16);
     let db = desc_2d(n, k, b.as_ptr() as *mut c_void, BNNS_DTYPE_F16);
     let dc = desc_2d(m, n, c.as_mut_ptr() as *mut c_void, BNNS_DTYPE_F32);
-    let rc = unsafe {
-        BNNSMatMul(
-            false,
-            true,
-            1.0,
-            &da,
-            &db,
-            &dc,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
-    rc == 0
+    thread_local! {
+        static WS: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    WS.with(|cell| {
+        let mut ws = cell.borrow_mut();
+        let need =
+            unsafe { BNNSMatMulWorkspaceSize(false, true, 1.0, &da, &db, &dc, std::ptr::null()) };
+        let ws_ptr = if need > 0 {
+            if ws.len() < need as usize {
+                ws.resize(need as usize, 0);
+            }
+            ws.as_mut_ptr() as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        let rc = unsafe { BNNSMatMul(false, true, 1.0, &da, &db, &dc, ws_ptr, std::ptr::null()) };
+        rc == 0
+    })
 }
 
 /// int8 inputs -> f32 output probe (int accumulate, dequant out).
