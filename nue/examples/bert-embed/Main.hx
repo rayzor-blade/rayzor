@@ -19,9 +19,14 @@ class Main {
             Sys.println("usage: bert-embed <model.gguf> <ids.txt> <embeddings.f32.bin>");
             return;
         }
-        // All model access stays inside nue.arch; we pass primitive paths
-        // in and get the min cosine back (cross-module field/ctor access on
-        // nue objects corrupts layout — bugs_import_xmodule_member_resolution).
-        BertEmbedder.goldenTest(args[0], args[1], args[2]);
+        // "tok" mode runs the WordPiece tokenizer test; default runs the
+        // encoder cosine test. All model access stays inside nue.arch (cross-
+        // module field/ctor access on nue objects corrupts layout —
+        // bugs_import_xmodule_member_resolution).
+        if (args[0] == "tok") {
+            BertEmbedder.tokenizerTest(args[1], args[2], args[3]);
+        } else {
+            BertEmbedder.goldenTest(args[0], args[1], args[2]);
+        }
     }
 }

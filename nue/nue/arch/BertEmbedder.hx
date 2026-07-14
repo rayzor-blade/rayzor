@@ -2,15 +2,14 @@ package nue.arch;
 
 import sys.io.File;
 import nue.loader.GGUFLoader;
+import nue.loader.GGUFReader;
+import nue.loader.GGUFTokenizer;
 import rayzor.ds.Tensor;
 
 /**
- * Sentence-embedding driver. ALL BertModel construction and field access
- * happens inside this (nue.arch) module — the same module BertModel is
- * defined in. Callers in other modules (examples, servers) invoke only
- * STATIC methods with primitive args/returns; they never `new` a
- * nue.arch object nor read its fields across a module boundary, both of
- * which corrupt the field layout (bugs_import_xmodule_member_resolution).
+ * Sentence-embedding driver. BertModel construction and field access stay
+ * inside nue.arch; callers in other modules use the static entry points,
+ * which take and return primitives.
  */
 class BertEmbedder {
     var model:BertModel;
@@ -75,5 +74,26 @@ class BertEmbedder {
         Sys.println("=== cosine  min=" + minCos + "  mean=" + (sumCos / rows)
             + "  over " + rows + " rows   gate>=0.999 ===");
         return minCos;
+    }
+
+    /**
+     * WordPiece tokenizer dump — encode each sentence to its `[CLS]…[SEP]` id
+     * sequence and print one `IDS <row> <id>...` line per sentence. The caller
+     * compares those against the golden ids externally.
+     */
+    public static function tokenizerTest(ggufPath:String, sentencesPath:String, expectedIdsPath:String):Int {
+        var bytes = File.getBytes(ggufPath);
+        var reader = new GGUFReader(bytes);
+        var tok = GGUFTokenizer.buildWordPiece(reader);
+        Sys.println("tokenizer built, vocab=" + tok.vocabSize());
+
+        var sents = File.getContent(sentencesPath).split("\n");
+        for (i in 0...sents.length) {
+            var s = StringTools.trim(sents[i]);
+            if (s.length == 0) continue;
+            var got = tok.encodeWithSpecials(s);
+            Sys.println("IDS " + i + " " + got.join(" "));
+        }
+        return 0;
     }
 }
