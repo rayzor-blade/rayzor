@@ -1,0 +1,10 @@
+{
+ "rows": 32,
+ "dim": 384,
+ "dtype": "f32",
+ "layout": "row-major-le",
+ "source": "onnxruntime all-MiniLM-L6-v2 model.onnx",
+ "pooling": "masked-mean",
+ "normalize": "l2",
+ "order": "matches sentences.txt line order"
+}
