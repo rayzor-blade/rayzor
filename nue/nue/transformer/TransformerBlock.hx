@@ -4,25 +4,25 @@ import nue.Module;
 import rayzor.ds.Tensor;
 
 /**
- * Generic pre-norm transformer block with two residual sub-layers.
+ * Generic transformer block with two residual sub-layers, selectable
+ * pre-norm or post-norm via the `postNorm` flag.
  *
  * ```
- *   h1 = x + attn(attnNorm(x))
- *   h2 = h1 + ffn(ffnNorm(h1))
- *   return h2
+ *   pre-norm  (Llama/Mistral/Qwen, modern GPT):  h = x + sublayer(norm(x))
+ *   post-norm (BERT/RoBERTa/original Transformer): h = norm(x + sublayer(x))
  * ```
  *
  * Every sub-layer is just a `Module`, so a single `TransformerBlock`
  * implementation drives many model families:
  *
- *   - **Llama / Mistral / Qwen**: `RMSNorm` + `GQAttention` + `RMSNorm` + `SwiGLU`
- *   - **GPT-2 / OPT**: `LayerNorm` + `MultiHeadAttention` + `LayerNorm` + `GeluFFN`
- *   - **Falcon**: parallel attn + FFN (override `forward` for that variant)
+ *   - **Llama / Mistral / Qwen** (pre-norm): `RMSNorm` + `GQAttention` + `RMSNorm` + `SwiGLU`
+ *   - **BERT / RoBERTa** (post-norm): `LayerNorm` + `MultiHeadAttention` + `LayerNorm` + `GeluFFN`
  *
- * Pre-norm vs post-norm: this implementation is pre-norm (norm before
- * sublayer, residual added afterwards) — the convention every modern
- * open-weight model uses. Subclass and override `forward` if you need
- * the original GPT-style post-norm.
+ * Norm placement is a genuine boolean that reorders the composition, not
+ * a feature toggle that guts the class — so it is a flag rather than a
+ * sibling type. BERT gets this wrong at its peril: the weights named
+ * `attn_output_norm` / `layer_output_norm` are trained to normalize the
+ * POST-residual sum; applying them pre-sublayer diverges every layer.
  *
  * The `name` field is used by `parameters()` to prefix the children's
  * tensor names — convention is `"blk.{layer}."` to match GGUF's naming.
@@ -33,20 +33,26 @@ class TransformerBlock implements Module {
     public var ffnNorm:Module;
     public var ffn:Module;
     public var name:String;
+    public var postNorm:Bool;
 
     public function new(
         attnNorm:Module, attn:Module,
         ffnNorm:Module, ffn:Module,
-        name:String
+        name:String, postNorm:Bool = false
     ) {
         this.attnNorm = attnNorm;
         this.attn = attn;
         this.ffnNorm = ffnNorm;
         this.ffn = ffn;
         this.name = name;
+        this.postNorm = postNorm;
     }
 
     public function forward(x:Tensor):Tensor {
+        return postNorm ? forwardPostNorm(x) : forwardPreNorm(x);
+    }
+
+    inline function forwardPreNorm(x:Tensor):Tensor {
         // Pre-norm residual: attnNorm consumes a copy of x; original x is
         // used again as the residual accumulator. `x.addInto(attnOut)`
         // mutates x's buffer in place (x += attnOut) — saves a fresh
@@ -78,6 +84,31 @@ class TransformerBlock implements Module {
         h1.addInto(ffnOut);
         ffnOut.free();
         return h1;
+    }
+
+    inline function forwardPostNorm(x:Tensor):Tensor {
+        // Post-norm residual (BERT): a = attnNorm(x + attn(x)), where the
+        // sublayer consumes the RAW hidden state and the norm is applied
+        // to the residual sum. Sublayer forwards never free their input
+        // (the F32 matmul reads it), so x is cloned only to satisfy the
+        // strict move analyzer's linearised call-arg consume; the clone
+        // is freed right after, and the original x accumulates in place.
+        var xc = x.clone();
+        var attnOut = attn.forward(xc);
+        xc.free();
+        x.addInto(attnOut);            // x += attn(x)
+        attnOut.free();
+        var a = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
+        x.free();
+        // FFN sublayer, same shape: out = ffnNorm(a + ffn(a)).
+        var ac = a.clone();
+        var ffnOut = ffn.forward(ac);
+        ac.free();
+        a.addInto(ffnOut);             // a += ffn(a)
+        ffnOut.free();
+        var out = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
+        a.free();
+        return out;
     }
 
     public function parameters():Array<NamedTensor> {
