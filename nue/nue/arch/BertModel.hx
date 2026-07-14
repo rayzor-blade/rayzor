@@ -29,12 +29,8 @@ import rayzor.ds.DType;
  * encoder attends to every position regardless of `attentionMask`).
  */
 class BertModel implements EncoderModel {
-    // NO `Null<T>` instance fields: a Null<class> field reads as a corrupt
-    // pointer when the object is built cross-module (BertArch) and its
-    // methods run here — segmentEmbed/embedNorm crashed on access while the
-    // plain-typed tokenEmbed/positionEmbed/blocks fields were fine (see
-    // bugs_null_class_field_xmodule). Optional pieces are stored as a
-    // non-null placeholder gated by a Bool flag instead.
+    // Optional pieces are non-null placeholders gated by a Bool flag, not
+    // `Null<T>` fields (which are not reliable here across module boundaries).
     public var meta:ModelMetadata;
     public var tokenEmbed:Embedding;
     public var positionEmbed:Embedding;
@@ -45,9 +41,8 @@ class BertModel implements EncoderModel {
     public var hasSegment:Bool;
     public var hasEncoderNorm:Bool;
 
-    // All params required and non-null. Optional params in the middle of the
-    // signature ALSO misbind fields cross-module, so presence is carried by
-    // the trailing Bool flags. See bugs_import_xmodule_member_resolution.
+    // All params required and non-null; presence of the optional pieces is
+    // carried by the trailing Bool flags.
     public function new(
         meta:ModelMetadata,
         tokenEmbed:Embedding,

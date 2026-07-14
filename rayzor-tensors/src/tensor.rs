@@ -2363,11 +2363,6 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
     //   exact     — dest and src have identical shape (the general case).
     //   broadcast — src is the trailing feature vector added to every row of
     //               dest: a [F] (or [1,F]) bias over a [seq, F] activation.
-    //               Llama never exercised this — decode runs one token at a
-    //               time (seq=1, so numel matched) and carries no biases
-    //               (RMSNorm + bias-free Linears). BERT processes the whole
-    //               [seq, F] sequence at once and adds LayerNorm + Linear
-    //               biases, so the [F] bias must broadcast over `seq` rows.
     let broadcast = d.numel != s.numel
         && s.numel > 0
         && d.numel.is_multiple_of(s.numel)
