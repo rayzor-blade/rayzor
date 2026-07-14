@@ -9,6 +9,7 @@
 /// row-major. `cos` and `sin` are `[max_seq_len, head_dim / 2]`. Adjacent
 /// dimensions are paired: `(x[2i], x[2i + 1])`.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)] // kernel ABI: all dims/strides passed flat
 pub fn apply_interleaved_f32(
     out: &mut [f32],
     x: &[f32],

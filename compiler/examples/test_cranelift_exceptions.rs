@@ -305,7 +305,7 @@ fn test_try_catch_basic() -> Result<(), String> {
         builder.ins().return_(&[normal_val]);
         builder.seal_block(normal_return);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module
@@ -457,7 +457,7 @@ fn test_exception_type_matching() -> Result<(), String> {
         builder.ins().return_(&[normal_val]);
         builder.seal_block(normal_return);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module
@@ -586,7 +586,7 @@ fn test_finally_execution() -> Result<(), String> {
         builder.ins().return_(&[ret_val]);
         builder.seal_block(return_block);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module

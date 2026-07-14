@@ -143,12 +143,18 @@ struct AllocHistogramSink {
 fn alloc_histogram_sink() -> &'static Option<Mutex<AllocHistogramSink>> {
     static SINK: OnceLock<Option<Mutex<AllocHistogramSink>>> = OnceLock::new();
     SINK.get_or_init(|| {
-        match crate::env_var("RZT_TENSOR_ALLOC_HISTOGRAM", "RAYZOR_TENSOR_ALLOC_HISTOGRAM") {
+        match crate::env_var(
+            "RZT_TENSOR_ALLOC_HISTOGRAM",
+            "RAYZOR_TENSOR_ALLOC_HISTOGRAM",
+        ) {
             Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {}
             _ => return None,
         }
-        let path = crate::env_var("RZT_TENSOR_ALLOC_HISTOGRAM_PATH", "RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH")
-            .unwrap_or_else(|_| "/tmp/alloc_hist.csv".to_string());
+        let path = crate::env_var(
+            "RZT_TENSOR_ALLOC_HISTOGRAM_PATH",
+            "RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH",
+        )
+        .unwrap_or_else(|_| "/tmp/alloc_hist.csv".to_string());
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -2248,10 +2254,13 @@ pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
         let n = a_s.len();
         let threads = crate::worker_pool::auto_kernel_threads();
-        let threshold = crate::env_var("RZT_SILU_MUL_PAR_THRESHOLD", "RAYZOR_SILU_MUL_PAR_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(65_536);
+        let threshold = crate::env_var(
+            "RZT_SILU_MUL_PAR_THRESHOLD",
+            "RAYZOR_SILU_MUL_PAR_THRESHOLD",
+        )
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(65_536);
         if threads > 1 && n >= threshold {
             let a_addr = a_s.as_ptr() as usize;
             let b_addr = b_s.as_ptr() as usize;
@@ -2602,7 +2611,8 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
 fn neon_silu_opted_in() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| crate::env_var("RZT_NEON_SILU", "RAYZOR_NEON_SILU").is_ok_and(|v| v == "1"))
+    *CACHED
+        .get_or_init(|| crate::env_var("RZT_NEON_SILU", "RAYZOR_NEON_SILU").is_ok_and(|v| v == "1"))
 }
 
 /// Softmax over the last dimension.

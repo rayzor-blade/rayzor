@@ -628,7 +628,7 @@ impl std::str::FromStr for TierThresholds {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = s
-            .split(|c| matches!(c, '/' | ',' | ':'))
+            .split(['/', ',', ':'])
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .collect();

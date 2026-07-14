@@ -1098,6 +1098,8 @@ mod tests {
 /// exponent field.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
+#[allow(clippy::excessive_precision)] // C1 = 355/512 written in full: the split-constant
+                                      // technique needs it EXACTLY representable, and the digits document that.
 unsafe fn expq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64::float32x4_t {
     use core::arch::aarch64::*;
     let x = vminq_f32(

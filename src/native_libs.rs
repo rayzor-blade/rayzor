@@ -70,7 +70,8 @@ pub fn load_manifest_native_lib(
         }
         #[cfg(not(unix))]
         {
-            unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {}", e))?
+            unsafe { libloading::Library::new(path) }
+                .map_err(|e| format!("dlopen failed: {}", e))?
         }
     };
 

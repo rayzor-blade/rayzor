@@ -14,6 +14,9 @@ pub const GGUF_DEFAULT_ALIGNMENT: u64 = 32;
 pub trait ByteSource {
     fn read_at(&self, offset: u64, len: usize) -> Result<&[u8], GgufError>;
     fn len(&self) -> u64;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

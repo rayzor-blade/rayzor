@@ -495,9 +495,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let addr = self
-            .runtime_addr("malloc")
-            .unwrap_or(libc::malloc as usize as u64);
+        let addr = self.runtime_addr("malloc").unwrap_or(
+            libc::malloc as unsafe extern "C" fn(libc::size_t) -> *mut libc::c_void as usize as u64,
+        );
         let fp = self
             .builder
             .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "malloc_fp")
@@ -520,7 +520,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let addr = self
             .runtime_addr("free")
-            .unwrap_or(libc::free as usize as u64);
+            .unwrap_or(libc::free as unsafe extern "C" fn(*mut libc::c_void) as usize as u64);
         let fp = self
             .builder
             .build_int_to_ptr(i64_type.const_int(addr, false), ptr_type, "free_fp")
@@ -2177,11 +2177,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             let expected_params = expected_param_types?;
 
             let existing_type = existing_func.get_type();
-            let existing_params: Vec<BasicMetadataTypeEnum> = existing_type
-                .get_param_types()
-                .iter()
-                .map(|&t| t.into())
-                .collect();
+            let existing_params: Vec<BasicMetadataTypeEnum> =
+                existing_type.get_param_types().to_vec();
 
             // Check if signatures match (parameter count and types)
             let signatures_match = expected_params.len() == existing_params.len()

@@ -34,6 +34,7 @@ pub fn compile_haxe_to_mir(
 }
 
 /// Compile Haxe source through the full pipeline with explicit cache controls.
+#[allow(dead_code)] // kept as the cache-explicit sibling of the defines variant
 pub fn compile_haxe_to_mir_with_cache(
     source: &str,
     filename: &str,
@@ -96,6 +97,7 @@ pub fn compile_haxe_to_mir_with_defines(
 }
 
 /// Compile with additional preprocessor defines and explicit cache controls.
+#[allow(clippy::too_many_arguments)] // full pipeline knobs passed flat
 pub fn compile_haxe_to_mir_with_defines_and_cache(
     source: &str,
     filename: &str,
@@ -160,7 +162,7 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
     // callers (which pass &[]) are untouched. The wrappers are well under the
     // cost model's 50-instruction threshold; the forward-ref-stub guard
     // (d5f2b48) and fresh-pass reg-id recompute (655d7ac) both hold.
-    if extra_defines.iter().any(|d| *d == "wasm") {
+    if extra_defines.contains(&"wasm") {
         use compiler::ir::inlining::InliningPass;
         use compiler::ir::optimization::OptimizationPass;
         let mut pass = InliningPass::new();

@@ -4357,8 +4357,7 @@ impl CompilationUnit {
         }
 
         // Renumber the globals table to match the rewritten instructions.
-        let old_globals: std::collections::BTreeMap<_, _> =
-            std::mem::take(&mut import_mir.globals);
+        let old_globals: std::collections::BTreeMap<_, _> = std::mem::take(&mut import_mir.globals);
         for (old_id, mut g) in old_globals {
             let new_id = *global_id_map.get(&old_id).unwrap();
             g.id = new_id;

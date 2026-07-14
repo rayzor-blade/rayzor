@@ -138,10 +138,8 @@ fn prepare_wasm_compile_inputs(
 fn wasm_defines(project: Option<&compiler::workspace::Project>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut defines = Vec::new();
-    for define in ["wasm"] {
-        seen.insert(define.to_string());
-        defines.push(define.to_string());
-    }
+    seen.insert("wasm".to_string());
+    defines.push("wasm".to_string());
     if let Some(project) = project {
         for (key, _value) in project.defines() {
             if seen.insert(key.clone()) {

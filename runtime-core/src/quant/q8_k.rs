@@ -171,6 +171,8 @@ pub fn quantize_row_q8_K(x: &[f32], dest: &mut [Q8KBlock]) {
 /// the scalar `roundf`, and `x*inv_d ∈ [-127, 127]` by the absmax scale so
 /// the saturating narrows reproduce the defensive `[-128, 127]` clamp.
 #[inline]
+#[allow(non_snake_case)] // mirrors llama.cpp's quantize_row_q8_K naming
+#[allow(clippy::needless_range_loop)] // kernel-style indexed loop
 fn quantize_block_q8_K(src: &[f32]) -> Q8KBlock {
     debug_assert_eq!(src.len(), Q4_K_M_BLOCK_SIZE);
 

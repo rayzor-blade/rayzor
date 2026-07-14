@@ -238,6 +238,7 @@ pub(crate) fn run_bench_with_options(
     let mut ordinal = 0usize;
 
     for i in 1..=runs {
+        #[allow(clippy::needless_range_loop)] // idx also names the variant in reports
         for idx in 0..accumulators.len() {
             ordinal += 1;
             if scrub_cache {
@@ -376,6 +377,7 @@ impl VariantAccumulator {
     }
 }
 
+#[allow(clippy::large_enum_variant)] // bench-local, short-lived; boxing adds noise
 enum SingleRunOutcome {
     Ok {
         value: f64,
@@ -405,7 +407,7 @@ fn bench_variants(options: &BenchOptions) -> Result<Vec<BenchVariant>> {
 
 fn validate_threshold_spec(spec: &str) -> Result<()> {
     let parts = spec
-        .split(|c| matches!(c, '/' | ',' | ':'))
+        .split(['/', ',', ':'])
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>();
