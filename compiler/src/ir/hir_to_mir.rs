@@ -20145,6 +20145,17 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(sym) = class_sym {
                         return self.lower_derived_equality(op, lhs, rhs, sym);
                     }
+
+                    // Null<prim> equality: route through null-guarded unboxing
+                    // compares (the nullable is a box; a raw cmp compared the
+                    // box pointer). `x == null` keeps the pointer compare.
+                    if !matches!(&lhs.kind, HirExprKind::Null)
+                        && !matches!(&rhs.kind, HirExprKind::Null)
+                    {
+                        if let Some(res) = self.lower_nullable_prim_eq(op, lhs, rhs) {
+                            return Some(res);
+                        }
+                    }
                 }
 
                 // @:derive(PartialOrd) lexicographic ordering for class instances
@@ -29644,6 +29655,122 @@ impl<'a> HirToMirContext<'a> {
             .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
 
         Some(result)
+    }
+
+    /// Lower `Null<prim>` equality. The nullable is a DynamicValue box, so
+    /// the generic path compared the BOX POINTER against the value —
+    /// `var x:Null<Int> = 9; x == 9` was always false. Routes
+    /// Optional<Int|Float|Bool> vs bare prim (either order) and
+    /// Optional vs Optional through null-guarded tag-aware runtime
+    /// compares. Returns None when the shape doesn't apply (caller falls
+    /// through to the generic compare); `x == null` never reaches here
+    /// (HirExprKind::Null operands are excluded at the call site).
+    fn lower_nullable_prim_eq(
+        &mut self,
+        op: &HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        #[derive(Clone, Copy, PartialEq)]
+        enum Prim {
+            Int,
+            Float,
+            Bool,
+        }
+        let classify = |me: &Self, ty: crate::tast::TypeId| -> (Option<Prim>, Option<Prim>) {
+            // (optional_inner_prim, bare_prim)
+            let tt = me.type_table;
+            match tt.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => {
+                    let inner = match tt.get(*inner_type).map(|t| &t.kind) {
+                        Some(TypeKind::Int) => Some(Prim::Int),
+                        Some(TypeKind::Float) => Some(Prim::Float),
+                        Some(TypeKind::Bool) => Some(Prim::Bool),
+                        _ => None,
+                    };
+                    (inner, None)
+                }
+                Some(TypeKind::Int) => (None, Some(Prim::Int)),
+                Some(TypeKind::Float) => (None, Some(Prim::Float)),
+                Some(TypeKind::Bool) => (None, Some(Prim::Bool)),
+                _ => (None, None),
+            }
+        };
+        let (lhs_opt, lhs_bare) = classify(self, lhs.ty);
+        let (rhs_opt, rhs_bare) = classify(self, rhs.ty);
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        // Widen a bare prim register for the helper ABI.
+        let widen_int = |me: &mut Self, reg: IrId, from: Prim| -> Option<IrId> {
+            match from {
+                Prim::Int => me.builder.build_cast(reg, IrType::I32, IrType::I64),
+                Prim::Bool => me.builder.build_cast(reg, IrType::Bool, IrType::I64),
+                Prim::Float => None, // routed to the float helper instead
+            }
+        };
+        let widen_float = |me: &mut Self, reg: IrId, from: Prim| -> Option<IrId> {
+            match from {
+                Prim::Float => Some(reg), // Haxe Float is already f64
+                Prim::Int => me.builder.build_cast(reg, IrType::I32, IrType::F64),
+                Prim::Bool => me.builder.build_cast(reg, IrType::Bool, IrType::F64),
+            }
+        };
+
+        let eq_result = match (lhs_opt, lhs_bare, rhs_opt, rhs_bare) {
+            // Optional<prim> vs bare prim (either order)
+            (Some(inner), _, None, Some(bare)) | (None, Some(bare), Some(inner), _) => {
+                let opt_first = lhs_opt.is_some();
+                let (opt_expr, bare_expr) = if opt_first { (lhs, rhs) } else { (rhs, lhs) };
+                let opt_reg = self.lower_expression(opt_expr)?;
+                let bare_reg = self.lower_expression(bare_expr)?;
+                let use_float = inner == Prim::Float || bare == Prim::Float;
+                if use_float {
+                    let v = widen_float(self, bare_reg, bare)?;
+                    let f = self.get_or_register_extern_function(
+                        "haxe_null_float_eq",
+                        vec![ptr_u8, IrType::F64],
+                        IrType::Bool,
+                    );
+                    self.builder
+                        .build_call_direct(f, vec![opt_reg, v], IrType::Bool)?
+                } else {
+                    let v = widen_int(self, bare_reg, bare)?;
+                    let f = self.get_or_register_extern_function(
+                        "haxe_null_int_eq",
+                        vec![ptr_u8, IrType::I64],
+                        IrType::Bool,
+                    );
+                    self.builder
+                        .build_call_direct(f, vec![opt_reg, v], IrType::Bool)?
+                }
+            }
+            // Optional<prim> vs Optional<prim>
+            (Some(li), _, Some(ri), _) => {
+                let lreg = self.lower_expression(lhs)?;
+                let rreg = self.lower_expression(rhs)?;
+                let name = if li == Prim::Float || ri == Prim::Float {
+                    "haxe_null_null_eq_float"
+                } else {
+                    "haxe_null_null_eq_int"
+                };
+                let f = self.get_or_register_extern_function(
+                    name,
+                    vec![ptr_u8.clone(), ptr_u8],
+                    IrType::Bool,
+                );
+                self.builder
+                    .build_call_direct(f, vec![lreg, rreg], IrType::Bool)?
+            }
+            _ => return None,
+        };
+
+        if matches!(op, HirBinaryOp::Ne) {
+            let f = self.builder.build_bool(false)?;
+            self.builder.build_cmp(CompareOp::Eq, eq_result, f)
+        } else {
+            Some(eq_result)
+        }
     }
 
     /// Lower field-by-field equality for classes that @:derive([PartialEq]).

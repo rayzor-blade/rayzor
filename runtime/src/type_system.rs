@@ -2642,6 +2642,54 @@ pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
     }
 }
 
+/// Null-guarded equality for `Null<prim> == prim`. The nullable is a
+/// DynamicValue box; the raw cmp compared the BOX POINTER to the value
+/// (`Null<Int> == 9` was always false). Tag-aware via haxe_unbox_int, so a
+/// FLOAT/BOOL-tagged box still compares by value.
+#[no_mangle]
+pub extern "C" fn haxe_null_int_eq(box_ptr: *mut u8, value: i64) -> bool {
+    if box_ptr.is_null() {
+        return false;
+    }
+    unsafe { haxe_unbox_int(*(box_ptr as *const DynamicValue)) == value }
+}
+
+/// Float variant of `haxe_null_int_eq` (either side statically Float).
+#[no_mangle]
+pub extern "C" fn haxe_null_float_eq(box_ptr: *mut u8, value: f64) -> bool {
+    if box_ptr.is_null() {
+        return false;
+    }
+    unsafe { haxe_unbox_float(*(box_ptr as *const DynamicValue)) == value }
+}
+
+/// Both sides nullable: null == null is true, null == value is false,
+/// otherwise compare the unboxed values.
+#[no_mangle]
+pub extern "C" fn haxe_null_null_eq_int(a: *mut u8, b: *mut u8) -> bool {
+    match (a.is_null(), b.is_null()) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        _ => unsafe {
+            haxe_unbox_int(*(a as *const DynamicValue))
+                == haxe_unbox_int(*(b as *const DynamicValue))
+        },
+    }
+}
+
+/// Float variant of `haxe_null_null_eq_int`.
+#[no_mangle]
+pub extern "C" fn haxe_null_null_eq_float(a: *mut u8, b: *mut u8) -> bool {
+    match (a.is_null(), b.is_null()) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        _ => unsafe {
+            haxe_unbox_float(*(a as *const DynamicValue))
+                == haxe_unbox_float(*(b as *const DynamicValue))
+        },
+    }
+}
+
 /// Tag-aware unbox for `tryReceive` results whose static target is a nullable
 /// POINTER type. At the MIR boundary `Ptr(U8)`/`Ptr(Void)` covers BOTH
 /// `Null<prim>` and class payloads — statically indistinguishable, so the tag
