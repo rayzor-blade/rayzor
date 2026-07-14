@@ -72,9 +72,8 @@ class BertArch implements ArchBuilder {
         // encoder's input scale, so fail loudly instead of skipping it.
         var embedNorm = takeNormAny(weights, ["token_embd_norm"], meta.normEps);
 
-        // Optional pieces are stored non-null on BertModel (a Null<class>
-        // field corrupts cross-module — bugs_null_class_field_xmodule) with a
-        // Bool flag carrying presence; use a harmless placeholder when absent.
+        // BertModel stores optional pieces as non-null placeholders + a Bool
+        // presence flag; pass a harmless placeholder when the weight is absent.
         var hasSegment = weights.exists("token_types.weight");
         var segmentEmbed = hasSegment
             ? new Embedding(takeWeight(weights, "token_types.weight"), 2, meta.hiddenSize, "weight")

@@ -234,15 +234,10 @@ class GGUFLoader implements ModelLoader {
     private static function populateTensor(
         result:NamedTensorMap, raw:haxe.io.Bytes, info:GGUFReader.TensorInfo
     ):Void {
-        // Multi-dim F32/F16/Q8_0 tensors must be oriented to [out, in] to
-        // match how the quant path (decodeQ4KM/Q6K) and both consumers
-        // (Linear.matmulT, Embedding.gatherRows) read weights. GGUF stores
-        // ggml dims [ne0=in, ne1=out] but the bytes are row-major over the
-        // output dim, so reinterpreting the shape as [out, in] is correct
-        // with no reshuffle. Llama never exercised this (its only F32/F16
-        // tensors are 1-D norms); BERT is the first with 2-D F32/F16
-        // weights, and the raw info.dims made token_embd load [384,30522]
-        // instead of [30522,384] — gatherRows then read wrong/oob rows.
+        // Orient multi-dim tensors to [out, in] — the convention the quant
+        // path and both weight consumers (Linear.matmulT, Embedding.gatherRows)
+        // use. GGUF stores ggml dims [in, out] with bytes row-major over the
+        // output dim, so reshaping to [out, in] needs no data move.
         var dims = orientDims(info.dims);
         switch (info.dtype) {
             case 0: // F32 — memcpy bytes directly into a fresh F32 tensor.
