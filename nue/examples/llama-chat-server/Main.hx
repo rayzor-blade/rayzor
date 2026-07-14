@@ -2,6 +2,7 @@ import nue.loader.GGUFLoader;
 import nue.sampling.GenerationLoop;
 import nue.sampling.LocalTempSampler;
 import nue.tokenizer.Tokenizer;
+import nue.tokenizer.BPETokenizer;
 import nue.arch.LlamaModel;
 import rayzor.ds.Tensor;
 import haxe.io.Bytes;
@@ -91,7 +92,9 @@ class Main {
 
         var llama = cast(loaded.model, LlamaModel);
         var profilePool = Sys.getEnvOr("NUE_PROFILE_POOL", "RAYZOR_PROFILE_POOL") != null;
-        var tok = loaded.tokenizer;
+        // Tokenizer arrives as the format-agnostic interface; the generation
+        // loop takes the concrete BPETokenizer (checked cast, as with the model).
+        var tok = cast(loaded.tokenizer, BPETokenizer);
         var meta = loaded.metadata;
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
             + " layers=" + meta.numLayers + " heads=" + meta.numHeads

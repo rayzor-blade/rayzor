@@ -1,4 +1,5 @@
 import nue.loader.GGUFLoader;
+import nue.tokenizer.BPETokenizer;
 import nue.sampling.GenerationLoop;
 import nue.sampling.LocalTempSampler;
 import nue.sampling.SpeculativeGenerationLoop;
@@ -112,7 +113,10 @@ class Main {
         trace("[load] done in " + fmt(Sys.time() - startLoad) + "s");
 
         var meta = loaded.metadata;
-        var tok = loaded.tokenizer;
+        // LoadedModel.tokenizer is the format-agnostic Tokenizer interface; the
+        // llama generation loops take the concrete BPETokenizer. Recover it the
+        // same checked way as the model cast on the next line.
+        var tok = cast(loaded.tokenizer, BPETokenizer);
         var llama = cast(loaded.model, LlamaModel);
         var profilePool = truthyEnv("RAYZOR_PROFILE_POOL");
 

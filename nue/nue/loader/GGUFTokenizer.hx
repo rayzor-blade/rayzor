@@ -1,6 +1,7 @@
 package nue.loader;
 
 import nue.loader.GGUFReader.MetaValue;
+import nue.tokenizer.Tokenizer;
 import nue.tokenizer.Vocab;
 import nue.tokenizer.MergeRule;
 import nue.tokenizer.BPETokenizer;
@@ -60,8 +61,13 @@ class GGUFTokenizer {
         return tok;
     }
 
-    public static function build(reader:GGUFReader):BPETokenizer {
+    public static function build(reader:GGUFReader):Tokenizer {
         var modelType = readStringOr(reader, "tokenizer.ggml.model", "gpt2");
+        // BERT-family GGUFs carry a WordPiece vocab with no merges; the BPE
+        // path below would build a merge-less tokenizer that mis-segments
+        // every multi-piece word. Dispatch on the model tag so a single
+        // `build`/`loadWithTokenizer` returns the right scheme per file.
+        if (modelType == "bert") return buildWordPiece(reader);
         var byteLevel = (modelType == "gpt2");
 
         var tokens = readStringArray(reader, "tokenizer.ggml.tokens");

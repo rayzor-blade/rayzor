@@ -73,7 +73,7 @@ class GGUFLoader implements ModelLoader {
      * Mistral, Qwen, …) carry the tokenizer inline so a single
      * `.gguf` file is enough to encode prompts and decode generations.
      */
-    public function tokenizer(path:String):BPETokenizer {
+    public function tokenizer(path:String):Tokenizer {
         var bytes = File.getBytes(path);
         var reader = new GGUFReader(bytes);
         return GGUFTokenizer.build(reader);
@@ -347,6 +347,6 @@ class GGUFLoader implements ModelLoader {
 
 typedef LoadedModel = {
     var model:Module;
-    var tokenizer:BPETokenizer;
+    var tokenizer:Tokenizer;
     var metadata:ModelMetadata;
 };
