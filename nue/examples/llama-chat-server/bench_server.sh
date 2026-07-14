@@ -15,12 +15,18 @@ PROMPTS="${PROMPTS:-Explain voronoi regions and their connection to delaunay com
 REQUESTS="${REQUESTS:-3}"
 MAX_TOKENS="${MAX_TOKENS:-808}"
 CTX="${CTX:-4096}"
-TEMP="${TEMP:-0.0}"
+TEMP="${TEMP:-0.5}"
 RUNS="${RUNS:-6}"
 TIMEOUT="${TIMEOUT:-360}"
 COOLDOWN_MS="${COOLDOWN_MS:-15000}"
 START_INTERPRETED="${START_INTERPRETED:-false}"
-TIER_PROMOTION="${TIER_PROMOTION:-false}"
+# Start compiled, but promotion stays ON: cranelift-tier functions must be
+# able to promote to LLVM. `false` froze tiers on the assumption the startup
+# LLVM upgrade covers everything — but request-path code first touched by a
+# client lazily compiles at a lower tier and then can never climb, so one
+# cold function turns short-response benches into a per-request tps lottery
+# (measured: req_tps 69.9/91.5/92.8 + a 56.6 stall, stddev 7.8).
+TIER_PROMOTION="${TIER_PROMOTION:-true}"
 VARIANTS="${VARIANTS:-1/30/5}"
 DECODE_PROFILE="${DECODE_PROFILE:-false}"
 LOAD_PROFILE="${LOAD_PROFILE:-false}"
