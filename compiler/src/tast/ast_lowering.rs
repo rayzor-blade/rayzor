@@ -12148,30 +12148,32 @@ impl<'a> AstLowering<'a> {
                 source_location,
                 metadata: ExpressionMetadata::default(),
             };
-            let increment_stmt = TypedStatement::Expression {
-                expression: increment,
-                source_location,
-            };
-
-            // while body: { var x = arr[_i]; body; _i++ }
-            let while_body = TypedStatement::Block {
-                statements: vec![var_decl, body_stmt, increment_stmt],
+            // for-body: { var x = arr[_i]; body }  — the _i++ is the loop UPDATE,
+            // not a body statement. Using TypedStatement::For (like the range
+            // desugar above) separates the update from the body so `continue`
+            // executes _i++ before jumping to the condition; a `while` with _i++
+            // at the end of the body would skip the increment on `continue` and
+            // spin forever on the element at the `continue`.
+            let for_body = TypedStatement::Block {
+                statements: vec![var_decl, body_stmt],
                 scope_id: loop_body_scope_id,
                 source_location,
             };
 
-            // while (_i < _len) { ... }
-            let while_stmt = TypedStatement::While {
-                condition,
-                body: Box::new(while_body),
+            // for (; _i < _len; _i++) { var x = arr[_i]; body }
+            let for_stmt = TypedStatement::For {
+                init: None,
+                condition: Some(condition),
+                update: Some(increment),
+                body: Box::new(for_body),
                 source_location,
             };
 
-            // Return block: { var _i = 0; var _len = arr.length; while (...) }
+            // Return block: { var _i = 0; var _len = arr.length; for (...) }
             return Ok(TypedExpression {
                 expr_type: self.context.type_table.borrow().void_type(),
                 kind: TypedExpressionKind::Block {
-                    statements: vec![counter_init, len_init, while_stmt],
+                    statements: vec![counter_init, len_init, for_stmt],
                     scope_id: ScopeId::from_raw(self.context.next_scope_id()),
                 },
                 usage: VariableUsage::Move,
