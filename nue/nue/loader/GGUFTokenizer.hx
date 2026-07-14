@@ -4,6 +4,7 @@ import nue.loader.GGUFReader.MetaValue;
 import nue.tokenizer.Vocab;
 import nue.tokenizer.MergeRule;
 import nue.tokenizer.BPETokenizer;
+import nue.tokenizer.WordPieceTokenizer;
 
 /**
  * Build a `BPETokenizer` from the metadata table of a parsed
@@ -36,6 +37,29 @@ import nue.tokenizer.BPETokenizer;
  *     regular vocabulary entries.
  */
 class GGUFTokenizer {
+    /**
+     * Build a WordPiece tokenizer (BERT / RoBERTa / MiniLM / BGE) from a
+     * GGUF whose `tokenizer.ggml.model == "bert"`. The vocab list is the
+     * same `tokenizer.ggml.tokens` array; there are no merges. BERT specials
+     * live as ordinary vocab entries, registered by their canonical names.
+     */
+    public static function buildWordPiece(reader:GGUFReader):WordPieceTokenizer {
+        var tokens = readStringArray(reader, "tokenizer.ggml.tokens");
+        if (tokens == null || tokens.length == 0) {
+            throw "GGUFTokenizer: missing 'tokenizer.ggml.tokens' — file does not embed a vocabulary.";
+        }
+        var vocab = new Vocab();
+        for (i in 0...tokens.length) vocab.addWithScore(tokens[i], 0.0);
+
+        var tok = new WordPieceTokenizer(vocab, "[UNK]");
+        var specials = ["[CLS]", "[SEP]", "[PAD]", "[UNK]", "[MASK]"];
+        for (i in 0...specials.length) {
+            var id = vocab.lookup(specials[i]);
+            if (id >= 0) tok.addSpecial(specials[i], id);
+        }
+        return tok;
+    }
+
     public static function build(reader:GGUFReader):BPETokenizer {
         var modelType = readStringOr(reader, "tokenizer.ggml.model", "gpt2");
         var byteLevel = (modelType == "gpt2");
