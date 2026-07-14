@@ -2,8 +2,6 @@ package nue.arch;
 
 import sys.io.File;
 import nue.loader.GGUFLoader;
-import nue.loader.GGUFReader;
-import nue.loader.GGUFTokenizer;
 import nue.tokenizer.WordPieceTokenizer;
 import rayzor.ds.Tensor;
 
@@ -25,7 +23,9 @@ class BertEmbedder {
         // for the same reason.
         this.model = cast(loader.load(ggufPath), BertModel);
         this.dim = model.meta.hiddenSize;
-        this.tok = GGUFTokenizer.buildWordPiece(new GGUFReader(File.getBytes(ggufPath)));
+        // GGUFLoader.tokenizer dispatches on tokenizer.ggml.model, so a bert
+        // GGUF yields WordPiece; recover the concrete type for encodeWithSpecials.
+        this.tok = cast(loader.tokenizer(ggufPath), WordPieceTokenizer);
     }
 
     /** Encode + mean-pool + L2, as a plain float array. */
@@ -144,9 +144,7 @@ class BertEmbedder {
      * pass/total and returns the number of mismatched sentences.
      */
     public static function tokenizerTest(ggufPath:String, sentencesPath:String, expectedIdsPath:String):Int {
-        var bytes = File.getBytes(ggufPath);
-        var reader = new GGUFReader(bytes);
-        var tok = GGUFTokenizer.buildWordPiece(reader);
+        var tok = cast(new GGUFLoader().tokenizer(ggufPath), WordPieceTokenizer);
         Sys.println("tokenizer built, vocab=" + tok.vocabSize());
 
         var sents = File.getContent(sentencesPath).split("\n");
