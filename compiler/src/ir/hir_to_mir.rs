@@ -10213,10 +10213,13 @@ impl<'a> HirToMirContext<'a> {
                             self.symbol_table.get_symbol(*field).map(|s| s.name);
 
                         if let Some(method_name_i) = method_name_interned {
-                            // Find the method's index in the interface
+                            // Find the method's index in the interface. Resolve
+                            // by name (drift-tolerant): the fat-pointer builder
+                            // uses the same resolver, so cross-module SymbolId
+                            // drift can't leave the call site indexing a
+                            // different (truncated) method list than the layout.
                             let method_index = self
-                                .interface_method_names
-                                .get(&iface_sym)
+                                .resolve_interface_method_names(iface_sym)
                                 .and_then(|names| names.iter().position(|n| *n == method_name_i));
                             if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
                                 let mn = self
@@ -13015,12 +13018,10 @@ impl<'a> HirToMirContext<'a> {
                                 self.symbol_table.get_symbol(*symbol).map(|s| s.name);
 
                             if let Some(method_name_i) = method_name_interned {
-                                let method_index = self
-                                    .interface_method_names
-                                    .get(&iface_sym)
-                                    .and_then(|names| {
-                                        names.iter().position(|n| *n == method_name_i)
-                                    });
+                                let method_index =
+                                    self.resolve_interface_method_names(iface_sym).and_then(
+                                        |names| names.iter().position(|n| *n == method_name_i),
+                                    );
 
                                 if let Some(idx) = method_index {
                                     // Lower the receiver (fat pointer)
@@ -36163,14 +36164,21 @@ impl<'a> HirToMirContext<'a> {
         //      loop resolves each slot's function by `<class_fqn>.<method>`
         //      via the stable name-keyed `external_function_name_map`, so the
         //      symbols aren't actually needed.
+        // Length the call sites will index against (drift-tolerant). A cached
+        // eager vtable that is SHORTER than this (a method compacted out in
+        // register_class_metadata, or built before a base interface's methods
+        // were merged in) would place every slot at the wrong offset — the call
+        // site reads past the fat pointer. Reject it and rebuild position-
+        // preserving below.
+        let expected_method_count = self
+            .resolve_interface_method_names(interface_symbol)
+            .map(|n| n.len());
         let vtable: Vec<Option<SymbolId>> = self
             .interface_vtables
             .get(&(class_symbol, interface_symbol))
             .cloned()
-            .and_then(|syms| {
-                // If every slot resolves, use it; else fall through to lazy.
-                Some(syms.into_iter().map(Some).collect::<Vec<_>>())
-            })
+            .filter(|syms| expected_method_count.map_or(true, |n| syms.len() == n))
+            .map(|syms| syms.into_iter().map(Some).collect::<Vec<_>>())
             .or_else(|| {
                 // Tier 2/3: driven by interface_method_names (forwarded and
                 // stable). Resolve each method's SymbolId if available; leave
@@ -36282,6 +36290,21 @@ impl<'a> HirToMirContext<'a> {
                     let key = format!("{}.{}", fqn, mname);
                     self.external_function_name_map.get(&key).copied()
                 });
+            if std::env::var_os("RAYZOR_IFACE_DIAG").is_some() {
+                let cn = class_fqn.clone().unwrap_or_default();
+                let mn = iface_method_names
+                    .get(i)
+                    .and_then(|o| o.clone())
+                    .unwrap_or_default();
+                eprintln!(
+                    "[fatptr] class={} slots={} slot={} method={} resolved={}",
+                    cn,
+                    method_count,
+                    i,
+                    mn,
+                    func_id_opt.is_some()
+                );
+            }
             if let Some(func_id) = func_id_opt {
                 // Slots MUST hold dispatch thunks, never raw methods: the
                 // CallIndirect lowering on every backend uses the closure
@@ -39193,7 +39216,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Build vtable for each interface (direct and inherited)
         for iface_sym in all_iface_symbols {
-            if let Some(method_names) = self.interface_method_names.get(&iface_sym).cloned() {
+            if let Some(method_names) = self.resolve_interface_method_names(iface_sym) {
                 let mut vtable_entries = Vec::new();
                 for iface_method_name in &method_names {
                     // Find the class method that matches this interface method name
@@ -39593,20 +39616,17 @@ impl<'a> HirToMirContext<'a> {
         let mut all_method_names: Vec<InternedString> = Vec::new();
 
         for &parent_type_id in &interface.extends {
-            let parent_sym = {
-                let type_table = self.type_table;
-                type_table.get(parent_type_id).and_then(|t| {
-                    if let TypeKind::Interface { symbol_id, .. } = &t.kind {
-                        Some(*symbol_id)
-                    } else {
-                        None
-                    }
-                })
-            };
-            if let Some(psym) = parent_sym {
+            // Recover the parent interface's SymbolId via `get_interface_symbol`
+            // (which name-matches when the extends clause lands as a Placeholder
+            // cross-module) and pull its methods through the drift-tolerant
+            // resolver. A raw type_table lookup + `.get(&psym)` silently drops
+            // the base methods when either the parent type or its SymbolId
+            // drifted across modules — truncating this derived interface's
+            // method list to its own methods and shifting every dispatch slot
+            // (the fat-pointer builder and call sites index by position here).
+            if let Some(psym) = self.get_interface_symbol(parent_type_id) {
                 parent_symbols.push(psym);
-                // Add inherited methods (already registered due to ordering)
-                if let Some(parent_methods) = self.interface_method_names.get(&psym).cloned() {
+                if let Some(parent_methods) = self.resolve_interface_method_names(psym) {
                     for m in parent_methods {
                         if !all_method_names.contains(&m) {
                             all_method_names.push(m);
