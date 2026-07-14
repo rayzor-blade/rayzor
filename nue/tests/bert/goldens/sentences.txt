@@ -1,0 +1,32 @@
+Hello world
+The quick brown fox jumps over the lazy dog.
+BERT is a bidirectional encoder representation from transformers.
+Tokenization handles subwords like unbelievability and antidisestablishmentarianism.
+café naïve résumé façade
+COVID-19 spread rapidly across the globe in 2020.
+Please email me at foo.bar@example.com when ready.
+Visit https://example.com/path?q=1&lang=en for details.
+3.14159 approximates pi, and 2 to the 10th equals 1024.
+Don't you think it can't and won't work out?
+SUPERCALIFRAGILISTICEXPIALIDOCIOUS is a very long word.
+a
+The
+Multiple   internal    spaces   collapse.
+Hello, world! How are you doing today? I'm fine, thanks.
+机器学习 and artificial intelligence reshape society.
+The years 1999, 2000, and 2024 were notable.
+Rock 'n' roll music played all through the night.
+Anthropic builds reliable and steerable AI systems for everyone.
+Machine learning transforms industries and workflows worldwide.
+Deep neural networks learn hierarchical feature representations from raw data across many layers of nonlinear transformation and abstraction.
+A dog runs happily through the green park.
+A canine sprints across the grassy field.
+The stock market crashed on Monday morning.
+Equity prices plummeted at the start of the week.
+I love programming in a fast systems language.
+Writing efficient low-level code is deeply satisfying.
+Quantum computers exploit superposition and entanglement.
+The recipe calls for two cups of flour and one egg.
+Bake at 350 degrees Fahrenheit for twenty-five minutes.
+Photosynthesis converts sunlight into chemical energy in plants.
+The quick brown fox jumps over the lazy dog.

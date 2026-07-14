@@ -1,0 +1,27 @@
+{
+ "model": "sentence-transformers/all-MiniLM-L6-v2",
+ "arch": "bert",
+ "hidden_size": 384,
+ "num_layers": 6,
+ "num_heads": 12,
+ "intermediate": 1536,
+ "vocab": 30522,
+ "max_pos": 512,
+ "layer_norm_eps": 1e-12,
+ "hidden_act": "gelu",
+ "pooling": "mean",
+ "normalize": "l2",
+ "gates": {
+  "tokenizer_ids": "exact",
+  "cosine_f32": 0.999,
+  "cosine_f16": 0.999,
+  "cosine_q8": 0.995
+ },
+ "empirical_quant_delta_vs_onnx": {
+  "gguf_f16": 1.0,
+  "gguf_q8_0_worst": 0.99969,
+  "gguf_f32": 1.0,
+  "note": "llama.cpp GGUF vs onnx(safetensors) cosine; gates add headroom for our GEMM-order error"
+ },
+ "cross_validation": "onnx(safetensors) and llama.cpp(gguf-f32) agree cosine 1.00000 on all 32 rows"
+}
