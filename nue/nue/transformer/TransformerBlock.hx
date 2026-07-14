@@ -29,14 +29,14 @@ import rayzor.ds.Tensor;
  */
 class TransformerBlock implements Module {
     public var attnNorm:Module;
-    public var attn:Module;
+    public var attn:Attention;
     public var ffnNorm:Module;
     public var ffn:Module;
     public var name:String;
     public var postNorm:Bool;
 
     public function new(
-        attnNorm:Module, attn:Module,
+        attnNorm:Module, attn:Attention,
         ffnNorm:Module, ffn:Module,
         name:String, postNorm:Bool = false
     ) {
@@ -101,6 +101,31 @@ class TransformerBlock implements Module {
         var a = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
         x.free();
         // FFN sublayer, same shape: out = ffnNorm(a + ffn(a)).
+        var ac = a.clone();
+        var ffnOut = ffn.forward(ac);
+        ac.free();
+        a.addInto(ffnOut);             // a += ffn(a)
+        ffnOut.free();
+        var out = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
+        a.free();
+        return out;
+    }
+
+    /**
+     * Post-norm block with an additive attention mask (BERT batched/padded
+     * path). Identical to `forwardPostNorm` but the attention sublayer takes
+     * an `attnBias`, reached through the `Attention` interface (virtual
+     * dispatch — no downcast). Only the post-norm shape is masked; the sole
+     * masked caller (BERT) is post-norm.
+     */
+    public function forwardMasked(x:Tensor, attnBias:Tensor):Tensor {
+        var xc = x.clone();
+        var attnOut = attn.forwardMasked(xc, attnBias); // virtual dispatch — no downcast
+        xc.free();
+        x.addInto(attnOut);            // x += attn(x, mask)
+        attnOut.free();
+        var a = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
+        x.free();
         var ac = a.clone();
         var ffnOut = ffn.forward(ac);
         ac.free();

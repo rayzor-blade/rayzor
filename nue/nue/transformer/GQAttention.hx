@@ -37,7 +37,7 @@ import nue.transformer.Q8Cache;
  *   - MoE routing across heads: re-implement `forward` for sparse
  *     per-token expert selection
  */
-class GQAttention implements Module {
+class GQAttention implements Attention {
     public var qProj:Linear;
     public var kProj:Linear;
     public var vProj:Linear;
@@ -382,6 +382,16 @@ class GQAttention implements Module {
         // The runtime primitive treats the last two dims as [rows, cols]
         // and masks j > i + positionOffset across every outer batch slice.
         return scores.causalMask_(positionOffset);
+    }
+
+    /**
+     * `Attention` conformance. GQA is the causal decode path — padding is
+     * handled by the causal mask + per-request KV cache, not an additive
+     * key bias — so it ignores `attnBias` and runs the normal forward. Only
+     * the bidirectional encoder (MultiHeadAttention) uses the bias.
+     */
+    public function forwardMasked(x:Tensor, attnBias:Tensor):Tensor {
+        return forward(x);
     }
 
     public function parameters():Array<NamedTensor> {
