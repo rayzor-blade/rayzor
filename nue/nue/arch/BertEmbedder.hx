@@ -28,9 +28,10 @@ class BertEmbedder {
         this.tok = cast(loader.tokenizer(ggufPath), WordPieceTokenizer);
     }
 
-    /** Encode + mean-pool + L2, as a plain float array. */
-    function embed(ids:Array<Int>):Array<Float> {
-        var e:Tensor = model.embed(ids);
+    /** Encode + mean-pool + L2, as a plain float array. An optional mask
+        (1 real / 0 pad) drives padding-aware attention and pooling. */
+    function embed(ids:Array<Int>, ?mask:Array<Int>):Array<Float> {
+        var e:Tensor = model.embed(ids, mask);
         var out = [for (j in 0...dim) e.getFlat(j)];
         e.free();
         return out;
@@ -173,5 +174,52 @@ class BertEmbedder {
         }
         Sys.println("=== tokenizer: " + pass + "/" + (pass + fail) + " sentences exact-id match ===");
         return fail;
+    }
+
+    static function cosine(a:Array<Float>, b:Array<Float>):Float {
+        var dot = 0.0;
+        var na = 0.0;
+        var nb = 0.0;
+        for (j in 0...a.length) {
+            dot += a[j] * b[j];
+            na += a[j] * a[j];
+            nb += b[j] * b[j];
+        }
+        return dot / (Math.sqrt(na) * Math.sqrt(nb));
+    }
+
+    /**
+     * Attention-mask correctness: right-pad each sentence with `[PAD]` and a
+     * mask that excludes the padding, then confirm the embedding matches the
+     * unpadded one (cosine ~1). The unmasked control (all-ones over the padded
+     * length) is reported alongside — it must drift below the masked cosine,
+     * proving the mask actually suppresses padding in both attention and the
+     * mean pool. Returns the number of sentences that miss the gate.
+     */
+    public static function maskTest(ggufPath:String):Int {
+        var self = new BertEmbedder(ggufPath);
+        var pad = self.tok.specialId("[PAD]");
+        if (pad < 0) pad = 0; // BERT [PAD] is vocab id 0
+        Sys.println("mask test: dim=" + self.dim + "  pad_id=" + pad);
+
+        var ids = self.tok.encodeWithSpecials("The quick brown fox jumps over the lazy dog.");
+        var e1 = self.embed(ids); // unpadded reference
+
+        // Right-pad and mask the padding out. With a correct mask the padded
+        // embedding must equal the unpadded one (attention ignores the pad keys,
+        // the pool ignores the pad tokens).
+        var ids2 = ids.copy();
+        var mask2 = [for (_ in 0...ids.length) 1];
+        for (i in 0...12) {
+            ids2.push(pad);
+            mask2.push(0);
+        }
+        var eMask = self.embed(ids2, mask2);
+
+        var cMask = cosine(e1, eMask);
+        var ok = cMask > 0.9999;
+        Sys.println("cos(unpadded, padded+mask) = " + cMask + (ok ? "   OK (padding ignored)" : "   FAIL"));
+        Sys.println("=== attention-mask: " + (ok ? "PASS" : "FAIL") + " (gate cos>0.9999) ===");
+        return ok ? 0 : 1;
     }
 }

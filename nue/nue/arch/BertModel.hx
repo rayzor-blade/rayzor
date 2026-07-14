@@ -14,19 +14,19 @@ import rayzor.ds.DType;
  * pre-norm `TransformerBlock`s, and a final encoder LayerNorm.
  *
  * The forward pass takes token IDs and returns per-token hidden
- * states `[seq_len, hidden_size]`. Padding masking, segment IDs, and
- * any task heads (MLM, classification, embedding pooling) live in
- * caller code or future `nue.head.*` modules.
+ * states `[seq_len, hidden_size]`. An optional `attentionMask` gates a
+ * padded/batched sequence: padded keys get an additive large-negative
+ * bias before softmax and are excluded from the mean pool. Task heads
+ * (MLM, classification) live in caller code or future `nue.head.*`.
  *
  * Segment embeddings are optional — many BERT GGUFs omit them or set
  * them to zero for the single-segment case. When the loader doesn't
  * register `token_types.weight`, `segmentEmbed` is `null` and the
  * forward path skips the segment contribution.
  *
- * **Status:** v1 — encoder forward path is wired end-to-end against
- * the `LayerNorm` + `MultiHeadAttention` + `LayerNorm` + `GeluFFN`
- * stack. Padding-aware attention masking is a follow-up (today the
- * encoder attends to every position regardless of `attentionMask`).
+ * The encoder forward path is wired end-to-end against the `LayerNorm`
+ * + `MultiHeadAttention` + `LayerNorm` + `GeluFFN` stack, with optional
+ * padding-aware attention masking for batched inputs.
  */
 class BertModel implements EncoderModel {
     // Optional pieces are non-null placeholders gated by a Bool flag, not
@@ -83,10 +83,30 @@ class BertModel implements EncoderModel {
         // Post-embedding LayerNorm — mandatory for BERT.
         var h3 = embedNorm.forward(h2);
 
+        // A mask with any zero entry (a padded/batched sequence) takes the
+        // masked block path: an additive `[seq]` key bias — 0 for real tokens,
+        // large-negative for padding — built once and reused across layers.
+        // An unpadded single sequence (all-ones or no mask) stays maskless.
+        var masked = false;
+        if (attentionMask != null) {
+            for (t in 0...seq) {
+                if (attentionMask[t] == 0) { masked = true; break; }
+            }
+        }
+
         var hBlocks = h3;
-        for (block in blocks) {
-            var nextH = hBlocks.clone();
-            hBlocks = block.forward(nextH);
+        if (masked) {
+            var bias = Tensor.fromArray([for (t in 0...seq) (attentionMask[t] == 0 ? -1e30 : 0.0)], F32);
+            for (block in blocks) {
+                var nextH = hBlocks.clone();
+                hBlocks = block.forwardMasked(nextH, bias);
+            }
+            bias.free();
+        } else {
+            for (block in blocks) {
+                var nextH = hBlocks.clone();
+                hBlocks = block.forward(nextH);
+            }
         }
         var hFinal:Tensor = hasEncoderNorm
             ? encoderNorm.forward(hBlocks.clone())

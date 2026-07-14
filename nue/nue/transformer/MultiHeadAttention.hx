@@ -16,11 +16,14 @@ import rayzor.ds.Tensor;
  * cache logic, and a subclass that "turns off" half its parent is
  * worse documentation than two siblings.
  *
- * The forward pass takes the full sequence and returns per-token
- * hidden states; padding masking is reserved for a future revision
- * (BertArch will pass `attentionMask` through).
+ * `forward` attends bidirectionally over the whole sequence.
+ * `forwardMasked` adds a caller-supplied additive bias to the scores
+ * before softmax — a `[seq_key]` vector, `0` for real keys and a large
+ * negative for padded keys, broadcast over heads and query positions —
+ * so batched/padded inputs ignore padding. The bias is an argument, not
+ * instance state, so concurrent encodes on a shared model don't race.
  */
-class MultiHeadAttention implements Module {
+class MultiHeadAttention implements Attention {
     public var qProj:Linear;
     public var kProj:Linear;
     public var vProj:Linear;
@@ -54,6 +57,29 @@ class MultiHeadAttention implements Module {
         // scores: [heads, seq, seq]
         var scores = q.bmm(k.transposeLast2()).scale(scale);
         // No mask — bidirectional attention.
+        var attn = scores.softmax();
+        var context = attn.bmm(v).permute([1, 0, 2]);
+
+        var flat = context.reshape([seq, numHeads * headDim]);
+        return oProj.forward(flat);
+    }
+
+    /**
+     * Attention with an additive padding mask. `attnBias` is a contiguous
+     * `[seq]` F32 vector added to every `[head, query]` row of the
+     * `[heads, seq, seq]` scores (addInto broadcasts the trailing axis), so
+     * padded keys carry a large-negative bias and softmax zeroes them. Mirrors
+     * `forward` exactly but for the one `addInto` before softmax.
+     */
+    public function forwardMasked(x:Tensor, attnBias:Tensor):Tensor {
+        var seq = x.shape()[0];
+
+        var q = qProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        var k = kProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        var v = vProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+
+        var scores = q.bmm(k.transposeLast2()).scale(scale);
+        scores.addInto(attnBias); // + additive key mask, broadcast over [heads, query]
         var attn = scores.softmax();
         var context = attn.bmm(v).permute([1, 0, 2]);
 
