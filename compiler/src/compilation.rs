@@ -5808,6 +5808,27 @@ impl CompilationUnit {
                 let symbol_id = match &info.kind {
                     crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                     crate::tast::TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+                    // Constrained type parameter `<T:Iface>`: forward the
+                    // interface constraint's name. The importer's context sees
+                    // this param as a TypeParameter with an EMPTY constraint
+                    // list (constraints don't survive the module boundary), so
+                    // it can't recover the interface to wrap the class arg —
+                    // resolve it here in the declaring module where the
+                    // constraint is present, and the name-based call-site wrap
+                    // (external_function_param_iface_names) fires cross-module.
+                    crate::tast::TypeKind::TypeParameter { constraints, .. } => constraints
+                        .iter()
+                        .find_map(|cid| match type_table.get(*cid) {
+                            Some(ct) => {
+                                if let crate::tast::TypeKind::Interface { symbol_id, .. } = &ct.kind
+                                {
+                                    Some(*symbol_id)
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
+                        }),
                     _ => None,
                 }?;
                 let sym = symbol_table.get_symbol(symbol_id)?;
