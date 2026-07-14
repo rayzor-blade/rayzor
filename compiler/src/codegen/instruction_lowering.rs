@@ -459,7 +459,7 @@ impl CraneliftBackend {
             UnaryOp::Not => {
                 if *ty == IrType::Bool {
                     // Logical NOT: compare == 0, producing a proper 0/1 result
-                    builder.ins().icmp_imm(IntCC::Equal, val, 0)
+                    builder.ins().icmp_imm_s(IntCC::Equal, val, 0)
                 } else {
                     builder.ins().bnot(val)
                 }
@@ -991,7 +991,7 @@ impl CraneliftBackend {
             UnaryOp::Not => {
                 if *ty == IrType::Bool {
                     // Logical NOT: compare == 0, producing a proper 0/1 result
-                    builder.ins().icmp_imm(IntCC::Equal, val, 0)
+                    builder.ins().icmp_imm_s(IntCC::Equal, val, 0)
                 } else {
                     builder.ins().bnot(val)
                 }

@@ -768,8 +768,9 @@ pub fn pool_opt_in_enabled() -> bool {
 /// short-circuits to `freer(entry)`. No Mutex traffic on the hot path.
 pub fn global() -> &'static TensorPool {
     GLOBAL_POOL.get_or_init(|| {
-        let max_per_bucket = parse_usize_env("RZT_POOL_MAX_PER_BUCKET", "RAYZOR_POOL_MAX_PER_BUCKET")
-            .unwrap_or(DEFAULT_MAX_PER_BUCKET);
+        let max_per_bucket =
+            parse_usize_env("RZT_POOL_MAX_PER_BUCKET", "RAYZOR_POOL_MAX_PER_BUCKET")
+                .unwrap_or(DEFAULT_MAX_PER_BUCKET);
         let max_total_bytes = parse_usize_env("RZT_POOL_MAX_TOTAL_MB", "RAYZOR_POOL_MAX_TOTAL_MB")
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(DEFAULT_MAX_TOTAL_BYTES);

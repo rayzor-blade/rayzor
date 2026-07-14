@@ -13555,9 +13555,7 @@ impl<'a> HirToMirContext<'a> {
                                         {
                                             self.let_target_type_hint
                                                 .map(|t| self.convert_type(t))
-                                                .filter(|t| {
-                                                    matches!(t, IrType::F64 | IrType::F32)
-                                                })
+                                                .filter(|t| matches!(t, IrType::F64 | IrType::F32))
                                         } else {
                                             None
                                         };
@@ -19839,9 +19837,7 @@ impl<'a> HirToMirContext<'a> {
                                 // `staticCounter++` was a lost store (plain
                                 // `x = x + 1` assignment already routed
                                 // through build_store_global).
-                                if let Some(&global_id) =
-                                    self.global_symbol_map.get(symbol)
-                                {
+                                if let Some(&global_id) = self.global_symbol_map.get(symbol) {
                                     self.builder.build_store_global(global_id, new_value);
                                 } else {
                                     // If we're inside a lambda with captured variables, also store back to environment
@@ -24401,9 +24397,11 @@ impl<'a> HirToMirContext<'a> {
                             vec![ptr_u8.clone()],
                             resolved_expected.clone(),
                         );
-                        return self
-                            .builder
-                            .build_call_direct(f, vec![value], resolved_expected.clone());
+                        return self.builder.build_call_direct(
+                            f,
+                            vec![value],
+                            resolved_expected.clone(),
+                        );
                     }
                     _ => {}
                 }

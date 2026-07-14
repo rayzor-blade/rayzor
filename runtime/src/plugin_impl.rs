@@ -1743,7 +1743,6 @@ register_symbol!(
     crate::cstring_runtime::rayzor_cstring_free
 );
 
-
 // ============================================================================
 // CPU Topology + thread affinity (rayzor.concurrent.CpuTopology)
 // ============================================================================

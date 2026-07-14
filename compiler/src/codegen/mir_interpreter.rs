@@ -3249,6 +3249,8 @@ impl MirInterpreter {
     /// the data pointer (observed: SIGSEGV at 0x505f524f5a594152 = "RAYZOR_P",
     /// the start of "RAYZOR_PROFILE_LOAD", in Sys.getEnv under the interpreter
     /// tier).
+    #[allow(clippy::vec_box)] // Box gives each header a STABLE address: raw pointers into
+                              // these allocations are handed to native code while the Vec may still grow.
     fn marshal_string_arg(s: &str, scratch: &mut Vec<Box<[usize; 3]>>) -> NativeValue {
         let header: Box<[usize; 3]> = Box::new([s.as_ptr() as usize, s.len(), s.len()]);
         let addr = header.as_ref() as *const [usize; 3] as usize;
@@ -3256,6 +3258,7 @@ impl MirInterpreter {
         NativeValue::Ptr(addr)
     }
 
+    #[allow(clippy::vec_box)] // see marshal_string_arg: Box = stable header addresses
     fn interp_to_native(
         &self,
         val: &InterpValue,
@@ -3296,6 +3299,7 @@ impl MirInterpreter {
     }
 
     /// Convert InterpValue to native, inferring type from the value
+    #[allow(clippy::vec_box)] // see marshal_string_arg: Box = stable header addresses
     fn interp_to_native_inferred(
         &self,
         val: &InterpValue,

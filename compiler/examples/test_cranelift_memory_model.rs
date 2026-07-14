@@ -435,7 +435,7 @@ fn test_move_semantics() -> Result<(), String> {
         builder.ins().return_(&[result]);
         builder.seal_block(entry);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module
@@ -528,7 +528,7 @@ fn test_shared_borrows() -> Result<(), String> {
         builder.ins().return_(&[sum]);
         builder.seal_block(entry);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module
@@ -623,7 +623,7 @@ fn test_exclusive_borrow() -> Result<(), String> {
         builder.ins().return_(&[sum]);
         builder.seal_block(entry);
 
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     module

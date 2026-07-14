@@ -262,6 +262,7 @@ pub fn vec_dot_q4_K_q8_K_scalar(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
 /// Dispatch wrapper: wasm32+simd128 uses the vectorised kernel, everything
 /// else (native, where the AArch64 SDOT path lives upstream) uses scalar.
 #[inline]
+#[allow(non_snake_case)] // mirrors llama.cpp's vec_dot_q4_K_q8_K naming
 pub fn vec_dot_q4_K_q8_K(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
@@ -620,6 +621,7 @@ mod golden_gate {
     use super::*;
 
     #[test]
+    #[allow(clippy::needless_range_loop)] // byte-layout construction is index-driven
     fn golden_q4_dot_for_haxe_gate() {
         // Weight: d=1.0 (0x3C00), dmin=0.5 (0x3800); sc6[s]=s+1, mn6[s]=1;
         // qs[i]=i (low nibble i&0x0F in 0..15, high nibble i>>4 in 0..7).

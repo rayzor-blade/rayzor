@@ -138,7 +138,7 @@ fn test_single_await() -> Result<(), String> {
         let result = builder.inst_results(call2)[0];
 
         builder.ins().return_(&[result]);
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     // Compile
@@ -234,7 +234,7 @@ fn test_multiple_awaits() -> Result<(), String> {
         // Add results
         let total = builder.ins().iadd(result1, result2);
         builder.ins().return_(&[total]);
-        builder.finalize();
+        builder.finalize(module.isa().frontend_config());
     }
 
     // Compile

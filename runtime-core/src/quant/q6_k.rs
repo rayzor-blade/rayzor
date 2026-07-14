@@ -43,6 +43,7 @@ pub unsafe fn vec_dot_q6_K_q8_K(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
 /// # Safety
 /// `block_ptr` must reference a live 210-byte Q6_K super-block.
 #[allow(non_snake_case)]
+#[allow(clippy::needless_range_loop)] // kernel-style indexed loop, mirrors llama.cpp
 pub unsafe fn vec_dot_q6_K_q8_K_scalar(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
     let mut w = [0.0f32; Q6_K_BLOCK_SIZE];
     dequant_q6_k_block(block_ptr, &mut w);

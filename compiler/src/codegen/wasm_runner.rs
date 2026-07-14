@@ -161,6 +161,8 @@ fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
                         }
                         match elem.items {
                             // `(elem ... func $a $b ...)` shorthand.
+                            #[allow(clippy::explicit_counter_loop)]
+                            // slot mirrors the wasm elem index
                             ElementItems::Functions(funcs) => {
                                 let mut slot = base;
                                 for f in funcs {
@@ -170,6 +172,8 @@ fn parse_side_dylink(bytes: &[u8]) -> Result<SideDylink, String> {
                                 }
                             }
                             // PIC modules emit `(elem ... funcref (ref.func $a) ...)`.
+                            #[allow(clippy::explicit_counter_loop)]
+                            // slot mirrors the wasm elem index
                             ElementItems::Expressions(_ty, exprs) => {
                                 let mut slot = base;
                                 for ex in exprs {
@@ -2731,7 +2735,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                     read_haxe_bytes_header(&mut caller, h)
                                 {
                                     let end = abs.saturating_add(len).min(total_len as usize);
-                                    let view_len = if abs < end { end - abs } else { 0 };
+                                    let view_len = end.saturating_sub(abs);
                                     let header_ptr = make_haxe_bytes_view(
                                         &mut caller,
                                         data_addr + abs as u32,
@@ -2818,7 +2822,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                     read_haxe_bytes_header(&mut caller, h)
                                 {
                                     let end = pos.saturating_add(len).min(total_len as usize);
-                                    let view_len = if pos < end { end - pos } else { 0 };
+                                    let view_len = end.saturating_sub(pos);
                                     let header_ptr = make_haxe_bytes_view(
                                         &mut caller,
                                         data_addr + pos as u32,

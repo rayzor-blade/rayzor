@@ -717,14 +717,18 @@ pub fn auto_kernel_threads() -> usize {
 /// `RZT_NO_CALLER_BAND=1` restores the pre-participation spin-only join.
 fn caller_band_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::env_var("RZT_NO_CALLER_BAND", "RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1"))
+    *ON.get_or_init(|| {
+        crate::env_var("RZT_NO_CALLER_BAND", "RAYZOR_NO_CALLER_BAND").map_or(true, |v| v != "1")
+    })
 }
 
 /// Whether fork-joins use dynamic chunk stealing (default) instead of one
 /// static band per thread. `RZT_STATIC_BANDS=1` reverts.
 fn chunk_stealing_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::env_var("RZT_STATIC_BANDS", "RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1"))
+    *ON.get_or_init(|| {
+        crate::env_var("RZT_STATIC_BANDS", "RAYZOR_STATIC_BANDS").map_or(true, |v| v != "1")
+    })
 }
 
 /// Whether idle workers park after `PARK_AFTER_ROUNDS` (default on).
