@@ -28,6 +28,7 @@ class WordPieceTokenizer implements Tokenizer {
     public var specialNames:Array<String>;
     var unkId:Int;
     var unkToken:String;
+    var wordStartPrefix:String;
     var contPrefix:String;
     var maxChars:Int;
 
@@ -37,8 +38,19 @@ class WordPieceTokenizer implements Tokenizer {
         this.specialNames = [];
         this.unkToken = unkToken;
         this.unkId = vocab.lookup(unkToken);
-        this.contPrefix = "##";
         this.maxChars = 100;
+
+        // Two vocab encodings map to the same ids: HF WordPiece marks word-start
+        // pieces bare and continuations with `##`; llama.cpp's bert GGUF marks
+        // word-start with `▁` (U+2581) and continuations bare. Detect which by
+        // probing for a `▁`-prefixed common word.
+        if (vocab.lookup("▁the") >= 0 || vocab.lookup("▁a") >= 0) {
+            this.wordStartPrefix = "▁"; // ▁
+            this.contPrefix = "";
+        } else {
+            this.wordStartPrefix = "";
+            this.contPrefix = "##";
+        }
     }
 
     public function addSpecial(name:String, id:Int):Void {
@@ -82,25 +94,23 @@ class WordPieceTokenizer implements Tokenizer {
     // --- normalization ---
 
     function normalize(cps:Array<Int>):Array<Int> {
-        // No `continue` here: `continue` inside an Array `for-in` does not
-        // advance the iterator on this backend (infinite loop). Use if/else.
         var out:Array<Int> = [];
         for (cp in cps) {
-            if (cp == 0 || cp == 0xFFFD || isControl(cp)) {
-                // clean_text: drop NUL / replacement / control chars
-            } else if (isWhitespace(cp)) {
+            // clean_text: drop NUL / replacement / control chars
+            if (cp == 0 || cp == 0xFFFD || isControl(cp)) continue;
+            if (isWhitespace(cp)) {
+                out.push(0x20);
+                continue;
+            }
+            // strip_accents (Latin-1 precomposed → base) then lowercase
+            var low = toLower(stripAccent(cp));
+            if (isCjk(low)) {
+                // handle_chinese_chars: each CJK char is its own token
+                out.push(0x20);
+                out.push(low);
                 out.push(0x20);
             } else {
-                // strip_accents (Latin-1 precomposed → base) then lowercase
-                var low = toLower(stripAccent(cp));
-                if (isCjk(low)) {
-                    // handle_chinese_chars: each CJK char is its own token
-                    out.push(0x20);
-                    out.push(low);
-                    out.push(0x20);
-                } else {
-                    out.push(low);
-                }
+                out.push(low);
             }
         }
         return out;
@@ -141,8 +151,8 @@ class WordPieceTokenizer implements Tokenizer {
             var end = n;
             var curId = -1;
             while (end > start) {
-                var piece = encodeUtf8(word, start, end);
-                if (start > 0) piece = contPrefix + piece;
+                var prefix = (start == 0) ? wordStartPrefix : contPrefix;
+                var piece = prefix + encodeUtf8(word, start, end);
                 var id = vocab.lookup(piece);
                 if (id >= 0) { curId = id; break; }
                 end--;
@@ -190,25 +200,11 @@ class WordPieceTokenizer implements Tokenizer {
     }
 
     static function encodeUtf8(cps:Array<Int>, start:Int, end:Int):String {
+        // `StringBuf.addChar` takes a codepoint and UTF-8-encodes it, so pass
+        // the codepoint directly — a manual byte split would be re-encoded
+        // (double-encoding) for anything above ASCII.
         var buf = new StringBuf();
-        for (k in start...end) {
-            var cp = cps[k];
-            if (cp < 0x80) {
-                buf.addChar(cp);
-            } else if (cp < 0x800) {
-                buf.addChar(0xC0 | (cp >> 6));
-                buf.addChar(0x80 | (cp & 0x3F));
-            } else if (cp < 0x10000) {
-                buf.addChar(0xE0 | (cp >> 12));
-                buf.addChar(0x80 | ((cp >> 6) & 0x3F));
-                buf.addChar(0x80 | (cp & 0x3F));
-            } else {
-                buf.addChar(0xF0 | (cp >> 18));
-                buf.addChar(0x80 | ((cp >> 12) & 0x3F));
-                buf.addChar(0x80 | ((cp >> 6) & 0x3F));
-                buf.addChar(0x80 | (cp & 0x3F));
-            }
-        }
+        for (k in start...end) buf.addChar(cps[k]);
         return buf.toString();
     }
 

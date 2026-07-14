@@ -87,12 +87,18 @@ class BertEmbedder {
         var tok = GGUFTokenizer.buildWordPiece(reader);
         Sys.println("tokenizer built, vocab=" + tok.vocabSize());
 
+        // Emit one `IDSV <row> <id>...` line per sentence; the caller diffs
+        // these against the golden ids (harness_ids.txt). Kept as a dump + an
+        // external compare because an in-Haxe comparison hits an unrelated
+        // native codegen crash (see bugs_native_codegen_continue_and_loop_output).
         var sents = File.getContent(sentencesPath).split("\n");
         for (i in 0...sents.length) {
             var s = StringTools.trim(sents[i]);
             if (s.length == 0) continue;
             var got = tok.encodeWithSpecials(s);
-            Sys.println("IDS " + i + " " + got.join(" "));
+            var line = "" + i;
+            for (k in 0...got.length) line += " " + got[k];
+            Sys.println("IDSV " + line);
         }
         return 0;
     }
