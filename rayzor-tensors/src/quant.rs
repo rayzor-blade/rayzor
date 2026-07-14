@@ -993,13 +993,15 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
 ///
 /// Returns a fresh F32 tensor; returns 0 on shape mismatch.
 #[no_mangle]
-/// Opt-in gate for the AMX prefill path (default off — a Mac-only accelerator).
+/// AMX prefill gate — ON by default on macOS (`RZT_AMX_PREFILL=0` opts out).
+/// Must agree with the Haxe-side gate in nue's Q4Matmul.amxPrefill.
 #[cfg(target_os = "macos")]
 fn amx_prefill_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        crate::env_var("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL").is_ok_and(|v| v == "1")
+        !crate::env_var("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL")
+            .is_ok_and(|v| v == "0" || v == "false")
     })
 }
 

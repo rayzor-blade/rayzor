@@ -34,14 +34,15 @@ class Q4Matmul {
     static var _amx:Int = 0;
     static inline var AMX_MIN_BATCH:Int = 16;
 
-    /** Opt-in Mac AMX prefill routing (RZT_AMX_PREFILL=1): compute-bound
-        batches hand off to the runtime kernel whose Accelerate path runs the
-        dequant-once + sgemm experiment. Default off; decode and non-Mac are
-        never routed. */
+    /** Mac AMX prefill routing — ON by default (RZT_AMX_PREFILL=0 opts out):
+        compute-bound Q4 batches hand off to the runtime kernel's Accelerate
+        f16 GEMM (dequant-once weights). Measured: batch=497 prefill ttft
+        7.0s vs 9.4s SDOT. Decode and non-Mac are never routed. */
     static function amxPrefill():Bool {
         if (_amx == 0) {
             var v = Sys.getEnvOr("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL");
-            var on = (v != null && v == "1") && (Sys.systemName() == "Mac");
+            var off = (v != null && (v == "0" || v == "false"));
+            var on = !off && (Sys.systemName() == "Mac");
             _amx = on ? 1 : 2;
         }
         return _amx == 1;
