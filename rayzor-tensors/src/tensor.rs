@@ -2356,23 +2356,45 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
         "rayzor_tensor_add_into: dest has shared refcount > 1; in-place mutation would silently leak to aliased bindings. Use addInto only on uniquely-owned tensors (freshly produced or after deepClone)."
     );
 
-    // (a) shape compatibility
-    if d.ndim != s.ndim || d.numel != s.numel {
+    let d_shape = std::slice::from_raw_parts(d.shape, d.ndim);
+    let s_shape = std::slice::from_raw_parts(s.shape, s.ndim);
+
+    // (a) shape compatibility. Two accepted forms:
+    //   exact     — dest and src have identical shape (the general case).
+    //   broadcast — src is the trailing feature vector added to every row of
+    //               dest: a [F] (or [1,F]) bias over a [seq, F] activation.
+    //               Llama never exercised this — decode runs one token at a
+    //               time (seq=1, so numel matched) and carries no biases
+    //               (RMSNorm + bias-free Linears). BERT processes the whole
+    //               [seq, F] sequence at once and adds LayerNorm + Linear
+    //               biases, so the [F] bias must broadcast over `seq` rows.
+    let broadcast = d.numel != s.numel
+        && s.numel > 0
+        && d.numel.is_multiple_of(s.numel)
+        && s.numel == d_shape[d.ndim - 1];
+    if broadcast && d.dtype != DTYPE_F32 {
         eprintln!(
-            "rayzor_tensor_add_into: shape mismatch — dest.ndim={}, src.ndim={}, dest.numel={}, src.numel={}",
-            d.ndim, s.ndim, d.numel, s.numel
+            "rayzor_tensor_add_into: broadcast add only supported for F32 (dtype={})",
+            d.dtype
         );
         std::process::abort();
     }
-    let d_shape = std::slice::from_raw_parts(d.shape, d.ndim);
-    let s_shape = std::slice::from_raw_parts(s.shape, s.ndim);
-    for i in 0..d.ndim {
-        if d_shape[i] != s_shape[i] {
+    if !broadcast {
+        if d.ndim != s.ndim || d.numel != s.numel {
             eprintln!(
-                "rayzor_tensor_add_into: shape mismatch at dim {} — dest={:?}, src={:?}",
-                i, d_shape, s_shape
+                "rayzor_tensor_add_into: shape mismatch — dest.ndim={}, src.ndim={}, dest.numel={}, src.numel={}",
+                d.ndim, s.ndim, d.numel, s.numel
             );
             std::process::abort();
+        }
+        for i in 0..d.ndim {
+            if d_shape[i] != s_shape[i] {
+                eprintln!(
+                    "rayzor_tensor_add_into: shape mismatch at dim {} — dest={:?}, src={:?}",
+                    i, d_shape, s_shape
+                );
+                std::process::abort();
+            }
         }
     }
 
@@ -2414,7 +2436,19 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
         DTYPE_F32 => {
             let n = d.numel;
             let dst_slice = std::slice::from_raw_parts_mut(d.data as *mut f32, n);
-            if s.is_contiguous() {
+            if broadcast {
+                // Per-feature bias: add the contiguous src[0..F] to every
+                // F-wide row of the contiguous dest. (src is always
+                // contiguous here — biases/norm weights are freshly loaded
+                // 1-D tensors.)
+                let f = s.numel;
+                let src_slice = std::slice::from_raw_parts(s.data as *const f32, f);
+                let mut off = 0usize;
+                while off + f <= n {
+                    crate::tensor_simd::add_assign_slice(&mut dst_slice[off..off + f], src_slice);
+                    off += f;
+                }
+            } else if s.is_contiguous() {
                 // Fast path: both contiguous F32. `add_assign_slice` takes a
                 // single `&mut [f32]` + `&[f32]` pair, so there is no aliased
                 // mutable+immutable reference to the dst memory — the SIMD
