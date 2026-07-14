@@ -31522,6 +31522,40 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Per-branch interface wrap for divergent-class conditionals.
+        // When the two branches are DIFFERENT concrete classes upcast to a
+        // shared interface, phi-ing the raw objects and wrapping ONCE downstream
+        // binds every vtable slot to a single branch's class (the then-branch's,
+        // since find_common_supertype returns the first type) — the other
+        // branch's object then dispatches through the wrong method table. Wrap
+        // each branch to the shared interface INSIDE its own block so the phi
+        // merges two already-correct fat pointers.
+        let mut branch_iface_wrapped = false;
+        if !then_terminated && !else_terminated {
+            if let (Some(tv), Some(ev)) = (then_val, else_val) {
+                if let (Some(tc), Some(ec)) = (
+                    self.get_class_symbol(then_expr.ty),
+                    self.get_class_symbol(else_expr.ty),
+                ) {
+                    if tc != ec {
+                        if let Some(iface) = self.shared_interface_for(tc, ec) {
+                            self.builder.switch_to_block(then_end_block);
+                            if let Some(w) = self.wrap_in_interface_fat_ptr(tv, tc, iface) {
+                                self.interface_wrapped_args.insert(w);
+                                then_val = Some(w);
+                                branch_iface_wrapped = true;
+                            }
+                            self.builder.switch_to_block(else_end_block);
+                            if let Some(w) = self.wrap_in_interface_fat_ptr(ev, ec, iface) {
+                                self.interface_wrapped_args.insert(w);
+                                else_val = Some(w);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Now build branches for non-terminated blocks
         if !then_terminated {
             self.builder.switch_to_block(then_end_block);
@@ -31760,6 +31794,12 @@ impl<'a> HirToMirContext<'a> {
                     return None;
                 }
             };
+            // The branches were wrapped to a shared interface above, so the phi
+            // is itself an interface fat pointer — mark it so the enclosing sink
+            // (Let/return/call-arg) doesn't class-wrap it a second time.
+            if branch_iface_wrapped {
+                self.interface_wrapped_args.insert(result);
+            }
 
             // eprintln!(
             //     "DEBUG: Adding result phi incoming: then_term={}, else_term={}",
@@ -37014,6 +37054,35 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The interface implemented by BOTH classes that has the most methods
+    /// (the most-derived shared interface). Used to wrap the divergent-class
+    /// branches of a conditional to a common fat-pointer layout. Interface
+    /// extension appends methods, so a most-derived fat pointer is also usable
+    /// where a base interface is expected (prefix-compatible slots).
+    /// `interface_vtables` is populated in `register_class_metadata`, which runs
+    /// before body lowering, so entries exist when conditionals lower.
+    fn shared_interface_for(&self, a: SymbolId, b: SymbolId) -> Option<SymbolId> {
+        let a_ifaces: std::collections::BTreeSet<SymbolId> = self
+            .interface_vtables
+            .keys()
+            .filter(|(c, _)| *c == a)
+            .map(|(_, i)| *i)
+            .collect();
+        let mut best: Option<(SymbolId, usize)> = None;
+        for (c, i) in self.interface_vtables.keys() {
+            if *c == b && a_ifaces.contains(i) {
+                let n = self
+                    .resolve_interface_method_names(*i)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                if best.map_or(true, |(_, bn)| n > bn) {
+                    best = Some((*i, n));
+                }
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
     /// If value_type is a class and target_type is an interface the class implements,
     /// wrap the value in a fat pointer. Otherwise return the value unchanged.
     fn maybe_wrap_for_interface(
@@ -37029,6 +37098,14 @@ impl<'a> HirToMirContext<'a> {
 
         // Class -> interface: build a fresh fat pointer wrapper from class vtable entries.
         if let Some(class_sym) = self.get_class_symbol(value_type) {
+            // Already an interface fat pointer (e.g. a conditional result whose
+            // branches were wrapped per-branch below, but whose static type is
+            // still one branch's class): never class-wrap again — nesting the
+            // fat pointer stores the wrapper where the receiver belongs and
+            // dispatch reads garbage.
+            if self.interface_wrapped_args.contains(&value_reg) {
+                return (value_reg, false);
+            }
             // Check if we have a vtable for this (class, interface) pair
             if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
                 return (value_reg, false);
