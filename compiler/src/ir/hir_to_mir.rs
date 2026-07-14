@@ -9949,6 +9949,52 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
+
+                    // Array.join: the generic array_join runtime treats every
+                    // element as a HaxeString pointer, which SIGSEGVs for non-
+                    // String element types. Route through haxe_array_join_typed
+                    // with the element's type tag so each element is converted
+                    // via Std.string first (1=Int 2=Bool 4=Float 5=String 6=Ref).
+                    if vname == "join" && *is_method && args.len() == 2 {
+                        let elem_tag: i32 = {
+                            let type_table = self.type_table;
+                            type_table
+                                .get(args[0].ty)
+                                .and_then(|t| {
+                                    if let TypeKind::Array { element_type } = &t.kind {
+                                        Some(*element_type)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .and_then(|et| type_table.get(et).map(|t| t.kind.clone()))
+                                .map(|k| match k {
+                                    TypeKind::Int => 1,
+                                    TypeKind::Bool => 2,
+                                    TypeKind::Float => 4,
+                                    TypeKind::String => 5,
+                                    _ => 6,
+                                })
+                                .unwrap_or(5)
+                        };
+                        if let (Some(arr_reg), Some(sep_reg)) = (
+                            self.lower_expression(&args[0]),
+                            self.lower_expression(&args[1]),
+                        ) {
+                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                            let tag_reg = self.builder.build_const(IrValue::I32(elem_tag))?;
+                            let join_fn = self.get_or_register_extern_function(
+                                "haxe_array_join_typed",
+                                vec![ptr_void.clone(), ptr_void.clone(), IrType::I32],
+                                ptr_void.clone(),
+                            );
+                            return self.builder.build_call_direct(
+                                join_fn,
+                                vec![arr_reg, sep_reg, tag_reg],
+                                ptr_void,
+                            );
+                        }
+                    }
                 }
                 {
                     // DEBUG: check callee kind for localhost

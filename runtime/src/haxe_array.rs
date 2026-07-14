@@ -930,6 +930,86 @@ pub extern "C" fn haxe_array_join(
     }
 }
 
+/// Type-aware `Array.join`. The plain `haxe_array_join` assumes every element
+/// is a `HaxeString` pointer — true only for `Array<String>`; for `Array<Int>`
+/// etc. the raw values are dereferenced as pointers and SIGSEGV. Here each
+/// element is first converted to a `HaxeString` via `haxe_value_to_string_by_tag`
+/// (tag 5 = already a String pointer — fast path; 1/2/4/6 = Int/Bool/Float/Ref).
+#[no_mangle]
+pub extern "C" fn haxe_array_join_typed(
+    arr: *const HaxeArray,
+    sep: *const HaxeString,
+    elem_tag: i32,
+) -> *mut HaxeString {
+    if elem_tag == 5 {
+        return haxe_array_join(arr, sep);
+    }
+    unsafe {
+        let result_layout = Layout::new::<HaxeString>();
+        let result_ptr = alloc(result_layout) as *mut HaxeString;
+        if result_ptr.is_null() {
+            panic!("Failed to allocate HaxeString for join result");
+        }
+        if arr.is_null() || (*arr).len == 0 {
+            crate::haxe_string::haxe_string_new(result_ptr);
+            return result_ptr;
+        }
+        let arr_ref = &*arr;
+        let (sep_ptr, sep_len) = if sep.is_null() {
+            (ptr::null(), 0usize)
+        } else {
+            ((*sep).ptr as *const u8, (*sep).len)
+        };
+
+        // Convert each element (a raw i64 value) to its string form.
+        let mut strs: Vec<*mut HaxeString> = Vec::with_capacity(arr_ref.len);
+        for i in 0..arr_ref.len {
+            let value = *(arr_ref.ptr.add(i * arr_ref.elem_size) as *const i64);
+            strs.push(crate::haxe_sys::haxe_value_to_string_by_tag(
+                value, elem_tag,
+            ));
+        }
+
+        let mut total_len: usize = 0;
+        for (i, &sp) in strs.iter().enumerate() {
+            if !sp.is_null() {
+                total_len += (*sp).len;
+            }
+            if i < arr_ref.len - 1 {
+                total_len += sep_len;
+            }
+        }
+
+        let buf_cap = total_len + 1;
+        let buf_layout = Layout::from_size_align_unchecked(buf_cap, 1);
+        let buf_ptr = alloc(buf_layout);
+        if buf_ptr.is_null() {
+            panic!("Failed to allocate buffer for join result");
+        }
+
+        let mut offset: usize = 0;
+        for (i, &sp) in strs.iter().enumerate() {
+            if !sp.is_null() {
+                let s = &*sp;
+                if s.len > 0 && !s.ptr.is_null() {
+                    ptr::copy_nonoverlapping(s.ptr, buf_ptr.add(offset), s.len);
+                    offset += s.len;
+                }
+            }
+            if i < arr_ref.len - 1 && sep_len > 0 && !sep_ptr.is_null() {
+                ptr::copy_nonoverlapping(sep_ptr, buf_ptr.add(offset), sep_len);
+                offset += sep_len;
+            }
+        }
+        *buf_ptr.add(offset) = 0;
+
+        (*result_ptr).ptr = buf_ptr;
+        (*result_ptr).len = total_len;
+        (*result_ptr).cap = buf_cap;
+        result_ptr
+    }
+}
+
 // ============================================================================
 // Higher-Order Array Methods
 // ============================================================================

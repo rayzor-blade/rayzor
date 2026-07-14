@@ -170,6 +170,10 @@ register_symbol!("haxe_array_reverse", crate::haxe_array::haxe_array_reverse);
 register_symbol!("haxe_array_copy", crate::haxe_array::haxe_array_copy);
 register_symbol!("haxe_array_slice", crate::haxe_array::haxe_array_slice);
 register_symbol!("haxe_array_join", crate::haxe_array::haxe_array_join);
+register_symbol!(
+    "haxe_array_join_typed",
+    crate::haxe_array::haxe_array_join_typed
+);
 register_symbol!("haxe_array_concat", crate::haxe_array::haxe_array_concat);
 register_symbol!("haxe_array_splice", crate::haxe_array::haxe_array_splice);
 
