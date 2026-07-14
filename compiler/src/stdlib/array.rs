@@ -27,6 +27,7 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_pop(builder);
     build_array_length(builder);
     build_array_slice(builder);
+    build_array_slice_to_end(builder);
     build_array_copy(builder);
     build_array_join(builder);
     build_array_index_of(builder);
@@ -585,6 +586,50 @@ fn build_array_copy(builder: &mut MirBuilder) {
         .get_function_by_name("haxe_array_copy")
         .expect("haxe_array_copy extern not found");
     builder.call(copy_func, vec![out_ptr, arr]);
+
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_slice_to_end(arr: Ptr(Void), start: i64) -> Ptr(Void)
+/// The `slice(pos)` form — `end` omitted means "to the array's length". The
+/// runtime clamps `end.min(len)`, so this passes i64::MAX as end. Mirrors how
+/// `array_index_of` defaults its optional `fromIndex` inside the wrapper: the
+/// params:1 mapping routes here, params:2 routes to `array_slice`. Without it,
+/// `slice(pos)` built a 2-arg call to the 3-param `array_slice` wrapper and read
+/// a garbage `end` (→ empty array).
+fn build_array_slice_to_end(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("array_slice_to_end")
+        .param("arr", ptr_void.clone())
+        .param("start", i64_ty.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let start = builder.get_param(1);
+
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // end = i64::MAX; haxe_array_slice does end.min(len) → len (to the end).
+    let end = builder.const_i64(i64::MAX);
+    let slice_func = builder
+        .get_function_by_name("haxe_array_slice")
+        .expect("haxe_array_slice extern not found");
+    builder.call(slice_func, vec![out_ptr, arr, start, end]);
 
     builder.ret(Some(out_ptr));
 }

@@ -1556,6 +1556,12 @@ impl StdlibMapping {
             map_method!(instance "Array", "remove" => "haxe_array_remove", params: 1, returns: primitive, ptr_params: 0b10),
             // Extraction methods
             // Array.slice uses MIR wrapper that handles out-param allocation
+            // slice(pos): omitted end -> "to length". Routes to a wrapper that
+            // passes i64::MAX (runtime clamps end.min(len)). params:2 (explicit
+            // end) keeps the 3-arg array_slice wrapper. Without the params:1
+            // entry, slice(pos) built a 2-arg call to the 3-param wrapper and
+            // read a garbage end (empty array).
+            map_method!(instance "Array", "slice" => "array_slice_to_end", params: 1, returns: primitive),
             map_method!(instance "Array", "slice" => "array_slice", params: 2, returns: primitive),
             // Routes to the `array_copy` MIR wrapper (stdlib/array.rs), which
             // heap-allocates the out array and calls the void out-param runtime
