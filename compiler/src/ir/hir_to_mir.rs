@@ -29760,6 +29760,35 @@ impl<'a> HirToMirContext<'a> {
                 Prim::Bool => me.builder.build_cast(reg, IrType::Bool, IrType::F64),
             }
         };
+        // The null-eq helpers take the Optional operand as a *DynamicValue box
+        // pointer. Most Optional<prim> values already are one (a variable, a
+        // user-fn return), but some stdlib calls return a RAW primitive despite
+        // a Null<T> type — e.g. Std.parseInt returns i64 (i64::MIN = null). A raw
+        // value reinterpreted as a pointer and dereferenced by the helper
+        // SIGSEGVs, so box it first (this mirrors what a `var x:Null<T> = ...`
+        // assignment does). Detect "raw" by the register not being a pointer.
+        let box_if_raw = |me: &mut Self, reg: IrId, inner: Prim| -> Option<IrId> {
+            if matches!(me.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+                return Some(reg);
+            }
+            let boxed_ptr = IrType::Ptr(Box::new(IrType::U8));
+            let (name, arg_ty) = match inner {
+                Prim::Int => ("haxe_box_int_ptr", IrType::I64),
+                Prim::Bool => ("haxe_box_bool_ptr", IrType::Bool),
+                Prim::Float => ("haxe_box_float_ptr", IrType::F64),
+            };
+            let cur = me
+                .builder
+                .get_register_type(reg)
+                .unwrap_or_else(|| arg_ty.clone());
+            let v = if cur != arg_ty {
+                me.builder.build_cast(reg, cur, arg_ty.clone())?
+            } else {
+                reg
+            };
+            let f = me.get_or_register_extern_function(name, vec![arg_ty], boxed_ptr.clone());
+            me.builder.build_call_direct(f, vec![v], boxed_ptr)
+        };
 
         let eq_result = match (lhs_opt, lhs_bare, rhs_opt, rhs_bare) {
             // Optional<prim> vs bare prim (either order)
@@ -29767,6 +29796,7 @@ impl<'a> HirToMirContext<'a> {
                 let opt_first = lhs_opt.is_some();
                 let (opt_expr, bare_expr) = if opt_first { (lhs, rhs) } else { (rhs, lhs) };
                 let opt_reg = self.lower_expression(opt_expr)?;
+                let opt_reg = box_if_raw(self, opt_reg, inner)?;
                 let bare_reg = self.lower_expression(bare_expr)?;
                 let use_float = inner == Prim::Float || bare == Prim::Float;
                 if use_float {
@@ -29792,7 +29822,9 @@ impl<'a> HirToMirContext<'a> {
             // Optional<prim> vs Optional<prim>
             (Some(li), _, Some(ri), _) => {
                 let lreg = self.lower_expression(lhs)?;
+                let lreg = box_if_raw(self, lreg, li)?;
                 let rreg = self.lower_expression(rhs)?;
+                let rreg = box_if_raw(self, rreg, ri)?;
                 let name = if li == Prim::Float || ri == Prim::Float {
                     "haxe_null_null_eq_float"
                 } else {
