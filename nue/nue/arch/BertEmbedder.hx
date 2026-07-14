@@ -77,9 +77,9 @@ class BertEmbedder {
     }
 
     /**
-     * WordPiece tokenizer dump — encode each sentence to its `[CLS]…[SEP]` id
-     * sequence and print one `IDS <row> <id>...` line per sentence. The caller
-     * compares those against the golden ids externally.
+     * WordPiece tokenizer correctness: encode each sentence to its `[CLS]…[SEP]`
+     * id sequence and compare against the golden ids (exact match). Prints the
+     * pass/total and returns the number of mismatched sentences.
      */
     public static function tokenizerTest(ggufPath:String, sentencesPath:String, expectedIdsPath:String):Int {
         var bytes = File.getBytes(ggufPath);
@@ -87,19 +87,31 @@ class BertEmbedder {
         var tok = GGUFTokenizer.buildWordPiece(reader);
         Sys.println("tokenizer built, vocab=" + tok.vocabSize());
 
-        // Emit one `IDSV <row> <id>...` line per sentence; the caller diffs
-        // these against the golden ids (harness_ids.txt). Kept as a dump + an
-        // external compare because an in-Haxe comparison hits an unrelated
-        // native codegen crash (see bugs_native_codegen_continue_and_loop_output).
         var sents = File.getContent(sentencesPath).split("\n");
+        var expLines = File.getContent(expectedIdsPath).split("\n");
+        var pass = 0;
+        var fail = 0;
         for (i in 0...sents.length) {
             var s = StringTools.trim(sents[i]);
             if (s.length == 0) continue;
             var got = tok.encodeWithSpecials(s);
-            var line = "" + i;
-            for (k in 0...got.length) line += " " + got[k];
-            Sys.println("IDSV " + line);
+            var exp = [for (p in StringTools.trim(expLines[i]).split(" ")) Std.parseInt(p)];
+            var ok = got.length == exp.length;
+            var j = 0;
+            while (ok && j < got.length) {
+                if (got[j] != exp[j]) ok = false;
+                j++;
+            }
+            if (ok) {
+                pass++;
+            } else {
+                fail++;
+                var gl = "";
+                for (k in 0...got.length) gl += " " + got[k];
+                Sys.println("MISMATCH row " + i + " \"" + s + "\" got:" + gl);
+            }
         }
-        return 0;
+        Sys.println("=== tokenizer: " + pass + "/" + (pass + fail) + " sentences exact-id match ===");
+        return fail;
     }
 }
