@@ -185,7 +185,13 @@ class GGUFLoader implements ModelLoader {
         if (vocabSize == 0) {
             vocabSize = readIntOr(reader, "tokenizer.ggml.tokens.count", 32000);
         }
-        var normEps = readFloatOr(reader, p + "attention.layer_norm_rms_epsilon", 1e-5);
+        // LayerNorm epsilon: BERT/GPT-family store the non-RMS key
+        // `attention.layer_norm_epsilon` (1e-12 for BERT); Llama-family
+        // store `attention.layer_norm_rms_epsilon` (1e-5). Try the non-RMS
+        // key first, then RMS, then an arch-appropriate default.
+        var normEps = readFloatOr(reader, p + "attention.layer_norm_epsilon",
+            readFloatOr(reader, p + "attention.layer_norm_rms_epsilon",
+                (arch == "bert" ? 1e-12 : 1e-5)));
         var ropeBase = readFloatOr(reader, p + "rope.freq_base", 10000.0);
         var tieEmbed = readBoolOr(reader, p + "tie_word_embeddings", false);
 
@@ -228,15 +234,25 @@ class GGUFLoader implements ModelLoader {
     private static function populateTensor(
         result:NamedTensorMap, raw:haxe.io.Bytes, info:GGUFReader.TensorInfo
     ):Void {
+        // Multi-dim F32/F16/Q8_0 tensors must be oriented to [out, in] to
+        // match how the quant path (decodeQ4KM/Q6K) and both consumers
+        // (Linear.matmulT, Embedding.gatherRows) read weights. GGUF stores
+        // ggml dims [ne0=in, ne1=out] but the bytes are row-major over the
+        // output dim, so reinterpreting the shape as [out, in] is correct
+        // with no reshuffle. Llama never exercised this (its only F32/F16
+        // tensors are 1-D norms); BERT is the first with 2-D F32/F16
+        // weights, and the raw info.dims made token_embd load [384,30522]
+        // instead of [30522,384] — gatherRows then read wrong/oob rows.
+        var dims = orientDims(info.dims);
         switch (info.dtype) {
             case 0: // F32 — memcpy bytes directly into a fresh F32 tensor.
                     // Avoids the `Array<Float>.push` precision-loss bug
                     // (boxes via i64) when crossing the runtime boundary.
-                result.set(info.name, Tensor.fromBytesF32(raw, info.dims));
+                result.set(info.name, Tensor.fromBytesF32(raw, dims));
             case 1: // F16
-                result.set(info.name, Tensor.fromBytesF16(raw, info.dims));
+                result.set(info.name, Tensor.fromBytesF16(raw, dims));
             case 8: // Q8_0
-                result.set(info.name, Tensor.fromBytesQ8_0(raw, info.dims));
+                result.set(info.name, Tensor.fromBytesQ8_0(raw, dims));
             case 12: // Q4_K — 144-byte super-blocks; the dominant Q4_K_M weight scheme.
                 result.setQuant(info.name, decodeQ4KMRaw(raw, info));
             case 14: // Q6_K — 210-byte super-blocks. Used in Q4_K_M variants for
@@ -246,6 +262,21 @@ class GGUFLoader implements ModelLoader {
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
+    }
+
+    /** Orient raw GGUF dims to the `[out, in]` (PyTorch row-major)
+     *  convention every weight consumer expects. GGUF stores ggml dims
+     *  `[ne0=in, ne1=out, ...]` with bytes row-major over the last dim, so
+     *  `[dims[last], product(earlier dims)]` reinterprets the same bytes
+     *  correctly. 1-D tensors (norms, biases) are returned unchanged —
+     *  collapsing them to `[d,1]` would break the 1-D broadcast in
+     *  LayerNorm/RMSNorm and bias adds. Mirrors decodeQ4KM/Q6K's rows/cols. */
+    private static function orientDims(dims:Array<Int>):Array<Int> {
+        if (dims.length <= 1) return dims;
+        var rows = dims[dims.length - 1];
+        var cols = 1;
+        for (i in 0...dims.length - 1) cols *= dims[i];
+        return [rows, cols];
     }
 
     /** Build a Q4_K_M `QTensor` view over the file's raw bytes without

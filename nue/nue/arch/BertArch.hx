@@ -4,7 +4,6 @@ import nue.Module;
 import nue.Linear;
 import nue.Embedding;
 import nue.EncoderModel;
-import nue.BertModel;
 import nue.model.ModelMetadata;
 import nue.model.NamedTensorMap;
 import nue.transformer.LayerNorm;
@@ -67,28 +66,35 @@ class BertArch implements ArchBuilder {
             takeWeight(weights, "position_embd.weight"),
             meta.maxSeqLen, meta.hiddenSize, "weight"
         );
-        var segmentEmbed:Embedding = null;
-        if (weights.exists("token_types.weight")) {
-            // Most BERTs use 2 segment IDs (sentence-A vs sentence-B).
-            // The exact vocab size doesn't matter for `lookup` here.
-            segmentEmbed = new Embedding(
-                takeWeight(weights, "token_types.weight"),
-                2, meta.hiddenSize, "weight"
-            );
-        }
-        var embedNorm = takeOptionalNorm(weights, "token_embd_norm", meta.normEps);
+
+        // Post-embedding LayerNorm is REQUIRED for BERT (embeddings.LayerNorm
+        // in HF, token_embd_norm in GGUF) — a missing one silently zeroes the
+        // encoder's input scale, so fail loudly instead of skipping it.
+        var embedNorm = takeNormAny(weights, ["token_embd_norm"], meta.normEps);
+
+        // Optional pieces are stored non-null on BertModel (a Null<class>
+        // field corrupts cross-module — bugs_null_class_field_xmodule) with a
+        // Bool flag carrying presence; use a harmless placeholder when absent.
+        var hasSegment = weights.exists("token_types.weight");
+        var segmentEmbed = hasSegment
+            ? new Embedding(takeWeight(weights, "token_types.weight"), 2, meta.hiddenSize, "weight")
+            : tokenEmbed; // placeholder, never looked up when hasSegment == false
 
         var blocks:Array<TransformerBlock> = [];
         for (i in 0...meta.numLayers) {
             blocks.push(buildBlock(meta, i, weights));
         }
 
-        var encoderNorm = takeOptionalNorm(weights, "output_norm", meta.normEps);
+        var hasEncoderNorm = weights.exists("output_norm.weight");
+        var encoderNorm = hasEncoderNorm
+            ? takeNorm(weights, "output_norm", meta.normEps)
+            : embedNorm; // placeholder, never applied when hasEncoderNorm == false
 
         return new BertModel(
             meta, tokenEmbed, positionEmbed,
             segmentEmbed, embedNorm,
-            blocks, encoderNorm
+            blocks, encoderNorm,
+            hasSegment, hasEncoderNorm
         );
     }
 
@@ -103,15 +109,23 @@ class BertArch implements ArchBuilder {
         var oProj = makeLinear(weights, prefix + "attn_output");
         var attn = new MultiHeadAttention(qProj, kProj, vProj, oProj, meta.numHeads, meta.headDim);
 
-        var attnNorm = takeNorm(weights, prefix + "attn_norm", meta.normEps);
+        // Post-attention LayerNorm. GGUF (llama.cpp) names it
+        // `attn_output_norm`; the SafetensorsLoader normalizes to
+        // `attn_norm`. Accept either so both load paths resolve.
+        var attnNorm = takeNormAny(weights, [prefix + "attn_norm", prefix + "attn_output_norm"], meta.normEps);
 
         var ffnUp = makeLinear(weights, prefix + "ffn_up");
         var ffnDown = makeLinear(weights, prefix + "ffn_down");
         var ffn = new GeluFFN(ffnUp, ffnDown);
 
-        var ffnNorm = takeNorm(weights, prefix + "ffn_norm", meta.normEps);
+        // Post-FFN LayerNorm. GGUF names it `layer_output_norm`;
+        // SafetensorsLoader normalizes to `ffn_norm`.
+        var ffnNorm = takeNormAny(weights, [prefix + "ffn_norm", prefix + "layer_output_norm"], meta.normEps);
 
-        return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+        // BERT is POST-norm: norms apply to the residual sum, not the
+        // sublayer input. `attn_output_norm` / `layer_output_norm` are
+        // trained for that position — pre-norm diverges every layer.
+        return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, prefix, true);
     }
 
     static function makeLinear(weights:NamedTensorMap, baseName:String):Linear {
@@ -130,9 +144,18 @@ class BertArch implements ArchBuilder {
         return new LayerNorm(weight, bias, eps, "weight");
     }
 
-    static function takeOptionalNorm(weights:NamedTensorMap, baseName:String, eps:Float):LayerNorm {
-        if (!weights.exists(baseName + ".weight")) return null;
-        return takeNorm(weights, baseName, eps);
+    /**
+     * Resolve a LayerNorm from the first candidate base-name that exists.
+     * BERT norms carry different names across loaders — GGUF (llama.cpp)
+     * uses `attn_output_norm` / `layer_output_norm`, the SafetensorsLoader
+     * normalizes to `attn_norm` / `ffn_norm` — so both must resolve. Throws
+     * if none match (these norms are mandatory for a correct encoder).
+     */
+    static function takeNormAny(weights:NamedTensorMap, baseNames:Array<String>, eps:Float):LayerNorm {
+        for (b in baseNames) {
+            if (weights.exists(b + ".weight")) return takeNorm(weights, b, eps);
+        }
+        throw "nue.arch.Bert: missing required LayerNorm, tried " + baseNames.join(", ");
     }
 
     static function takeWeight(weights:NamedTensorMap, name:String):Tensor {
