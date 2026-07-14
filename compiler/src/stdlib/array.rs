@@ -27,6 +27,7 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_pop(builder);
     build_array_length(builder);
     build_array_slice(builder);
+    build_array_copy(builder);
     build_array_join(builder);
     build_array_index_of(builder);
     build_array_last_index_of(builder);
@@ -543,6 +544,48 @@ fn build_array_slice(builder: &mut MirBuilder) {
     builder.call(slice_func, vec![out_ptr, arr, start, end]);
 
     // Return the pointer to the heap-allocated array
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_copy(arr: Ptr(Void)) -> Ptr(Void)
+/// Wrapper for the void out-param runtime fn `haxe_array_copy(out, arr)`.
+/// Heap-allocates the returned HaxeArray struct, fills it, and returns it.
+/// Without this wrapper (mapping `copy` straight to the void extern) no
+/// `out` is allocated, so `copy()` returns null and every use segfaults.
+/// Mirrors `build_array_slice`, which is why `slice` works but `copy` did not.
+fn build_array_copy(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    // Function signature: array_copy(arr: *Array) -> *Array
+    let func_id = builder
+        .begin_function("array_copy")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+
+    // HEAP-allocate the returned HaxeArray struct (32 bytes).
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // Call haxe_array_copy(out_ptr, arr) — fills out_ptr from arr.
+    let copy_func = builder
+        .get_function_by_name("haxe_array_copy")
+        .expect("haxe_array_copy extern not found");
+    builder.call(copy_func, vec![out_ptr, arr]);
+
     builder.ret(Some(out_ptr));
 }
 

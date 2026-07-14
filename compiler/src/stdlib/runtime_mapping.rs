@@ -1557,7 +1557,10 @@ impl StdlibMapping {
             // Extraction methods
             // Array.slice uses MIR wrapper that handles out-param allocation
             map_method!(instance "Array", "slice" => "array_slice", params: 2, returns: primitive),
-            map_method!(instance "Array", "copy" => "haxe_array_copy", params: 0, returns: complex),
+            // Routes to the `array_copy` MIR wrapper (stdlib/array.rs), which
+            // heap-allocates the out array and calls the void out-param runtime
+            // fn. Mapping straight to `haxe_array_copy` allocated no out → null.
+            map_method!(instance "Array", "copy" => "array_copy", params: 0, returns: primitive),
             // Search methods — MIR wrappers default optional fromIndex
             map_method!(instance "Array", "indexOf" => "array_index_of", params: 1, returns: primitive),
             map_method!(instance "Array", "lastIndexOf" => "array_last_index_of", params: 1, returns: primitive),
