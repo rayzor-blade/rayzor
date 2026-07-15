@@ -4189,6 +4189,21 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
     let b_col_stride = b_strides[1];
     let f32_contig = dtype == DTYPE_F32 && a_col_stride == 1 && b_col_stride == 1;
 
+    // AMX f16 fast path (macOS, prefill-shaped GEMM): narrow fully-contiguous F32
+    // to f16 and run BNNSMatMul, which is internally parallel — so it pre-empts
+    // the fork/join below. Gated on m >= RZT_AMX_MIN_BATCH; RZT_AMX_PREFILL=0 opts
+    // out (restoring the exact-F32 NEON reduction). This is the variant the Haxe
+    // `matmulT` wrapper routes through, so it covers every transformer Linear.
+    #[cfg(target_os = "macos")]
+    if f32_contig && a_row_stride == k && b_row_stride == k {
+        let a_data = a.data as *const f32;
+        let b_data = b.data as *const f32;
+        let r_data = r.data as *mut f32;
+        if crate::quant::amx_matmul_t_f32(a_data, b_data, m, k, n, r_data) {
+            return result;
+        }
+    }
+
     let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
     let mut t = if threads > 0 {
         (threads as usize).min(64)
