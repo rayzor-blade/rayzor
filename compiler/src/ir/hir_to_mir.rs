@@ -955,6 +955,24 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Type a loop-carried phi should use for `reg`. Normally the variable's
+    /// declared local type — but when that diverges from the value's actual
+    /// register type on float-vs-integer (e.g. a `Usize` address whose local was
+    /// mis-inferred as `Float`), the phi MUST follow the VALUE. Otherwise the
+    /// backend lowers the mismatched phi with a corrupting `sitofp` at the entry
+    /// and a `bitcast` at the use, destroying the carried pointer → SIGSEGV.
+    fn loop_phi_type(&self, reg: IrId, local_ty: IrType) -> IrType {
+        match self.builder.get_register_type(reg) {
+            Some(rt)
+                if matches!(rt, IrType::F32 | IrType::F64)
+                    != matches!(local_ty, IrType::F32 | IrType::F64) =>
+            {
+                rt
+            }
+            _ => local_ty,
+        }
+    }
+
     /// Cleanup all scopes - used for early return from functions
     /// Frees all heap values in all active scopes (innermost to outermost)
     fn cleanup_all_scopes(&mut self) {
@@ -22322,11 +22340,14 @@ impl<'a> HirToMirContext<'a> {
         let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
-                // Get the type from the locals table
-                if let Some(func) = self.builder.current_function() {
-                    if let Some(local) = func.locals.get(&reg) {
-                        loop_var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
-                    }
+                let local_ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg))
+                    .map(|local| local.ty.clone());
+                if let Some(local_ty) = local_ty {
+                    loop_var_initial_values
+                        .insert(*symbol_id, (reg, self.loop_phi_type(reg, local_ty)));
                 }
             }
         }
@@ -26677,8 +26698,18 @@ impl<'a> HirToMirContext<'a> {
                             IrType::I32 | IrType::I64 | IrType::Bool | IrType::F32 | IrType::F64
                         );
 
+                        // Float-vs-integer disagreement: the register holds the ACTUAL
+                        // value, so its type is authoritative for storage. A hint of
+                        // `Float` over an i64 value (e.g. a `Usize` address whose HIR type
+                        // decayed to Float) would otherwise make every read of the local
+                        // coerce i64→f64→i64 (a corrupting sitofp/bitcast) at loop phis and
+                        // call arguments — a use-after-free on the carried pointer.
+                        let float_int_mismatch = matches!(actual_type, IrType::F32 | IrType::F64)
+                            != matches!(&var_type_from_hint, IrType::F32 | IrType::F64);
+
                         if (hint_is_void_ptr && actual_is_specific)
                             || (actual_is_ptr && hint_is_scalar)
+                            || float_int_mismatch
                         {
                             actual_type.clone()
                         } else {
@@ -31899,11 +31930,14 @@ impl<'a> HirToMirContext<'a> {
         let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
-                // Get the type from the locals table
-                if let Some(func) = self.builder.current_function() {
-                    if let Some(local) = func.locals.get(&reg) {
-                        loop_var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
-                    }
+                let local_ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg))
+                    .map(|local| local.ty.clone());
+                if let Some(local_ty) = local_ty {
+                    loop_var_initial_values
+                        .insert(*symbol_id, (reg, self.loop_phi_type(reg, local_ty)));
                 }
             }
         }
