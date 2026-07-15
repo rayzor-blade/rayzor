@@ -15,7 +15,7 @@ class BertEmbedder {
     var tok:WordPieceTokenizer;
     var dim:Int;
 
-    function new(ggufPath:String) {
+    public function new(ggufPath:String) {
         var loader = new GGUFLoader();
         // Two-arg CHECKED cast — the one-arg `cast x` unsafe form does not
         // recover the concrete object layout from a Module return, so field
@@ -38,8 +38,13 @@ class BertEmbedder {
     }
 
     /** Full pipeline: raw text → WordPiece ([CLS]…[SEP]) → encode → pool + L2. */
-    function embedText(text:String):Array<Float> {
+    public function embedText(text:String):Array<Float> {
         return embed(tok.encodeWithSpecials(text));
+    }
+
+    /** Embedding width — callers size their output buffers from this. */
+    public function dimension():Int {
+        return dim;
     }
 
     /**
