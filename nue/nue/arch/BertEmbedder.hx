@@ -41,15 +41,31 @@ class BertEmbedder {
     // RZT_AMX_MIN_BATCH in the tensor runtime.
     static inline var AMX_MIN = 16;
 
+    // Whether padding-to-threshold pays off: only when the runtime will route
+    // the padded GEMM through Accelerate f16 (macOS + RZT_AMX_PREFILL on). On
+    // x86/non-Mac there is no such gate, so padding is pure wasted work — the
+    // encoder stays on the F32 SIMD kernel regardless of seq len. Mirrors the
+    // Q4Matmul.amxPrefill gate (which isn't reachable cross-module as a static).
+    static var _amx:Int = 0;
+
+    static function amxPad():Bool {
+        if (_amx == 0) {
+            var v = Sys.getEnvOr("RZT_AMX_PREFILL", "RAYZOR_AMX_PREFILL");
+            var off = (v != null && (v == "0" || v == "false"));
+            _amx = (!off && Sys.systemName() == "Mac") ? 1 : 2;
+        }
+        return _amx == 1;
+    }
+
     /** Full pipeline: raw text → WordPiece ([CLS]…[SEP]) → encode → pool + L2. */
     public function embedText(text:String):Array<Float> {
         var ids = tok.encodeWithSpecials(text);
-        // Pad a short sequence up to the AMX threshold so the encoder's Linear
-        // GEMMs take the Accelerate f16 fast path even for tiny inputs; the mask
-        // excludes the padding from attention + pooling, so the embedding is
-        // identical to the unpadded encode (validated by maskTest). Sequences
-        // already at/over the threshold skip masking (the fast maskless path).
-        if (ids.length < AMX_MIN) {
+        // On AMX platforms, pad a short sequence up to the AMX threshold so the
+        // encoder's Linear GEMMs take the Accelerate f16 fast path even for tiny
+        // inputs; the mask excludes the padding from attention + pooling, so the
+        // embedding is identical to the unpadded encode (validated by maskTest).
+        // Non-AMX (x86) never pads — there padding is pure overhead.
+        if (amxPad() && ids.length < AMX_MIN) {
             var pad = tok.specialId("[PAD]");
             if (pad < 0) pad = 0;
             var mask = [for (i in 0...ids.length) 1];
