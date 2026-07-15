@@ -1146,6 +1146,81 @@ unsafe fn amx_prefill_matmul(
     Some(out_tensor)
 }
 
+/// f16 copy of a plain-F32 weight, cached by data pointer and reused across
+/// forwards. Encoder/Linear weights are load-once and fixed, so f32 -> f16 is a
+/// one-time narrowing (vImage, correct rounding); the f16 buffer is leaked,
+/// bounded by the model's weight set (mirrors `cached_f16_weight`). The cached
+/// length guards against a freed+reused buffer of a different shape colliding on
+/// the same address.
+#[cfg(target_os = "macos")]
+fn cached_f16_weight_f32(w_ptr: usize, len: usize) -> *const u16 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<usize, (usize, usize)>>> = Mutex::new(None);
+    let mut g = CACHE.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some(&(p, cached_len)) = map.get(&w_ptr) {
+        if cached_len == len {
+            return p as *const u16;
+        }
+    }
+    let src = unsafe { std::slice::from_raw_parts(w_ptr as *const f32, len) };
+    let mut buf = vec![0u16; len];
+    if !crate::apple_accel::f32_to_f16(src, &mut buf) {
+        return std::ptr::null();
+    }
+    let p = Box::leak(buf.into_boxed_slice()).as_ptr();
+    map.insert(w_ptr, (p as usize, len));
+    p
+}
+
+/// AMX f16 fast path for a plain-F32 `matmul_t` (`X[m,k] · W[n,k]^T -> [m,n]`),
+/// the F32/F16-weight analogue of `amx_prefill_matmul`. The weight is narrowed
+/// to f16 once and cached by pointer; the f32 activation is narrowed per call
+/// into a thread-local scratch; BNNS runs f16×f16 -> f32 straight into `out`.
+/// Gated identically to the Q4 route: `RZT_AMX_PREFILL` on (default) and
+/// `m >= RZT_AMX_MIN_BATCH` (default 16) — so decode/small matmuls stay on the
+/// exact-F32 NEON kernel. Callers must pass fully row-contiguous A and B.
+/// Returns false to fall back.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn amx_matmul_t_f32(
+    a: *const f32,
+    b: *const f32,
+    m: usize,
+    k: usize,
+    n: usize,
+    out: *mut f32,
+) -> bool {
+    if std::env::var_os("RZT_AMX_DEBUG").is_some() {
+        eprintln!(
+            "[amx-f32] m={m} k={k} n={n} enabled={} min_batch={}",
+            amx_prefill_enabled(),
+            amx_prefill_min_batch()
+        );
+    }
+    if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
+        return false;
+    }
+    let fw16 = cached_f16_weight_f32(b as usize, n * k);
+    if fw16.is_null() {
+        return false;
+    }
+    let x = std::slice::from_raw_parts(a, m * k);
+    thread_local! {
+        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    X16.with(|cell| {
+        let mut x16 = cell.borrow_mut();
+        x16.resize(m * k, 0);
+        if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+            return false;
+        }
+        let fw = std::slice::from_raw_parts(fw16, n * k);
+        let out_slice = std::slice::from_raw_parts_mut(out, m * n);
+        crate::apple_accel::matmul_f16f32_nt(m, k, n, &x16, fw, out_slice)
+    })
+}
+
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     x_tensor: i64,
     qt_w: i64,
