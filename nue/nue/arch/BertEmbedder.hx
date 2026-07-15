@@ -37,9 +37,29 @@ class BertEmbedder {
         return out;
     }
 
+    // AMX f16 GEMM fires only at batch (=seq len) >= this; keep in sync with
+    // RZT_AMX_MIN_BATCH in the tensor runtime.
+    static inline var AMX_MIN = 16;
+
     /** Full pipeline: raw text → WordPiece ([CLS]…[SEP]) → encode → pool + L2. */
     public function embedText(text:String):Array<Float> {
-        return embed(tok.encodeWithSpecials(text));
+        var ids = tok.encodeWithSpecials(text);
+        // Pad a short sequence up to the AMX threshold so the encoder's Linear
+        // GEMMs take the Accelerate f16 fast path even for tiny inputs; the mask
+        // excludes the padding from attention + pooling, so the embedding is
+        // identical to the unpadded encode (validated by maskTest). Sequences
+        // already at/over the threshold skip masking (the fast maskless path).
+        if (ids.length < AMX_MIN) {
+            var pad = tok.specialId("[PAD]");
+            if (pad < 0) pad = 0;
+            var mask = [for (i in 0...ids.length) 1];
+            while (ids.length < AMX_MIN) {
+                ids.push(pad);
+                mask.push(0);
+            }
+            return embed(ids, mask);
+        }
+        return embed(ids);
     }
 
     /** Embedding width — callers size their output buffers from this. */
