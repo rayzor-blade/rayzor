@@ -458,6 +458,31 @@ impl IrBuilder {
             }
         }
 
+        // Fill omitted trailing params with a type-appropriate default (null/zero).
+        // Several method-dispatch paths in hir_to_mir build the arg list directly
+        // and never run fill_default_args; an omitted optional (`?mask`) then leaves
+        // its ABI slot (x2/…) holding caller garbage that the callee dereferences —
+        // a nondeterministic use-after-free that only bites when the leftover looks
+        // like a live pointer (e.g. the 2nd iteration of a loop calling the method).
+        // Padding from the callee's own signature fixes every call path in one place.
+        // Restricted to in-module (user-defined) functions so runtime/extern C calls,
+        // which the compiler always emits with exact args, are left untouched.
+        if self.module.functions.contains_key(&func_id) && final_args.len() < param_types.len() {
+            for param_ty in &param_types[final_args.len()..] {
+                let default_val = match param_ty {
+                    IrType::I32 | IrType::U32 => IrValue::I32(0),
+                    IrType::F32 => IrValue::F32(0.0),
+                    IrType::F64 => IrValue::F64(0.0),
+                    IrType::Bool => IrValue::Bool(false),
+                    _ => IrValue::I64(0), // pointers/strings/arrays → null
+                };
+                match self.build_const(default_val) {
+                    Some(reg) => final_args.push(reg),
+                    None => break,
+                }
+            }
+        }
+
         // Only allocate a destination register if the function returns a value
         let dest = if actual_return_type == IrType::Void {
             None
@@ -589,6 +614,40 @@ impl IrBuilder {
         } else {
             Some(self.alloc_reg()?)
         };
+
+        // Fill omitted trailing params with a type-appropriate default (null/zero),
+        // matching build_call_direct — an omitted optional otherwise leaves its ABI
+        // slot holding caller garbage the callee dereferences. In-module funcs only.
+        let mut args = args;
+        if self.module.functions.contains_key(&func_id) {
+            let param_types: Vec<IrType> = self
+                .module
+                .functions
+                .get(&func_id)
+                .map(|f| {
+                    f.signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if args.len() < param_types.len() {
+                for param_ty in &param_types[args.len()..] {
+                    let default_val = match param_ty {
+                        IrType::I32 | IrType::U32 => IrValue::I32(0),
+                        IrType::F32 => IrValue::F32(0.0),
+                        IrType::F64 => IrValue::F64(0.0),
+                        IrType::Bool => IrValue::Bool(false),
+                        _ => IrValue::I64(0),
+                    };
+                    match self.build_const(default_val) {
+                        Some(reg) => args.push(reg),
+                        None => break,
+                    }
+                }
+            }
+        }
 
         let arg_ownership = args
             .iter()
