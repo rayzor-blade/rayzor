@@ -35,6 +35,8 @@ class Main {
                 BertEmbedder.tokenizerTest(args[1], args[2], args[3]);
             case "mask":
                 BertEmbedder.maskTest(args[1]);
+            case "bench":
+                BertEmbedder.benchMode(args[1], args[2], args[3]);
             default:
                 BertEmbedder.goldenTest(args[0], args[1], args[2]);
         }
