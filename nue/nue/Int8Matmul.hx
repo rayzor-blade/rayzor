@@ -86,7 +86,7 @@ class Int8Matmul {
 
         for (t in 0...m) {
             var xScale = Mem.loadF32(adBase + Usize.fromInt(t << 2));
-            var aRow:Usize = axBase + Usize.fromInt(t * k);
+            var aRow = axBase + Usize.fromInt(t * k);
             var yRow = yBase + Usize.fromInt((t * n) << 2);
             for (i in 0...n) {
                 // raw = sum(w * (q_x + 128)) = signedDot + 128*rowsum(w).
@@ -131,7 +131,7 @@ class Int8Matmul {
         var l3 = mAcc.get(3); if (l3 > maxAbs) maxAbs = l3;
         var invD = maxAbs > 0.0 ? 127.0 / maxAbs : 0.0;
         Mem.storeF32(adBase + Usize.fromInt(t << 2), maxAbs > 0.0 ? maxAbs / 127.0 : 1.0);
-        var aRow:Usize = axBase + Usize.fromInt(t * k);
+        var aRow = axBase + Usize.fromInt(t * k);
         for (jj in 0...k) {
             var v = Mem.loadF32(rowF + Usize.fromInt(jj << 2)) * invD;
             var q = v >= 0.0 ? Std.int(v + 0.5) : Std.int(v - 0.5);

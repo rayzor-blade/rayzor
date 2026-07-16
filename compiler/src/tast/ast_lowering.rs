@@ -13210,6 +13210,27 @@ impl<'a> AstLowering<'a> {
                     if lhs_is_user_type {
                         return Ok(left.expr_type);
                     }
+                    // Symmetric case: `<primitive> + <abstract>`. A stdlib-typed
+                    // method whose return is an abstract can read back as its
+                    // primitive (e.g. `Bytes.address()` → an integer, not `Usize`),
+                    // so the abstract lands on the RHS instead. The @:op result is
+                    // still the abstract type; without this the arithmetic default
+                    // below hits `else => Float` and a `Usize` address silently
+                    // decays to Float — every use then coerces the i64 pointer
+                    // i64→f64→i64 (sitofp/bitcast), destroying it → SIGSEGV.
+                    let rhs_is_user_type = type_table
+                        .get(right.expr_type)
+                        .map(|t| {
+                            matches!(
+                                t.kind,
+                                crate::tast::core::TypeKind::Class { .. }
+                                    | crate::tast::core::TypeKind::Abstract { .. }
+                            )
+                        })
+                        .unwrap_or(false);
+                    if rhs_is_user_type {
+                        return Ok(right.expr_type);
+                    }
                 }
 
                 match operator {
