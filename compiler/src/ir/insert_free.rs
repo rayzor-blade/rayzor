@@ -41,6 +41,13 @@ struct AllocFuncIds {
     /// receiver. Tracked separately from anon_safe_ids so we can flag the
     /// value-arg as an escape without losing the receiver-is-safe semantics.
     anon_setter_ids: BTreeSet<IrFunctionId>,
+    /// Copy-only callees: they READ/COPY their pointer args into their own
+    /// storage and retain no reference (e.g. `tensor_fromArray` copies a Haxe
+    /// `Array<Float>` into a fresh tensor buffer). Passing a heap pointer to
+    /// one is NOT an escape, so a local that flows only into such calls (and
+    /// nowhere else escaping) can still be freed. Each entry MUST be verified
+    /// to retain nothing.
+    copy_only_ids: BTreeSet<IrFunctionId>,
 }
 
 pub struct InsertFreePass;
@@ -67,6 +74,7 @@ impl OptimizationPass for InsertFreePass {
             anon_drop_ids: BTreeSet::new(),
             anon_safe_ids: BTreeSet::new(),
             anon_setter_ids: BTreeSet::new(),
+            copy_only_ids: BTreeSet::new(),
         };
 
         // Scan both local and extern functions for known names
@@ -138,6 +146,13 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         }
         "free" => {
             ids.free_ids.insert(fid);
+        }
+        // Copy-only runtime helpers: verified to copy their pointer arg into
+        // fresh storage and retain nothing (rayzor_tensor_from_array loops
+        // element-by-element into a freshly alloc'd tensor buffer). A local
+        // Haxe array that flows only into one of these does not escape.
+        "tensor_fromArray" | "rayzor_tensor_from_array" => {
+            ids.copy_only_ids.insert(fid);
         }
         "rayzor_anon_new" => {
             ids.anon_new_ids.insert(fid);
@@ -231,7 +246,14 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         // For anon allocs, use modified escape analysis that whitelists safe accessors
         let empty = BTreeSet::new();
         let safe_ids = if is_anon { &ids.anon_safe_ids } else { &empty };
-        if !pointer_escapes(alloc_id, &derived, function, safe_ids, &ids.anon_setter_ids) {
+        if !pointer_escapes(
+            alloc_id,
+            &derived,
+            function,
+            safe_ids,
+            &ids.anon_setter_ids,
+            &ids.copy_only_ids,
+        ) {
             allocs_needing_free.push(alloc_id);
         }
     }
@@ -388,6 +410,7 @@ fn pointer_escapes(
     function: &IrFunction,
     safe_call_ids: &BTreeSet<IrFunctionId>,
     anon_setter_ids: &BTreeSet<IrFunctionId>,
+    copy_only_ids: &BTreeSet<IrFunctionId>,
 ) -> bool {
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
@@ -395,7 +418,12 @@ fn pointer_escapes(
                 // Pointer passed as function argument → escapes
                 // (unless the call target is known-safe, e.g. rayzor_anon_* accessors)
                 IrInstruction::CallDirect { args, func_id, .. } => {
-                    if !safe_call_ids.contains(func_id) {
+                    if copy_only_ids.contains(func_id) {
+                        // Verified copy-only callee: it copies its pointer args
+                        // into fresh storage and retains nothing, so passing the
+                        // alloc here is not an escape. Other uses of the alloc are
+                        // still checked by the remaining match arms.
+                    } else if !safe_call_ids.contains(func_id) {
                         for arg in args {
                             if *arg == alloc_id || derived.contains(arg) {
                                 return true;
