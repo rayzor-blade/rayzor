@@ -765,7 +765,61 @@ where
     }
 }
 
+/// On Linux, transparently re-exec under jemalloc (system libjemalloc via
+/// LD_PRELOAD) before doing any real work. This routes BOTH the compiler's
+/// own Rust allocations AND the JIT'd guest's C `malloc`/`free` — which the
+/// backend resolves by name from the process symbol table, so a Rust
+/// `#[global_allocator]` alone would NOT cover them — through jemalloc.
+/// glibc's default retains freed pages per-arena, inflating long-running RSS
+/// (a bounded encode loop grew unbounded on the NUC); jemalloc returns them.
+///
+/// No-op when: not Linux, `RAYZOR_NO_JEMALLOC=1`, jemalloc is already
+/// preloaded (the bench scripts do this), the lib is absent, or we've already
+/// re-exec'd (guard env). `exec` replaces the image (same PID/argv); it only
+/// returns on error, in which case we fall through on the default allocator.
+#[cfg(target_os = "linux")]
+fn ensure_jemalloc() {
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    if std::env::var_os("RAYZOR_NO_JEMALLOC").is_some()
+        || std::env::var_os("RAYZOR_JEMALLOC_ACTIVE").is_some()
+    {
+        return;
+    }
+    if std::env::var("LD_PRELOAD")
+        .map(|v| v.contains("jemalloc"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(lib) = [
+        "/usr/lib/x86_64-linux-gnu/libjemalloc.so.2",
+        "/usr/lib64/libjemalloc.so.2",
+        "/usr/lib/libjemalloc.so.2",
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).exists()) else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let preload = match std::env::var("LD_PRELOAD") {
+        Ok(v) if !v.is_empty() => format!("{v}:{lib}"),
+        _ => lib.to_string(),
+    };
+    let _ = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("LD_PRELOAD", preload)
+        .env("RAYZOR_JEMALLOC_ACTIVE", "1")
+        .exec();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_jemalloc() {}
+
 fn main() {
+    ensure_jemalloc();
     #[cfg(feature = "profile")]
     unsafe {
         rayzor_runtime::ensure_alloc_dump_hooks();
