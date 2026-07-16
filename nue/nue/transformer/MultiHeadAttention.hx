@@ -48,20 +48,41 @@ class MultiHeadAttention implements Attention {
     public function forward(x:Tensor):Tensor {
         var seq = x.shape()[0];
 
-        // Three independent consumers of x → clone twice; last use moves
-        // the original.
-        var q = qProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
-        var k = kProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
-        var v = vProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        // Every intermediate below (clones, projections, reshape/permute views,
+        // bmm/scale/softmax outputs) is a manually-managed tensor; each was
+        // leaking one allocation per layer. Bind every step and free them all
+        // after `out` is computed — `out` is an independent oProj matmul, so
+        // releasing the intermediates afterward is safe (refcount-protected).
+        var xc1 = x.clone();
+        var qp = qProj.forward(xc1);
+        xc1.free();
+        var qr = qp.reshape([seq, numHeads, headDim]);
+        var q = qr.permute([1, 0, 2]);
 
-        // scores: [heads, seq, seq]
-        var scores = q.bmm(k.transposeLast2()).scale(scale);
-        // No mask — bidirectional attention.
-        var attn = scores.softmax();
-        var context = attn.bmm(v).permute([1, 0, 2]);
+        var xc2 = x.clone();
+        var kp = kProj.forward(xc2);
+        xc2.free();
+        var kr = kp.reshape([seq, numHeads, headDim]);
+        var k = kr.permute([1, 0, 2]);
 
+        var vp = vProj.forward(x);
+        var vr = vp.reshape([seq, numHeads, headDim]);
+        var v = vr.permute([1, 0, 2]);
+
+        var kt = k.transposeLast2();
+        var qk = q.bmm(kt);
+        var scores = qk.scale(scale); // [heads, seq, seq]
+        var attn = scores.softmax();  // no mask — bidirectional attention
+        var av = attn.bmm(v);
+        var context = av.permute([1, 0, 2]);
         var flat = context.reshape([seq, numHeads * headDim]);
-        return oProj.forward(flat);
+        var out = oProj.forward(flat);
+
+        flat.free(); context.free(); av.free(); attn.free(); scores.free(); qk.free(); kt.free();
+        v.free(); vr.free(); vp.free();
+        k.free(); kr.free(); kp.free();
+        q.free(); qr.free(); qp.free();
+        return out;
     }
 
     /**
@@ -74,17 +95,37 @@ class MultiHeadAttention implements Attention {
     public function forwardMasked(x:Tensor, attnBias:Tensor):Tensor {
         var seq = x.shape()[0];
 
-        var q = qProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
-        var k = kProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
-        var v = vProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        var xc1 = x.clone();
+        var qp = qProj.forward(xc1);
+        xc1.free();
+        var qr = qp.reshape([seq, numHeads, headDim]);
+        var q = qr.permute([1, 0, 2]);
 
-        var scores = q.bmm(k.transposeLast2()).scale(scale);
+        var xc2 = x.clone();
+        var kp = kProj.forward(xc2);
+        xc2.free();
+        var kr = kp.reshape([seq, numHeads, headDim]);
+        var k = kr.permute([1, 0, 2]);
+
+        var vp = vProj.forward(x);
+        var vr = vp.reshape([seq, numHeads, headDim]);
+        var v = vr.permute([1, 0, 2]);
+
+        var kt = k.transposeLast2();
+        var qk = q.bmm(kt);
+        var scores = qk.scale(scale);
         scores.addInto(attnBias); // + additive key mask, broadcast over [heads, query]
         var attn = scores.softmax();
-        var context = attn.bmm(v).permute([1, 0, 2]);
-
+        var av = attn.bmm(v);
+        var context = av.permute([1, 0, 2]);
         var flat = context.reshape([seq, numHeads * headDim]);
-        return oProj.forward(flat);
+        var out = oProj.forward(flat);
+
+        flat.free(); context.free(); av.free(); attn.free(); scores.free(); qk.free(); kt.free();
+        v.free(); vr.free(); vp.free();
+        k.free(); kr.free(); kp.free();
+        q.free(); qr.free(); qp.free();
+        return out;
     }
 
     public function parameters():Array<NamedTensor> {

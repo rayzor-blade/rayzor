@@ -180,7 +180,7 @@ class BertEmbedder {
             if (s.length > 0) sents.push(s);
         }
         var iters = Std.parseInt(itersArg);
-        if (iters <= 0) iters = 10;
+        if (iters == null || iters <= 0) iters = 10;
         Sys.println("[bench] loaded dim=" + self.dim + " corpus=" + sents.length + " iters=" + iters);
         // Warm up: JIT tier promotion + lazy int8 weight quantization.
         for (r in 0...sents.length) self.embedText(sents[r]);

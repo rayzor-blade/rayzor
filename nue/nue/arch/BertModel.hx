@@ -69,19 +69,29 @@ class BertModel implements EncoderModel {
         var seq = tokenIds.length;
         var positions = [for (i in 0...seq) i];
 
+        // Tensors are manually freed (Tensor is @:derive([Clone]), not Drop);
+        // every embedding-stack intermediate below leaked one allocation per
+        // encode. Bind + free each at last use.
         var h0 = tokenEmbed.lookup(tokenIds);
-        var h1 = h0.add(positionEmbed.lookup(positions));
+        var posLookup = positionEmbed.lookup(positions);
+        var h1 = h0.add(posLookup);
+        h0.free();
+        posLookup.free();
         // token_type embedding: single-segment BERT uses segment id 0 for
         // every position, so add token_types[0] to each row.
         var h2:Tensor;
         if (hasSegment) {
             var segIds = [for (i in 0...seq) 0];
-            h2 = h1.add(segmentEmbed.lookup(segIds));
+            var segLookup = segmentEmbed.lookup(segIds);
+            h2 = h1.add(segLookup);
+            h1.free();
+            segLookup.free();
         } else {
             h2 = h1;
         }
         // Post-embedding LayerNorm — mandatory for BERT.
         var h3 = embedNorm.forward(h2);
+        h2.free();
 
         // A mask with any zero entry (a padded/batched sequence) takes the
         // masked block path: an additive `[seq]` key bias — 0 for real tokens,
@@ -99,18 +109,28 @@ class BertModel implements EncoderModel {
             var bias = Tensor.fromArray([for (t in 0...seq) (attentionMask[t] == 0 ? -1e30 : 0.0)], F32);
             for (block in blocks) {
                 var nextH = hBlocks.clone();
+                var prev = hBlocks;
                 hBlocks = block.forwardMasked(nextH, bias);
+                prev.free(); // old hidden state (h3 on the first pass) — was leaked per layer
             }
             bias.free();
         } else {
             for (block in blocks) {
                 var nextH = hBlocks.clone();
+                var prev = hBlocks;
                 hBlocks = block.forward(nextH);
+                prev.free();
             }
         }
-        var hFinal:Tensor = hasEncoderNorm
-            ? encoderNorm.forward(hBlocks.clone())
-            : hBlocks.clone();
+        var hFinal:Tensor;
+        if (hasEncoderNorm) {
+            var hc = hBlocks.clone();
+            hFinal = encoderNorm.forward(hc);
+            hc.free();
+            hBlocks.free();
+        } else {
+            hFinal = hBlocks; // transfer ownership to the caller — no clone/leak
+        }
         return hFinal;
     }
 
