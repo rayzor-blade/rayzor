@@ -3,6 +3,9 @@ package nue;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
+import rayzor.Bytes;
+import rayzor.Usize;
+import nue.Int8Matmul;
 
 /**
  * Standard linear (matmul + optional bias) layer used by every transformer
@@ -41,6 +44,14 @@ class Linear implements Module {
         read garbage (statics aren't forwarded across modules). */
     public var pool:Null<rayzor.concurrent.SpinPool> = null;
 
+    /** x86/NUC int8 VNNI path: the F32 weight lazily quantized once into a packed
+        [qw(n*k i8) | scales(4n f32) | rowsums(4n i32)] buffer, then reused every
+        forward. Off by default (Mac uses the AMX f16 matmulT); gated by NUE_INT8. */
+    public var int8:Null<Bytes> = null;
+    public var int8N:Int = 0;
+    public var int8K:Int = 0;
+    static var _int8:Int = 0;
+
     public function new(weight:Tensor, ?bias:Tensor, paramName:String = "weight") {
         this.weight = weight;
         this.qweight = null;
@@ -64,6 +75,18 @@ class Linear implements Module {
             _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _haxeMatmul == 1;
+    }
+
+    /** NUE_INT8=1 routes plain-F32 encoder projections through the int8 VNNI GEMM
+        (Int8Matmul → vpdpbusd on x86 / SDOT on arm). Platform-agnostic so it can be
+        A/B'd on any box; the AMX f16 matmulT stays the Mac default. Cached like
+        useHaxeMatmul (0 = uninitialised, load-bearing for x-module static dups). */
+    public static function useInt8():Bool {
+        if (_int8 == 0) {
+            var v = Sys.getEnvOr("NUE_INT8", "RAYZOR_INT8");
+            _int8 = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _int8 == 1;
     }
 
     /**
@@ -115,6 +138,8 @@ class Linear implements Module {
                 y = qweight.matmulXTQThreaded(xClone, 0);
                 xClone.free();
             }
+        } else if (useInt8()) {
+            y = int8Forward(x);
         } else {
             y = x.matmulT(weight);
         }
@@ -128,6 +153,29 @@ class Linear implements Module {
             return y;
         }
         return y;
+    }
+
+    /** Plain-F32 weight → int8 VNNI GEMM. Quantizes the `[out,in]` weight once
+        (packed, cached in `int8`); activations are quantized per call inside
+        Int8Matmul. Falls back to the F32 kernel when the contraction dim is not a
+        multiple of 16. `pool` (when set) threads the row band. */
+    function int8Forward(x:Tensor):Tensor {
+        var shp = weight.shape(); // [out, in] = [n, k]
+        var n = shp[0];
+        var k = shp[1];
+        if ((k & 15) != 0) return x.matmulT(weight);
+        if (int8 == null) {
+            var packed = Bytes.alloc(n * k + n * 8); // qw(n*k) + scales(4n) + sums(4n)
+            var b = packed.address();
+            Int8Matmul.quantizeWeight(weight, n, k, b, b + Usize.fromInt(n * k), b + Usize.fromInt(n * k + n * 4));
+            int8 = packed;
+            int8N = n;
+            int8K = k;
+        }
+        var m = Std.int(x.numel() / int8K);
+        var base = int8.address();
+        return Int8Matmul.matmul(x, m, int8K, int8N, base, base + Usize.fromInt(int8N * int8K),
+            base + Usize.fromInt(int8N * int8K + int8N * 4));
     }
 
     public function parameters():Array<NamedTensor> {

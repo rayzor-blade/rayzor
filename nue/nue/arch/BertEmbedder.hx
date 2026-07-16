@@ -168,6 +168,37 @@ class BertEmbedder {
         return minCos;
     }
 
+    /** `nue bench <gguf> <sentences.txt> <iters>`: load once, warm up, then time
+        `iters` passes over the corpus and report pure encode throughput. Server-free
+        so the F32 vs NUE_INT8 A/B isn't clouded by TCP/threading. */
+    public static function benchMode(ggufPath:String, sentencesPath:String, itersArg:String):Void {
+        var self = new BertEmbedder(ggufPath);
+        var raw = File.getContent(sentencesPath).split("\n");
+        var sents = [];
+        for (r in 0...raw.length) {
+            var s = StringTools.trim(raw[r]);
+            if (s.length > 0) sents.push(s);
+        }
+        var iters = Std.parseInt(itersArg);
+        if (iters <= 0) iters = 10;
+        Sys.println("[bench] loaded dim=" + self.dim + " corpus=" + sents.length + " iters=" + iters);
+        // Warm up: JIT tier promotion + lazy int8 weight quantization.
+        for (r in 0...sents.length) self.embedText(sents[r]);
+        var t0 = Sys.time();
+        var count = 0;
+        for (it in 0...iters) {
+            var it0 = Sys.time();
+            for (r in 0...sents.length) {
+                self.embedText(sents[r]);
+                count++;
+            }
+            Sys.println("[bench] iter " + it + "  " + (sents.length / (Sys.time() - it0)) + " sent/s");
+        }
+        var dt = Sys.time() - t0;
+        Sys.println("=== BENCH  sentences=" + count + "  encode_s=" + dt
+            + "  sent/s=" + (count / dt) + " ===");
+    }
+
     /** `nue embed`: load, embed one text, print the dim, L2 norm, and head. */
     public static function embedOne(ggufPath:String, text:String):Void {
         var self = new BertEmbedder(ggufPath);
