@@ -712,6 +712,68 @@ fn pool_alloc_bytes(shape: &[usize], dtype: u8) -> usize {
 /// shape class; on a hit, the popped wrapper's data buffer is refilled
 /// per `fill` and the same wrapper handle is returned (zero mallocs).
 /// On a miss falls through to the canonical four-malloc path below.
+// ============================================================================
+// Leak characterisation (env-gated `RZT_LEAK_STATS=1`). Tracks NET owning-
+// tensor live bytes (every logical alloc +=, every logical owning free -=;
+// views carry no data so they don't count) and periodically prints it beside
+// the process RSS. If NET tracks RSS growth → the residual leak is tensors; if
+// RSS climbs while NET stays flat → it is non-tensor (Haxe objects / Rust).
+// Disabled path is a single cached-bool load; safe to leave compiled in.
+// ============================================================================
+static LEAK_NET_TENSOR_BYTES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static LEAK_OP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn leak_stats_enabled() -> bool {
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| {
+        matches!(
+            crate::env_var("RZT_LEAK_STATS", "RAYZOR_LEAK_STATS").as_deref(),
+            Ok("1")
+        )
+    })
+}
+
+fn proc_rss_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(-1.0)
+}
+
+#[inline]
+fn leak_on_alloc(bytes: usize) {
+    if !leak_stats_enabled() {
+        return;
+    }
+    LEAK_NET_TENSOR_BYTES.fetch_add(bytes as i64, MemOrdering::Relaxed);
+    let n = LEAK_OP_COUNT.fetch_add(1, MemOrdering::Relaxed);
+    if n.is_multiple_of(20_000) {
+        let tensor_mb = LEAK_NET_TENSOR_BYTES.load(MemOrdering::Relaxed) as f64 / 1e6;
+        let rss = proc_rss_mb();
+        eprintln!(
+            "[leak-stats] allocs={} tensor_net_live={:.1}MB rss={:.1}MB non_tensor~={:.1}MB",
+            n,
+            tensor_mb,
+            rss,
+            rss - tensor_mb
+        );
+    }
+}
+
+#[inline]
+fn leak_on_free(bytes: usize) {
+    if !leak_stats_enabled() {
+        return;
+    }
+    LEAK_NET_TENSOR_BYTES.fetch_sub(bytes as i64, MemOrdering::Relaxed);
+}
+
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 unsafe fn alloc_tensor_with_zero_policy(
     shape: &[usize],
@@ -726,6 +788,7 @@ unsafe fn alloc_tensor_with_zero_policy(
     let numel: usize = shape.iter().product();
     let elem_size = dtype_size(dtype);
     let data_bytes = numel * elem_size;
+    leak_on_alloc(pool_alloc_bytes(shape, dtype));
 
     // ---- Pool fast path ----
     let key = PoolKey::from_shape(dtype, shape);
@@ -4551,6 +4614,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
     let key = PoolKey::from_shape(t.dtype, shape_slice);
     let alloc_bytes = pool_alloc_bytes(shape_slice, t.dtype);
+    leak_on_free(alloc_bytes);
     let entry = PooledEntry {
         ptr: tensor_ptr as *mut u8,
         shape: ShapeBuf::from_slice(shape_slice),
