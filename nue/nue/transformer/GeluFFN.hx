@@ -27,7 +27,15 @@ class GeluFFN implements Module {
     }
 
     public function forward(x:Tensor):Tensor {
-        return down.forward(up.forward(x).gelu());
+        // Free the two large [seq, intermediate] transients (up projection and
+        // its GELU) — tensors are manually managed (Tensor is @:derive([Clone]),
+        // not Drop), so an un-freed intermediate leaks every layer.
+        var u = up.forward(x);
+        var g = u.gelu();
+        u.free();
+        var out = down.forward(g);
+        g.free();
+        return out;
     }
 
     public function parameters():Array<NamedTensor> {

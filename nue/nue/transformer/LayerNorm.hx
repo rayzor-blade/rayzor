@@ -29,7 +29,13 @@ class LayerNorm implements Module {
     }
 
     public function forward(x:Tensor):Tensor {
-        var y = x.layerNorm(eps).mul(weight);
+        // Bind the layerNorm result so it can be freed — as a chained temp
+        // (`x.layerNorm(eps).mul(weight)`) it leaked one [seq, hidden] tensor
+        // every call (~14 LayerNorms per BERT encode). mul() does not free its
+        // receiver.
+        var ln = x.layerNorm(eps);
+        var y = ln.mul(weight);
+        ln.free();
         // `y` is a fresh contiguous owning tensor straight out of `.mul`.
         // Accumulate bias in place — saves one [seq, hidden] F32 alloc on
         // every LayerNorm call. Cold for Llama (RMSNorm has no bias) but
