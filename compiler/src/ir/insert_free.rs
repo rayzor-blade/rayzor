@@ -48,6 +48,16 @@ struct AllocFuncIds {
     /// nowhere else escaping) can still be freed. Each entry MUST be verified
     /// to retain nothing.
     copy_only_ids: BTreeSet<IrFunctionId>,
+    /// `haxe_array_new` — initialises a `HaxeArray` header (arg0) that owns a
+    /// heap data buffer. The buffer is otherwise never freed.
+    array_new_ids: BTreeSet<IrFunctionId>,
+    /// `haxe_array_free` — releases the header's data buffer.
+    array_free_ids: BTreeSet<IrFunctionId>,
+    /// Array ops that take the header as arg0 and DO NOT retain it past the
+    /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
+    /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
+    /// getters (hand out interior pointers) — which must count as escapes.
+    array_safe_ids: BTreeSet<IrFunctionId>,
 }
 
 pub struct InsertFreePass;
@@ -75,6 +85,9 @@ impl OptimizationPass for InsertFreePass {
             anon_safe_ids: BTreeSet::new(),
             anon_setter_ids: BTreeSet::new(),
             copy_only_ids: BTreeSet::new(),
+            array_new_ids: BTreeSet::new(),
+            array_free_ids: BTreeSet::new(),
+            array_safe_ids: BTreeSet::new(),
         };
 
         // Scan both local and extern functions for known names
@@ -154,6 +167,21 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         "tensor_fromArray" | "rayzor_tensor_from_array" => {
             ids.copy_only_ids.insert(fid);
         }
+        "haxe_array_new" | "array_new" => {
+            ids.array_new_ids.insert(fid);
+            ids.array_safe_ids.insert(fid);
+        }
+        "haxe_array_free" | "array_free" => {
+            ids.array_free_ids.insert(fid);
+        }
+        // Non-retaining array ops (receiver = arg0). Conservative: only the
+        // scalar get/set/push/pop/length/query ops that neither hand out an
+        // interior pointer nor keep the array. Everything else (iterator,
+        // *_ptr, map/filter/sort/concat/slice/…) is intentionally omitted so
+        // it still counts as an escape.
+        _ if is_safe_array_op(name) => {
+            ids.array_safe_ids.insert(fid);
+        }
         "rayzor_anon_new" => {
             ids.anon_new_ids.insert(fid);
             ids.anon_safe_ids.insert(fid);
@@ -175,6 +203,33 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
     }
 }
 
+/// Non-retaining array ops (see `array_safe_ids`). Matches both the
+/// `haxe_array_*` and bare `array_*` spellings the MIR emits. Deliberately
+/// excludes iterator (retains the array), the `_ptr` getters (hand out
+/// interior pointers), and closure-taking ops (map/filter/sort).
+fn is_safe_array_op(name: &str) -> bool {
+    let base = name.strip_prefix("haxe_").unwrap_or(name);
+    matches!(
+        base,
+        "array_push"
+            | "array_push_f64"
+            | "array_push_i32"
+            | "array_push_i64"
+            | "array_get_f64"
+            | "array_get_i32"
+            | "array_get_i64"
+            | "array_set_f64"
+            | "array_set_i64"
+            | "array_set_null"
+            | "array_length"
+            | "array_pop"
+            | "array_pop_i64"
+            | "array_contains"
+            | "array_index_of"
+            | "array_last_index_of"
+    )
+}
+
 /// Insert Free instructions for non-escaping allocations in a single function.
 /// Returns the number of Free instructions inserted.
 fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> usize {
@@ -191,6 +246,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     // Calling libc free() on a stack address causes SIGABRT.
     let mut alloc_ids: Vec<IrId> = Vec::new();
     let mut anon_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
+    let mut array_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
@@ -209,6 +265,18 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                     alloc_ids.push(*dest);
                     anon_alloc_ids.insert(*dest);
                 }
+                // haxe_array_new(header, elem_size) initialises the HaxeArray
+                // header passed as arg0; that header owns a heap data buffer
+                // released by haxe_array_free. Track the header pointer.
+                IrInstruction::CallDirect { func_id, args, .. }
+                    if ids.array_new_ids.contains(func_id) =>
+                {
+                    if let Some(&hdr) = args.first() {
+                        if array_alloc_ids.insert(hdr) {
+                            alloc_ids.push(hdr);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -220,11 +288,13 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
 
     // Step 2: For each alloc, check escape and collect non-escaping ones
     let mut allocs_needing_free: Vec<IrId> = Vec::new();
-    let dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    dealloc_ids.extend(ids.array_free_ids.iter().cloned());
 
     for &alloc_id in &alloc_ids {
         let derived = build_derived_set(alloc_id, function);
         let is_anon = anon_alloc_ids.contains(&alloc_id);
+        let is_array = array_alloc_ids.contains(&alloc_id);
 
         // Check if already has a Free (either Free instruction, free() call, or anon_drop call)
         let has_free = function.cfg.blocks.values().any(|block| {
@@ -243,9 +313,15 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
             continue;
         }
 
-        // For anon allocs, use modified escape analysis that whitelists safe accessors
+        // Anon and array allocs each whitelist their own safe accessors.
         let empty = BTreeSet::new();
-        let safe_ids = if is_anon { &ids.anon_safe_ids } else { &empty };
+        let safe_ids = if is_array {
+            &ids.array_safe_ids
+        } else if is_anon {
+            &ids.anon_safe_ids
+        } else {
+            &empty
+        };
         if !pointer_escapes(
             alloc_id,
             &derived,
@@ -279,6 +355,8 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
 
     // Pick a single anon_drop function ID for emitting drop calls
     let anon_drop_id = ids.anon_drop_ids.iter().next().cloned();
+    // ...and a single haxe_array_free ID for releasing array data buffers.
+    let array_free_id = ids.array_free_ids.iter().next().cloned();
 
     // Step 4: Insert Free/Drop for each non-escaping alloc.
     // For allocs defined in the entry block (which dominates all returns), insert at return blocks.
@@ -291,13 +369,22 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     for (&block_id, block) in &function.cfg.blocks {
         for inst in &block.instructions {
             if let IrInstruction::CallDirect {
-                dest: Some(dest),
+                dest,
                 func_id,
+                args,
                 ..
             } = inst
             {
-                if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
-                    alloc_def_block.insert(*dest, block_id);
+                if let Some(dest) = dest {
+                    if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
+                        alloc_def_block.insert(*dest, block_id);
+                    }
+                }
+                // Arrays are keyed by the header pointer passed to haxe_array_new.
+                if ids.array_new_ids.contains(func_id) {
+                    if let Some(&hdr) = args.first() {
+                        alloc_def_block.insert(hdr, block_id);
+                    }
                 }
             }
         }
@@ -333,7 +420,22 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                     }
                 }
 
-                if anon_alloc_ids.contains(&alloc_id) {
+                if array_alloc_ids.contains(&alloc_id) {
+                    // Release the array's heap data buffer via haxe_array_free
+                    // (the stack header is auto-reclaimed). NOT a libc Free —
+                    // the alloc_id is the header pointer, not a malloc result.
+                    if let Some(free_id) = array_free_id {
+                        block.instructions.push(IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: free_id,
+                            args: vec![alloc_id],
+                            arg_ownership: vec![OwnershipMode::Move],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        });
+                        inserted += 1;
+                    }
+                } else if anon_alloc_ids.contains(&alloc_id) {
                     if let Some(drop_id) = anon_drop_id {
                         block.instructions.push(IrInstruction::CallDirect {
                             dest: None,
