@@ -7,6 +7,8 @@ import nue.transformer.TransformerBlock;
 import nue.model.ModelMetadata;
 import rayzor.ds.Tensor;
 import rayzor.ds.DType;
+import rayzor.ds.BertGraph;
+import rayzor.Bytes;
 
 /**
  * BERT-family encoder. Composes the input embedding stack (token +
@@ -32,6 +34,11 @@ class BertModel implements EncoderModel {
     // Optional pieces are non-null placeholders gated by a Bool flag, not
     // `Null<T>` fields (which are not reliable here across module boundaries).
     public var meta:ModelMetadata;
+    /** BNNSGraph fused-encoder engine (Phase 4): the model HANDLE returned by
+        `BertGraph.load`, set by the embedder. 0 = engine off. When set,
+        `encode` routes the whole block stack through one graph call for
+        bucket-fitting sequences. */
+    public var graphHandle:Int = 0;
     public var tokenEmbed:Embedding;
     public var positionEmbed:Embedding;
     public var segmentEmbed:Embedding;   // placeholder when hasSegment == false
@@ -105,7 +112,29 @@ class BertModel implements EncoderModel {
         }
 
         var hBlocks = h3;
-        if (masked) {
+        // Fused-graph engine: one BNNSGraph call replaces the whole block
+        // loop when the sequence was padded to a loaded bucket (embedText
+        // does that when the engine is on). Bias is the additive key mask in
+        // fp16-safe range (-1e4, NOT the f32 path's -1e30). Falls through to
+        // the per-block path on any failure.
+        var ranGraph = false;
+        if (graphHandle > 0 && attentionMask != null && BertGraph.bucketFor(graphHandle, seq) == seq) {
+            var biasB = Bytes.alloc(seq * 4);
+            for (t in 0...seq) biasB.setFloat(t * 4, attentionMask[t] == 0 ? -1e4 : 0.0);
+            var gOut = Tensor.zeros([seq, meta.hiddenSize], F32);
+            var rc = BertGraph.execute(graphHandle, seq, h3.data().raw(), biasB.address(), gOut.data().raw());
+            biasB.free();
+            if (rc == 0) {
+                h3.free();
+                hBlocks = gOut;
+                ranGraph = true;
+            } else {
+                gOut.free();
+            }
+        }
+        if (ranGraph) {
+            // encoder norm / ownership handling below is shared
+        } else if (masked) {
             var bias = Tensor.fromArray([for (t in 0...seq) (attentionMask[t] == 0 ? -1e30 : 0.0)], F32);
             for (block in blocks) {
                 var nextH = hBlocks.clone();

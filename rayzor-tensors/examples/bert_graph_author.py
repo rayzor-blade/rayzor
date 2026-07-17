@@ -32,22 +32,34 @@ from coremltools.converters.mil import Builder as mb
 from coremltools.converters.mil.mil import types
 from gguf import GGUFReader
 
-HIDDEN = 384
-HEADS = 12
-HEAD_DIM = 32
-LAYERS = 6
-FFN = 1536
+# Model dims are read from the GGUF metadata (bert.*) in main() — the script
+# is generic across BERT-family GGUFs; artifacts are named by the gguf stem.
+HIDDEN = HEADS = HEAD_DIM = LAYERS = FFN = 0
 EPS = 1e-12
 
 
-def load_weights(gguf_path):
+def meta_int(r, key):
+    f = r.fields[key]
+    return int(f.parts[f.data[0]][0])
+
+
+def load_model(gguf_path):
+    """Weights by name + dims from the GGUF's own bert.* metadata."""
     r = GGUFReader(gguf_path)
+    arch = bytes(r.fields["general.architecture"].parts[-1]).decode()
+    assert arch == "bert", f"expected a bert-family gguf, got {arch!r}"
+    dims = {
+        "hidden": meta_int(r, "bert.embedding_length"),
+        "layers": meta_int(r, "bert.block_count"),
+        "heads": meta_int(r, "bert.attention.head_count"),
+        "ffn": meta_int(r, "bert.feed_forward_length"),
+    }
     w = {}
     for t in r.tensors:
         w[t.name] = np.array(t.data, dtype=np.float32).reshape(
             tuple(int(d) for d in reversed(t.shape))
         )
-    return w
+    return w, dims
 
 
 def layer_params(w, i):
@@ -170,16 +182,28 @@ def author_bucket(S, params, outdir):
     print(f"S={S}  cosine(mlprogram, numpy-ref) = {cos:.6f}")
     assert cos > 0.999, f"authored graph diverges from reference (S={S}, cos={cos})"
 
-    path = f"{outdir}/bert_encoder_s{S}.mlpackage"
+    path = f"{outdir}/{STEM}.encoder_s{S}.mlpackage"
     m.save(path)
     print(f"saved {path}")
 
 
 def main():
+    global HIDDEN, HEADS, HEAD_DIM, LAYERS, FFN, STEM
     gguf_path = sys.argv[1]
     outdir = sys.argv[2]
     buckets = [int(b) for b in sys.argv[3:]] or [128, 256, 512]
-    w = load_weights(gguf_path)
+    w, dims = load_model(gguf_path)
+    HIDDEN, LAYERS, HEADS, FFN = (
+        dims["hidden"],
+        dims["layers"],
+        dims["heads"],
+        dims["ffn"],
+    )
+    HEAD_DIM = HIDDEN // HEADS
+    # Artifacts are keyed to their model by the gguf stem, so several BERT
+    # models can share a directory and the runtime pairs them deterministically.
+    STEM = gguf_path.rsplit("/", 1)[-1].removesuffix(".gguf")
+    print(f"model {STEM}: hidden={HIDDEN} layers={LAYERS} heads={HEADS} ffn={FFN}")
     params = [layer_params(w, i) for i in range(LAYERS)]
     for S in buckets:
         author_bucket(S, params, outdir)
