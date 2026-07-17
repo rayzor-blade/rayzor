@@ -50,6 +50,14 @@ struct AllocFuncIds {
     copy_only_ids: BTreeSet<IrFunctionId>,
     /// `haxe_array_free` — releases the header's data buffer.
     array_free_ids: BTreeSet<IrFunctionId>,
+    /// Extern producers VERIFIED to return a fresh `Box::into_raw` HaxeString
+    /// with an owned (or cap=0 static-protected) buffer on EVERY path — safe
+    /// to release with `haxe_string_free`. NOT `value_to_string_by_tag`: its
+    /// tag-5 arm returns the INPUT pointer (not fresh).
+    ext_fresh_string_ids: BTreeSet<IrFunctionId>,
+    /// `haxe_string_free` — releases buffer AND Box-reclaims the header, so
+    /// string allocs get ONLY this call, never an `IrInstruction::Free`.
+    string_free_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
     /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
@@ -83,6 +91,8 @@ impl OptimizationPass for InsertFreePass {
             anon_setter_ids: BTreeSet::new(),
             copy_only_ids: BTreeSet::new(),
             array_free_ids: BTreeSet::new(),
+            ext_fresh_string_ids: BTreeSet::new(),
+            string_free_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
         };
 
@@ -152,14 +162,78 @@ impl OptimizationPass for InsertFreePass {
             ids.array_free_ids.insert(free_id);
         }
 
+        // Same for haxe_string_free when fresh-string producers are present.
+        if !ids.ext_fresh_string_ids.is_empty() && ids.string_free_ids.is_empty() {
+            let free_id = module.alloc_function_id();
+            module.extern_functions.insert(
+                free_id,
+                super::modules::IrExternFunction {
+                    id: free_id,
+                    name: "haxe_string_free".to_string(),
+                    symbol_id: crate::tast::SymbolId::from_raw(0),
+                    signature: super::IrFunctionSignature {
+                        parameters: vec![super::functions::IrParameter {
+                            name: "s".to_string(),
+                            ty: IrType::Ptr(Box::new(IrType::U8)),
+                            reg: IrId(0),
+                            by_ref: false,
+                        }],
+                        return_type: IrType::Void,
+                        calling_convention: super::CallingConvention::C,
+                        can_throw: false,
+                        type_params: vec![],
+                        uses_sret: false,
+                    },
+                    source: "runtime".to_string(),
+                },
+            );
+            ids.string_free_ids.insert(free_id);
+        }
+
+        // Per-parameter retention for module functions — lets a pointer flow
+        // into a non-retaining wrapper (`lookup(key)` → stringmap_get) without
+        // counting as an escape. Opt-in (RZT_PARAM_RETENTION=1) while the
+        // remaining soundness hole is bisected: with it on, strings stored
+        // into result structs get freed (tok 4/32).
+        let param_retention = if std::env::var("RZT_PARAM_RETENTION").as_deref() == Ok("1") {
+            let r = compute_param_retention(module, &ids);
+            if std::env::var_os("RZT_DBG_RETENTION").is_some() {
+                for (fid, mask) in &r {
+                    if mask.iter().any(|m| !m) {
+                        if let Some(f) = module.functions.get(fid) {
+                            let clear: Vec<usize> = mask
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, m)| !**m)
+                                .map(|(i, _)| i)
+                                .collect();
+                            eprintln!("[retain-clear] {} {:?}", f.name, clear);
+                        }
+                    }
+                }
+            }
+            r
+        } else {
+            BTreeMap::new()
+        };
+
         // Functions whose return is a fresh caller-owned array — their call
         // dests are owned allocations in the caller.
-        let fresh_fns = compute_returns_fresh_arrays(module, &ids);
+        let fresh_fns = compute_returns_fresh_arrays(module, &ids, &param_retention);
+        // ...and likewise for fresh caller-owned strings (chains through
+        // StringBuf.toString → encodeUtf8-style wrappers).
+        let fresh_string_fns = compute_returns_fresh_strings(module, &ids, &param_retention);
 
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
-                total_inserted += insert_free_for_function(function, &ids, &fresh_fns);
+                total_inserted += insert_free_for_function(
+                    function,
+                    &ids,
+                    &fresh_fns,
+                    &fresh_string_fns,
+                    &param_retention,
+                );
             }
         }
 
@@ -198,6 +272,40 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         }
         "haxe_array_free" | "array_free" => {
             ids.array_free_ids.insert(fid);
+        }
+        "haxe_string_free" => {
+            ids.string_free_ids.insert(fid);
+        }
+        // Verified Box-fresh string producers; their string INPUTS are
+        // read-and-copied (never retained), so they are also safe consumers.
+        "haxe_string_lower"
+        | "haxe_string_char_at_ptr"
+        | "haxe_string_substr_ptr"
+        | "haxe_string_concat"
+        | "haxe_string_concat_ptr"
+        | "haxe_string_from_char_code"
+        | "haxe_string_from_int"
+        | "haxe_string_from_float"
+        | "haxe_string_from_bool"
+        | "haxe_string_from_string"
+        | "haxe_bytes_to_string" => {
+            ids.ext_fresh_string_ids.insert(fid);
+            ids.copy_only_ids.insert(fid);
+        }
+        // Read-only string/map consumers: read every pointer arg, retain none.
+        // NOT stringmap_set (stores its key) and NOT haxe_box_haxestring_ptr
+        // (boxing retains).
+        "haxe_string_length"
+        | "haxe_string_char_code_at_ptr"
+        | "haxe_string_compare"
+        | "haxe_string_index_of_ptr"
+        | "haxe_string_last_index_of_ptr"
+        | "haxe_string_starts_with"
+        | "haxe_string_print"
+        | "haxe_string_println"
+        | "haxe_stringmap_get"
+        | "haxe_stringmap_exists" => {
+            ids.copy_only_ids.insert(fid);
         }
         // Non-retaining array ops (receiver = arg0). Conservative: only the
         // scalar get/set/push/pop/length/query ops that neither hand out an
@@ -261,6 +369,8 @@ fn insert_free_for_function(
     function: &mut IrFunction,
     ids: &AllocFuncIds,
     fresh_fns: &BTreeSet<IrFunctionId>,
+    fresh_string_fns: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> usize {
     if function.cfg.blocks.is_empty() {
         return 0;
@@ -279,6 +389,7 @@ fn insert_free_for_function(
     let mut anon_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     let mut array_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     let mut received_array_ids: BTreeSet<IrId> = BTreeSet::new();
+    let mut string_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
@@ -305,6 +416,16 @@ fn insert_free_for_function(
                     alloc_ids.push(*dest);
                     received_array_ids.insert(*dest);
                 }
+                IrInstruction::CallDirect {
+                    dest: Some(dest),
+                    func_id,
+                    ..
+                } if ids.ext_fresh_string_ids.contains(func_id)
+                    || fresh_string_fns.contains(func_id) =>
+                {
+                    alloc_ids.push(*dest);
+                    string_alloc_ids.insert(*dest);
+                }
                 _ => {}
             }
         }
@@ -318,16 +439,19 @@ fn insert_free_for_function(
     let mut allocs_needing_free: Vec<IrId> = Vec::new();
     let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
+    dealloc_ids.extend(ids.string_free_ids.iter().cloned());
 
     for &alloc_id in &alloc_ids {
         let derived = build_derived_set(alloc_id, function);
         let is_anon = anon_alloc_ids.contains(&alloc_id);
+        let is_string = string_alloc_ids.contains(&alloc_id);
         // A malloc'd HaxeArray header: the alloc (or a derived / loop-invariant
         // alias) is used as arg0 of a non-retaining array op — or the value was
         // RECEIVED from a returns-fresh-array callee (known array by type, even
         // if the caller never touches it). Released via haxe_array_free + Free.
-        let is_array = received_array_ids.contains(&alloc_id)
-            || (!is_anon && is_array_header(&derived, function, &ids.array_safe_ids));
+        let is_array = !is_string
+            && (received_array_ids.contains(&alloc_id)
+                || (!is_anon && is_array_header(&derived, function, &ids.array_safe_ids)));
         if is_array {
             array_alloc_ids.insert(alloc_id);
         }
@@ -349,7 +473,8 @@ fn insert_free_for_function(
             continue;
         }
 
-        // Anon and array allocs each whitelist their own safe accessors.
+        // Anon and array allocs each whitelist their own safe accessors;
+        // string consumers are all in copy_only_ids (checked unconditionally).
         let empty = BTreeSet::new();
         let safe_ids = if is_array {
             &ids.array_safe_ids
@@ -365,6 +490,7 @@ fn insert_free_for_function(
             safe_ids,
             &ids.anon_setter_ids,
             &ids.copy_only_ids,
+            param_retention,
         ) {
             allocs_needing_free.push(alloc_id);
         }
@@ -393,6 +519,8 @@ fn insert_free_for_function(
     let anon_drop_id = ids.anon_drop_ids.iter().next().cloned();
     // ...and a single haxe_array_free ID for releasing array data buffers.
     let array_free_id = ids.array_free_ids.iter().next().cloned();
+    // ...and haxe_string_free for fresh strings.
+    let string_free_id = ids.string_free_ids.iter().next().cloned();
 
     // Step 4: Insert Free/Drop for each non-escaping alloc.
     // For allocs defined in the entry block (which dominates all returns), insert at return blocks.
@@ -411,10 +539,13 @@ fn insert_free_for_function(
             } = inst
             {
                 // Array headers are malloc results, so the malloc arm covers
-                // them too. Received fresh arrays are defined by their call.
+                // them too. Received fresh arrays/strings are defined by
+                // their producing call.
                 if ids.malloc_ids.contains(func_id)
                     || ids.anon_new_ids.contains(func_id)
                     || fresh_fns.contains(func_id)
+                    || ids.ext_fresh_string_ids.contains(func_id)
+                    || fresh_string_fns.contains(func_id)
                 {
                     alloc_def_block.insert(*dest, block_id);
                 }
@@ -458,7 +589,24 @@ fn insert_free_for_function(
                     }
                 }
 
-                if array_alloc_ids.contains(&alloc_id) {
+                if string_alloc_ids.contains(&alloc_id) {
+                    // Fresh string: haxe_string_free releases the buffer AND
+                    // Box-reclaims the header — no IrInstruction::Free.
+                    if dbg_arr {
+                        eprintln!("[str-ins] {fname} {alloc_id:?} entry");
+                    }
+                    if let Some(free_id) = string_free_id {
+                        block.instructions.push(IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: free_id,
+                            args: vec![alloc_id],
+                            arg_ownership: vec![OwnershipMode::Move],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        });
+                        inserted += 1;
+                    }
+                } else if array_alloc_ids.contains(&alloc_id) {
                     // Owned HaxeArray: first release the heap DATA BUFFER via
                     // haxe_array_free (which reads the header's `ptr`), THEN free
                     // the header itself — a 32-byte malloc. Order matters: the
@@ -515,7 +663,8 @@ fn insert_free_for_function(
     // freeing at "last use" is unsound for loop-carried allocations, and SRA
     // usually promotes them anyway.
     for &alloc_id in &inner_allocs {
-        if !array_alloc_ids.contains(&alloc_id) {
+        let is_string = string_alloc_ids.contains(&alloc_id);
+        if !is_string && !array_alloc_ids.contains(&alloc_id) {
             continue;
         }
         let Some(&def_block) = alloc_def_block.get(&alloc_id) else {
@@ -527,11 +676,26 @@ fn insert_free_for_function(
         }
         if dbg_arr {
             eprintln!(
-                "[arr-ins] {fname} {alloc_id:?} inner-confined recv={}",
+                "[{}-ins] {fname} {alloc_id:?} inner-confined recv={}",
+                if is_string { "str" } else { "arr" },
                 received_array_ids.contains(&alloc_id)
             );
         }
-        if let Some(free_id) = array_free_id {
+        if is_string {
+            if let Some(free_id) = string_free_id {
+                if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
+                    block.instructions.push(IrInstruction::CallDirect {
+                        dest: None,
+                        func_id: free_id,
+                        args: vec![alloc_id],
+                        arg_ownership: vec![OwnershipMode::Move],
+                        type_args: vec![],
+                        is_tail_call: false,
+                    });
+                    inserted += 1;
+                }
+            }
+        } else if let Some(free_id) = array_free_id {
             if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
                 block.instructions.push(IrInstruction::CallDirect {
                     dest: None,
@@ -613,13 +777,27 @@ fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
                         }
                     }
                     IrInstruction::Cast { dest, src, .. }
-                    | IrInstruction::BitCast { dest, src, .. } => {
+                    | IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::SsaBarrier { dest, src, .. } => {
                         if derived.contains(src) && derived.insert(*dest) {
                             changed = true;
                         }
                     }
                     IrInstruction::Copy { dest, src } => {
                         if derived.contains(src) && derived.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    // Select over a tracked pointer yields an alias of it.
+                    IrInstruction::Select {
+                        dest,
+                        true_val,
+                        false_val,
+                        ..
+                    } => {
+                        if (derived.contains(true_val) || derived.contains(false_val))
+                            && derived.insert(*dest)
+                        {
                             changed = true;
                         }
                     }
@@ -675,6 +853,7 @@ fn is_array_header(
 
 /// Check if a pointer (or any of its derived pointers) escapes the function.
 /// `safe_call_ids` are function IDs that don't capture the pointer (e.g., anon object accessors).
+#[allow(clippy::too_many_arguments)]
 fn pointer_escapes(
     alloc_id: IrId,
     derived: &BTreeSet<IrId>,
@@ -682,6 +861,7 @@ fn pointer_escapes(
     safe_call_ids: &BTreeSet<IrFunctionId>,
     anon_setter_ids: &BTreeSet<IrFunctionId>,
     copy_only_ids: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> bool {
     pointer_escapes_ex(
         alloc_id,
@@ -690,6 +870,7 @@ fn pointer_escapes(
         safe_call_ids,
         anon_setter_ids,
         copy_only_ids,
+        param_retention,
         false,
     )
 }
@@ -705,6 +886,7 @@ fn pointer_escapes_ex(
     safe_call_ids: &BTreeSet<IrFunctionId>,
     anon_setter_ids: &BTreeSet<IrFunctionId>,
     copy_only_ids: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
     ignore_returns: bool,
 ) -> bool {
     for block in function.cfg.blocks.values() {
@@ -724,6 +906,17 @@ fn pointer_escapes_ex(
                         // into fresh storage and retains nothing, so passing the
                         // alloc here is not an escape. Other uses of the alloc are
                         // still checked by the remaining match arms.
+                    } else if let Some(mask) = param_retention.get(func_id) {
+                        // Module function with per-parameter retention info:
+                        // only a RETAINING position (or an out-of-range arg)
+                        // counts as an escape.
+                        for (i, arg) in args.iter().enumerate() {
+                            if (*arg == alloc_id || derived.contains(arg))
+                                && mask.get(i).copied().unwrap_or(true)
+                            {
+                                return true;
+                            }
+                        }
                     } else if !safe_call_ids.contains(func_id) {
                         for arg in args {
                             if *arg == alloc_id || derived.contains(arg) {
@@ -854,7 +1047,11 @@ fn pointer_escapes_ex(
 /// only escape route is the return itself and which is not freed locally.
 /// Fixpoint so freshness propagates through forwarding wrappers
 /// (`embedText` returning `embed(ids)`'s result).
-fn compute_returns_fresh_arrays(module: &IrModule, ids: &AllocFuncIds) -> BTreeSet<IrFunctionId> {
+fn compute_returns_fresh_arrays(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> BTreeSet<IrFunctionId> {
     let mut fresh: BTreeSet<IrFunctionId> = BTreeSet::new();
     loop {
         let mut changed = false;
@@ -862,7 +1059,7 @@ fn compute_returns_fresh_arrays(module: &IrModule, ids: &AllocFuncIds) -> BTreeS
             if fresh.contains(&fid) {
                 continue;
             }
-            if returns_fresh_array(function, ids, &fresh) {
+            if returns_fresh_array(function, ids, &fresh, param_retention) {
                 fresh.insert(fid);
                 changed = true;
             }
@@ -874,10 +1071,235 @@ fn compute_returns_fresh_arrays(module: &IrModule, ids: &AllocFuncIds) -> BTreeS
     fresh
 }
 
+/// Per-function, per-parameter: can the callee RETAIN the pointer passed at
+/// that position (store it, return it, put it in a struct/global, hand it to
+/// an unknown call or a retaining position)? Optimistic fixpoint: parameters
+/// start non-retaining and escalate when a retaining use is found; calls into
+/// other module functions consult the current map, so wrapper chains
+/// (`lookup(key)` → `haxe_stringmap_get(map, key)`) resolve, and cycles
+/// without sinks correctly stay non-retaining. `true` = retains.
+fn compute_param_retention(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+) -> BTreeMap<IrFunctionId, Vec<bool>> {
+    let mut retention: BTreeMap<IrFunctionId, Vec<bool>> = BTreeMap::new();
+    // Derived sets are body-static — compute once per parameter.
+    let mut param_derived: BTreeMap<IrFunctionId, Vec<BTreeSet<IrId>>> = BTreeMap::new();
+    for (&fid, f) in &module.functions {
+        retention.insert(fid, vec![false; f.signature.parameters.len()]);
+        let sets = f
+            .signature
+            .parameters
+            .iter()
+            .map(|p| build_derived_set(p.reg, f))
+            .collect();
+        param_derived.insert(fid, sets);
+    }
+    loop {
+        let mut changed = false;
+        for (&fid, function) in &module.functions {
+            for pi in 0..function.signature.parameters.len() {
+                if retention[&fid][pi] {
+                    continue;
+                }
+                let derived = &param_derived[&fid][pi];
+                if param_retained(derived, function, ids, &retention) {
+                    retention.get_mut(&fid).unwrap()[pi] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    retention
+}
+
+fn param_retained(
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let in_set = |v: &IrId| derived.contains(v);
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            match inst {
+                IrInstruction::Store { value, .. } if in_set(value) => return true,
+                IrInstruction::StoreGlobal { value, .. } if in_set(value) => return true,
+                IrInstruction::CreateStruct { fields, .. } if fields.iter().any(in_set) => {
+                    return true;
+                }
+                IrInstruction::MemCopy { dest, src, .. } if in_set(dest) || in_set(src) => {
+                    return true;
+                }
+                IrInstruction::Throw { exception } if in_set(exception) => return true,
+                // Reading THROUGH the param extracts a field (e.g. an interior
+                // buffer pointer) whose flow we don't track — conservative.
+                IrInstruction::Load { ptr, .. } if in_set(ptr) => return true,
+                IrInstruction::Return { value: Some(v) } if in_set(v) => return true,
+                IrInstruction::CallIndirect { func_ptr, args, .. }
+                    if in_set(func_ptr) || args.iter().any(in_set) =>
+                {
+                    return true;
+                }
+                IrInstruction::CallDirect { func_id, args, .. } => {
+                    if ids.copy_only_ids.contains(func_id) {
+                        // reads/copies every arg — safe
+                    } else if let Some(mask) = retention.get(func_id) {
+                        for (i, arg) in args.iter().enumerate() {
+                            if in_set(arg) && mask.get(i).copied().unwrap_or(true) {
+                                return true;
+                            }
+                        }
+                    } else if ids.array_safe_ids.contains(func_id)
+                        || ids.anon_safe_ids.contains(func_id)
+                    {
+                        // receiver-safe: arg0 fine, value positions retain
+                        for arg in args.iter().skip(1) {
+                            if in_set(arg) {
+                                return true;
+                            }
+                        }
+                    } else if args.iter().any(in_set) {
+                        // unknown extern
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if in_set(v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Fresh-STRING analogue: every value-return is covered by the dest of a call
+/// to a verified Box-fresh extern producer or an already-fresh module function,
+/// with no other escape and no local free. No usage-identification step —
+/// string-ness is known from the producer.
+fn compute_returns_fresh_strings(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> BTreeSet<IrFunctionId> {
+    let mut fresh: BTreeSet<IrFunctionId> = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for (&fid, function) in &module.functions {
+            if fresh.contains(&fid) {
+                continue;
+            }
+            if returns_fresh_string(function, ids, &fresh, param_retention) {
+                fresh.insert(fid);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    fresh
+}
+
+fn returns_fresh_string(
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    fresh: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let mut ret_vals: Vec<IrId> = Vec::new();
+    for block in function.cfg.blocks.values() {
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            ret_vals.push(*v);
+        }
+        for inst in &block.instructions {
+            if let IrInstruction::Return { value: Some(v) } = inst {
+                ret_vals.push(*v);
+            }
+        }
+    }
+    if ret_vals.is_empty() {
+        return false;
+    }
+
+    let mut sources: Vec<IrId> = Vec::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect {
+                dest: Some(d),
+                func_id,
+                ..
+            } = inst
+            {
+                if ids.ext_fresh_string_ids.contains(func_id) || fresh.contains(func_id) {
+                    sources.push(*d);
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return false;
+    }
+
+    let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    dealloc_ids.extend(ids.array_free_ids.iter().cloned());
+    dealloc_ids.extend(ids.string_free_ids.iter().cloned());
+
+    let empty = BTreeSet::new();
+    let mut derived_memo: BTreeMap<IrId, BTreeSet<IrId>> = BTreeMap::new();
+    'ret: for v in &ret_vals {
+        for &src in &sources {
+            let derived = derived_memo
+                .entry(src)
+                .or_insert_with(|| build_derived_set(src, function));
+            if !derived.contains(v) {
+                continue;
+            }
+            let derived = &*derived;
+            if pointer_escapes_ex(
+                src,
+                derived,
+                function,
+                &empty,
+                &ids.anon_setter_ids,
+                &ids.copy_only_ids,
+                param_retention,
+                true,
+            ) {
+                continue;
+            }
+            let freed_locally = function.cfg.blocks.values().any(|block| {
+                block.instructions.iter().any(|inst| match inst {
+                    IrInstruction::Free { ptr } => derived.contains(ptr),
+                    IrInstruction::CallDirect { func_id, args, .. }
+                        if dealloc_ids.contains(func_id) =>
+                    {
+                        args.iter().any(|a| derived.contains(a))
+                    }
+                    _ => false,
+                })
+            });
+            if freed_locally {
+                continue;
+            }
+            continue 'ret;
+        }
+        return false;
+    }
+    true
+}
+
 fn returns_fresh_array(
     function: &IrFunction,
     ids: &AllocFuncIds,
     fresh: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> bool {
     let mut ret_vals: Vec<IrId> = Vec::new();
     for block in function.cfg.blocks.values() {
@@ -939,6 +1361,7 @@ fn returns_fresh_array(
                 &ids.array_safe_ids,
                 &ids.anon_setter_ids,
                 &ids.copy_only_ids,
+                param_retention,
                 true,
             ) {
                 continue;

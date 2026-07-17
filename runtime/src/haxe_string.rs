@@ -593,11 +593,28 @@ pub extern "C" fn haxe_string_split_array(
 /// second free short-circuits on the buffer path, and only then reclaim the
 /// header. The drop order matters: the `Box::from_raw` runs after the buffer
 /// dealloc so we never read through a freed header.
+/// Env-gated (`RZT_DBG_STRFREE=1`) call counter — proves the InsertFree
+/// string-release path fires at runtime (mirrors haxe_array_free's counter).
+fn strfree_dbg_count() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    static N: AtomicU64 = AtomicU64::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("RZT_DBG_STRFREE").is_some()) {
+        return;
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || n % 1000 == 0 {
+        eprintln!("[strfree] count={n}");
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
     if s.is_null() {
         return;
     }
+    strfree_dbg_count();
 
     unsafe {
         // Snapshot the buffer pointer/cap, then poison the header fields so a
