@@ -28,52 +28,84 @@ class BertEmbedder {
         // GGUFLoader.tokenizer dispatches on tokenizer.ggml.model, so a bert
         // GGUF yields WordPiece; recover the concrete type for encodeWithSpecials.
         this.tok = cast(loader.tokenizer(ggufPath), WordPieceTokenizer);
-        // Phase-4 fused-graph engine: RZT_EMBED_ENGINE=graph loads the
-        // per-bucket mlmodelc artifacts sitting NEXT TO the gguf (authored
-        // from that same gguf by bert_graph_author.py). Mac-only; load
-        // returns 0 elsewhere and the flag stays off.
-        if (graphEngine()) {
-            var slash = ggufPath.lastIndexOf("/");
-            var dir = slash >= 0 ? ggufPath.substr(0, slash) : ".";
-            var file = slash >= 0 ? ggufPath.substr(slash + 1) : ggufPath;
-            // Artifacts are keyed by the gguf STEM (filename minus .gguf) so
-            // several models can share the directory.
-            var dot = file.lastIndexOf(".gguf");
-            var stem = dot > 0 ? file.substr(0, dot) : file;
-            var db = Bytes.ofString(dir);
-            var sb = Bytes.ofString(stem);
-            // Do NOT string-concat the extern result: the x-module extern
-            // return mistypes as an object and `"" + handle` dereferences the
-            // raw handle via haxe_std_string_ptr → SIGSEGV
-            // (bugs_xmodule_resolution_disease_cluster). Compares/assigns are
-            // register-level and safe.
-            var handle:Int = BertGraph.load(db.address(), db.length, sb.address(), sb.length, dim, graphKind());
-            db.free();
-            sb.free();
-            if (handle > 0) {
-                model.graphHandle = handle;
-                Sys.println(graphKind() == 1 ? "[embed] engine=ane on" : "[embed] engine=graph on");
-            } else {
-                Sys.println("[embed] engine requested but no artifacts — falling back");
-            }
+        // Per-(platform × model) ENGINE RESOLUTION. Auto-detection is the
+        // mechanism — zero configuration: platform from the system, model
+        // needs from its metadata, accelerator availability by probing the
+        // artifacts next to the gguf. NUE_ENGINE (legacy RZT_EMBED_ENGINE)
+        // is the single escape hatch (A/B runs, bit-class pinning). Lives IN
+        // this module deliberately: a separate EngineSelector module shifted
+        // function IDs and a startup path landed on a pre-existing trap stub
+        // (410017 reflect-renumbering family).
+        engine = resolveEncode(ggufPath, dim);
+        if (engine == ENG_GRAPH || engine == ENG_ANE) {
+            // Idempotent with the probe — same handle, no reload. NEVER
+            // string-concat this extern result (x-module extern returns
+            // mistype as objects → haxe_std_string_ptr deref SIGSEGV).
+            var handle:Int = graphLoad(ggufPath, dim, engine == ENG_ANE ? 1 : 0);
+            if (handle > 0) model.graphHandle = handle;
+        } else if (engine == ENG_INT8) {
+            // Linear reads NUE_INT8 lazily at its first forward; env is
+            // process-global so it crosses modules reliably (statics don't).
+            Sys.putEnv("NUE_INT8", "1");
         }
+        Sys.println("[embed] engine=" + engineName(engine));
     }
 
-    // RZT_EMBED_ENGINE gate: "graph" = BNNSGraph CPU (kind 0), "ane" = CoreML
-    // CPU+NeuralEngine (kind 1). Cached (0 uninit / 1 graph / 2 ane / 9 off —
-    // zero-valued uninit is load-bearing for cross-module static dups).
-    static var _graph:Int = 0;
+    /** Resolved encode engine for this embedder instance. */
+    public var engine:Int = 0;
 
-    static function graphEngine():Bool {
-        if (_graph == 0) {
-            var v = Sys.getEnvOr("RZT_EMBED_ENGINE", "RAYZOR_EMBED_ENGINE");
-            _graph = (v == "graph") ? 1 : ((v == "ane") ? 2 : 9);
+    public static inline var ENG_HAXE = 0;
+    public static inline var ENG_AMX = 1;
+    public static inline var ENG_INT8 = 2;
+    public static inline var ENG_GRAPH = 3;
+    public static inline var ENG_ANE = 4;
+
+    /** Encode-engine resolution: env escape hatch, else best-available
+        detection per (platform, model dims, artifact presence). */
+    static function resolveEncode(ggufPath:String, hidden:Int):Int {
+        var isMac = Sys.systemName() == "Mac";
+        var forced = Sys.getEnvOr("NUE_ENGINE", "RZT_EMBED_ENGINE");
+        if (forced != null && forced != "" && forced != "auto") {
+            if (forced == "haxe") return ENG_HAXE;
+            if (forced == "amx") return isMac ? ENG_AMX : ENG_HAXE;
+            if (forced == "int8") return (hidden & 15) == 0 ? ENG_INT8 : ENG_HAXE;
+            if (forced == "graph") return graphLoad(ggufPath, hidden, 0) > 0 ? ENG_GRAPH : (isMac ? ENG_AMX : ENG_HAXE);
+            if (forced == "ane") return graphLoad(ggufPath, hidden, 1) > 0 ? ENG_ANE : (isMac ? ENG_AMX : ENG_HAXE);
         }
-        return _graph == 1 || _graph == 2;
+        if (isMac) {
+            if (graphLoad(ggufPath, hidden, 1) > 0) return ENG_ANE;
+            if (graphLoad(ggufPath, hidden, 0) > 0) return ENG_GRAPH;
+            // ane/graph would be 2-3x here but need the compiled artifacts —
+            // a build product like the gguf itself; auto uses them, it can't
+            // conjure them.
+            Sys.println("[embed] hint: no <stem>.encoder_s*.mlmodelc next to the model — author with bert_graph_author.py to unlock graph/ane");
+            return ENG_AMX;
+        }
+        return (hidden & 15) == 0 ? ENG_INT8 : ENG_HAXE;
     }
 
-    static function graphKind():Int {
-        return _graph == 2 ? 1 : 0;
+    static function engineName(e:Int):String {
+        if (e == ENG_AMX) return "amx";
+        if (e == ENG_INT8) return "int8";
+        if (e == ENG_GRAPH) return "graph";
+        if (e == ENG_ANE) return "ane";
+        return "haxe";
+    }
+
+    /** BertGraph.load for the model at `ggufPath` (artifacts keyed by the
+        gguf stem, sitting in its directory). Registry is idempotent. */
+    static function graphLoad(ggufPath:String, hidden:Int, kind:Int):Int {
+        var slash = ggufPath.lastIndexOf("/");
+        var dir = slash >= 0 ? ggufPath.substr(0, slash) : ".";
+        var file = slash >= 0 ? ggufPath.substr(slash + 1) : ggufPath;
+        var dot = file.lastIndexOf(".gguf");
+        var stem = dot > 0 ? file.substr(0, dot) : file;
+        var db = Bytes.ofString(dir);
+        var sb = Bytes.ofString(stem);
+        var handle:Int = BertGraph.load(db.address(), db.length, sb.address(), sb.length, hidden, kind);
+        db.free();
+        sb.free();
+        return handle;
     }
 
     /** Encode + mean-pool + L2, as a plain float array. An optional mask
@@ -128,8 +160,9 @@ class BertEmbedder {
         // encoder's Linear GEMMs take the Accelerate f16 fast path even for tiny
         // inputs; the mask excludes the padding from attention + pooling, so the
         // embedding is identical to the unpadded encode (validated by maskTest).
-        // Non-AMX (x86) never pads — there padding is pure overhead.
-        if (amxPad() && ids.length < AMX_MIN) {
+        // Only when AMX is the RESOLVED engine — under haxe/int8 padding is
+        // pure overhead (amxPad() keeps the RZT_AMX_PREFILL kill-switch).
+        if (engine == ENG_AMX && amxPad() && ids.length < AMX_MIN) {
             var pad = tok.specialId("[PAD]");
             if (pad < 0) pad = 0;
             var mask = [for (i in 0...ids.length) 1];
