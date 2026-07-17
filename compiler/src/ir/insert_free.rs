@@ -152,10 +152,14 @@ impl OptimizationPass for InsertFreePass {
             ids.array_free_ids.insert(free_id);
         }
 
+        // Functions whose return is a fresh caller-owned array — their call
+        // dests are owned allocations in the caller.
+        let fresh_fns = compute_returns_fresh_arrays(module, &ids);
+
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
-                total_inserted += insert_free_for_function(function, &ids);
+                total_inserted += insert_free_for_function(function, &ids, &fresh_fns);
             }
         }
 
@@ -253,7 +257,11 @@ fn is_safe_array_op(name: &str) -> bool {
 
 /// Insert Free instructions for non-escaping allocations in a single function.
 /// Returns the number of Free instructions inserted.
-fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> usize {
+fn insert_free_for_function(
+    function: &mut IrFunction,
+    ids: &AllocFuncIds,
+    fresh_fns: &BTreeSet<IrFunctionId>,
+) -> usize {
     if function.cfg.blocks.is_empty() {
         return 0;
     }
@@ -261,6 +269,8 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     // Step 1: Find all allocation sources:
     // - malloc + reflective class allocators (`haxe_type_create_*`)
     // - rayzor_anon_new (Arc-backed anonymous objects)
+    // - dests of calls to returns-fresh-array functions (the caller owns
+    //   the received array)
     // NOTE: IrInstruction::Alloc is NOT included here because Alloc creates
     // stack slots (via Cranelift's create_sized_stack_slot), not heap memory.
     // Stack slots are automatically freed when the function returns.
@@ -268,6 +278,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     let mut alloc_ids: Vec<IrId> = Vec::new();
     let mut anon_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     let mut array_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
+    let mut received_array_ids: BTreeSet<IrId> = BTreeSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
@@ -285,6 +296,14 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                 } if ids.anon_new_ids.contains(func_id) => {
                     alloc_ids.push(*dest);
                     anon_alloc_ids.insert(*dest);
+                }
+                IrInstruction::CallDirect {
+                    dest: Some(dest),
+                    func_id,
+                    ..
+                } if fresh_fns.contains(func_id) => {
+                    alloc_ids.push(*dest);
+                    received_array_ids.insert(*dest);
                 }
                 _ => {}
             }
@@ -304,9 +323,11 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         let derived = build_derived_set(alloc_id, function);
         let is_anon = anon_alloc_ids.contains(&alloc_id);
         // A malloc'd HaxeArray header: the alloc (or a derived / loop-invariant
-        // alias) is used as arg0 of a non-retaining array op. Mark it so those
-        // array ops count as safe and it's released via haxe_array_free.
-        let is_array = !is_anon && is_array_header(&derived, function, &ids.array_safe_ids);
+        // alias) is used as arg0 of a non-retaining array op — or the value was
+        // RECEIVED from a returns-fresh-array callee (known array by type, even
+        // if the caller never touches it). Released via haxe_array_free + Free.
+        let is_array = received_array_ids.contains(&alloc_id)
+            || (!is_anon && is_array_header(&derived, function, &ids.array_safe_ids));
         if is_array {
             array_alloc_ids.insert(alloc_id);
         }
@@ -390,8 +411,11 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
             } = inst
             {
                 // Array headers are malloc results, so the malloc arm covers
-                // them too — no separate array case needed here.
-                if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
+                // them too. Received fresh arrays are defined by their call.
+                if ids.malloc_ids.contains(func_id)
+                    || ids.anon_new_ids.contains(func_id)
+                    || fresh_fns.contains(func_id)
+                {
                     alloc_def_block.insert(*dest, block_id);
                 }
             }
@@ -410,6 +434,12 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     }
 
     let mut inserted = 0;
+    let dbg_arr = std::env::var_os("RZT_DBG_ARR").is_some();
+    let fname = if dbg_arr {
+        function.name.clone()
+    } else {
+        String::new()
+    };
 
     // Entry-block allocs: free at return blocks (original behavior)
     for block_id in &return_blocks {
@@ -433,6 +463,12 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                     // haxe_array_free (which reads the header's `ptr`), THEN free
                     // the header itself — a 32-byte malloc. Order matters: the
                     // header must still be valid when haxe_array_free reads it.
+                    if dbg_arr {
+                        eprintln!(
+                            "[arr-ins] {fname} {alloc_id:?} entry recv={}",
+                            received_array_ids.contains(&alloc_id)
+                        );
+                    }
                     if let Some(free_id) = array_free_id {
                         block.instructions.push(IrInstruction::CallDirect {
                             dest: None,
@@ -469,14 +505,94 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         }
     }
 
-    // Inner-block allocs: skip for now.
-    // The "last-use block" approach is unsound for loop-carried allocations:
-    // if an alloc is used in a loop body, freeing at the "last use" block frees it
-    // after the first iteration, causing use-after-free on subsequent iterations.
-    // These allocations are typically eliminated by SRA (promoted to registers).
-    // Any remaining inner-block allocs will leak, which is acceptable.
+    // Inner-block ARRAY allocs (own or received): free at the end of the
+    // DEFINING block when every use is confined to that block. Such an alloc
+    // is fresh on every execution of the block and dead at its terminator, so
+    // an end-of-block release pairs alloc+free per iteration (the discarded
+    // `embedText(s)` in a bench loop). Loop-carried values are excluded
+    // structurally: anything threaded through a phi or read by another block
+    // is not confined. Non-array inner allocs keep the historical skip —
+    // freeing at "last use" is unsound for loop-carried allocations, and SRA
+    // usually promotes them anyway.
+    for &alloc_id in &inner_allocs {
+        if !array_alloc_ids.contains(&alloc_id) {
+            continue;
+        }
+        let Some(&def_block) = alloc_def_block.get(&alloc_id) else {
+            continue;
+        };
+        let derived = &derived_sets[&alloc_id];
+        if !array_confined_to_block(derived, def_block, function) {
+            continue;
+        }
+        if dbg_arr {
+            eprintln!(
+                "[arr-ins] {fname} {alloc_id:?} inner-confined recv={}",
+                received_array_ids.contains(&alloc_id)
+            );
+        }
+        if let Some(free_id) = array_free_id {
+            if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
+                block.instructions.push(IrInstruction::CallDirect {
+                    dest: None,
+                    func_id: free_id,
+                    args: vec![alloc_id],
+                    arg_ownership: vec![OwnershipMode::Move],
+                    type_args: vec![],
+                    is_tail_call: false,
+                });
+                block
+                    .instructions
+                    .push(IrInstruction::Free { ptr: alloc_id });
+                inserted += 1;
+            }
+        }
+    }
 
     inserted
+}
+
+/// True iff every use of the alloc (and its derived set) sits in the
+/// instructions of `def_block` — no other block reads it, no terminator
+/// anywhere consumes it (including `def_block`'s own, so it is dead at the
+/// block's end), and no phi carries it. Such a value can be released at the
+/// end of its defining block as a per-execution free.
+fn array_confined_to_block(
+    derived: &BTreeSet<IrId>,
+    def_block: IrBlockId,
+    function: &IrFunction,
+) -> bool {
+    for (&bid, block) in &function.cfg.blocks {
+        if bid != def_block {
+            for inst in &block.instructions {
+                for u in inst.uses() {
+                    if derived.contains(&u) {
+                        return false;
+                    }
+                }
+            }
+        }
+        let term_uses: Vec<IrId> = match &block.terminator {
+            IrTerminator::CondBranch { condition, .. } => vec![*condition],
+            IrTerminator::Switch { value, .. } => vec![*value],
+            IrTerminator::Return { value: Some(v) } => vec![*v],
+            IrTerminator::NoReturn { call } => vec![*call],
+            _ => Vec::new(),
+        };
+        for u in term_uses {
+            if derived.contains(&u) {
+                return false;
+            }
+        }
+        for phi in &block.phi_nodes {
+            for (_, v) in &phi.incoming {
+                if derived.contains(v) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Build the set of all IrIds derived from an allocation pointer.
@@ -567,9 +683,39 @@ fn pointer_escapes(
     anon_setter_ids: &BTreeSet<IrFunctionId>,
     copy_only_ids: &BTreeSet<IrFunctionId>,
 ) -> bool {
+    pointer_escapes_ex(
+        alloc_id,
+        derived,
+        function,
+        safe_call_ids,
+        anon_setter_ids,
+        copy_only_ids,
+        false,
+    )
+}
+
+/// `ignore_returns` drops the "returned → escapes" arms so the returns-fresh
+/// analysis can ask "does this alloc escape by any route OTHER than being
+/// handed to the caller?".
+#[allow(clippy::too_many_arguments)]
+fn pointer_escapes_ex(
+    alloc_id: IrId,
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    safe_call_ids: &BTreeSet<IrFunctionId>,
+    anon_setter_ids: &BTreeSet<IrFunctionId>,
+    copy_only_ids: &BTreeSet<IrFunctionId>,
+    ignore_returns: bool,
+) -> bool {
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
+                // Instruction-level return (rare; most returns are terminators)
+                IrInstruction::Return { value: Some(v) } => {
+                    if !ignore_returns && (*v == alloc_id || derived.contains(v)) {
+                        return true;
+                    }
+                }
                 // Pointer passed as function argument → escapes
                 // (unless the call target is known-safe, e.g. rayzor_anon_* accessors)
                 IrInstruction::CallDirect { args, func_id, .. } => {
@@ -580,6 +726,17 @@ fn pointer_escapes(
                         // still checked by the remaining match arms.
                     } else if !safe_call_ids.contains(func_id) {
                         for arg in args {
+                            if *arg == alloc_id || derived.contains(arg) {
+                                return true;
+                            }
+                        }
+                    } else if safe_call_ids.contains(func_id) && !anon_setter_ids.contains(func_id)
+                    {
+                        // "Safe" accessors are safe for the RECEIVER (arg0)
+                        // only. The pointer appearing in any VALUE position —
+                        // e.g. pushed as an element into another array — is
+                        // stored inside the receiver and escapes with it.
+                        for arg in args.iter().skip(1) {
                             if *arg == alloc_id || derived.contains(arg) {
                                 return true;
                             }
@@ -679,12 +836,131 @@ fn pointer_escapes(
         }
 
         // Pointer returned → escapes
-        if let IrTerminator::Return { value: Some(val) } = &block.terminator {
-            if *val == alloc_id || derived.contains(val) {
-                return true;
+        if !ignore_returns {
+            if let IrTerminator::Return { value: Some(val) } = &block.terminator {
+                if *val == alloc_id || derived.contains(val) {
+                    return true;
+                }
             }
         }
     }
 
     false
+}
+
+/// Compute the set of functions that return a FRESH, caller-owned Haxe array:
+/// every value-return is covered by a source — a local malloc used as an array
+/// header, or the dest of a call to an already-known fresh function — whose
+/// only escape route is the return itself and which is not freed locally.
+/// Fixpoint so freshness propagates through forwarding wrappers
+/// (`embedText` returning `embed(ids)`'s result).
+fn compute_returns_fresh_arrays(module: &IrModule, ids: &AllocFuncIds) -> BTreeSet<IrFunctionId> {
+    let mut fresh: BTreeSet<IrFunctionId> = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for (&fid, function) in &module.functions {
+            if fresh.contains(&fid) {
+                continue;
+            }
+            if returns_fresh_array(function, ids, &fresh) {
+                fresh.insert(fid);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    fresh
+}
+
+fn returns_fresh_array(
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    fresh: &BTreeSet<IrFunctionId>,
+) -> bool {
+    let mut ret_vals: Vec<IrId> = Vec::new();
+    for block in function.cfg.blocks.values() {
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            ret_vals.push(*v);
+        }
+        for inst in &block.instructions {
+            if let IrInstruction::Return { value: Some(v) } = inst {
+                ret_vals.push(*v);
+            }
+        }
+    }
+    if ret_vals.is_empty() {
+        return false;
+    }
+
+    // (source id, is-a-fresh-call-dest)
+    let mut sources: Vec<(IrId, bool)> = Vec::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect {
+                dest: Some(d),
+                func_id,
+                ..
+            } = inst
+            {
+                if ids.malloc_ids.contains(func_id) {
+                    sources.push((*d, false));
+                } else if fresh.contains(func_id) {
+                    sources.push((*d, true));
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return false;
+    }
+
+    let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    dealloc_ids.extend(ids.array_free_ids.iter().cloned());
+
+    let mut derived_memo: BTreeMap<IrId, BTreeSet<IrId>> = BTreeMap::new();
+    'ret: for v in &ret_vals {
+        for &(src, is_fresh_call) in &sources {
+            let derived = derived_memo
+                .entry(src)
+                .or_insert_with(|| build_derived_set(src, function));
+            if !derived.contains(v) {
+                continue;
+            }
+            let derived = &*derived;
+            if !is_fresh_call && !is_array_header(&derived, function, &ids.array_safe_ids) {
+                continue;
+            }
+            if pointer_escapes_ex(
+                src,
+                &derived,
+                function,
+                &ids.array_safe_ids,
+                &ids.anon_setter_ids,
+                &ids.copy_only_ids,
+                true,
+            ) {
+                continue;
+            }
+            // Locally freed then returned would dangle — reject the source.
+            let freed_locally = function.cfg.blocks.values().any(|block| {
+                block.instructions.iter().any(|inst| match inst {
+                    IrInstruction::Free { ptr } => derived.contains(ptr),
+                    IrInstruction::CallDirect { func_id, args, .. }
+                        if dealloc_ids.contains(func_id) =>
+                    {
+                        args.iter().any(|a| derived.contains(a))
+                    }
+                    _ => false,
+                })
+            });
+            if freed_locally {
+                continue;
+            }
+            continue 'ret;
+        }
+        return false;
+    }
+    true
 }
