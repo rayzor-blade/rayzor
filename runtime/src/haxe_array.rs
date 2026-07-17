@@ -754,12 +754,30 @@ pub extern "C" fn haxe_array_slice(
 // Memory Management
 // ============================================================================
 
+/// Env-gated (`RZT_DBG_ARRFREE=1`) call counter. haxe_array_free was
+/// historically never emitted, so a nonzero count proves the InsertFree
+/// array-release path actually fires at runtime.
+fn arrfree_dbg_count() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    static N: AtomicU64 = AtomicU64::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("RZT_DBG_ARRFREE").is_some()) {
+        return;
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n == 1 || n % 1000 == 0 {
+        eprintln!("[arrfree] count={n}");
+    }
+}
+
 /// Free array memory
 #[no_mangle]
 pub extern "C" fn haxe_array_free(arr: *mut HaxeArray) {
     if arr.is_null() {
         return;
     }
+    arrfree_dbg_count();
 
     unsafe {
         let arr_ref = &*arr;
