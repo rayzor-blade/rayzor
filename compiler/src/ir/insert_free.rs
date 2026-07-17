@@ -48,9 +48,6 @@ struct AllocFuncIds {
     /// nowhere else escaping) can still be freed. Each entry MUST be verified
     /// to retain nothing.
     copy_only_ids: BTreeSet<IrFunctionId>,
-    /// `haxe_array_new` — initialises a `HaxeArray` header (arg0) that owns a
-    /// heap data buffer. The buffer is otherwise never freed.
-    array_new_ids: BTreeSet<IrFunctionId>,
     /// `haxe_array_free` — releases the header's data buffer.
     array_free_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
@@ -85,7 +82,6 @@ impl OptimizationPass for InsertFreePass {
             anon_safe_ids: BTreeSet::new(),
             anon_setter_ids: BTreeSet::new(),
             copy_only_ids: BTreeSet::new(),
-            array_new_ids: BTreeSet::new(),
             array_free_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
         };
@@ -127,6 +123,35 @@ impl OptimizationPass for InsertFreePass {
             ids.anon_safe_ids.insert(drop_id);
         }
 
+        // Likewise: nue code never calls haxe_array_free, so if we will need it
+        // (any array ops are present) declare it as an extern to call.
+        if !ids.array_safe_ids.is_empty() && ids.array_free_ids.is_empty() {
+            let free_id = module.alloc_function_id();
+            module.extern_functions.insert(
+                free_id,
+                super::modules::IrExternFunction {
+                    id: free_id,
+                    name: "haxe_array_free".to_string(),
+                    symbol_id: crate::tast::SymbolId::from_raw(0),
+                    signature: super::IrFunctionSignature {
+                        parameters: vec![super::functions::IrParameter {
+                            name: "arr".to_string(),
+                            ty: IrType::Ptr(Box::new(IrType::U8)),
+                            reg: IrId(0),
+                            by_ref: false,
+                        }],
+                        return_type: IrType::Void,
+                        calling_convention: super::CallingConvention::C,
+                        can_throw: false,
+                        type_params: vec![],
+                        uses_sret: false,
+                    },
+                    source: "runtime".to_string(),
+                },
+            );
+            ids.array_free_ids.insert(free_id);
+        }
+
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
@@ -166,10 +191,6 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         // Haxe array that flows only into one of these does not escape.
         "tensor_fromArray" | "rayzor_tensor_from_array" => {
             ids.copy_only_ids.insert(fid);
-        }
-        "haxe_array_new" | "array_new" => {
-            ids.array_new_ids.insert(fid);
-            ids.array_safe_ids.insert(fid);
         }
         "haxe_array_free" | "array_free" => {
             ids.array_free_ids.insert(fid);
@@ -265,18 +286,6 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                     alloc_ids.push(*dest);
                     anon_alloc_ids.insert(*dest);
                 }
-                // haxe_array_new(header, elem_size) initialises the HaxeArray
-                // header passed as arg0; that header owns a heap data buffer
-                // released by haxe_array_free. Track the header pointer.
-                IrInstruction::CallDirect { func_id, args, .. }
-                    if ids.array_new_ids.contains(func_id) =>
-                {
-                    if let Some(&hdr) = args.first() {
-                        if array_alloc_ids.insert(hdr) {
-                            alloc_ids.push(hdr);
-                        }
-                    }
-                }
                 _ => {}
             }
         }
@@ -294,7 +303,13 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     for &alloc_id in &alloc_ids {
         let derived = build_derived_set(alloc_id, function);
         let is_anon = anon_alloc_ids.contains(&alloc_id);
-        let is_array = array_alloc_ids.contains(&alloc_id);
+        // A malloc'd HaxeArray header: the alloc (or a derived / loop-invariant
+        // alias) is used as arg0 of a non-retaining array op. Mark it so those
+        // array ops count as safe and it's released via haxe_array_free.
+        let is_array = !is_anon && is_array_header(&derived, function, &ids.array_safe_ids);
+        if is_array {
+            array_alloc_ids.insert(alloc_id);
+        }
 
         // Check if already has a Free (either Free instruction, free() call, or anon_drop call)
         let has_free = function.cfg.blocks.values().any(|block| {
@@ -369,22 +384,15 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     for (&block_id, block) in &function.cfg.blocks {
         for inst in &block.instructions {
             if let IrInstruction::CallDirect {
-                dest,
+                dest: Some(dest),
                 func_id,
-                args,
                 ..
             } = inst
             {
-                if let Some(dest) = dest {
-                    if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
-                        alloc_def_block.insert(*dest, block_id);
-                    }
-                }
-                // Arrays are keyed by the header pointer passed to haxe_array_new.
-                if ids.array_new_ids.contains(func_id) {
-                    if let Some(&hdr) = args.first() {
-                        alloc_def_block.insert(hdr, block_id);
-                    }
+                // Array headers are malloc results, so the malloc arm covers
+                // them too — no separate array case needed here.
+                if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
+                    alloc_def_block.insert(*dest, block_id);
                 }
             }
         }
@@ -421,9 +429,10 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                 }
 
                 if array_alloc_ids.contains(&alloc_id) {
-                    // Release the array's heap data buffer via haxe_array_free
-                    // (the stack header is auto-reclaimed). NOT a libc Free —
-                    // the alloc_id is the header pointer, not a malloc result.
+                    // Owned HaxeArray: first release the heap DATA BUFFER via
+                    // haxe_array_free (which reads the header's `ptr`), THEN free
+                    // the header itself — a 32-byte malloc. Order matters: the
+                    // header must still be valid when haxe_array_free reads it.
                     if let Some(free_id) = array_free_id {
                         block.instructions.push(IrInstruction::CallDirect {
                             dest: None,
@@ -433,6 +442,9 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                             type_args: vec![],
                             is_tail_call: false,
                         });
+                        block
+                            .instructions
+                            .push(IrInstruction::Free { ptr: alloc_id });
                         inserted += 1;
                     }
                 } else if anon_alloc_ids.contains(&alloc_id) {
@@ -498,10 +510,51 @@ fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
                     _ => {}
                 }
             }
+            // A phi that takes the alloc (or a derived value) on ANY edge is
+            // pulled in optimistically. This reaches through mutually-recursive
+            // loop phis (`$50 = phi[$44,$56]`, `$56 = phi[$50,$96]`) that an
+            // "all incoming" rule would deadlock on. Over-inclusion is safe:
+            // `pointer_escapes` separately flags any phi that ALSO merges a
+            // value NOT in this set (a real foreign merge) as an escape.
+            for phi in &block.phi_nodes {
+                if derived.contains(&phi.dest) {
+                    continue;
+                }
+                if phi.incoming.iter().any(|(_, v)| derived.contains(v)) && derived.insert(phi.dest)
+                {
+                    changed = true;
+                }
+            }
         }
     }
 
     derived
+}
+
+/// A malloc allocation is an owned `HaxeArray` header if the alloc — or any
+/// pointer derived from it, including loop-invariant phi aliases threaded
+/// through the fill / consume loops — is passed as arg0 (the receiver) of a
+/// non-retaining array op. Borrowed arrays (params, fields) are not malloc
+/// results in this function, so they never match.
+fn is_array_header(
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    array_safe_ids: &BTreeSet<IrFunctionId>,
+) -> bool {
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect { func_id, args, .. } = inst {
+                if array_safe_ids.contains(func_id) {
+                    if let Some(a0) = args.first() {
+                        if derived.contains(a0) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Check if a pointer (or any of its derived pointers) escapes the function.
@@ -603,13 +656,25 @@ fn pointer_escapes(
             }
         }
 
-        // Phi nodes — conservative: if alloc flows through phi, treat as escape.
-        // SRA/phi-SRA handles these by eliminating the alloc entirely.
+        // Phi nodes: the alloc escapes through a phi only if the phi MERGES it
+        // with a value NOT derived from the alloc. A pure loop-invariant phi
+        // (every incoming already derived, or the phi's own result on a back
+        // edge) is just the alloc threaded through a loop — it's in the derived
+        // set and its uses are checked directly, so it is not an escape.
         for phi in &block.phi_nodes {
-            for (_, val) in &phi.incoming {
-                if *val == alloc_id || derived.contains(val) {
-                    return true;
-                }
+            let touches = phi
+                .incoming
+                .iter()
+                .any(|(_, v)| *v == alloc_id || derived.contains(v));
+            if !touches {
+                continue;
+            }
+            let all_internal = phi
+                .incoming
+                .iter()
+                .all(|(_, v)| *v == alloc_id || derived.contains(v) || *v == phi.dest);
+            if !all_internal {
+                return true;
             }
         }
 
