@@ -39,6 +39,10 @@ class BertModel implements EncoderModel {
         `encode` routes the whole block stack through one graph call for
         bucket-fitting sequences. */
     public var graphHandle:Int = 0;
+    /** Pooling convention from the GGUF (`bert.pooling_type`): false = mean
+        over unmasked tokens (MiniLM-class), true = the [CLS] row (bge-class).
+        Set by the loader post-build. */
+    public var clsPool:Bool = false;
     public var tokenEmbed:Embedding;
     public var positionEmbed:Embedding;
     public var segmentEmbed:Embedding;   // placeholder when hasSegment == false
@@ -181,12 +185,20 @@ class BertModel implements EncoderModel {
 
         var acc = [for (_ in 0...hs) 0.0];
         var counted = 0;
-        for (t in 0...seq) {
-            var m = (attentionMask != null) ? attentionMask[t] : 1;
-            if (m == 0) continue;
-            counted++;
-            var base = t * hs;
-            for (j in 0...hs) acc[j] += hidden.getFlat(base + j);
+        if (clsPool) {
+            // bge-class: the sentence embedding is the [CLS] row (position 0
+            // is always a real token), then L2 below — matches
+            // sentence-transformers' CLS-pooling config for these models.
+            for (j in 0...hs) acc[j] = hidden.getFlat(j);
+            counted = 1;
+        } else {
+            for (t in 0...seq) {
+                var m = (attentionMask != null) ? attentionMask[t] : 1;
+                if (m == 0) continue;
+                counted++;
+                var base = t * hs;
+                for (j in 0...hs) acc[j] += hidden.getFlat(base + j);
+            }
         }
         hidden.free();
 

@@ -64,7 +64,16 @@ class GGUFLoader implements ModelLoader {
         var meta = metadataFromReader(reader);
         var weights = tensorsFromReader(reader);
         var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
-        return reg.build(meta, weights);
+        var model = reg.build(meta, weights);
+        // Pooling convention travels in the GGUF (llama.cpp convert writes
+        // `bert.pooling_type`): 1 = mean (MiniLM-class), 2 = CLS (bge-class).
+        // A BertModel field, not ModelMetadata surgery — the typedef is
+        // consumed x-module and optional-field reads are a Null<Int> hazard.
+        if (meta.architecture == "bert") {
+            var pooling = readIntOr(reader, "bert.pooling_type", 1);
+            if (pooling == 2) cast(model, nue.arch.BertModel).clsPool = true;
+        }
+        return model;
     }
 
     /**
