@@ -21,7 +21,7 @@ import rayzor.Usize;
 extern class BertGraph {
     /** Handle > 0 on success, 0 when no artifacts found, -1 off-Mac. */
     @:native("rayzor_bert_graph_load")
-    static function load(dirPtr:Usize, dirLen:Int, stemPtr:Usize, stemLen:Int, hidden:Int):Int;
+    static function load(dirPtr:Usize, dirLen:Int, stemPtr:Usize, stemLen:Int, hidden:Int, kind:Int):Int;
 
     /** Smallest loaded bucket of `handle` that fits `seq`, or 0. */
     @:native("rayzor_bert_graph_bucket")
