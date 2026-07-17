@@ -17,3 +17,6 @@ lazy_static = "1.4"
 parking_lot = "0.12"
 log = "0.4"
 rayon = "1.8"
+
+[build-dependencies]
+cc = "1"

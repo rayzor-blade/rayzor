@@ -9,6 +9,10 @@ fn main() {
             stem.as_ptr() as i64,
             stem.len() as i64,
             384,
+            std::env::args()
+                .nth(3)
+                .map(|k| k.parse().unwrap_or(0))
+                .unwrap_or(0),
         )
     };
     println!("load handle={h}");

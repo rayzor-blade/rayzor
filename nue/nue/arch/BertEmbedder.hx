@@ -47,28 +47,33 @@ class BertEmbedder {
             // raw handle via haxe_std_string_ptr → SIGSEGV
             // (bugs_xmodule_resolution_disease_cluster). Compares/assigns are
             // register-level and safe.
-            var handle:Int = BertGraph.load(db.address(), db.length, sb.address(), sb.length, dim);
+            var handle:Int = BertGraph.load(db.address(), db.length, sb.address(), sb.length, dim, graphKind());
             db.free();
             sb.free();
             if (handle > 0) {
                 model.graphHandle = handle;
-                Sys.println("[embed] engine=graph on");
+                Sys.println(graphKind() == 1 ? "[embed] engine=ane on" : "[embed] engine=graph on");
             } else {
-                Sys.println("[embed] engine=graph requested but no artifacts — falling back");
+                Sys.println("[embed] engine requested but no artifacts — falling back");
             }
         }
     }
 
-    // RZT_EMBED_ENGINE=graph gate; cached (0 uninit / 1 on / 2 off — the
+    // RZT_EMBED_ENGINE gate: "graph" = BNNSGraph CPU (kind 0), "ane" = CoreML
+    // CPU+NeuralEngine (kind 1). Cached (0 uninit / 1 graph / 2 ane / 9 off —
     // zero-valued uninit is load-bearing for cross-module static dups).
     static var _graph:Int = 0;
 
     static function graphEngine():Bool {
         if (_graph == 0) {
             var v = Sys.getEnvOr("RZT_EMBED_ENGINE", "RAYZOR_EMBED_ENGINE");
-            _graph = (v == "graph") ? 1 : 2;
+            _graph = (v == "graph") ? 1 : ((v == "ane") ? 2 : 9);
         }
-        return _graph == 1;
+        return _graph == 1 || _graph == 2;
+    }
+
+    static function graphKind():Int {
+        return _graph == 2 ? 1 : 0;
     }
 
     /** Encode + mean-pool + L2, as a plain float array. An optional mask

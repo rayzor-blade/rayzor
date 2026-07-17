@@ -2867,6 +2867,7 @@ dependencies = [
 name = "rayzor-tensors"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "half",
  "lazy_static",
  "libc",

@@ -87,6 +87,20 @@ mod imp {
         ) -> i32;
     }
 
+    // In-process CoreML runtime (src/coreml_shim.m, compiled by build.rs) —
+    // the ANE path. Same artifacts, different executor.
+    extern "C" {
+        fn rzt_coreml_load(path: *const c_char, compute_units: i32) -> *mut c_void;
+        fn rzt_coreml_predict(
+            handle: *mut c_void,
+            h: *const f32,
+            bias: *const f32,
+            out: *mut f32,
+            s: i64,
+            hidden: i64,
+        ) -> i32;
+    }
+
     struct Engine {
         ctx: BnnsGraphContext,
         /// Positions of (out, h, bias) in the graph's argument order.
@@ -94,11 +108,17 @@ mod imp {
         ws: Vec<u8>,
         s: usize,
     }
+    enum Backend {
+        /// BNNSGraph — CPU-only by design.
+        Bnns(Engine),
+        /// CoreML runtime with computeUnits = CPU+NeuralEngine.
+        CoreMl { model: *mut c_void, s: usize },
+    }
     struct Model {
         hidden: usize,
-        buckets: BTreeMap<usize, Engine>,
+        buckets: BTreeMap<usize, Backend>,
     }
-    // Raw BNNS handles are opaque; all use is serialized through the mutex.
+    // Raw BNNS/CoreML handles are opaque; use is serialized through the mutex.
     unsafe impl Send for Model {}
 
     struct Registry {
@@ -157,18 +177,38 @@ mod imp {
         })
     }
 
-    /// Load every bucket artifact for (dir, stem). Returns a handle > 0 when
-    /// at least one bucket loaded, else 0. Idempotent per (dir, stem).
-    pub fn load(dir: &str, stem: &str, hidden: usize) -> i64 {
+    /// Load every bucket artifact for (dir, stem) under the requested backend
+    /// (`kind` 0 = BNNSGraph CPU, 1 = CoreML CPU+ANE). Returns a handle > 0
+    /// when at least one bucket loaded, else 0. Idempotent per (dir, stem,
+    /// kind).
+    pub fn load(dir: &str, stem: &str, hidden: usize, kind: i64) -> i64 {
         let mut reg = registry().lock().unwrap();
-        let key = format!("{dir}\u{1}{stem}");
+        let key = format!("{dir}\u{1}{stem}\u{1}{kind}");
         if let Some(&h) = reg.by_key.get(&key) {
             return h;
         }
         let mut buckets = BTreeMap::new();
         for &s in BUCKETS.iter() {
-            if let Some(e) = load_bucket(dir, stem, s) {
-                buckets.insert(s, e);
+            let backend = if kind == 1 {
+                let path = format!("{dir}/{stem}.encoder_s{s}.mlmodelc");
+                if !std::path::Path::new(&path).exists() {
+                    None
+                } else {
+                    std::ffi::CString::new(path).ok().and_then(|c| {
+                        let m = unsafe { rzt_coreml_load(c.as_ptr(), 1) };
+                        if m.is_null() {
+                            eprintln!("[bert-graph] coreml load failed: {stem} bucket {s}");
+                            None
+                        } else {
+                            Some(Backend::CoreMl { model: m, s })
+                        }
+                    })
+                }
+            } else {
+                load_bucket(dir, stem, s).map(Backend::Bnns)
+            };
+            if let Some(b) = backend {
+                buckets.insert(s, b);
             }
         }
         if buckets.is_empty() {
@@ -196,15 +236,19 @@ mod imp {
     }
 
     /// Execute bucket `s` of `handle`. `h`/`out` are `s*hidden` f32; `bias`
-    /// is `s` f32. Returns the BNNS rc (0 = ok), -1 when not loaded.
+    /// is `s` f32. Returns the backend rc (0 = ok), -1 when not loaded.
     pub fn run(handle: i64, s: usize, h: *const f32, bias: *const f32, out: *mut f32) -> i32 {
         let mut reg = registry().lock().unwrap();
         let Some(model) = reg.by_handle.get_mut(&handle) else {
             return -1;
         };
         let hidden = model.hidden;
-        let Some(e) = model.buckets.get_mut(&s) else {
-            return -1;
+        let e = match model.buckets.get_mut(&s) {
+            Some(Backend::Bnns(e)) => e,
+            Some(Backend::CoreMl { model: m, s }) => {
+                return unsafe { rzt_coreml_predict(*m, h, bias, out, *s as i64, hidden as i64) };
+            }
+            None => return -1,
         };
         let n = e.s * hidden;
         let mut args: Vec<BnnsGraphArgument> = (0..3)
@@ -239,8 +283,9 @@ mod imp {
 }
 
 /// Load the bucket artifacts for one MODEL: `dir`/`stem` are raw (ptr, len)
-/// UTF-8 strings (the Haxe side passes `Bytes.ofString(..)` addresses), and
-/// `hidden` is the model's embedding width from its metadata. Returns a
+/// UTF-8 strings (the Haxe side passes `Bytes.ofString(..)` addresses),
+/// `hidden` is the model's embedding width from its metadata, and `kind`
+/// picks the backend (0 = BNNSGraph CPU, 1 = CoreML CPU+ANE). Returns a
 /// handle > 0 on success, 0 when no artifacts were found, -1 off-macOS.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_bert_graph_load(
@@ -249,12 +294,13 @@ pub unsafe extern "C" fn rayzor_bert_graph_load(
     stem_ptr: i64,
     stem_len: i64,
     hidden: i64,
+    kind: i64,
 ) -> i64 {
     #[cfg(target_os = "macos")]
     {
         if std::env::var_os("RZT_DBG_GRAPH").is_some() {
             eprintln!(
-                "[bert-graph] load args: dir_ptr={dir_ptr:#x} dir_len={dir_len} stem_ptr={stem_ptr:#x} stem_len={stem_len} hidden={hidden}"
+                "[bert-graph] load args: dir_ptr={dir_ptr:#x} dir_len={dir_len} stem_ptr={stem_ptr:#x} stem_len={stem_len} hidden={hidden} kind={kind}"
             );
         }
         if dir_ptr == 0 || dir_len <= 0 || stem_ptr == 0 || stem_len <= 0 || hidden <= 0 {
@@ -265,11 +311,11 @@ pub unsafe extern "C" fn rayzor_bert_graph_load(
         let (Ok(dir), Ok(stem)) = (std::str::from_utf8(d), std::str::from_utf8(s)) else {
             return 0;
         };
-        imp::load(dir, stem, hidden as usize)
+        imp::load(dir, stem, hidden as usize, kind)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (dir_ptr, dir_len, stem_ptr, stem_len, hidden);
+        let _ = (dir_ptr, dir_len, stem_ptr, stem_len, hidden, kind);
         -1
     }
 }
