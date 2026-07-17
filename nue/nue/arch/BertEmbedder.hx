@@ -4,6 +4,8 @@ import sys.io.File;
 import nue.loader.GGUFLoader;
 import nue.tokenizer.WordPieceTokenizer;
 import rayzor.ds.Tensor;
+import rayzor.ds.BertGraph;
+import rayzor.Bytes;
 
 /**
  * Sentence-embedding driver: text → WordPiece → encoder → mean-pool + L2.
@@ -26,6 +28,47 @@ class BertEmbedder {
         // GGUFLoader.tokenizer dispatches on tokenizer.ggml.model, so a bert
         // GGUF yields WordPiece; recover the concrete type for encodeWithSpecials.
         this.tok = cast(loader.tokenizer(ggufPath), WordPieceTokenizer);
+        // Phase-4 fused-graph engine: RZT_EMBED_ENGINE=graph loads the
+        // per-bucket mlmodelc artifacts sitting NEXT TO the gguf (authored
+        // from that same gguf by bert_graph_author.py). Mac-only; load
+        // returns 0 elsewhere and the flag stays off.
+        if (graphEngine()) {
+            var slash = ggufPath.lastIndexOf("/");
+            var dir = slash >= 0 ? ggufPath.substr(0, slash) : ".";
+            var file = slash >= 0 ? ggufPath.substr(slash + 1) : ggufPath;
+            // Artifacts are keyed by the gguf STEM (filename minus .gguf) so
+            // several models can share the directory.
+            var dot = file.lastIndexOf(".gguf");
+            var stem = dot > 0 ? file.substr(0, dot) : file;
+            var db = Bytes.ofString(dir);
+            var sb = Bytes.ofString(stem);
+            // Do NOT string-concat the extern result: the x-module extern
+            // return mistypes as an object and `"" + handle` dereferences the
+            // raw handle via haxe_std_string_ptr → SIGSEGV
+            // (bugs_xmodule_resolution_disease_cluster). Compares/assigns are
+            // register-level and safe.
+            var handle:Int = BertGraph.load(db.address(), db.length, sb.address(), sb.length, dim);
+            db.free();
+            sb.free();
+            if (handle > 0) {
+                model.graphHandle = handle;
+                Sys.println("[embed] engine=graph on");
+            } else {
+                Sys.println("[embed] engine=graph requested but no artifacts — falling back");
+            }
+        }
+    }
+
+    // RZT_EMBED_ENGINE=graph gate; cached (0 uninit / 1 on / 2 off — the
+    // zero-valued uninit is load-bearing for cross-module static dups).
+    static var _graph:Int = 0;
+
+    static function graphEngine():Bool {
+        if (_graph == 0) {
+            var v = Sys.getEnvOr("RZT_EMBED_ENGINE", "RAYZOR_EMBED_ENGINE");
+            _graph = (v == "graph") ? 1 : 2;
+        }
+        return _graph == 1;
     }
 
     /** Encode + mean-pool + L2, as a plain float array. An optional mask
@@ -60,6 +103,22 @@ class BertEmbedder {
     /** Full pipeline: raw text → WordPiece ([CLS]…[SEP]) → encode → pool + L2. */
     public function embedText(text:String):Array<Float> {
         var ids = tok.encodeWithSpecials(text);
+        // Graph engine: pad to the smallest loaded bucket so encode() can run
+        // the whole block stack as one fused BNNSGraph call. The mask keeps
+        // padding out of attention + pooling (validated by maskTest).
+        if (model.graphHandle > 0) {
+            var bucket = BertGraph.bucketFor(model.graphHandle, ids.length);
+            if (bucket > 0) {
+                var pad = tok.specialId("[PAD]");
+                if (pad < 0) pad = 0;
+                var mask = [for (i in 0...ids.length) 1];
+                while (ids.length < bucket) {
+                    ids.push(pad);
+                    mask.push(0);
+                }
+                return embed(ids, mask);
+            }
+        }
         // On AMX platforms, pad a short sequence up to the AMX threshold so the
         // encoder's Linear GEMMs take the Accelerate f16 fast path even for tiny
         // inputs; the mask excludes the padding from attention + pooling, so the
