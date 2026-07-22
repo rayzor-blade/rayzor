@@ -121,24 +121,37 @@ class LlamaModel implements CausalLanguageModel {
         return result1;
     }
 
-    /** Warm the fused-prefill path once: first entry JIT-compiles/resolves the
-        whole graphPrefill→cache.append→PrefillGraph call tree AND triggers
-        CoreML E5RT graph specialization. Both are one-time; a warmed process
-        prefills warm. Costs one graph predict — call at load for server/warm
-        deployments. No-op when the engine is off. */
-    public function warmPrefill():Void {
-        if (prefillHandle <= 0) return;
-        // Warm BOTH decode entry points so the first user prefill is warm
-        // whichever the generation loop picks: forwardIds (default) and
-        // forwardLastLogits (NUE_PREFILL_LAST_LOGITS=1, the server path). Each
-        // JIT-compiles its wrapper + graphPrefill; the FIRST call also pays the
-        // one-time CoreML E5RT graph specialization (~3.9s), the second is warm.
-        // ttft then ~0.17s regardless of path. No-op when the engine is off.
+    /** Warm the forward + DECODE kernels at load so the first request runs hot.
+        The bundle tier-promotes by call count, so an unwarmed first request
+        promotes DURING its own generation — slow, low-floor. This warms both
+        decode entry points (forwardIds default; forwardLastLogits for the
+        NUE_PREFILL_LAST_LOGITS=1 / server path) with ~40 single-token forwards
+        each, clearing the WARM/HOT thresholds.
+
+        Runs for ANY model, INDEPENDENT of the CoreML graph — decode is a
+        pure-CPU, bandwidth-bound path either way. With the graph on, the seeding
+        prefill also pays the one-time E5RT specialization; with it off
+        (NUE_PREFILL=off, pure-CPU per-op prefill) the warm is cheap (~1s). The
+        loader gates this via NUE_DECODE_WARM (opt-out), so a no-CoreML server
+        still gets a warm decode from request 1. */
+    public function warm():Void {
+        // forwardIds path (default): prefill (graph or per-op) seeds the cache,
+        // then single-token forwards warm + tier-promote the per-op decode.
         var a = forwardIds([0]);
         if (a != null) a.free();
+        for (i in 0...40) {
+            var d = forwardIds([1]);
+            if (d != null) d.free();
+        }
         resetCache();
+        // forwardLastLogits path (server, NUE_PREFILL_LAST_LOGITS=1): same wrapper
+        // drives both its prefill and its per-token decode, so warm it too.
         var b = forwardLastLogits([0]);
         if (b != null) b.free();
+        for (i in 0...40) {
+            var e = forwardLastLogits([1]);
+            if (e != null) e.free();
+        }
         resetCache();
     }
 
