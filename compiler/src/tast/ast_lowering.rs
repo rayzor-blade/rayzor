@@ -3819,6 +3819,35 @@ impl<'a> AstLowering<'a> {
         let mut typed_class = typed_class;
         typed_class.derived_traits = derived_traits;
 
+        // Mirror the concurrency derives onto the class SYMBOL. The TypedClass
+        // only lives in its own file's `classes` list, but the send/sync
+        // validator runs per-file and looks types up cross-file through the
+        // shared symbol table — so a `@:derive([Send])` extern (e.g.
+        // sys.net.SocketOutput) must carry the fact on its symbol to read as
+        // Send at a `Thread.spawn` capture site in another module.
+        {
+            let mut sym_flags = crate::tast::symbols::SymbolFlags::NONE;
+            if typed_class
+                .derived_traits
+                .iter()
+                .any(|t| matches!(t, crate::tast::DerivedTrait::Send))
+            {
+                sym_flags.insert(crate::tast::symbols::SymbolFlags::DERIVE_SEND);
+            }
+            if typed_class
+                .derived_traits
+                .iter()
+                .any(|t| matches!(t, crate::tast::DerivedTrait::Sync))
+            {
+                sym_flags.insert(crate::tast::symbols::SymbolFlags::DERIVE_SYNC);
+            }
+            if !sym_flags.is_empty() {
+                self.context
+                    .symbol_table
+                    .add_symbol_flags(class_symbol, sym_flags);
+            }
+        }
+
         // Synthesize hashCode():Int method for classes that derive Hash
         if typed_class
             .derived_traits

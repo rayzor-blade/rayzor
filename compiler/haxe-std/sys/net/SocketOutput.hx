@@ -26,7 +26,13 @@ package sys.net;
 	Output stream adapter for writing to a TCP socket.
 	Created automatically when a Socket connects.
 	Extends haxe.io.Output for full compatibility with the standard I/O API.
+
+	`@:derive([Send])`: the underlying socket is an OS fd, safe to transfer to
+	another thread as long as it isn't written concurrently. This lets a stream
+	be handed to a dedicated writer thread (see llama-chat-server) so per-token
+	socket flushes run off the decode hot path.
 **/
+@:derive([Send])
 extern class SocketOutput extends haxe.io.Output {
 	function writeByte(c:Int):Void;
 	function writeBytes(s:haxe.io.Bytes, pos:Int, len:Int):Int;
