@@ -404,9 +404,16 @@ impl StdlibMapping {
     }
 
     /// Check if a lookup class name matches a registered class name.
-    /// Supports exact match and suffix match (e.g., "Arc" matches "rayzor_concurrent_Arc").
+    /// Supports exact match and simple-name suffix match against a qualified
+    /// registered name, for BOTH separators: underscore (`rayzor_concurrent_Arc`,
+    /// the stdlib convention) and dot (`nue.engine.PrefillGraph`, the package-
+    /// qualified convention). Without the dot arm, a bare `PrefillGraph` lookup
+    /// fails to match `nue.engine.PrefillGraph` and the resolver falls through to
+    /// a name-only path that collapses same-name externs (e.g. onto BertGraph).
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
-        lookup == registered || registered.ends_with(&format!("_{}", lookup))
+        lookup == registered
+            || registered.ends_with(&format!("_{}", lookup))
+            || registered.ends_with(&format!(".{}", lookup))
     }
 
     /// Find a static method by class and method name
