@@ -342,6 +342,14 @@ impl SymbolFlags {
     /// `ast_lowering::is_auto_deref_wrapper_class`.
     pub const AUTO_DEREF: Self = Self(1 << 22);
 
+    /// `@:derive([Send])` on the type. Mirrored onto the SYMBOL (not just the
+    /// TypedClass) so the concurrency validator can see it cross-file — a type
+    /// declared Send in one file must read as Send at a `Thread.spawn` capture
+    /// site in another, where only the symbol table is shared.
+    pub const DERIVE_SEND: Self = Self(1 << 23);
+    /// `@:derive([Sync])` on the type; mirrored for the same cross-file reason.
+    pub const DERIVE_SYNC: Self = Self(1 << 24);
+
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)
     }
@@ -349,6 +357,16 @@ impl SymbolFlags {
     /// Check if this symbol has @:autoDeref metadata.
     pub const fn is_auto_deref(self) -> bool {
         self.contains(Self::AUTO_DEREF)
+    }
+
+    /// The type derives `Send` (via `@:derive([Send])`) — cross-file visible.
+    pub const fn derives_send(self) -> bool {
+        self.contains(Self::DERIVE_SEND)
+    }
+
+    /// The type derives `Sync` (via `@:derive([Sync])`) — cross-file visible.
+    pub const fn derives_sync(self) -> bool {
+        self.contains(Self::DERIVE_SYNC)
     }
 
     pub const fn empty() -> Self {

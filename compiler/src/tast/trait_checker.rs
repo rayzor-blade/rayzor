@@ -241,7 +241,21 @@ impl<'a> TraitChecker<'a> {
         // Find the class
         let class = match self.find_class(symbol_id) {
             Some(c) => c,
-            None => return false,
+            None => {
+                // Cross-file / extern class: its TypedClass isn't in this file's
+                // `classes` list, but the concurrency derives were mirrored onto
+                // the symbol at lowering. Read them from the shared symbol table
+                // (e.g. a `@:derive([Send])` sys.net.SocketOutput used at a
+                // Thread.spawn capture site in another module).
+                if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+                    return match trait_ {
+                        DerivedTrait::Send => sym.flags.derives_send(),
+                        DerivedTrait::Sync => sym.flags.derives_sync(),
+                        _ => false,
+                    };
+                }
+                return false;
+            }
         };
 
         // 1. Check if explicitly derived
