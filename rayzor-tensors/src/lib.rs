@@ -11,7 +11,6 @@
 
 #[cfg(target_os = "macos")]
 pub mod apple_accel;
-pub mod bert_graph;
 pub mod haxe_sys;
 pub mod heap_check;
 pub mod kernel_timing;
@@ -97,18 +96,6 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         entry!(
             b"rayzor_plugin_tensor_alloc_zeros",
             crate::tensor::rayzor_plugin_tensor_alloc_zeros
-        ),
-        entry!(
-            b"rayzor_bert_graph_load",
-            crate::bert_graph::rayzor_bert_graph_load
-        ),
-        entry!(
-            b"rayzor_bert_graph_bucket",
-            crate::bert_graph::rayzor_bert_graph_bucket
-        ),
-        entry!(
-            b"rayzor_bert_graph_execute",
-            crate::bert_graph::rayzor_bert_graph_execute
         ),
         entry!(b"rayzor_tensor_zeros", crate::tensor::rayzor_tensor_zeros),
         entry!(b"rayzor_tensor_uninit", crate::tensor::rayzor_tensor_uninit),

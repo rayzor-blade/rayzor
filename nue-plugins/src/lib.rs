@@ -29,6 +29,17 @@ use alloc::vec::Vec;
 use half::f16;
 use rayzor_plugin::{declare_native_methods, dtype, NativeMethodDesc, Tensor};
 
+// In-process CoreML graph engines (macOS ANE/CPU): BERT whole-encoder + Llama
+// fused prefill. Native-only (std + the CoreML ObjC shim compiled by build.rs);
+// excluded from the no_std wasm side-module. These declare an `extern "C"` block
+// for the in-dylib `nue_coreml_*` shim (not a host reach — the shim links into
+// this same cdylib), so they live outside the "no host extern blocks" rule that
+// governs the rest of this crate.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bert_graph;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod prefill_graph;
+
 // ============================================================================
 // no_std wasm runtime glue: a global allocator forwarding to the host's
 // malloc/free, a panic handler, and a libm-backed float shim. All cfg'd to
@@ -209,7 +220,7 @@ pub struct SymbolEntry {
 
 #[cfg(not(target_arch = "wasm32"))]
 macro_rules! entry {
-    ($name:expr, $fn:ident) => {
+    ($name:expr, $fn:path) => {
         SymbolEntry {
             name_ptr: ($name as &[u8]).as_ptr(),
             name_len: ($name as &[u8]).len(),
@@ -239,6 +250,35 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         ),
         entry!(b"rayzor_kvcacheq8_clone", rayzor_kvcacheq8_clone),
         entry!(b"rayzor_kvcacheq8_arc_clone", rayzor_kvcacheq8_arc_clone),
+        // CoreML graph engines (macOS): BERT encoder + Llama fused prefill.
+        entry!(
+            b"nue_bert_graph_load",
+            crate::bert_graph::nue_bert_graph_load
+        ),
+        entry!(
+            b"nue_bert_graph_bucket",
+            crate::bert_graph::nue_bert_graph_bucket
+        ),
+        entry!(
+            b"nue_bert_graph_execute",
+            crate::bert_graph::nue_bert_graph_execute
+        ),
+        entry!(
+            b"nue_prefill_graph_load",
+            crate::prefill_graph::nue_prefill_graph_load
+        ),
+        entry!(
+            b"nue_prefill_graph_bucket",
+            crate::prefill_graph::nue_prefill_graph_bucket
+        ),
+        entry!(
+            b"nue_prefill_graph_execute",
+            crate::prefill_graph::nue_prefill_graph_execute
+        ),
+        entry!(
+            b"nue_prefill_graph_kv_copy",
+            crate::prefill_graph::nue_prefill_graph_kv_copy
+        ),
     ]);
     let count = entries.len();
     let ptr = Box::leak(entries).as_ptr();

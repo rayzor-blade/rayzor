@@ -1,5 +1,5 @@
 //! BNNSGraph probe #2: execute the WHOLE authored MiniLM encoder (6 post-norm
-//! BERT layers, one mlprogram from `bert_graph_author.py`) and check it against
+//! BERT layers, one mlprogram from `../nue-plugins/examples/bert_graph_author.py`) and check it against
 //! the CoreML-predicted reference dumped by the authoring venv.
 //!
 //! This answers the Phase-4 question the single-GEMM probe couldn't: does
@@ -135,7 +135,7 @@ fn main() {
     println!("argument order: {order:?}");
 
     let mut out = vec![0f32; S * H];
-    let mut run = |out: &mut [f32], ws: &mut [u8]| -> i32 {
+    let run = |out: &mut [f32], ws: &mut [u8]| -> i32 {
         let mut slot = |name: &str| -> BnnsGraphArgument {
             match name {
                 "out" => BnnsGraphArgument {

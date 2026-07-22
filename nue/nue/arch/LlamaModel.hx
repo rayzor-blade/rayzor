@@ -8,8 +8,11 @@ import nue.transformer.RoPE;
 import nue.transformer.RMSNorm;
 import nue.transformer.GQAttention;
 import nue.transformer.LlamaBlock;
+import nue.engine.PrefillGraph;
+import rayzor.Bytes;
 import nue.model.ModelMetadata;
 import rayzor.ds.Tensor;
+import rayzor.ds.DType;
 
 /**
  * Concrete `LanguageModel` for the Llama family. Constructed by
@@ -48,6 +51,11 @@ class LlamaModel implements CausalLanguageModel {
     public var outputNorm:RMSNorm;
     public var lmHead:Linear;
     public var sharedRope:RoPE;
+    /** Fused CoreML prefill engine handle (`PrefillGraph.load`, set by the
+        loader when artifacts sit next to the gguf; 0 = off). Prefill runs
+        the whole block stack in one graph call and seeds every layer's KV
+        cache from the graph outputs; decode continues on the CPU path. */
+    public var prefillHandle:Int = 0;
 
     public function new(
         metadata:ModelMetadata,
@@ -66,6 +74,12 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function forwardIds(tokenIds:Array<Int>):Tensor {
+        // Fused-graph prefill (see forwardLastLogits). Returns the LAST row's
+        // logits [1, vocab] — every caller reduces to lastRow anyway.
+        if (prefillHandle > 0 && cacheLen() == 0) {
+            var g = graphPrefill(tokenIds);
+            if (g != null) return g;
+        }
         var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
             h = block.forward(h);
@@ -78,6 +92,14 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function forwardLastLogits(tokenIds:Array<Int>):Tensor {
+        // Fused-graph prefill: one CoreML call for the whole block stack,
+        // KV caches seeded from the graph outputs (~15x the per-op path).
+        // Only from an empty cache; falls through to the per-op path on any
+        // failure or when no bucket fits.
+        if (prefillHandle > 0 && cacheLen() == 0) {
+            var g = graphPrefill(tokenIds);
+            if (g != null) return g;
+        }
         var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
             h = block.forward(h);
@@ -97,6 +119,62 @@ class LlamaModel implements CausalLanguageModel {
         normed1.free();
         h.free();
         return result1;
+    }
+
+    /** Warm the fused-prefill path once: first entry JIT-compiles/resolves the
+        whole graphPrefill→cache.append→PrefillGraph call tree AND triggers
+        CoreML E5RT graph specialization. Both are one-time; a warmed process
+        prefills warm. Costs one graph predict — call at load for server/warm
+        deployments. No-op when the engine is off. */
+    public function warmPrefill():Void {
+        if (prefillHandle <= 0) return;
+        // Through forwardIds (not graphPrefill directly) so the whole wrapper —
+        // the real decode entry point — JIT-compiles here, not on first prefill.
+        var g = forwardIds([0]);
+        if (g != null) g.free();
+        resetCache();
+    }
+
+    /** Graph prefill: pad ids to the bucket (causal masking keeps pad rows
+        self-contained; only the real-prompt prefix rows are appended to the
+        caches), run the fused graph, seed every layer's KV, and return the
+        last real row's logits. Null = not applicable, caller falls through. */
+    function graphPrefill(tokenIds:Array<Int>):Null<Tensor> {
+        var sReal = tokenIds.length;
+        var bucket:Int = PrefillGraph.bucketFor(prefillHandle, sReal);
+        if (bucket <= 0) return null;
+        var padded = tokenIds.copy();
+        while (padded.length < bucket) padded.push(0);
+        var h = embedTokens.lookup(padded);
+        var hs = metadata.hiddenSize;
+        var kvh = metadata.numKvHeads;
+        var hd = metadata.headDim;
+        var out = Tensor.uninit([bucket, hs], DType.F32);
+        var kvB = Bytes.alloc(metadata.numLayers * 2 * bucket * kvh * hd * 4);
+        var rc:Int = PrefillGraph.execute(prefillHandle, bucket, h.data().raw(), out.data().raw(), kvB.address());
+        h.free();
+        if (rc != 0) {
+            kvB.free();
+            out.free();
+            return null;
+        }
+        for (i in 0...blocks.length) {
+            var kT = Tensor.uninit([sReal, kvh, hd], DType.F32);
+            var vT = Tensor.uninit([sReal, kvh, hd], DType.F32);
+            PrefillGraph.kvCopy(kvB.address(), 2 * i, sReal, bucket, kvh, hd, kT.data().raw());
+            PrefillGraph.kvCopy(kvB.address(), 2 * i + 1, sReal, bucket, kvh, hd, vT.data().raw());
+            blocks[i].attn.cache.append(kT, vT);
+            kT.free();
+            vT.free();
+        }
+        kvB.free();
+        var last = out.slice(0, sReal - 1, sReal);
+        var normed = outputNorm.forward(last);
+        var result = lmHead.forward(normed);
+        normed.free();
+        last.free();
+        out.free();
+        return result;
     }
 
     public function forward(x:Tensor):Tensor {

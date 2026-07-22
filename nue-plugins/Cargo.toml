@@ -28,3 +28,8 @@ half = { version = "2", default-features = false }
 # inherent f32 methods (see the `fmath` shim in lib.rs).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libm = "0.2"
+
+# macOS-only: compiles the CoreML ObjC shim (coreml_shim.m) for the graph
+# engines. Build-time only; nothing links into the wasm/Linux side-module.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"

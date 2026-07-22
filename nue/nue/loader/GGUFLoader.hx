@@ -13,6 +13,7 @@ import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
+import nue.engine.PrefillGraph;
 
 /**
  * GGUF (`*.gguf`) loader. Maps the on-disk format to the generic
@@ -65,15 +66,51 @@ class GGUFLoader implements ModelLoader {
         var weights = tensorsFromReader(reader);
         var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
         var model = reg.build(meta, weights);
-        // Pooling convention travels in the GGUF (llama.cpp convert writes
-        // `bert.pooling_type`): 1 = mean (MiniLM-class), 2 = CLS (bge-class).
-        // A BertModel field, not ModelMetadata surgery — the typedef is
-        // consumed x-module and optional-field reads are a Null<Int> hazard.
+        applyEngines(model, meta, reader, path);
+        return model;
+    }
+
+    /** Post-build engine wiring, shared by `load` and `loadWithTokenizer`:
+     * bert pooling convention (`bert.pooling_type`: 1 mean, 2 CLS) and the
+     * llama fused prefill graph (auto-detect `<stem>.prefill_s{S}.mlmodelc`
+     * next to the gguf — capability IS the config; NUE_PREFILL=off kills).
+     */
+    function applyEngines(model:Module, meta:ModelMetadata, reader:GGUFReader, path:String):Void {
         if (meta.architecture == "bert") {
             var pooling = readIntOr(reader, "bert.pooling_type", 1);
             if (pooling == 2) cast(model, nue.arch.BertModel).clsPool = true;
         }
-        return model;
+        if (meta.architecture == "llama") {
+            var kill = Sys.getEnv("NUE_PREFILL");
+            if (kill != "off" && kill != "0") {
+                var slash = path.lastIndexOf("/");
+                var dir = slash >= 0 ? path.substr(0, slash) : ".";
+                var file = slash >= 0 ? path.substr(slash + 1) : path;
+                var dot = file.lastIndexOf(".gguf");
+                var stem = dot > 0 ? file.substr(0, dot) : file;
+                var db = rayzor.Bytes.ofString(dir);
+                var sb = rayzor.Bytes.ofString(stem);
+                var handle:Int = PrefillGraph.load(db.address(), db.length,
+                    sb.address(), sb.length, meta.hiddenSize, meta.numLayers,
+                    meta.numKvHeads, meta.headDim);
+                db.free();
+                sb.free();
+                if (handle > 0) {
+                    var lm = cast(model, nue.arch.LlamaModel);
+                    lm.prefillHandle = handle;
+                    Sys.println("[prefill] engine=graph on");
+                    // Warm the JIT call-tree + CoreML E5RT specialization at
+                    // load so the first real prefill runs warm (server/warm
+                    // deployments amortize this once). Opt-in for now.
+                    var warm = Sys.getEnvOr("NUE_PREFILL_WARM", "RAYZOR_PREFILL_WARM");
+                    if (warm != null && warm != "0" && warm != "") {
+                        var tW = Sys.time();
+                        lm.warmPrefill();
+                        Sys.println("[prefill] warmed in " + (Sys.time() - tW) + "s");
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -144,6 +181,7 @@ class GGUFLoader implements ModelLoader {
             phaseStart = Sys.time();
         }
         var model = reg.build(meta, weights);
+        applyEngines(model, meta, reader, path);
         if (profileOn) {
             buildS = Sys.time() - phaseStart;
             phaseStart = Sys.time();

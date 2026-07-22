@@ -2368,6 +2368,7 @@ dependencies = [
 name = "nue-plugins"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "half",
  "libm",
  "rayzor-plugin",

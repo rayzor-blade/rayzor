@@ -4,9 +4,9 @@
 // behind the CoreML runtime. This shim exposes the three C entry points the
 // Rust engine needs to run the SAME compiled artifacts on the Neural Engine:
 //
-//   rzt_coreml_load(path, units)  -> retained MLModel* (NULL on failure)
-//   rzt_coreml_predict(...)       -> 0 ok / negative stage code
-//   rzt_coreml_free(handle)
+//   nue_coreml_load(path, units)  -> retained MLModel* (NULL on failure)
+//   nue_coreml_predict(...)       -> 0 ok / negative stage code
+//   nue_coreml_free(handle)
 //
 // Inputs are wrapped as external-data MLMultiArrays (zero-copy over the
 // caller's f32 buffers, strides in ELEMENTS); the output is copied back into
@@ -17,7 +17,7 @@
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 
-void *rzt_coreml_load(const char *path, int compute_units) {
+void *nue_coreml_load(const char *path, int compute_units) {
     @autoreleasepool {
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
         MLModelConfiguration *cfg = [[MLModelConfiguration alloc] init];
@@ -36,7 +36,7 @@ void *rzt_coreml_load(const char *path, int compute_units) {
     }
 }
 
-int rzt_coreml_predict(void *handle, const float *h, const float *bias, float *out, long s,
+int nue_coreml_predict(void *handle, const float *h, const float *bias, float *out, long s,
                        long hidden) {
     @autoreleasepool {
         MLModel *m = (__bridge MLModel *)handle;
@@ -77,9 +77,54 @@ int rzt_coreml_predict(void *handle, const float *h, const float *bias, float *o
     }
 }
 
-void rzt_coreml_free(void *handle) {
+void nue_coreml_free(void *handle) {
     if (handle) {
         MLModel *m = (__bridge_transfer MLModel *)handle;
         (void)m;
+    }
+}
+
+// Llama prefill: one input h [s, hidden]; outputs "out" [s, hidden] plus
+// per-layer "k{i}f"/"v{i}f" [s, kv_heads, head_dim] (K post-rope, cache
+// layout). The caller provides ONE contiguous kv block laid out
+// [layers][2][s*kv_heads*head_dim] f32 — k at slot 2i, v at 2i+1.
+int nue_coreml_predict_prefill(void *handle, const float *h, float *out, float *kv, long s,
+                               long hidden, long layers, long kv_heads, long head_dim) {
+    @autoreleasepool {
+        MLModel *m = (__bridge MLModel *)handle;
+        NSError *err = nil;
+        MLMultiArray *ha = [[MLMultiArray alloc] initWithDataPointer:(void *)h
+                                                               shape:@[ @(s), @(hidden) ]
+                                                            dataType:MLMultiArrayDataTypeFloat32
+                                                             strides:@[ @(hidden), @1 ]
+                                                         deallocator:nil
+                                                               error:&err];
+        if (!ha) return -3;
+        MLDictionaryFeatureProvider *in = [[MLDictionaryFeatureProvider alloc]
+            initWithDictionary:@{@"h" : [MLFeatureValue featureValueWithMultiArray:ha]}
+                         error:&err];
+        if (!in) return -5;
+        id<MLFeatureProvider> res = [m predictionFromFeatures:in error:&err];
+        if (!res) {
+            if (getenv("RZT_DBG_GRAPH")) NSLog(@"[coreml] prefill predict failed: %@", err);
+            return -6;
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        MLMultiArray *oa = [res featureValueForName:@"out"].multiArrayValue;
+        if (!oa) return -7;
+        memcpy(out, oa.dataPointer, (size_t)(s * hidden) * sizeof(float));
+        size_t kvsz = (size_t)(s * kv_heads * head_dim);
+        for (long i = 0; i < layers; i++) {
+            NSString *kn = [NSString stringWithFormat:@"k%ldf", i];
+            NSString *vn = [NSString stringWithFormat:@"v%ldf", i];
+            MLMultiArray *ka = [res featureValueForName:kn].multiArrayValue;
+            MLMultiArray *va = [res featureValueForName:vn].multiArrayValue;
+            if (!ka || !va) return -8;
+            memcpy(kv + (size_t)(2 * i) * kvsz, ka.dataPointer, kvsz * sizeof(float));
+            memcpy(kv + (size_t)(2 * i + 1) * kvsz, va.dataPointer, kvsz * sizeof(float));
+        }
+#pragma clang diagnostic pop
+        return 0;
     }
 }

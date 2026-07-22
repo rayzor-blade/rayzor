@@ -90,8 +90,8 @@ mod imp {
     // In-process CoreML runtime (src/coreml_shim.m, compiled by build.rs) —
     // the ANE path. Same artifacts, different executor.
     extern "C" {
-        fn rzt_coreml_load(path: *const c_char, compute_units: i32) -> *mut c_void;
-        fn rzt_coreml_predict(
+        fn nue_coreml_load(path: *const c_char, compute_units: i32) -> *mut c_void;
+        fn nue_coreml_predict(
             handle: *mut c_void,
             h: *const f32,
             bias: *const f32,
@@ -195,7 +195,7 @@ mod imp {
                     None
                 } else {
                     std::ffi::CString::new(path).ok().and_then(|c| {
-                        let m = unsafe { rzt_coreml_load(c.as_ptr(), 1) };
+                        let m = unsafe { nue_coreml_load(c.as_ptr(), 1) };
                         if m.is_null() {
                             eprintln!("[bert-graph] coreml load failed: {stem} bucket {s}");
                             None
@@ -246,7 +246,7 @@ mod imp {
         let e = match model.buckets.get_mut(&s) {
             Some(Backend::Bnns(e)) => e,
             Some(Backend::CoreMl { model: m, s }) => {
-                return unsafe { rzt_coreml_predict(*m, h, bias, out, *s as i64, hidden as i64) };
+                return unsafe { nue_coreml_predict(*m, h, bias, out, *s as i64, hidden as i64) };
             }
             None => return -1,
         };
@@ -288,7 +288,7 @@ mod imp {
 /// picks the backend (0 = BNNSGraph CPU, 1 = CoreML CPU+ANE). Returns a
 /// handle > 0 on success, 0 when no artifacts were found, -1 off-macOS.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_bert_graph_load(
+pub unsafe extern "C" fn nue_bert_graph_load(
     dir_ptr: i64,
     dir_len: i64,
     stem_ptr: i64,
@@ -323,7 +323,7 @@ pub unsafe extern "C" fn rayzor_bert_graph_load(
 /// Smallest loaded bucket of `handle` that fits `seq`, or 0 when the graph
 /// engine can't take this sequence.
 #[no_mangle]
-pub extern "C" fn rayzor_bert_graph_bucket(handle: i64, seq: i64) -> i64 {
+pub extern "C" fn nue_bert_graph_bucket(handle: i64, seq: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
         imp::bucket_for(handle, seq.max(0) as usize) as i64
@@ -338,7 +338,7 @@ pub extern "C" fn rayzor_bert_graph_bucket(handle: i64, seq: i64) -> i64 {
 /// Run the fused encoder for bucket `s` of `handle`: h[s*hidden] + bias[s]
 /// -> out[s*hidden], all f32. Returns 0 on success.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_bert_graph_execute(
+pub unsafe extern "C" fn nue_bert_graph_execute(
     handle: i64,
     s: i64,
     h_ptr: i64,

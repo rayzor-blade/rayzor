@@ -14,15 +14,5 @@ fn main() {
         // only on macOS; the `apple_accel` module is cfg'd to match. Portable
         // (Linux/NUC) paths never reference it.
         println!("cargo:rustc-link-lib=framework=Accelerate");
-        // In-process CoreML runtime for the ANE embed engine (bert_graph
-        // kind=ane). CoreML is the only Apple-sanctioned path to the Neural
-        // Engine — BNNSGraph stays on CPU by design.
-        println!("cargo:rustc-link-lib=framework=CoreML");
-        println!("cargo:rustc-link-lib=framework=Foundation");
-        println!("cargo:rerun-if-changed=src/coreml_shim.m");
-        cc::Build::new()
-            .file("src/coreml_shim.m")
-            .flag("-fobjc-arc")
-            .compile("coreml_shim");
     }
 }

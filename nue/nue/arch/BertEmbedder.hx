@@ -4,7 +4,7 @@ import sys.io.File;
 import nue.loader.GGUFLoader;
 import nue.tokenizer.WordPieceTokenizer;
 import rayzor.ds.Tensor;
-import rayzor.ds.BertGraph;
+import nue.engine.BertGraph;
 import rayzor.Bytes;
 
 /**

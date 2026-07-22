@@ -7605,6 +7605,12 @@ impl CompilationUnit {
                         .insert(qualified, symbol_name.clone());
                 }
 
+                // Real declared return type (native_type tag) so a scalar return
+                // (`:Int`/`:Bool`/`:Float`/`:Void`) doesn't decay to a boxed
+                // PtrVoid → null across the module boundary. Params stay PtrVoid:
+                // they're 64-bit for these externs and the real per-param types
+                // ride the `external_function_param_types` carrier at the call site.
+                let return_tag = self.haxe_type_to_native_tag(method.return_type);
                 entries.push(MethodDescEntry {
                     symbol_name,
                     class_name: class_native_name.clone(),
@@ -7612,9 +7618,9 @@ impl CompilationUnit {
                     is_static: method.is_static,
                     param_count: method.parameters.len() as u8
                         + if method.is_static { 0 } else { 1 },
-                    return_type: 3, // Ptr (safe default — matches native path)
+                    return_type: return_tag,
                     param_types: vec![
-                        3; // All Ptr (safe default)
+                        3; // All Ptr (params ride external_function_param_types)
                         method.parameters.len() + if method.is_static { 0 } else { 1 }
                     ],
                 });
@@ -7670,6 +7676,24 @@ impl CompilationUnit {
             Some(TypeKind::String) => 8, // String
             Some(TypeKind::Void) => 0,   // Void
             _ => 9,                      // PtrVoid for class types, etc.
+        }
+    }
+
+    /// Map a Haxe return/param TypeId to a `native_type` tag as decoded by
+    /// `compiler_plugin::native_type_to_descriptor` (0=Void 1=I64 2=F64 3=PtrVoid
+    /// 4=Bool). This is a DIFFERENT numbering than `haxe_type_to_descriptor`.
+    /// Used to give `@:native` extern methods their real declared return type
+    /// instead of the old blanket PtrVoid default — a PtrVoid return decays a
+    /// scalar (e.g. `:Int`) to a boxed pointer (null) across the module boundary.
+    fn haxe_type_to_native_tag(&self, type_id: TypeId) -> u8 {
+        use crate::tast::TypeKind;
+        let tt = self.type_table.borrow();
+        match tt.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Void) => 0,
+            Some(TypeKind::Int) => 1,   // I64
+            Some(TypeKind::Float) => 2, // F64
+            Some(TypeKind::Bool) => 4,
+            _ => 3, // PtrVoid — objects, String, Tensor, Usize, etc.
         }
     }
 
