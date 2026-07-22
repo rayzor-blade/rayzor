@@ -8,6 +8,19 @@ import rayzor.ds.Tensor;
 import haxe.io.Bytes;
 import sys.net.Host;
 import sys.net.Socket;
+import rayzor.concurrent.Arc;
+import rayzor.concurrent.Channel;
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class StreamMsg {
+    public var text:String;
+    public var done:Bool;
+    public function new(text:String, done:Bool) {
+        this.text = text;
+        this.done = done;
+    }
+}
 
 class Main {
     static inline var DEFAULT_MAX_TOKENS = 128;
@@ -168,13 +181,63 @@ class Main {
             var socketOutput = [conn != null ? conn.output : null];
             var started = Sys.time();
             var output:String;
-            if (stream) {
-                output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
-                    Sys.print(delta);
-                    var out = socketOutput[0];
-                    if (out != null) {
-                        out.writeString(delta);
+            var out = socketOutput[0];
+            var writerOff = Sys.getEnvOr("NUE_STREAM_WRITER", "RAYZOR_STREAM_WRITER") == "0";
+            if (stream && out != null && !writerOff) {
+                // Async streaming: decode sends each token delta to an unbounded
+                // channel (non-blocking send), and a writer thread owns the
+                // socket and coalesces writeString/flush OFF the decode thread.
+                // The per-token TCP flush no longer stalls decode, so STREAM=1
+                // tracks STREAM=0 (~90 tok/s) instead of contending with it.
+                var chArc = new Arc(new Channel(0));
+                var writerCh = chArc.clone();
+                var writer:Thread<Int> = Thread.spawn(function():Int {
+                    while (true) {
+                        var m:StreamMsg = writerCh.get().receive();
+                        if (m == null || m.done) break;
+                        var s = m.text;
+                        var n:StreamMsg = writerCh.get().tryReceive();
+                        while (n != null) {
+                            if (n.done) {
+                                out.writeString(s);
+                                out.flush();
+                                return 0;
+                            }
+                            s += n.text;
+                            n = writerCh.get().tryReceive();
+                        }
+                        out.writeString(s);
                         out.flush();
+                    }
+                    return 0;
+                });
+                // Producer-side coalescing: per-token work is a cheap array
+                // push; the channel is crossed only per BATCH, so decode isn't
+                // taxed per token (the earlier per-token send was as costly as
+                // the per-token flush it replaced). The writer still does the
+                // socket I/O off the decode thread.
+                var pending:Array<Array<String>> = [[]];
+                output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
+                    pending[0].push(delta);
+                    if (pending[0].length >= 8) {
+                        chArc.get().send(new StreamMsg(pending[0].join(""), false));
+                        pending[0] = [];
+                    }
+                    nTokens[0] = nTokens[0] + 1;
+                    return true;
+                });
+                if (pending[0].length > 0) {
+                    chArc.get().send(new StreamMsg(pending[0].join(""), false));
+                }
+                chArc.get().send(new StreamMsg("", true));
+                writer.join();
+            } else if (stream) {
+                // Sync fallback: writer disabled (NUE_STREAM_WRITER=0) or no socket.
+                output = loop.generate(modelPrompt, function(_id:Int, delta:String):Bool {
+                    var o = socketOutput[0];
+                    if (o != null) {
+                        o.writeString(delta);
+                        o.flush();
                     }
                     nTokens[0] = nTokens[0] + 1;
                     return true;
