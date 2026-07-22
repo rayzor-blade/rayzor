@@ -128,12 +128,17 @@ class LlamaModel implements CausalLanguageModel {
         deployments. No-op when the engine is off. */
     public function warmPrefill():Void {
         if (prefillHandle <= 0) return;
-        // One real forward through the graph so the first user prefill is warm:
-        // pays the CoreML E5RT graph specialization (the ~3.9s one-time cost)
-        // here at load instead of on the first token. Server/warm deployments
-        // amortize it once; ttft then ~0.17s.
-        var g = forwardIds([0]);
-        if (g != null) g.free();
+        // Warm BOTH decode entry points so the first user prefill is warm
+        // whichever the generation loop picks: forwardIds (default) and
+        // forwardLastLogits (NUE_PREFILL_LAST_LOGITS=1, the server path). Each
+        // JIT-compiles its wrapper + graphPrefill; the FIRST call also pays the
+        // one-time CoreML E5RT graph specialization (~3.9s), the second is warm.
+        // ttft then ~0.17s regardless of path. No-op when the engine is off.
+        var a = forwardIds([0]);
+        if (a != null) a.free();
+        resetCache();
+        var b = forwardLastLogits([0]);
+        if (b != null) b.free();
         resetCache();
     }
 
