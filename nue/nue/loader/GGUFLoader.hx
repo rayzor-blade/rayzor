@@ -81,6 +81,10 @@ class GGUFLoader implements ModelLoader {
             if (pooling == 2) cast(model, nue.arch.BertModel).clsPool = true;
         }
         if (meta.architecture == "llama") {
+            var lm = cast(model, nue.arch.LlamaModel);
+            // Fused CoreML prefill graph — auto-detected next to the gguf.
+            // NUE_PREFILL=off drops it entirely (pure-CPU per-op / morselized
+            // prefill). This ONLY affects prefill/ttft; decode is CPU either way.
             var kill = Sys.getEnv("NUE_PREFILL");
             if (kill != "off" && kill != "0") {
                 var slash = path.lastIndexOf("/");
@@ -96,19 +100,21 @@ class GGUFLoader implements ModelLoader {
                 db.free();
                 sb.free();
                 if (handle > 0) {
-                    var lm = cast(model, nue.arch.LlamaModel);
                     lm.prefillHandle = handle;
                     Sys.println("[prefill] engine=graph on");
-                    // Warm the JIT call-tree + CoreML E5RT specialization at
-                    // load so the first real prefill runs warm (server/warm
-                    // deployments amortize this once). Opt-in for now.
-                    var warm = Sys.getEnvOr("NUE_PREFILL_WARM", "RAYZOR_PREFILL_WARM");
-                    if (warm != null && warm != "0" && warm != "") {
-                        var tW = Sys.time();
-                        lm.warmPrefill();
-                        Sys.println("[prefill] warmed in " + (Sys.time() - tW) + "s");
-                    }
                 }
+            }
+            // Warm the forward + DECODE kernels at load, INDEPENDENT of the graph
+            // so a pure-CPU server (NUE_PREFILL=off) also gets a warm decode from
+            // request 1 (the bundle tier-promotes by call count — an unwarmed
+            // first request promotes mid-generation, the low-floor requests).
+            // Default ON; opt out with NUE_DECODE_WARM=0. With the graph on this
+            // also pays its one-time E5RT specialization here, not on first prefill.
+            var noWarm = Sys.getEnvOr("NUE_DECODE_WARM", "RAYZOR_DECODE_WARM") == "0";
+            if (!noWarm) {
+                var tW = Sys.time();
+                lm.warm();
+                Sys.println("[warm] model warmed in " + (Sys.time() - tW) + "s");
             }
         }
     }
