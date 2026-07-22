@@ -7,7 +7,7 @@ import nue.transformer.TransformerBlock;
 import nue.model.ModelMetadata;
 import rayzor.ds.Tensor;
 import rayzor.ds.DType;
-import rayzor.ds.BertGraph;
+import nue.engine.BertGraph;
 import rayzor.Bytes;
 
 /**

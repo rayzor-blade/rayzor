@@ -917,7 +917,6 @@ unsafe fn alloc_tensor_with_zero_policy(
     tensor as i64
 }
 
-#[inline]
 unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
     alloc_tensor_with_zero_policy(shape, dtype, fill, true)
 }
