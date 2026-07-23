@@ -554,15 +554,16 @@ unsafe fn fill_dtype(data: *mut u8, numel: usize, dtype: u8, value: f32) {
     }
 }
 
-/// Internal tensor representation
+/// Internal tensor representation. `pub(crate)` so the Haxe-ABI adapters
+/// (haxe_abi.rs) can read fields when adapting handle-taking entry points.
 #[repr(C)]
-struct RayzorTensor {
-    data: *mut u8,
-    shape: *mut usize,
-    strides: *mut usize,
-    ndim: usize,
-    numel: usize,
-    dtype: u8,
+pub(crate) struct RayzorTensor {
+    pub(crate) data: *mut u8,
+    pub(crate) shape: *mut usize,
+    pub(crate) strides: *mut usize,
+    pub(crate) ndim: usize,
+    pub(crate) numel: usize,
+    pub(crate) dtype: u8,
     // `owns_data` indicates this wrapper owns its `data` / `shape` / `strides`
     // allocations and is responsible for freeing them. As of the clone-compact
     // fix (`rayzor_tensor_clone` always compacts to contiguous), `owns_data ==
@@ -2424,8 +2425,13 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
     // (a) shape compatibility. Two accepted forms:
     //   exact     — dest and src have identical shape (the general case).
     //   broadcast — src is the trailing feature vector added to every row of
-    //               dest: a [F] (or [1,F]) bias over a [seq, F] activation.
-    let broadcast = d.numel != s.numel
+    //               dest: a [F] (or [1,F]) bias over a [rows, F] activation.
+    //               Keyed on shape identity, NOT numel: the single-row case
+    //               (dest [1,F] += src [F]) has equal numel but different ndim
+    //               and is still a row-broadcast, not an exact add — this is
+    //               exactly the decode-step Qwen2 q/k/v-bias path.
+    let same_shape = d.ndim == s.ndim && (0..d.ndim).all(|i| d_shape[i] == s_shape[i]);
+    let broadcast = !same_shape
         && s.numel > 0
         && d.numel.is_multiple_of(s.numel)
         && s.numel == d_shape[d.ndim - 1];
@@ -2968,11 +2974,12 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(
 ///
 /// Returns a new tensor with the same shape + dtype.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_tensor_rope(
+unsafe fn rope_impl(
     x_ptr: i64,
     cos_ptr: i64,
     sin_ptr: i64,
     position_offset: i64,
+    neox: bool,
 ) -> i64 {
     crate::kernel_timing::init();
     let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ROPE);
@@ -3049,8 +3056,18 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
                 // vs the llama.cpp reference and a degenerate downstream
                 // attention pattern. See ggml-cpu/ops.cpp `ggml_compute_forward_rope`
                 // and the `rope type = 0` print_info in `llama-eval-callback -lv 4`.
-                let off_lo = base + 2 * i;
-                let off_hi = base + 2 * i + 1;
+                // Pairing depends on the model's RoPE convention:
+                //   NORM/interleaved (Llama, Mistral) — consecutive dims
+                //     (x[2i], x[2i+1]); GGUF weights are permuted to suit it.
+                //   NEOX/half-split (Qwen2, GPT-NeoX, Falcon) — dims a half
+                //     apart (x[i], x[i+half]); GGUF weights are NOT permuted.
+                // The cos/sin table is identical for both (freq indexed by i);
+                // only which two dims rotate together changes.
+                let (off_lo, off_hi) = if neox {
+                    (base + i, base + half + i)
+                } else {
+                    (base + 2 * i, base + 2 * i + 1)
+                };
                 let xlo = load_f32_at(x.data, off_lo, x.dtype);
                 let xhi = load_f32_at(x.data, off_hi, x.dtype);
                 store_f32_at(r.data, off_lo, x.dtype, xlo * cos_v - xhi * sin_v);
@@ -3059,6 +3076,28 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
         }
     }
     result
+}
+
+/// Interleaved (NORM) RoPE — Llama/Mistral. GGUF permutes Q/K to suit.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rope(
+    x_ptr: i64,
+    cos_ptr: i64,
+    sin_ptr: i64,
+    position_offset: i64,
+) -> i64 {
+    rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, false)
+}
+
+/// Half-split (NEOX) RoPE — Qwen2/GPT-NeoX/Falcon. GGUF leaves Q/K unpermuted.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rope_neox(
+    x_ptr: i64,
+    cos_ptr: i64,
+    sin_ptr: i64,
+    position_offset: i64,
+) -> i64 {
+    rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, true)
 }
 
 /// Fused flash-style scaled dot-product attention for the **decode** case

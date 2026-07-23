@@ -103,15 +103,28 @@ class GQAttention implements Attention {
         var useHaxeMat = Linear.useHaxeMatmul();
         var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul();
         if (qWq != null && kWq != null && vWq != null && useFusedMat) {
-            var triple = Linear.useHaxeMatmul()
-                ? nue.Q4Matmul.matmulFused(qWq, kWq, vWq, x, qProj.pool)
-                : QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);
+            var triple:Array<Tensor>;
+            if (Linear.useHaxeMatmul()) {
+                triple = nue.Q4Matmul.matmulFused(qWq, kWq, vWq, x, qProj.pool);
+            } else {
+                // Slots stay null on kernel gate-miss; the null-check below
+                // falls back to the three-call path.
+                triple = [null, null, null];
+                QTensor.fusedQkvIntoArr(x, qWq, kWq, vWq, 0, triple);
+            }
             if (triple != null && triple.length == 3
                 && triple[0] != null && triple[1] != null && triple[2] != null) {
+                // The fused QKV kernel multiplies the raw quant weights and
+                // does NOT go through Linear.forward, so the projection bias
+                // (Qwen2 q/k/v) must be applied here — otherwise it's silently
+                // dropped and attention is garbage. No-op for Llama (null bias).
+                if (qProj.bias != null) triple[0].addInto(qProj.bias);
                 qRaw = triple[0].reshape([seqQ, numQHeads, headDim]);
                 triple[0].free();
+                if (kProj.bias != null) triple[1].addInto(kProj.bias);
                 kRaw = triple[1].reshape([seqQ, numKvHeads, headDim]);
                 triple[1].free();
+                if (vProj.bias != null) triple[2].addInto(vProj.bias);
                 v    = triple[2].reshape([seqQ, numKvHeads, headDim]);
                 triple[2].free();
             } else {

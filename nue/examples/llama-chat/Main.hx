@@ -123,7 +123,9 @@ class Main {
         trace("[meta] " + meta.architecture + " hidden=" + meta.hiddenSize
             + " layers=" + meta.numLayers + " heads=" + meta.numHeads
             + "/" + meta.numKvHeads + " ffn=" + meta.intermediateSize
-            + " vocab=" + meta.vocabSize + " ctx=" + meta.maxSeqLen);
+            + " vocab=" + meta.vocabSize + " ctx=" + meta.maxSeqLen
+            + " headDim=" + meta.headDim + " ropeBase=" + meta.ropeBase
+            + " normEps=" + meta.normEps);
         if (llama.spinPool != null) {
             trace("[pool] workers=" + llama.spinPool.workers());
         }

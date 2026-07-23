@@ -56,9 +56,9 @@ pub mod ssl;
 // Rayzor systems-level types (Box, Ptr, Ref, Usize)
 pub mod systems;
 
-// Rayzor data science types (Tensor)
-pub mod qtensor;
-pub mod tensor;
+// Tensor/QTensor live entirely in the rayzor-tensors plugin: kernels,
+// Haxe-ABI adapters, and the entry-table symbols the @:native externs in
+// rayzor/ds/Tensor.hx bind to. No compiler-side tensor surface.
 
 // Hashlink compatibility
 pub mod hdll_plugin;
@@ -123,12 +123,6 @@ pub fn build_stdlib() -> IrModule {
     // Build systems-level types (Box, Ptr, Ref, Usize)
     systems::build_systems_types(&mut builder);
 
-    // Build tensor types (rayzor.ds.Tensor)
-    tensor::build_tensor_types(&mut builder);
-
-    // Build quantised tensor types (rayzor.ds.QTensor)
-    qtensor::build_qtensor_types(&mut builder);
-
     // Build EReg (regular expressions)
     ereg::build_ereg_type(&mut builder);
 
@@ -166,8 +160,6 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     future::build_future_type(&mut builder);
     socket::build_socket_type(&mut builder);
     systems::build_systems_types(&mut builder);
-    tensor::build_tensor_types(&mut builder);
-    qtensor::build_qtensor_types(&mut builder);
     ereg::build_ereg_type(&mut builder);
     compress::build_compress_type(&mut builder);
     ssl::build_ssl_types(&mut builder);

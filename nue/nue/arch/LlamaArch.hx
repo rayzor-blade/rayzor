@@ -65,6 +65,11 @@ class LlamaArch implements ArchBuilder {
     public function build(meta:ModelMetadata, weights:NamedTensorMap):Module {
         var dtype = inferDType(weights, "token_embd.weight");
         var rope = new RoPE(meta.headDim, meta.maxSeqLen, meta.ropeBase);
+        // RoPE convention is architecture-specific. Llama/Mistral bake the
+        // interleaved (NORM) convention into permuted GGUF weights; Qwen2
+        // (and other NeoX-family archs) keep weights unpermuted and need the
+        // half-split (NEOX) rotation. Wrong choice → degenerate attention.
+        rope.neox = (meta.architecture == "qwen2");
 
         // Q8_0 KV cache opt-in. Default off until we have wider
         // workload coverage; `RAYZOR_KV_Q8=1` enables. Storage drops
@@ -192,10 +197,14 @@ class LlamaArch implements ArchBuilder {
                     + " is not a multiple of 32 — falling back to F32");
             }
         }
-        var qProj = buildLinear(weights, prefix + "attn_q.weight", null, sp);
-        var kProj = buildLinear(weights, prefix + "attn_k.weight", null, sp);
-        var vProj = buildLinear(weights, prefix + "attn_v.weight", null, sp);
-        var oProj = buildLinear(weights, prefix + "attn_output.weight", null, sp);
+        // Attention-projection bias: absent in Llama/Mistral, present on
+        // q/k/v (not o_proj) in Qwen2. Load conditionally so one builder
+        // covers both families — GGUF stores the bias F32 even when the
+        // weight is quantised, which `buildLinear` already handles.
+        var qProj = buildLinear(weights, prefix + "attn_q.weight", biasIfPresent(weights, prefix + "attn_q"), sp);
+        var kProj = buildLinear(weights, prefix + "attn_k.weight", biasIfPresent(weights, prefix + "attn_k"), sp);
+        var vProj = buildLinear(weights, prefix + "attn_v.weight", biasIfPresent(weights, prefix + "attn_v"), sp);
+        var oProj = buildLinear(weights, prefix + "attn_output.weight", biasIfPresent(weights, prefix + "attn_output"), sp);
         var attn = new GQAttention(
             qProj, kProj, vProj, oProj, rope, cache,
             meta.numHeads, meta.numKvHeads, meta.headDim
@@ -222,6 +231,10 @@ class LlamaArch implements ArchBuilder {
                                 biasName:Null<String>,
                                 ?sp:rayzor.concurrent.SpinPool):Linear {
         var b:Null<Tensor> = (biasName == null) ? null : weights.get(biasName);
+        if (b != null && Sys.getEnvOr("NUE_DBG_BIAS", "") == "1") {
+            Sys.println("[bias] " + biasName + " dtype=" + b.dtype() + " numel=" + b.numel()
+                + " v=[" + b.getFlat(0) + ", " + b.getFlat(1) + ", " + b.getFlat(2) + "]");
+        }
         if (weights.isQuantised(weightName)) {
             var qw = weights.getQuant(weightName);
             if (qw == null) {
@@ -251,6 +264,14 @@ class LlamaArch implements ArchBuilder {
         var lf = new Linear(takeWeight(weights, weightName), b, "weight");
         lf.pool = sp;
         return lf;
+    }
+
+    /** `<base>.bias` when the GGUF carries it, else null. Llama-family
+     *  checkpoints have no attention bias; Qwen2 biases q/k/v (not o_proj),
+     *  so a single conditional covers both. */
+    static function biasIfPresent(weights:NamedTensorMap, base:String):Null<String> {
+        var bn = base + ".bias";
+        return weights.exists(bn) ? bn : null;
     }
 
     /**

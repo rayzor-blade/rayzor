@@ -37,7 +37,7 @@ extern class QTensor {
      *
      * For `Q4_K_M`, `cols` must be a multiple of 256.
      */
-    @:native("qtensor_from_float32")
+    @:native("rayzor_qtensor_from_f32_int8_t")
     public static function fromFloat32(src:Tensor, scheme:QScheme):QTensor;
 
     /**
@@ -46,7 +46,7 @@ extern class QTensor {
      * `takeOwnership` is true, the runtime will `free()` the buffer
      * with the `QTensor`; pass false for mmap-backed buffers.
      */
-    @:native("qtensor_wrap_q4_k_m")
+    @:native("rayzor_qtensor_wrap_q4_k_m")
     public static function wrapQ4KM(blockData:Ptr<Float>, rows:Int, cols:Int, takeOwnership:Int):QTensor;
 
     /**
@@ -59,7 +59,7 @@ extern class QTensor {
      * Intended caller: the GGUF loader handing the runtime a tensor slice
      * cut out of the on-disk weights file.
      */
-    @:native("qtensor_from_bytes_q4_k_m")
+    @:native("rayzor_qtensor_from_bytes_q4_k_m")
     public static function fromBytesQ4KM(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
     /**
@@ -68,7 +68,7 @@ extern class QTensor {
      * GGUF variants for the token-embedding, attention-V, and FFN-down
      * weights where Q6_K accuracy is preferred over Q4_K compression.
      */
-    @:native("qtensor_from_bytes_q6_k")
+    @:native("rayzor_qtensor_from_bytes_q6_k")
     public static function fromBytesQ6K(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
     /**
@@ -82,23 +82,25 @@ extern class QTensor {
      * must be a multiple of 256, and allocation must succeed. Caller
      * should fall back to the original tensor in that case.
      */
-    @:native("qtensor_requant_q6k_to_q4km")
+    @:native("rayzor_qtensor_requant_q6k_to_q4km")
     public function requantQ6KToQ4KM():QTensor;
 
     /** Cheap @:shared handle clone (Arc refcount bump). No @:native — the
         call routes through the @:derive(Clone)/@:shared intercept; this
         declaration exists so the RETURN TYPE is known at any compile order. */
+    @:native("rayzor_qtensor_clone")
     public function clone():QTensor;
 
     /** Disjoint-storage deep copy. */
+    @:native("rayzor_qtensor_deep_clone")
     public function deepClone():QTensor;
 
     /** Number of rows in this 2-D matrix. */
-    @:native("qtensor_rows")
+    @:native("rayzor_qtensor_rows")
     public function rows():Int;
 
     /** Number of columns in this 2-D matrix. */
-    @:native("qtensor_cols")
+    @:native("rayzor_qtensor_cols")
     public function cols():Int;
 
     /**
@@ -116,15 +118,15 @@ extern class QTensor {
         Guest-resident on wasm (the weight buffer lives in guest linear memory),
         so the offset is a valid guest `SIMD16i8.load` address.
     **/
-    @:native("qtensor_data_ptr")
+    @:native("rayzor_qtensor_data_ptr")
     public function dataPtr():Usize;
 
     /** Total element count (rows * cols). */
-    @:native("qtensor_numel")
+    @:native("rayzor_qtensor_numel")
     public function numel():Int;
 
     /** Quantisation scheme. */
-    @:native("qtensor_scheme")
+    @:native("rayzor_qtensor_scheme")
     public function scheme():QScheme;
 
     /**
@@ -132,14 +134,14 @@ extern class QTensor {
      * accuracy comparison or debug — production code should prefer
      * `matmulF32` which fuses dequant + matmul.
      */
-    @:native("qtensor_dequant")
+    @:native("rayzor_qtensor_dequant")
     public function dequant():Tensor;
 
     /**
      * Fused dequant-matmul: `self [M, K] × b [K, N] → out [M, N]` where
      * `self` is quantised and `b` is f32. Returns a fresh f32 `Tensor`.
      */
-    @:native("qtensor_matmul_f32")
+    @:native("rayzor_qtensor_matmul_f32")
     public function matmulF32(b:Tensor):Tensor;
 
     /**
@@ -151,7 +153,7 @@ extern class QTensor {
      *
      * Returns a fresh f32 `Tensor`; null if shapes mismatch.
      */
-    @:native("tensor_matmul_qt_t_f32")
+    @:native("rayzor_tensor_matmul_qt_t_f32")
     public function matmulXTQ(x:Tensor):Tensor;
 
     /**
@@ -167,7 +169,7 @@ extern class QTensor {
      *
      * Returns 1 on success, 0 on shape mismatch / null input.
      */
-    @:native("tensor_matmul_qt_t_f32_chunk")
+    @:native("rayzor_tensor_matmul_qt_t_f32_chunk")
     public function matmulXTQChunk(x:Tensor, y:Tensor, nStart:Int, nEnd:Int):Int;
 
     /**
@@ -186,7 +188,7 @@ extern class QTensor {
      *
      * Returns a fresh F32 `Tensor`; null on shape mismatch.
      */
-    @:native("tensor_matmul_qt_t_f32_threaded")
+    @:native("rayzor_tensor_matmul_qt_t_f32_threaded")
     public function matmulXTQThreaded(x:Tensor, threads:Int):Tensor;
 
     /**
@@ -209,8 +211,12 @@ extern class QTensor {
      * M1 Pro). Reduction order is byte-identical to three separate
      * `matmulXTQThreaded` calls.
      */
-    @:native("tensor_matmul_qkv_qt_t_f32_threaded")
-    public static function fusedQkvMatmul(x:Tensor, qW:QTensor, kW:QTensor, vW:QTensor, threads:Int):Array<Tensor>;
+    /** Writes the three result handles into the caller-provided `out`
+     *  (pre-sized `[null, null, null]`). Slots stay null on gate-miss —
+     *  null-check `out[0]` and fall back to three `matmulXTQThreaded`
+     *  calls. Returns 0 on success. */
+    @:native("rayzor_tensor_matmul_qkv_fused_arr")
+    public static function fusedQkvIntoArr(x:Tensor, qW:QTensor, kW:QTensor, vW:QTensor, threads:Int, out:Array<Tensor>):Int;
 
     /**
      * Q6_K-aware row gather: dequant just the rows named by `indices`
@@ -224,10 +230,10 @@ extern class QTensor {
      * embeddings against a Q6_K token-embedding weight, avoiding a
      * full `[vocab, hidden]` dequant per forward pass.
      */
-    @:native("qtensor_gather_rows_q6_k")
+    @:native("rayzor_tensor_gather_rows_q6_k_arr")
     public function gatherRowsQ6K(indices:Array<Int>):Tensor;
 
     /** Free the quantised storage. */
-    @:native("qtensor_free")
+    @:native("rayzor_qtensor_free")
     public function free():Void;
 }

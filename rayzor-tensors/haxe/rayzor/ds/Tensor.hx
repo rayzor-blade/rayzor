@@ -25,26 +25,26 @@ extern class Tensor {
     // --- Construction ---
 
     /** Create a tensor filled with zeros */
-    @:native("tensor_zeros")
+    @:native("rayzor_tensor_zeros_arr")
     public static function zeros(shape:Array<Int>, dtype:DType):Tensor;
 
     /**
      * Create an owning contiguous tensor without initialising its data.
      * Use only when every element is overwritten before the tensor is read.
      */
-    @:native("tensor_uninit")
+    @:native("rayzor_tensor_uninit_arr")
     public static function uninit(shape:Array<Int>, dtype:DType):Tensor;
 
     /** Create a tensor filled with ones */
-    @:native("tensor_ones")
+    @:native("rayzor_tensor_ones_arr")
     public static function ones(shape:Array<Int>, dtype:DType):Tensor;
 
     /** Create a tensor filled with a constant value */
-    @:native("tensor_full")
+    @:native("rayzor_tensor_full_arr")
     public static function full(shape:Array<Int>, value:Float, dtype:DType):Tensor;
 
     /** Create a 1-D tensor from a flat array of floats */
-    @:native("tensor_fromArray")
+    @:native("rayzor_tensor_from_array_arr")
     public static function fromArray(data:Array<Float>, dtype:DType):Tensor;
 
     /**
@@ -54,7 +54,7 @@ extern class Tensor {
      * shipped yet; widening at load keeps the rest of the stack
      * dtype-uniform).
      */
-    @:native("tensor_fromBytesF16")
+    @:native("rayzor_tensor_from_bytes_f16_arr")
     public static function fromBytesF16(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
 
     /**
@@ -64,7 +64,7 @@ extern class Tensor {
      * `Array<Float>.push` wrapper loses precision when crossing the i64
      * extern boundary.
      */
-    @:native("tensor_fromBytesF32")
+    @:native("rayzor_tensor_from_bytes_f32_arr")
     public static function fromBytesF32(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
 
     /**
@@ -73,29 +73,29 @@ extern class Tensor {
      * each). Output is F32 — Q8_0 is rare in Q4_K_M-quantised models so
      * load-time expansion is the simplest path.
      */
-    @:native("tensor_fromBytesQ8_0")
+    @:native("rayzor_tensor_from_bytes_q8_0_arr")
     public static function fromBytesQ8_0(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
 
     /** Create a tensor with random values in [0, 1) */
-    @:native("tensor_rand")
+    @:native("rayzor_tensor_rand_arr")
     public static function rand(shape:Array<Int>, dtype:DType):Tensor;
 
     // --- Properties ---
 
     /** Get the shape as an array of dimension sizes */
-    @:native("tensor_shape")
+    @:native("rayzor_tensor_shape")
     public function shape():Array<Int>;
 
     /** Number of dimensions */
-    @:native("tensor_ndim")
+    @:native("rayzor_tensor_ndim")
     public function ndim():Int;
 
     /** Total number of elements */
-    @:native("tensor_numel")
+    @:native("rayzor_tensor_numel")
     public function numel():Int;
 
     /** Element data type */
-    @:native("tensor_dtype")
+    @:native("rayzor_tensor_dtype")
     public function dtype():DType;
 
     /**
@@ -104,7 +104,7 @@ extern class Tensor {
      * value, call `Tensors.deviceOf(t)` (sibling helper, future). Phase 1a:
      * every constructor on this class returns a tensor with `deviceTag() == 0`.
      */
-    @:native("tensor_device")
+    @:native("rayzor_tensor_device")
     public function deviceTag():Int;
 
     /**
@@ -112,13 +112,13 @@ extern class Tensor {
      * "any node" (no affinity); `>= 0` is a specific node from
      * `rayzor.concurrent.NumaTopology`.
      */
-    @:native("tensor_numa_node")
+    @:native("rayzor_tensor_numa_node")
     public function numaNode():Int;
 
     // --- Element access ---
 
     /** Get element at indices */
-    @:native("tensor_get")
+    @:native("rayzor_tensor_get_arr")
     public function get(indices:Array<Int>):Float;
 
     /**
@@ -127,7 +127,7 @@ extern class Tensor {
      * per call. Use when scanning a contiguous tensor linearly (e.g.
      * top-k selection over a logits row).
      */
-    @:native("tensor_get_flat")
+    @:native("rayzor_tensor_get_flat")
     public function getFlat(i:Int):Float;
 
     /**
@@ -137,7 +137,7 @@ extern class Tensor {
      * buffer from Haxe. A raw `data():Ptr<Float>` + `write()` stores 8-byte
      * f64 at an 8-byte stride and corrupts an F32 tensor.
      */
-    @:native("tensor_set_flat")
+    @:native("rayzor_tensor_set_flat")
     public function setFlat(i:Int, value:Float):Void;
 
     /**
@@ -164,7 +164,7 @@ extern class Tensor {
      * repetition-penalty step entirely — the scan still runs and the
      * top-K is returned untouched.
      */
-    @:native("tensor_topk_scan")
+    @:native("rayzor_tensor_topk_scan_arr")
     public function topkScan(
         outLogits:Array<Float>,
         outIds:Array<Int>,
@@ -174,7 +174,7 @@ extern class Tensor {
     ):Int;
 
     /** Set element at indices */
-    @:native("tensor_set")
+    @:native("rayzor_tensor_set_arr")
     public function set(indices:Array<Int>, value:Float):Void;
 
     /**
@@ -183,7 +183,7 @@ extern class Tensor {
      * mismatch, out-of-bounds, etc.). Callers must treat `-1` as a hard
      * failure — there is no scalar fallback.
      */
-    @:native("tensor_append_along_0_f32")
+    @:native("rayzor_tensor_append_along_0_f32")
     public function appendAlong0(src:Tensor, dstRowOffset:Int):Int;
 
     /**
@@ -191,39 +191,41 @@ extern class Tensor {
      * Returns `0` on success, `-1` on failure. Callers must treat `-1` as a
      * hard failure — there is no scalar fallback.
      */
-    @:native("tensor_broadcast_repeat_0_f32")
+    @:native("rayzor_tensor_broadcast_repeat_0_f32")
     public function broadcastRepeat0(src:Tensor, repeats:Int):Int;
 
     // --- Reshape / view (no copy) ---
 
     /** Reshape to a new shape (same numel) */
-    @:native("tensor_reshape")
+    @:native("rayzor_tensor_reshape_arr")
     public function reshape(shape:Array<Int>):Tensor;
 
     /** 2D matrix transpose */
-    @:native("tensor_transpose")
+    @:native("rayzor_tensor_transpose")
     public function transpose():Tensor;
 
     /** N-D permutation (no copy, view) */
-    @:native("tensor_permute")
+    @:native("rayzor_tensor_permute_arr")
     public function permute(axes:Array<Int>):Tensor;
 
     /** Slice along a single dim, [start, end) (no copy, view) */
-    @:native("tensor_slice")
+    @:native("rayzor_tensor_slice")
     public function slice(dim:Int, start:Int, end:Int):Tensor;
 
     /** Cheap @:shared handle clone (Arc refcount bump). No @:native — the
         call routes through the @:derive(Clone)/@:shared intercept; this
         declaration exists so the RETURN TYPE is known at any compile order. */
+    @:native("rayzor_tensor_clone")
     public function clone():Tensor;
 
     /** Disjoint-storage deep copy (cross-thread mutation patterns). */
+    @:native("rayzor_tensor_deep_clone")
     public function deepClone():Tensor;
 
     // --- Arithmetic (elementwise, return new tensor) ---
 
     /** Element-wise addition */
-    @:native("tensor_add")
+    @:native("rayzor_tensor_add")
     @:op(A + B)
     public function add(other:Tensor):Tensor;
 
@@ -232,16 +234,16 @@ extern class Tensor {
      * same shape, same dtype. Does NOT consume src (src remains live).
      * Use this in place of `var y = x.add(src);` to avoid the alloc+copy.
      */
-    @:native("tensor_addInto")
+    @:native("rayzor_tensor_add_into")
     public function addInto(src:Tensor):Void;
 
     /** Element-wise subtraction */
-    @:native("tensor_sub")
+    @:native("rayzor_tensor_sub")
     @:op(A - B)
     public function sub(other:Tensor):Tensor;
 
     /** Element-wise multiplication */
-    @:native("tensor_mul")
+    @:native("rayzor_tensor_mul")
     @:op(A * B)
     public function mul(other:Tensor):Tensor;
 
@@ -250,18 +252,18 @@ extern class Tensor {
      * Used by transformer SwiGLU blocks to avoid materialising the
      * intermediate activation tensor.
      */
-    @:native("tensor_silu_mul")
+    @:native("rayzor_tensor_silu_mul")
     public function siluMul(other:Tensor):Tensor;
 
     /** Element-wise division */
-    @:native("tensor_div")
+    @:native("rayzor_tensor_div")
     @:op(A / B)
     public function div(other:Tensor):Tensor;
 
     // --- Linear algebra ---
 
     /** Matrix multiplication (2-D × 2-D → 2-D). */
-    @:native("tensor_matmul")
+    @:native("rayzor_tensor_matmul")
     public function matmul(other:Tensor):Tensor;
 
     /**
@@ -271,7 +273,7 @@ extern class Tensor {
      * matmul). Output is `[M, N]`. The natural shape for PyTorch-style
      * `Linear`: `y = x @ w.T` with `w[out, in]` and `x[batch, in]`.
      */
-    @:native("tensor_matmul_t")
+    @:native("rayzor_tensor_matmul_t_threaded")
     public function matmulT(other:Tensor):Tensor;
 
     /**
@@ -280,7 +282,7 @@ extern class Tensor {
      * independent matmul; SIMD axpy fast path on F32, scalar fallback on
      * other dtypes.
      */
-    @:native("tensor_bmm")
+    @:native("rayzor_tensor_bmm")
     public function bmm(other:Tensor):Tensor;
 
     /**
@@ -289,7 +291,7 @@ extern class Tensor {
      * with `bmm` (each row's dot product runs in a single thread; no
      * cross-thread reduction).
      */
-    @:native("tensor_bmm_threaded")
+    @:native("rayzor_tensor_bmm_threaded")
     public function bmmThreaded(other:Tensor, threads:Int):Tensor;
 
     /**
@@ -312,7 +314,7 @@ extern class Tensor {
      * Caller MUST handle null by falling back to the unfused path —
      * prefill (seqQ > 1) is intentionally not supported here.
      */
-    @:native("tensor_flash_attn_decode")
+    @:native("rayzor_tensor_flash_attn_decode")
     public function flashAttnDecode(k:Tensor, v:Tensor, scale:Float):Tensor;
 
     /**
@@ -324,7 +326,7 @@ extern class Tensor {
      * Returns null on dtype mismatch (F32 only), non-3D source, or non-
      * contiguous innermost dim.
      */
-    @:native("tensor_expand_kv_heads_axis1")
+    @:native("rayzor_tensor_expand_kv_heads_axis1_f32")
     public function expandKvHeadsAxis1(repeats:Int):Tensor;
 
     /**
@@ -334,14 +336,14 @@ extern class Tensor {
      * for incremental decode where the new query is at logical position
      * `positionOffset`. Mutates in place; returns `this` for chaining.
      */
-    @:native("tensor_causal_mask_")
+    @:native("rayzor_tensor_causal_mask_")
     public function causalMask_(positionOffset:Int):Tensor;
 
     /**
      * Multiply every element by a scalar. Returns a new tensor; uses the
      * SIMD `mul_const_slice` fast path for F32 inputs.
      */
-    @:native("tensor_scale")
+    @:native("rayzor_tensor_scale")
     public function scale(factor:Float):Tensor;
 
     /**
@@ -349,7 +351,7 @@ extern class Tensor {
      * `permute([..., ndim-1, ndim-2])` but doesn't require an indices
      * array literal at the call site.
      */
-    @:native("tensor_transpose_last2")
+    @:native("rayzor_tensor_transpose_last2")
     public function transposeLast2():Tensor;
 
     /**
@@ -357,67 +359,67 @@ extern class Tensor {
      * `indices` and stack them as `[indices.length, ...rest]`. Used by
      * `nue.Embedding` to turn token IDs into per-token embeddings.
      */
-    @:native("tensor_gather_rows")
+    @:native("rayzor_tensor_gather_rows_arr")
     public function gatherRows(indices:Array<Int>):Tensor;
 
     /** Dot product (flattened) */
-    @:native("tensor_dot")
+    @:native("rayzor_tensor_dot")
     public function dot(other:Tensor):Float;
 
     // --- Reductions ---
 
     /** Sum all elements (returns scalar tensor) */
-    @:native("tensor_sum")
+    @:native("rayzor_tensor_sum")
     public function sum():Float;
 
     /** Mean of all elements */
-    @:native("tensor_mean")
+    @:native("rayzor_tensor_mean")
     public function mean():Float;
 
     /** Maximum element */
-    @:native("tensor_max")
+    @:native("rayzor_tensor_max")
     public function max():Float;
 
     /** Minimum element */
-    @:native("tensor_min")
+    @:native("rayzor_tensor_min")
     public function min():Float;
 
     // --- Math ---
 
     /** Element-wise square root */
-    @:native("tensor_sqrt")
+    @:native("rayzor_tensor_sqrt")
     public function sqrt():Tensor;
 
     /** Element-wise exponential */
-    @:native("tensor_exp")
+    @:native("rayzor_tensor_exp")
     public function exp():Tensor;
 
     /** Element-wise natural logarithm */
-    @:native("tensor_log")
+    @:native("rayzor_tensor_log")
     public function log():Tensor;
 
     /** Element-wise ReLU activation */
-    @:native("tensor_relu")
+    @:native("rayzor_tensor_relu")
     public function relu():Tensor;
 
     /** Element-wise GELU activation (tanh approximation) */
-    @:native("tensor_gelu")
+    @:native("rayzor_tensor_gelu")
     public function gelu():Tensor;
 
     /** Element-wise SiLU / swish activation */
-    @:native("tensor_silu")
+    @:native("rayzor_tensor_silu")
     public function silu():Tensor;
 
     /** Softmax over the last dimension */
-    @:native("tensor_softmax")
+    @:native("rayzor_tensor_softmax")
     public function softmax():Tensor;
 
     /** Layer normalization over the last dimension */
-    @:native("tensor_layer_norm")
+    @:native("rayzor_tensor_layer_norm")
     public function layerNorm(eps:Float):Tensor;
 
     /** RMS normalization over the last dimension */
-    @:native("tensor_rms_norm")
+    @:native("rayzor_tensor_rms_norm")
     public function rmsNorm(eps:Float):Tensor;
 
     /**
@@ -426,7 +428,7 @@ extern class Tensor {
      * `weight` must be a contiguous F32 tensor whose length matches the last
      * dimension of `this`. Returns `x * weight / sqrt(mean(x*x) + eps)`.
      */
-    @:native("tensor_rms_norm_weight")
+    @:native("rayzor_tensor_rms_norm_weight")
     public function rmsNormWeight(weight:Tensor, eps:Float):Tensor;
 
     /**
@@ -439,22 +441,31 @@ extern class Tensor {
      * used by the KV-cache decode path to rotate the new query token at
      * its absolute position.
      */
-    @:native("tensor_rope")
+    @:native("rayzor_tensor_rope")
     public function rope(cos:Tensor, sin:Tensor, positionOffset:Int):Tensor;
+
+    /**
+     * Half-split (NEOX) RoPE variant — rotates dims `(i, i+headDim/2)` rather
+     * than the interleaved `(2i, 2i+1)` of `rope`. Qwen2 / GPT-NeoX / Falcon
+     * GGUFs leave Q/K unpermuted and expect this convention; Llama/Mistral use
+     * the interleaved `rope`. Same cos/sin tables.
+     */
+    @:native("rayzor_tensor_rope_neox")
+    public function ropeNeox(cos:Tensor, sin:Tensor, positionOffset:Int):Tensor;
 
     /**
      * Precomputed cosine table for RoPE. Shape `[maxSeqLen, headDim/2]`,
      * dtype F32. Pass to `Tensor.rope`. `base` is the frequency base
      * (10000.0 for standard Llama, 1000000.0 for long-context tunes).
      */
-    @:native("tensor_rope_cos_table")
+    @:native("rayzor_tensor_rope_cos_table")
     public static function ropeCosTable(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
 
     /**
      * Precomputed sine table for RoPE — companion to `ropeCosTable`.
      * Same shape and dtype.
      */
-    @:native("tensor_rope_sin_table")
+    @:native("rayzor_tensor_rope_sin_table")
     public static function ropeSinTable(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
 
     /**
@@ -463,20 +474,20 @@ extern class Tensor {
      * quantisation of `cos ∈ [-1, 1]` (≈5e-4 absolute), negligible for
      * inference. The GPU RoPE kernel reads through f32 anyway.
      */
-    @:native("tensor_rope_cos_table_f16")
+    @:native("rayzor_tensor_rope_cos_table_f16")
     public static function ropeCosTableF16(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
 
     /** F16-stored sine LUT — companion to `ropeCosTableF16`. */
-    @:native("tensor_rope_sin_table_f16")
+    @:native("rayzor_tensor_rope_sin_table_f16")
     public static function ropeSinTableF16(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
 
     // --- Interop ---
 
     /** Get raw data pointer for FFI */
-    @:native("tensor_data")
+    @:native("rayzor_tensor_data")
     public function data():Ptr<Float>;
 
     /** Free tensor and its data */
-    @:native("tensor_free")
+    @:native("rayzor_tensor_free")
     public function free():Void;
 }

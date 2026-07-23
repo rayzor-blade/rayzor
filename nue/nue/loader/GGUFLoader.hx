@@ -80,7 +80,9 @@ class GGUFLoader implements ModelLoader {
             var pooling = readIntOr(reader, "bert.pooling_type", 1);
             if (pooling == 2) cast(model, nue.arch.BertModel).clsPool = true;
         }
-        if (meta.architecture == "llama") {
+        // Llama-family (Llama/Mistral/Qwen2) all build a LlamaModel and share
+        // the same prefill-graph + decode-warm wiring.
+        if (meta.architecture == "llama" || meta.architecture == "qwen2") {
             var lm = cast(model, nue.arch.LlamaModel);
             // Fused CoreML prefill graph — auto-detected next to the gguf.
             // NUE_PREFILL=off drops it entirely (pure-CPU per-op / morselized
@@ -234,10 +236,14 @@ class GGUFLoader implements ModelLoader {
         var headDim = Std.int(hiddenSize / numHeads);
         var maxSeqLen = readIntOr(reader, p + "context_length", 2048);
         var intermediateSize = readIntOr(reader, p + "feed_forward_length", hiddenSize * 4);
+        // Vocab: the `<arch>.vocab_size` key is often absent (Qwen2 omits it),
+        // so derive from the `token_embd.weight` tensor shape — the embedding
+        // table is [vocab, hidden], authoritative regardless of metadata keys.
+        // Only fall back to the tokenizer count / a default if no embedding
+        // tensor is present (e.g. an encoder head-only checkpoint).
         var vocabSize = readIntOr(reader, p + "vocab_size", 0);
-        if (vocabSize == 0) {
-            vocabSize = readIntOr(reader, "tokenizer.ggml.tokens.count", 32000);
-        }
+        if (vocabSize == 0) vocabSize = vocabFromEmbd(reader, hiddenSize);
+        if (vocabSize == 0) vocabSize = readIntOr(reader, "tokenizer.ggml.tokens.count", 32000);
         // LayerNorm epsilon: BERT/GPT-family store the non-RMS key
         // `attention.layer_norm_epsilon` (1e-12 for BERT); Llama-family
         // store `attention.layer_norm_rms_epsilon` (1e-5). Try the non-RMS
@@ -262,6 +268,20 @@ class GGUFLoader implements ModelLoader {
             ropeBase: ropeBase,
             tieWordEmbeddings: tieEmbed
         };
+    }
+
+    /** Vocab size from the `token_embd.weight` shape — one dim is the hidden
+     *  size, the other is the vocabulary. Authoritative when the metadata
+     *  omits `<arch>.vocab_size` (Qwen2). Returns 0 if no embedding tensor. */
+    private static function vocabFromEmbd(reader:GGUFReader, hiddenSize:Int):Int {
+        for (info in reader.tensorInfos) {
+            if (info.name == "token_embd.weight") {
+                for (d in info.dims) {
+                    if (d != hiddenSize) return d;
+                }
+            }
+        }
+        return 0;
     }
 
     private static function tensorsFromReader(reader:GGUFReader):NamedTensorMap {

@@ -112,13 +112,29 @@ class LlamaModel implements CausalLanguageModel {
             normed.free();
             last.free();
             h.free();
+            if (dbgLogit) dumpArgmax(result);
             return result;
         }
         var normed1 = outputNorm.forward(h);
         var result1 = lmHead.forward(normed1);
         normed1.free();
         h.free();
+        if (dbgLogit) dumpArgmax(result1);
         return result1;
+    }
+
+    static var dbgLogit:Bool = Sys.getEnvOr("NUE_DBG_LOGIT", "") == "1";
+
+    static function dumpArgmax(logits:Tensor):Void {
+        var n = logits.numel();
+        if (n <= 0) return;
+        var best = 0;
+        var bv = logits.getFlat(0);
+        for (i in 1...n) {
+            var v = logits.getFlat(i);
+            if (v > bv) { bv = v; best = i; }
+        }
+        Sys.println("[logit] argmax=" + best + " max=" + bv + " vocab=" + n);
     }
 
     /** Warm the forward + DECODE kernels at load so the first request runs hot.

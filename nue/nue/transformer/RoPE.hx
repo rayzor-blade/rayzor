@@ -35,10 +35,18 @@ class RoPE {
     public var maxSeqLen:Int;
     public var base:Float;
 
+    /** RoPE pairing convention. `false` = interleaved/NORM (Llama, Mistral;
+     *  GGUF permutes Q/K). `true` = half-split/NEOX (Qwen2, GPT-NeoX, Falcon;
+     *  GGUF leaves Q/K unpermuted). Set by the arch builder after construction;
+     *  applying the wrong one gives confident-but-wrong logits (degenerate
+     *  attention), the classic symptom of a RoPE-convention mismatch. */
+    public var neox:Bool;
+
     public function new(headDim:Int, maxSeqLen:Int, base:Float = 10000.0) {
         this.headDim = headDim;
         this.maxSeqLen = maxSeqLen;
         this.base = base;
+        this.neox = false;
         this.cos = Tensor.ropeCosTable(headDim, maxSeqLen, base);
         this.sin = Tensor.ropeSinTable(headDim, maxSeqLen, base);
     }
@@ -49,6 +57,6 @@ class RoPE {
      * position — used for incremental decode.
      */
     public function apply(x:Tensor, positionOffset:Int = 0):Tensor {
-        return x.rope(cos, sin, positionOffset);
+        return neox ? x.ropeNeox(cos, sin, positionOffset) : x.rope(cos, sin, positionOffset);
     }
 }

@@ -7244,9 +7244,7 @@ impl<'a> HirToMirContext<'a> {
             .map(|m| m.is_mir_wrapper)
             .unwrap_or(false)
             || name.starts_with("array_")
-            || name.starts_with("String_")
-            || name.starts_with("Tensor_")
-            || name.starts_with("QTensor_");
+            || name.starts_with("String_");
         if is_stdlib_wrapper_name {
             return self.register_stdlib_mir_forward_ref(name, param_types, return_type);
         }
@@ -11555,22 +11553,42 @@ impl<'a> HirToMirContext<'a> {
                                         runtime_call.return_type.map(|rt| rt.to_ir_type());
                                     let is_static_call = sig.is_static;
 
-                                    let (expected_param_types, actual_return_type) = self
-                                        .get_stdlib_mir_wrapper_signature(runtime_func)
-                                        .unwrap_or_else(|| {
-                                            let mut params = if is_static_call {
-                                                Vec::new()
-                                            } else {
-                                                vec![IrType::Ptr(Box::new(IrType::U8))]
-                                            };
-                                            for arg in args {
-                                                params.push(self.convert_type(arg.ty));
-                                            }
-                                            let ret = explicit_return_type
-                                                .clone()
+                                    // A plugin mapping carries the exact ABI signature it
+                                    // declared (param_types includes self for instance
+                                    // methods). It is authoritative — and free of the TAST
+                                    // param-type drift that otherwise mis-boxes scalar args
+                                    // on an imported extern class. Prefer it over the
+                                    // name-keyed wrapper registry (which has no entry for a
+                                    // pure plugin symbol and so falls back to Ptr).
+                                    let (expected_param_types, actual_return_type) =
+                                        if let Some(descs) = runtime_call.param_types {
+                                            let params: Vec<IrType> =
+                                                descs.iter().map(|d| d.to_ir_type()).collect();
+                                            let ret = runtime_call
+                                                .return_type
+                                                .map(|d| d.to_ir_type())
+                                                .or_else(|| explicit_return_type.clone())
                                                 .unwrap_or_else(|| self.convert_type(expr.ty));
                                             (params, ret)
-                                        });
+                                        } else {
+                                            self.get_stdlib_mir_wrapper_signature(runtime_func)
+                                                .unwrap_or_else(|| {
+                                                    let mut params = if is_static_call {
+                                                        Vec::new()
+                                                    } else {
+                                                        vec![IrType::Ptr(Box::new(IrType::U8))]
+                                                    };
+                                                    for arg in args {
+                                                        params.push(self.convert_type(arg.ty));
+                                                    }
+                                                    let ret = explicit_return_type
+                                                        .clone()
+                                                        .unwrap_or_else(|| {
+                                                            self.convert_type(expr.ty)
+                                                        });
+                                                    (params, ret)
+                                                })
+                                        };
 
                                     let mut arg_regs = if is_static_call {
                                         Vec::new()
