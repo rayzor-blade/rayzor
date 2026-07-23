@@ -198,6 +198,75 @@ impl<'a> SendSyncValidator<'a> {
         Ok(())
     }
 
+    /// Validate that a class which explicitly `@:derive([Send])`/`([Sync])` has
+    /// fields that actually fulfill the trait — an explicit derive is UNSOUND if
+    /// a field isn't Send/Sync (the type would then escape to another thread
+    /// carrying a non-Send field). Runs post-lowering, so every field type and
+    /// every type's `DERIVE_SEND/SYNC` symbol flag is already resolved.
+    ///
+    /// Extern classes are skipped: their fields are opaque, so the derive is an
+    /// unchecked promise the author vouches for (e.g. sys.net.SocketOutput wraps
+    /// an OS fd). Returns one error per offending (trait, field).
+    pub fn validate_derive_soundness(&self, class: &TypedClass) -> Vec<SendSyncError> {
+        use crate::tast::DerivedTrait;
+        let mut errors = Vec::new();
+
+        let derives_send = class.derives(DerivedTrait::Send);
+        let derives_sync = class.derives(DerivedTrait::Sync);
+        if !derives_send && !derives_sync {
+            return errors;
+        }
+        // Extern: opaque fields, derive is a vouched-for promise — skip.
+        if let Some(sym) = self.symbol_table.get_symbol(class.symbol_id) {
+            if sym
+                .flags
+                .contains(crate::tast::symbols::SymbolFlags::EXTERN)
+            {
+                return errors;
+            }
+        }
+
+        let class_name = self
+            .string_interner
+            .get(class.name)
+            .unwrap_or("<anon>")
+            .to_string();
+
+        for field in &class.fields {
+            let field_name = self.string_interner.get(field.name).unwrap_or("?");
+            let field_type_name = self.get_type_name(field.field_type);
+
+            if derives_send && !self.trait_checker.is_send(field.field_type) {
+                errors.push(SendSyncError {
+                    message: format!(
+                        "`{}` derives Send but field `{}` (type `{}`) is not Send",
+                        class_name, field_name, field_type_name
+                    ),
+                    type_name: class_name.clone(),
+                    reason: format!("field `{}` does not derive Send", field_name),
+                    type_id: field.field_type,
+                    symbol_id: None,
+                    source_location: class.source_location,
+                });
+            }
+            if derives_sync && !self.trait_checker.is_sync(field.field_type) {
+                errors.push(SendSyncError {
+                    message: format!(
+                        "`{}` derives Sync but field `{}` (type `{}`) is not Sync",
+                        class_name, field_name, field_type_name
+                    ),
+                    type_name: class_name.clone(),
+                    reason: format!("field `{}` does not derive Sync", field_name),
+                    type_id: field.field_type,
+                    symbol_id: None,
+                    source_location: class.source_location,
+                });
+            }
+        }
+
+        errors
+    }
+
     /// Get a human-readable name for a type
     fn get_type_name(&self, type_id: TypeId) -> String {
         let type_table = self.type_table.borrow();

@@ -146,8 +146,16 @@ impl<'a> TraitChecker<'a> {
             // Primitives are always Send + Sync
             TypeKind::Int | TypeKind::Float | TypeKind::Bool => true,
 
-            // String is Send but NOT Sync (has interior mutability in our impl)
-            TypeKind::String => matches!(trait_, DerivedTrait::Send | DerivedTrait::Clone),
+            // String is immutable — HaxeString is a plain ptr+len+cap with no
+            // cached or interior-mutable state (hashCode recomputes each call),
+            // so a shared &String is race-free. Send + Sync + Clone, matching
+            // Rust's `String`. NOT Copy: it owns a heap buffer, a bit-copy aliases.
+            TypeKind::String => {
+                matches!(
+                    trait_,
+                    DerivedTrait::Send | DerivedTrait::Sync | DerivedTrait::Clone
+                )
+            }
 
             // Void is Send + Sync (it's empty)
             TypeKind::Void => true,
@@ -358,16 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn test_string_is_send_not_sync() {
+    fn test_string_is_send_sync_clone_not_copy() {
         let (type_table, symbol_table, string_interner) = create_test_context();
         let classes: Vec<TypedClass> = vec![];
         let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
 
         let string_type = type_table.borrow().string_type();
 
-        // String is Send but NOT Sync (due to interior mutability concerns)
+        // HaxeString is immutable (ptr+len+cap, no interior mutability) → Send +
+        // Sync + Clone like Rust's String, but NOT Copy (owns a heap buffer).
         assert!(checker.is_send(string_type));
-        assert!(!checker.is_sync(string_type));
+        assert!(checker.is_sync(string_type));
+        assert!(checker.is_clone(string_type));
+        assert!(!checker.is_copy(string_type));
     }
 
     #[test]
@@ -422,6 +433,6 @@ mod tests {
     // Test scenarios to add:
     // 1. Class with explicit @:derive([Send, Sync])
     // 2. Class with auto-derived Send/Sync (all fields are Send/Sync)
-    // 3. Class with String field (Send but NOT Sync)
+    // 3. Class with a Dynamic field (Send/Sync neither — should block derive)
     // 4. Nested classes (class with field of another class type)
 }
