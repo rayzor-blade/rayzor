@@ -153,7 +153,12 @@ impl<'a> TraitChecker<'a> {
             TypeKind::Void => true,
 
             // Check class for derived traits
-            TypeKind::Class { symbol_id, .. } => {
+            // Interfaces share the class path: `class_implements_trait` falls
+            // through `find_class` (an interface isn't a class → None) to the
+            // symbol's derive flags, which the interface lowering mirrors on.
+            // So `@:derive([Send])` on an interface makes an interface-typed
+            // value Send at a Thread.spawn capture site.
+            TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. } => {
                 // Stdlib concurrent types are inherently Send + Sync
                 if matches!(trait_, DerivedTrait::Send | DerivedTrait::Sync) {
                     if self.core_checker.is_arc(type_id)
