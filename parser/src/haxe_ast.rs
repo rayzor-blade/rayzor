@@ -323,6 +323,36 @@ pub struct InterfaceDecl {
     pub span: Span,
 }
 
+impl InterfaceDecl {
+    /// Extract `@:derive([...])` trait names — mirrors `ClassDecl::get_derive_traits`.
+    /// Lets an interface carry Send/Sync so an interface-typed value can cross a
+    /// thread boundary (the marker propagates to implementors' obligations).
+    pub fn get_derive_traits(&self) -> Vec<String> {
+        self.meta
+            .iter()
+            .filter(|m| m.name == "derive")
+            .flat_map(|m| {
+                m.params
+                    .iter()
+                    .filter_map(|param| match &param.kind {
+                        ExprKind::Array(items) => Some(
+                            items
+                                .iter()
+                                .filter_map(|item| match &item.kind {
+                                    ExprKind::Ident(name) => Some(name.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        ExprKind::Ident(name) => Some(vec![name.clone()]),
+                        _ => None,
+                    })
+                    .flatten()
+            })
+            .collect()
+    }
+}
+
 /// Enum declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {

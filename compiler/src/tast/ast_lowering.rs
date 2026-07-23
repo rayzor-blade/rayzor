@@ -4021,6 +4021,30 @@ impl<'a> AstLowering<'a> {
         self.context.pop_type_parameters();
         self.context.exit_scope();
 
+        // Mirror concurrency derives onto the interface SYMBOL (same mechanism
+        // as classes) so an interface-typed value reads as Send/Sync at a
+        // `Thread.spawn` capture site, cross-file. The trait checker reads the
+        // symbol flags when the type isn't in the local file's list.
+        {
+            let mut sym_flags = crate::tast::symbols::SymbolFlags::NONE;
+            for name in interface_decl.get_derive_traits() {
+                match crate::tast::DerivedTrait::from_str(&name) {
+                    Some(crate::tast::DerivedTrait::Send) => {
+                        sym_flags.insert(crate::tast::symbols::SymbolFlags::DERIVE_SEND);
+                    }
+                    Some(crate::tast::DerivedTrait::Sync) => {
+                        sym_flags.insert(crate::tast::symbols::SymbolFlags::DERIVE_SYNC);
+                    }
+                    _ => {}
+                }
+            }
+            if !sym_flags.is_empty() {
+                self.context
+                    .symbol_table
+                    .add_symbol_flags(interface_symbol, sym_flags);
+            }
+        }
+
         let typed_interface = TypedInterface {
             symbol_id: interface_symbol,
             name: interface_name,

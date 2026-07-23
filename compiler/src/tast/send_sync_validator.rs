@@ -211,7 +211,7 @@ impl<'a> SendSyncValidator<'a> {
                     TypeKind::String => "String".to_string(),
                     TypeKind::Void => "Void".to_string(),
                     TypeKind::Dynamic => "Dynamic".to_string(),
-                    TypeKind::Class { symbol_id, .. } => {
+                    TypeKind::Class { symbol_id, .. } | TypeKind::Interface { symbol_id, .. } => {
                         if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
                             if let Some(qn) = sym.qualified_name {
                                 return self
@@ -226,7 +226,7 @@ impl<'a> SendSyncValidator<'a> {
                                 .unwrap_or("unknown")
                                 .to_string();
                         }
-                        "unknown class".to_string()
+                        "unknown type".to_string()
                     }
                     TypeKind::Function { .. } => "Function".to_string(),
                     TypeKind::Array { .. } => "Array".to_string(),
