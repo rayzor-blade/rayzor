@@ -5421,6 +5421,11 @@ impl CompilationUnit {
                 if let Err(error) = validator.validate_class(class) {
                     send_sync_errors.push(collect_error(error));
                 }
+                // Soundness: a class explicitly deriving Send/Sync must have
+                // fields that fulfill the trait (extern types skip — opaque).
+                for error in validator.validate_derive_soundness(class) {
+                    send_sync_errors.push(collect_error(error));
+                }
             }
             for function in &typed_file.functions {
                 if let Err(error) = validator.validate_function(function) {

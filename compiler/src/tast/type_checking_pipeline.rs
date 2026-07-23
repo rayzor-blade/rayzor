@@ -312,6 +312,11 @@ impl<'a> TypeCheckingPhase<'a> {
             if let Err(error) = validator.validate_class(class) {
                 self.emit_send_sync_error(error);
             }
+            // Soundness: a class explicitly deriving Send/Sync must have fields
+            // that fulfill the trait (extern types skipped — opaque promise).
+            for error in validator.validate_derive_soundness(class) {
+                self.emit_send_sync_error(error);
+            }
         }
 
         // Validate all module-level functions
