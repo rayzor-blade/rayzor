@@ -7610,24 +7610,30 @@ impl CompilationUnit {
                         .insert(qualified, symbol_name.clone());
                 }
 
-                // Real declared return type (native_type tag) so a scalar return
-                // (`:Int`/`:Bool`/`:Float`/`:Void`) doesn't decay to a boxed
-                // PtrVoid → null across the module boundary. Params stay PtrVoid:
-                // they're 64-bit for these externs and the real per-param types
-                // ride the `external_function_param_types` carrier at the call site.
+                // Real declared native-type tags for the return AND each param,
+                // so a scalar (`:Int`/`:Bool`/`:Float`) doesn't decay to a boxed
+                // PtrVoid across the module boundary. A C-ABI extern takes its
+                // args by value; the plugin_match lowering marshals per this
+                // signature, so a scalar param declared here as PtrVoid would be
+                // boxed (the arg arriving as a DynamicValue pointer the kernel
+                // then misreads). The leading self slot on instance methods is a
+                // real pointer (tag 3).
                 let return_tag = self.haxe_type_to_native_tag(method.return_type);
+                let mut param_tags: Vec<u8> = Vec::with_capacity(method.parameters.len() + 1);
+                if !method.is_static {
+                    param_tags.push(3); // self pointer
+                }
+                for p in &method.parameters {
+                    param_tags.push(self.haxe_type_to_native_tag(p.param_type));
+                }
                 entries.push(MethodDescEntry {
                     symbol_name,
                     class_name: class_native_name.clone(),
                     method_name,
                     is_static: method.is_static,
-                    param_count: method.parameters.len() as u8
-                        + if method.is_static { 0 } else { 1 },
+                    param_count: param_tags.len() as u8,
                     return_type: return_tag,
-                    param_types: vec![
-                        3; // All Ptr (params ride external_function_param_types)
-                        method.parameters.len() + if method.is_static { 0 } else { 1 }
-                    ],
+                    param_types: param_tags,
                 });
             }
 

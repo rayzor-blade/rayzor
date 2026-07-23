@@ -57,6 +57,10 @@ class ArchRegistry {
     public static function withDefaults():ArchRegistry {
         var r = new ArchRegistry();
         r.register("llama", new LlamaArch());
+        // Qwen2 (and Qwen2.5, which also reports `qwen2` in GGUF) follows the
+        // Llama recipe; the only structural delta is QKV bias, which LlamaArch
+        // loads conditionally. Same builder, distinct arch name.
+        r.register("qwen2", new LlamaArch());
         r.register("bert", new BertArch());
         return r;
     }

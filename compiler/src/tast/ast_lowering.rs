@@ -9681,6 +9681,7 @@ impl<'a> AstLowering<'a> {
     /// callees resolve) and free / same-class `name(...)` calls. Returns None
     /// for instance method calls (same-module boxing is still covered by
     /// `maybe_materialize_for_call`).
+
     fn boxing_param_types(&mut self, callee: &Expr) -> Option<Vec<TypeId>> {
         match &callee.kind {
             ExprKind::Ident(name) => {

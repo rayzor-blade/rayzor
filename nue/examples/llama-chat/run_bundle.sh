@@ -24,7 +24,21 @@ DEFAULT_GGUF="/Users/amaterasu/.cache/huggingface/hub/models--unsloth--Llama-3.2
 if [[ -z "${GGUF:-}" && -f "$HOME/llama-q4.gguf" ]]; then
   DEFAULT_GGUF="$HOME/llama-q4.gguf"
 fi
-GGUF="${GGUF:-$DEFAULT_GGUF}"
+# Model path resolution, in precedence order:
+#   1. first positional arg   ./run_bundle.sh /path/to/model.gguf
+#   2. GGUF env var           GGUF=/path/to/model.gguf ./run_bundle.sh
+#   3. built-in default
+# The positional form avoids the common mistake of writing the assignment
+# on its own line (`GGUF=... <newline> ./run_bundle.sh`), where the var is
+# set locally and never exported into the script's environment.
+GGUF="${1:-${GGUF:-$DEFAULT_GGUF}}"
+[[ $# -gt 0 ]] && shift || true
+echo ">> model: $GGUF"
+if [[ ! -f "$GGUF" ]]; then
+  echo "error: model file not found: $GGUF" >&2
+  echo "       pass it as an argument (./run_bundle.sh <model.gguf>) or via GGUF=..." >&2
+  exit 1
+fi
 
 # The long prompt (override with PROMPT=... ./run_bundle.sh).
 PROMPT="${PROMPT:-Explain voronoi regions, and their connection to delauney computation and graph memory models. With coding examples. Describe vector graph database implementation}"

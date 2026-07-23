@@ -2777,7 +2777,6 @@ impl StdlibMapping {
             map_method!(instance "rayzor_Bytes", "storeI32AlignedUnchecked" => "rayzor_bytes_store_i32_aligned_unchecked", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // Mem.* — address-based unchecked loads/stores (raw Usize base
-            // from Bytes.address()/Tensor.data().raw()); the f32 pair is the
             // only scalar f32 access reachable from Haxe (Float is f64).
             map_method!(static "rayzor_Mem", "loadF32" => "rayzor_mem_load_f32", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::F64),
@@ -3578,218 +3577,25 @@ impl StdlibMapping {
 
         let mappings = vec![
             // --- Construction (static) ---
-            // Tensor.zeros(shape: Array<Int>, dtype: DType): Tensor
-            map_method!(static "rayzor_ds_Tensor", "zeros" => "Tensor_zeros", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // Tensor.uninit(shape: Array<Int>, dtype: DType): Tensor
             // Full-overwrite producers only; wrapper preserves the shape-array ABI.
-            map_method!(static "rayzor_ds_Tensor", "uninit" => "Tensor_uninit", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // Tensor.ones(shape: Array<Int>, dtype: DType): Tensor
-            map_method!(static "rayzor_ds_Tensor", "ones" => "Tensor_ones", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // Tensor.full(shape: Array<Int>, value: Float, dtype: DType): Tensor
-            map_method!(static "rayzor_ds_Tensor", "full" => "Tensor_full", params: 3, mir_wrapper,
-                types: &[PtrVoid, F64, I64] => PtrVoid),
-            // Tensor.fromArray(data: Array<Float>, dtype: DType): Tensor
-            map_method!(static "rayzor_ds_Tensor", "fromArray" => "Tensor_fromArray", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // Tensor.fromBytesF16(bytes: Bytes, shape: Array<Int>): Tensor
-            map_method!(static "rayzor_ds_Tensor", "fromBytesF16" => "Tensor_fromBytesF16", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // Tensor.fromBytesF32(bytes: Bytes, shape: Array<Int>): Tensor
-            map_method!(static "rayzor_ds_Tensor", "fromBytesF32" => "Tensor_fromBytesF32", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // Tensor.fromBytesQ8_0(bytes: Bytes, shape: Array<Int>): Tensor
-            map_method!(static "rayzor_ds_Tensor", "fromBytesQ8_0" => "Tensor_fromBytesQ8_0", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // Tensor.rand(shape: Array<Int>, dtype: DType): Tensor
-            map_method!(static "rayzor_ds_Tensor", "rand" => "Tensor_rand", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
             // --- Properties (instance) ---
-            // tensor.shape(): Array<Int>
-            map_method!(instance "rayzor_ds_Tensor", "shape" => "Tensor_shape", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.ndim(): Int
-            map_method!(instance "rayzor_ds_Tensor", "ndim" => "Tensor_ndim", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
-            // tensor.numel(): Int
-            map_method!(instance "rayzor_ds_Tensor", "numel" => "Tensor_numel", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
-            // tensor.dtype(): DType (returns i64 tag)
-            map_method!(instance "rayzor_ds_Tensor", "dtype" => "Tensor_dtype", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
-            // tensor.deviceTag(): Int — 0=CPU, 1=Metal, 2=Cuda, 3=Vulkan, 4=WebGPU
-            map_method!(instance "rayzor_ds_Tensor", "deviceTag" => "Tensor_device", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
-            // tensor.numaNode(): Int — NUMA node hint when device==CPU; -1 = any
-            map_method!(instance "rayzor_ds_Tensor", "numaNode" => "Tensor_numa_node", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
             // --- Element access ---
-            // tensor.get(indices: Array<Int>): Float
-            map_method!(instance "rayzor_ds_Tensor", "get" => "Tensor_get", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => F64),
-            // tensor.getFlat(i: Int): Float — flat-index scalar read,
             // skips the Array<Int> indexing path. ~100x cheaper per call
-            // for tight scans over a contiguous tensor.
-            map_method!(instance "rayzor_ds_Tensor", "getFlat" => "Tensor_get_flat", params: 1, mir_wrapper,
-                types: &[PtrVoid, I64] => F64),
-            // tensor.setFlat(i, value): Void — dtype-aware flat store, the
             // counterpart to getFlat. Narrows to the element type so an F32
             // tensor stores 4 bytes (a raw Ptr<Float> write stores 8 and
             // corrupts the buffer).
-            map_method!(instance "rayzor_ds_Tensor", "setFlat" => "Tensor_set_flat", params: 2, mir_wrapper,
-                types: &[PtrVoid, I64, F64]),
-            // tensor.topkScan(outLogits, outIds, k, recent, penalty): Int
             // Single FFI replacement for a per-element scan + insertion
             // sort + repetition-penalty loop. Returns number of survivors
             // actually written into the output buffers (≤ k).
-            map_method!(instance "rayzor_ds_Tensor", "topkScan" => "Tensor_topk_scan", params: 5, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, PtrVoid, I64, PtrVoid, F64] => I64),
-            // tensor.set(indices: Array<Int>, value: Float): Void
-            map_method!(instance "rayzor_ds_Tensor", "set" => "Tensor_set", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, F64]),
-            // tensor.appendAlong0(src: Tensor, dstRowOffset: Int): Int
-            map_method!(instance "rayzor_ds_Tensor", "appendAlong0" => "Tensor_append_along_0", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, I64] => I64),
-            // tensor.broadcastRepeat0(src: Tensor, repeats: Int): Int
-            map_method!(instance "rayzor_ds_Tensor", "broadcastRepeat0" => "Tensor_broadcast_repeat_0", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, I64] => I64),
             // --- Reshape / transpose ---
-            // tensor.reshape(shape: Array<Int>): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "reshape" => "Tensor_reshape", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.transpose(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "transpose" => "Tensor_transpose", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.permute(axes: Array<Int>): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "permute" => "Tensor_permute", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.slice(dim, start, end): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "slice" => "Tensor_slice", params: 3, mir_wrapper,
-                types: &[PtrVoid, I64, I64, I64] => PtrVoid),
             // --- Arithmetic (binary, instance) ---
-            // tensor.add(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "add" => "Tensor_add", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.addInto(src: Tensor): Void — in-place accumulation; reuses dest's buffer
-            map_method!(instance "rayzor_ds_Tensor", "addInto" => "Tensor_addInto", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid]),
-            // tensor.sub(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "sub" => "Tensor_sub", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.mul(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "mul" => "Tensor_mul", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.siluMul(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "siluMul" => "Tensor_siluMul", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.div(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "div" => "Tensor_div", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Linear algebra ---
-            // tensor.matmul(other: Tensor): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "matmul" => "Tensor_matmul", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.matmulT(other: Tensor): Tensor — y = a @ b.T (b implicitly transposed)
-            map_method!(instance "rayzor_ds_Tensor", "matmulT" => "Tensor_matmulT", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.dot(other: Tensor): Float
-            map_method!(instance "rayzor_ds_Tensor", "dot" => "Tensor_dot", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => F64),
             // --- Reductions ---
-            // tensor.sum(): Float
-            map_method!(instance "rayzor_ds_Tensor", "sum" => "Tensor_sum", params: 0, mir_wrapper,
-                types: &[PtrVoid] => F64),
-            // tensor.mean(): Float
-            map_method!(instance "rayzor_ds_Tensor", "mean" => "Tensor_mean", params: 0, mir_wrapper,
-                types: &[PtrVoid] => F64),
-            // tensor.max(): Float
-            map_method!(instance "rayzor_ds_Tensor", "max" => "Tensor_max", params: 0, mir_wrapper,
-                types: &[PtrVoid] => F64),
-            // tensor.min(): Float
-            map_method!(instance "rayzor_ds_Tensor", "min" => "Tensor_min", params: 0, mir_wrapper,
-                types: &[PtrVoid] => F64),
             // --- Math (unary) ---
-            // tensor.sqrt(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "sqrt" => "Tensor_sqrt", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.exp(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "exp" => "Tensor_exp", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.log(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "log" => "Tensor_log", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.relu(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "relu" => "Tensor_relu", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.gelu(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "gelu" => "Tensor_gelu", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.silu(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "silu" => "Tensor_silu", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.softmax(): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "softmax" => "Tensor_softmax", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.layerNorm(eps: Float): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "layerNorm" => "Tensor_layer_norm", params: 1, mir_wrapper,
-                types: &[PtrVoid, F64] => PtrVoid),
-            // tensor.rmsNorm(eps: Float): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "rmsNorm" => "Tensor_rms_norm", params: 1, mir_wrapper,
-                types: &[PtrVoid, F64] => PtrVoid),
-            // tensor.rmsNormWeight(weight: Tensor, eps: Float): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "rmsNormWeight" => "Tensor_rms_norm_weight", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, F64] => PtrVoid),
-            // tensor.rope(cos: Tensor, sin: Tensor, positionOffset: Int): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "rope" => "Tensor_rope", params: 3, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
-            // Tensor.ropeCosTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
-            map_method!(static "rayzor_ds_Tensor", "ropeCosTable" => "Tensor_rope_cos_table", params: 3, mir_wrapper,
-                types: &[I64, I64, F64] => PtrVoid),
-            // Tensor.ropeSinTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
-            map_method!(static "rayzor_ds_Tensor", "ropeSinTable" => "Tensor_rope_sin_table", params: 3, mir_wrapper,
-                types: &[I64, I64, F64] => PtrVoid),
-            // Tensor.ropeCosTableF16 / ropeSinTableF16 — F16-stored LUTs
-            map_method!(static "rayzor_ds_Tensor", "ropeCosTableF16" => "Tensor_rope_cos_table_f16", params: 3, mir_wrapper,
-                types: &[I64, I64, F64] => PtrVoid),
-            map_method!(static "rayzor_ds_Tensor", "ropeSinTableF16" => "Tensor_rope_sin_table_f16", params: 3, mir_wrapper,
-                types: &[I64, I64, F64] => PtrVoid),
             // Attention building blocks — composed by nue.transformer in Haxe
-            // tensor.bmm(other: Tensor): Tensor   (batched 3-D matmul)
-            map_method!(instance "rayzor_ds_Tensor", "bmm" => "Tensor_bmm", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // tensor.bmmThreaded(other: Tensor, threads: Int): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "bmmThreaded" => "Tensor_bmm_threaded", params: 2, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
-            // tensor.flashAttnDecode(k, v, scale): Tensor — fused decode
             // attention. Returns 0/null on gate violation (caller must
             // fall back to the unfused bmm chain).
-            map_method!(instance "rayzor_ds_Tensor", "flashAttnDecode" => "Tensor_flash_attn_decode", params: 3, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, PtrVoid, F64] => PtrVoid),
-            // tensor.expandKvHeadsAxis1(repeats: Int): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "expandKvHeadsAxis1" => "Tensor_expand_kv_heads_axis1", params: 1, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // tensor.causalMask_(positionOffset: Int): Tensor   (in-place; returns self)
-            map_method!(instance "rayzor_ds_Tensor", "causalMask_" => "Tensor_causal_mask_", params: 1, mir_wrapper,
-                types: &[PtrVoid, I64] => PtrVoid),
-            // tensor.scale(factor: Float): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "scale" => "Tensor_scale", params: 1, mir_wrapper,
-                types: &[PtrVoid, F64] => PtrVoid),
-            // tensor.transposeLast2(): Tensor   (zero-copy view)
-            map_method!(instance "rayzor_ds_Tensor", "transposeLast2" => "Tensor_transpose_last2", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.gatherRows(indices: Array<Int>): Tensor
-            map_method!(instance "rayzor_ds_Tensor", "gatherRows" => "Tensor_gather_rows", params: 1, mir_wrapper,
-                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Interop ---
-            // tensor.data(): Ptr<Float>
-            map_method!(instance "rayzor_ds_Tensor", "data" => "Tensor_data", params: 0, mir_wrapper,
-                types: &[PtrVoid] => I64),
-            // tensor.free(): Void
-            map_method!(instance "rayzor_ds_Tensor", "free" => "Tensor_free", params: 0, mir_wrapper,
-                types: &[PtrVoid]),
-            // tensor.clone(): Tensor  — @:derive(Clone) safety-net mapping.
             // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
             // before runtime_mapping is consulted; the entry here covers the
             // Dynamic-receiver dispatch edge case where intercept misses.
@@ -3801,14 +3607,9 @@ impl StdlibMapping {
             // path can't read the `@:shared` flag (no static class info),
             // so we route through the legacy name which is now an Arc
             // forward under the hood.
-            map_method!(instance "rayzor_ds_Tensor", "clone" => "rayzor_tensor_clone", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
-            // tensor.deepClone(): Tensor — escape hatch for callers that
             // genuinely need disjoint storage (e.g. cross-thread mutation
             // patterns). Routed directly to `rayzor_tensor_deep_clone`
             // (legacy deep-copy body) regardless of @:shared.
-            map_method!(instance "rayzor_ds_Tensor", "deepClone" => "rayzor_tensor_deep_clone", params: 0, mir_wrapper,
-                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
@@ -3823,95 +3624,32 @@ impl StdlibMapping {
 
         let mappings = vec![
             // --- Construction (static) ---
-            // QTensor.fromFloat32(src: Tensor, scheme: QScheme): QTensor
-            map_method!(static "rayzor_ds_QTensor", "fromFloat32" => "QTensor_fromFloat32",
-                params: 2, mir_wrapper, types: &[PtrVoid, I64] => PtrVoid),
-            // QTensor.wrapQ4KM(blockData: Ptr<Float>, rows: Int, cols: Int, takeOwnership: Bool): QTensor
-            map_method!(static "rayzor_ds_QTensor", "wrapQ4KM" => "QTensor_wrapQ4KM",
-                params: 4, mir_wrapper, types: &[I64, I64, I64, I64] => PtrVoid),
-            // QTensor.fromBytesQ4KM(bytes: Bytes, rows: Int, cols: Int): QTensor
-            map_method!(static "rayzor_ds_QTensor", "fromBytesQ4KM" => "QTensor_fromBytesQ4KM",
-                params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
-            // QTensor.fromBytesQ6K(bytes: Bytes, rows: Int, cols: Int): QTensor
-            map_method!(static "rayzor_ds_QTensor", "fromBytesQ6K" => "QTensor_fromBytesQ6K",
-                params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
-            // qt.requantQ6KToQ4KM(): QTensor — fresh Q4_K_M tensor
-            // re-encoded from a Q6_K source. Returns null on gate fail.
-            map_method!(instance "rayzor_ds_QTensor", "requantQ6KToQ4KM" => "QTensor_requantQ6KToQ4KM",
-                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
             // --- Properties (instance) ---
-            map_method!(instance "rayzor_ds_QTensor", "rows" => "QTensor_rows",
-                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
-            map_method!(instance "rayzor_ds_QTensor", "cols" => "QTensor_cols",
-                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
-            // qt.dataPtr(): Usize — raw weight-byte base (guest-resident on wasm),
-            // so a pure-Haxe qmatmul can SIMD16i8.load Q4_K_M blocks directly.
-            map_method!(instance "rayzor_ds_QTensor", "dataPtr" => "QTensor_data_ptr",
-                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
-            map_method!(instance "rayzor_ds_QTensor", "numel" => "QTensor_numel",
-                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
-            map_method!(instance "rayzor_ds_QTensor", "scheme" => "QTensor_scheme",
-                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
             // --- Compute ---
-            // qt.dequant(): Tensor
-            map_method!(instance "rayzor_ds_QTensor", "dequant" => "QTensor_dequant",
-                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
-            // qt.matmulF32(b: Tensor): Tensor
-            map_method!(instance "rayzor_ds_QTensor", "matmulF32" => "QTensor_matmulF32",
-                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // qt.matmulXTQ(x: Tensor): Tensor  — y = x @ self.T (Linear forward)
-            map_method!(instance "rayzor_ds_QTensor", "matmulXTQ" => "QTensor_matmulXTQ",
-                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
-            // qt.matmulXTQChunk(x: Tensor, y: Tensor, nStart: Int, nEnd: Int): Int
             // The Haxe-side WorkerPool dispatch builds Y itself, splits the
             // row range across workers, and calls this per chunk.
-            map_method!(instance "rayzor_ds_QTensor", "matmulXTQChunk" => "QTensor_matmulXTQChunk",
-                params: 4, mir_wrapper, types: &[PtrVoid, PtrVoid, PtrVoid, I64, I64] => I64),
-            // qt.matmulXTQThreaded(x: Tensor, threads: Int): Tensor
             // Runtime-side fork-join entry point; the established default while
             // the WorkerPool.parallelRows band-loop path is re-verified post
             // WorkerPool fix chain (an earlier nue.Linear import cascade).
-            map_method!(instance "rayzor_ds_QTensor", "matmulXTQThreaded" => "QTensor_matmulXTQThreaded",
-                params: 2, mir_wrapper, types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
-            // QTensor.fusedQkvMatmul(x: Tensor, qW: QTensor, kW: QTensor,
             //   vW: QTensor, threads: Int): Array<Tensor>
             //
             // Static — bypasses the QTensor receiver because the operation
             // consumes three weight matrices. Shares one X→Q8_K pre-quant
             // and one `parallel_rows` fan-out across all three projections
             // (Q/K/V). Returns a fresh 3-element `Array<Tensor>` of
-            // `[Q, K, V]` handles; on gate-miss (non-Q4_K_M, batch != 1,
             // SDOT off, X non-contiguous) the array carries
             // `[null, null, null]` and the Haxe caller falls back to three
             // sequential `matmulXTQThreaded` calls.
-            map_method!(static "rayzor_ds_QTensor", "fusedQkvMatmul" => "QTensor_fusedQkvMatmul",
-                params: 5, mir_wrapper,
-                types: &[PtrVoid, PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
-            // qt.gatherRowsQ6K(indices: Array<Int>): Tensor
-            // Row-wise dequant of a Q6_K weight matrix into a fresh f32
             // Tensor — used by nue.Embedding for token-table lookup
-            // against a Q6_K token-embedding weight (the F32 analogue
-            // is `Tensor.gatherRows`).
-            map_method!(instance "rayzor_ds_QTensor", "gatherRowsQ6K" => "QTensor_gatherRowsQ6K",
-                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Lifetime ---
-            map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
-                params: 0, mir_wrapper, types: &[PtrVoid]),
-            // qt.clone(): QTensor  — @:derive(Clone) safety-net mapping.
             // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
             // before runtime_mapping is consulted; the entry here covers the
             // Dynamic-receiver dispatch edge case where intercept misses.
             //
             // QTensor is `@:shared`; the runtime `rayzor_qtensor_clone`
             // symbol forwards to `rayzor_qtensor_arc_clone` (atomic refcount).
-            // See the matching note on `Tensor.clone` above for the
             // Dynamic-dispatch rationale.
-            map_method!(instance "rayzor_ds_QTensor", "clone" => "rayzor_qtensor_clone",
-                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
-            // qt.deepClone(): QTensor — escape hatch routed to the
             // legacy deep-copy body.
-            map_method!(instance "rayzor_ds_QTensor", "deepClone" => "rayzor_qtensor_deep_clone",
-                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);

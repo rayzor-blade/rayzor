@@ -11,6 +11,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod apple_accel;
+pub mod haxe_abi;
 pub mod haxe_sys;
 pub mod heap_check;
 pub mod kernel_timing;
@@ -50,6 +51,127 @@ pub mod topology {
 // ============================================================================
 
 rayzor_plugin::export_abi_version!();
+
+// ============================================================================
+// Typed method descriptor table.
+//
+// The authoritative (class, method) → (symbol, param types, return type)
+// manifest for `rayzor.ds.Tensor` / `rayzor.ds.QTensor`. The compiler reads
+// this via `plugin_describe` and registers typed mappings, so call sites
+// marshal scalars raw and handles as pointers — independent of any TAST
+// type information, which can drift when this module is compiled as an
+// import. Signatures MUST match both the Haxe declarations in
+// `haxe/rayzor/ds/*.hx` and the Rust kernels/adapters they name.
+// Instance rows include `self` as the leading `Ptr`.
+// ============================================================================
+
+rayzor_plugin::declare_native_methods! {
+    TENSOR_METHODS;
+    // ---- Tensor statics: construction ----
+    "rayzor_ds_Tensor", "zeros",         static,   "rayzor_tensor_zeros_arr",          [Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "uninit",        static,   "rayzor_tensor_uninit_arr",         [Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "ones",          static,   "rayzor_tensor_ones_arr",           [Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "full",          static,   "rayzor_tensor_full_arr",           [Ptr, F64, I64] => Ptr;
+    "rayzor_ds_Tensor", "fromArray",     static,   "rayzor_tensor_from_array_arr",     [Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "fromBytesF16",  static,   "rayzor_tensor_from_bytes_f16_arr", [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "fromBytesF32",  static,   "rayzor_tensor_from_bytes_f32_arr", [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "fromBytesQ8_0", static,   "rayzor_tensor_from_bytes_q8_0_arr", [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "rand",          static,   "rayzor_tensor_rand_arr",           [Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "ropeCosTable",  static,   "rayzor_tensor_rope_cos_table",     [I64, I64, F64] => Ptr;
+    "rayzor_ds_Tensor", "ropeSinTable",  static,   "rayzor_tensor_rope_sin_table",     [I64, I64, F64] => Ptr;
+    "rayzor_ds_Tensor", "ropeCosTableF16", static, "rayzor_tensor_rope_cos_table_f16", [I64, I64, F64] => Ptr;
+    "rayzor_ds_Tensor", "ropeSinTableF16", static, "rayzor_tensor_rope_sin_table_f16", [I64, I64, F64] => Ptr;
+    // ---- Tensor instance: properties / element access ----
+    "rayzor_ds_Tensor", "shape",         instance, "rayzor_tensor_shape",              [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "ndim",          instance, "rayzor_tensor_ndim",               [Ptr] => I64;
+    "rayzor_ds_Tensor", "numel",         instance, "rayzor_tensor_numel",              [Ptr] => I64;
+    "rayzor_ds_Tensor", "dtype",         instance, "rayzor_tensor_dtype",              [Ptr] => I64;
+    "rayzor_ds_Tensor", "deviceTag",     instance, "rayzor_tensor_device",             [Ptr] => I64;
+    "rayzor_ds_Tensor", "numaNode",      instance, "rayzor_tensor_numa_node",          [Ptr] => I64;
+    "rayzor_ds_Tensor", "get",           instance, "rayzor_tensor_get_arr",            [Ptr, Ptr] => F64;
+    "rayzor_ds_Tensor", "getFlat",       instance, "rayzor_tensor_get_flat",           [Ptr, I64] => F64;
+    "rayzor_ds_Tensor", "setFlat",       instance, "rayzor_tensor_set_flat",           [Ptr, I64, F64] => Void;
+    "rayzor_ds_Tensor", "set",           instance, "rayzor_tensor_set_arr",            [Ptr, Ptr, F64] => Void;
+    "rayzor_ds_Tensor", "topkScan",      instance, "rayzor_tensor_topk_scan_arr",      [Ptr, Ptr, Ptr, I64, Ptr, F64] => I64;
+    "rayzor_ds_Tensor", "data",          instance, "rayzor_tensor_data",               [Ptr] => I64;
+    "rayzor_ds_Tensor", "free",          instance, "rayzor_tensor_free",               [Ptr] => Void;
+    "rayzor_ds_Tensor", "clone",         instance, "rayzor_tensor_clone",              [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "deepClone",     instance, "rayzor_tensor_deep_clone",         [Ptr] => Ptr;
+    // ---- Tensor instance: shape ops ----
+    "rayzor_ds_Tensor", "appendAlong0",  instance, "rayzor_tensor_append_along_0_f32", [Ptr, Ptr, I64] => I64;
+    "rayzor_ds_Tensor", "broadcastRepeat0", instance, "rayzor_tensor_broadcast_repeat_0_f32", [Ptr, Ptr, I64] => I64;
+    "rayzor_ds_Tensor", "reshape",       instance, "rayzor_tensor_reshape_arr",        [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "transpose",     instance, "rayzor_tensor_transpose",          [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "transposeLast2", instance, "rayzor_tensor_transpose_last2",   [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "permute",       instance, "rayzor_tensor_permute_arr",        [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "slice",         instance, "rayzor_tensor_slice",              [Ptr, I64, I64, I64] => Ptr;
+    "rayzor_ds_Tensor", "gatherRows",    instance, "rayzor_tensor_gather_rows_arr",    [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "expandKvHeadsAxis1", instance, "rayzor_tensor_expand_kv_heads_axis1_f32", [Ptr, I64] => Ptr;
+    // ---- Tensor instance: arithmetic / linalg ----
+    "rayzor_ds_Tensor", "add",           instance, "rayzor_tensor_add",                [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "addInto",       instance, "rayzor_tensor_add_into",           [Ptr, Ptr] => Void;
+    "rayzor_ds_Tensor", "sub",           instance, "rayzor_tensor_sub",                [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "mul",           instance, "rayzor_tensor_mul",                [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "div",           instance, "rayzor_tensor_div",                [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "siluMul",       instance, "rayzor_tensor_silu_mul",           [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "matmul",        instance, "rayzor_tensor_matmul",             [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "matmulT",       instance, "rayzor_tensor_matmul_t_threaded",  [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "bmm",           instance, "rayzor_tensor_bmm",                [Ptr, Ptr] => Ptr;
+    "rayzor_ds_Tensor", "bmmThreaded",   instance, "rayzor_tensor_bmm_threaded",       [Ptr, Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "flashAttnDecode", instance, "rayzor_tensor_flash_attn_decode", [Ptr, Ptr, Ptr, F64] => Ptr;
+    "rayzor_ds_Tensor", "dot",           instance, "rayzor_tensor_dot",                [Ptr, Ptr] => F64;
+    "rayzor_ds_Tensor", "scale",         instance, "rayzor_tensor_scale",              [Ptr, F64] => Ptr;
+    "rayzor_ds_Tensor", "causalMask_",   instance, "rayzor_tensor_causal_mask_",       [Ptr, I64] => Ptr;
+    // ---- Tensor instance: reductions / activations / norms / rope ----
+    "rayzor_ds_Tensor", "sum",           instance, "rayzor_tensor_sum",                [Ptr] => F64;
+    "rayzor_ds_Tensor", "mean",          instance, "rayzor_tensor_mean",               [Ptr] => F64;
+    "rayzor_ds_Tensor", "max",           instance, "rayzor_tensor_max",                [Ptr] => F64;
+    "rayzor_ds_Tensor", "min",           instance, "rayzor_tensor_min",                [Ptr] => F64;
+    "rayzor_ds_Tensor", "sqrt",          instance, "rayzor_tensor_sqrt",               [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "exp",           instance, "rayzor_tensor_exp",                [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "log",           instance, "rayzor_tensor_log",                [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "relu",          instance, "rayzor_tensor_relu",               [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "gelu",          instance, "rayzor_tensor_gelu",               [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "silu",          instance, "rayzor_tensor_silu",               [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "softmax",       instance, "rayzor_tensor_softmax",            [Ptr] => Ptr;
+    "rayzor_ds_Tensor", "layerNorm",     instance, "rayzor_tensor_layer_norm",         [Ptr, F64] => Ptr;
+    "rayzor_ds_Tensor", "rmsNorm",       instance, "rayzor_tensor_rms_norm",           [Ptr, F64] => Ptr;
+    "rayzor_ds_Tensor", "rmsNormWeight", instance, "rayzor_tensor_rms_norm_weight",    [Ptr, Ptr, F64] => Ptr;
+    "rayzor_ds_Tensor", "rope",          instance, "rayzor_tensor_rope",               [Ptr, Ptr, Ptr, I64] => Ptr;
+    "rayzor_ds_Tensor", "ropeNeox",      instance, "rayzor_tensor_rope_neox",          [Ptr, Ptr, Ptr, I64] => Ptr;
+    // ---- QTensor ----
+    "rayzor_ds_QTensor", "fromFloat32",  static,   "rayzor_qtensor_from_f32_int8_t",   [Ptr, I64] => Ptr;
+    "rayzor_ds_QTensor", "wrapQ4KM",     static,   "rayzor_qtensor_wrap_q4_k_m",       [I64, I64, I64, I64] => Ptr;
+    "rayzor_ds_QTensor", "fromBytesQ4KM", static,  "rayzor_qtensor_from_bytes_q4_k_m", [Ptr, I64, I64] => Ptr;
+    "rayzor_ds_QTensor", "fromBytesQ6K", static,   "rayzor_qtensor_from_bytes_q6_k",   [Ptr, I64, I64] => Ptr;
+    "rayzor_ds_QTensor", "fusedQkvIntoArr", static, "rayzor_tensor_matmul_qkv_fused_arr", [Ptr, Ptr, Ptr, Ptr, I64, Ptr] => I64;
+    "rayzor_ds_QTensor", "requantQ6KToQ4KM", instance, "rayzor_qtensor_requant_q6k_to_q4km", [Ptr] => Ptr;
+    "rayzor_ds_QTensor", "clone",        instance, "rayzor_qtensor_clone",             [Ptr] => Ptr;
+    "rayzor_ds_QTensor", "deepClone",    instance, "rayzor_qtensor_deep_clone",        [Ptr] => Ptr;
+    "rayzor_ds_QTensor", "rows",         instance, "rayzor_qtensor_rows",              [Ptr] => I64;
+    "rayzor_ds_QTensor", "cols",         instance, "rayzor_qtensor_cols",              [Ptr] => I64;
+    "rayzor_ds_QTensor", "dataPtr",      instance, "rayzor_qtensor_data_ptr",          [Ptr] => I64;
+    "rayzor_ds_QTensor", "numel",        instance, "rayzor_qtensor_numel",             [Ptr] => I64;
+    "rayzor_ds_QTensor", "scheme",       instance, "rayzor_qtensor_scheme",            [Ptr] => I64;
+    "rayzor_ds_QTensor", "dequant",      instance, "rayzor_qtensor_dequant",           [Ptr] => Ptr;
+    "rayzor_ds_QTensor", "matmulF32",    instance, "rayzor_qtensor_matmul_f32",        [Ptr, Ptr] => Ptr;
+    "rayzor_ds_QTensor", "matmulXTQ",    instance, "rayzor_tensor_matmul_qt_t_f32",    [Ptr, Ptr] => Ptr;
+    "rayzor_ds_QTensor", "matmulXTQChunk", instance, "rayzor_tensor_matmul_qt_t_f32_chunk", [Ptr, Ptr, Ptr, I64, I64] => I64;
+    "rayzor_ds_QTensor", "matmulXTQThreaded", instance, "rayzor_tensor_matmul_qt_t_f32_threaded", [Ptr, Ptr, I64] => Ptr;
+    "rayzor_ds_QTensor", "gatherRowsQ6K", instance, "rayzor_tensor_gather_rows_q6_k_arr", [Ptr, Ptr] => Ptr;
+    "rayzor_ds_QTensor", "free",         instance, "rayzor_qtensor_free",              [Ptr] => Void;
+}
+
+/// Typed method manifest export — same contract as nue-plugins.
+#[no_mangle]
+pub unsafe extern "C" fn plugin_describe(
+    out_count: *mut usize,
+) -> *const rayzor_plugin::NativeMethodDesc {
+    if !out_count.is_null() {
+        *out_count = TENSOR_METHODS.len();
+    }
+    TENSOR_METHODS.as_ptr()
+}
 
 #[repr(C)]
 pub struct SymbolEntry {
@@ -101,6 +223,80 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         entry!(b"rayzor_tensor_uninit", crate::tensor::rayzor_tensor_uninit),
         entry!(b"rayzor_tensor_ones", crate::tensor::rayzor_tensor_ones),
         entry!(b"rayzor_tensor_full", crate::tensor::rayzor_tensor_full),
+        // Haxe-ABI adapters (haxe_abi.rs): take Array/handle args directly —
+        // the direct binding targets for @:native in rayzor/ds/Tensor.hx.
+        entry!(
+            b"rayzor_tensor_zeros_arr",
+            crate::haxe_abi::rayzor_tensor_zeros_arr
+        ),
+        entry!(
+            b"rayzor_tensor_uninit_arr",
+            crate::haxe_abi::rayzor_tensor_uninit_arr
+        ),
+        entry!(
+            b"rayzor_tensor_ones_arr",
+            crate::haxe_abi::rayzor_tensor_ones_arr
+        ),
+        entry!(
+            b"rayzor_tensor_full_arr",
+            crate::haxe_abi::rayzor_tensor_full_arr
+        ),
+        entry!(
+            b"rayzor_tensor_rand_arr",
+            crate::haxe_abi::rayzor_tensor_rand_arr
+        ),
+        entry!(
+            b"rayzor_tensor_from_array_arr",
+            crate::haxe_abi::rayzor_tensor_from_array_arr
+        ),
+        entry!(
+            b"rayzor_tensor_from_bytes_f32_arr",
+            crate::haxe_abi::rayzor_tensor_from_bytes_f32_arr
+        ),
+        entry!(
+            b"rayzor_tensor_from_bytes_f16_arr",
+            crate::haxe_abi::rayzor_tensor_from_bytes_f16_arr
+        ),
+        entry!(
+            b"rayzor_tensor_from_bytes_q8_0_arr",
+            crate::haxe_abi::rayzor_tensor_from_bytes_q8_0_arr
+        ),
+        entry!(
+            b"rayzor_tensor_reshape_arr",
+            crate::haxe_abi::rayzor_tensor_reshape_arr
+        ),
+        entry!(
+            b"rayzor_tensor_permute_arr",
+            crate::haxe_abi::rayzor_tensor_permute_arr
+        ),
+        entry!(
+            b"rayzor_tensor_get_arr",
+            crate::haxe_abi::rayzor_tensor_get_arr
+        ),
+        entry!(
+            b"rayzor_tensor_set_arr",
+            crate::haxe_abi::rayzor_tensor_set_arr
+        ),
+        entry!(
+            b"rayzor_tensor_gather_rows_arr",
+            crate::haxe_abi::rayzor_tensor_gather_rows_arr
+        ),
+        entry!(
+            b"rayzor_tensor_gather_rows_q6_k_arr",
+            crate::haxe_abi::rayzor_tensor_gather_rows_q6_k_arr
+        ),
+        entry!(
+            b"rayzor_tensor_topk_scan_arr",
+            crate::haxe_abi::rayzor_tensor_topk_scan_arr
+        ),
+        entry!(
+            b"rayzor_qtensor_from_f32_int8_t",
+            crate::haxe_abi::rayzor_qtensor_from_f32_int8_t
+        ),
+        entry!(
+            b"rayzor_tensor_matmul_qkv_fused_arr",
+            crate::haxe_abi::rayzor_tensor_matmul_qkv_fused_arr
+        ),
         entry!(
             b"rayzor_tensor_from_array",
             crate::tensor::rayzor_tensor_from_array
@@ -223,6 +419,10 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
             crate::tensor::rayzor_tensor_matmul_t_threaded
         ),
         entry!(b"rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope),
+        entry!(
+            b"rayzor_tensor_rope_neox",
+            crate::tensor::rayzor_tensor_rope_neox
+        ),
         entry!(
             b"rayzor_tensor_rope_cos_table",
             crate::tensor::rayzor_tensor_rope_cos_table
