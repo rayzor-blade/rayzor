@@ -25,6 +25,52 @@ pub fn quantise_int8_row(src: &[f32], dst: &mut [i8]) -> f32 {
     scale
 }
 
+/// i32 dot of two i8 vectors — `vdotq_s32` (SDOT) on aarch64+dotprod
+/// (the crate enables `stdarch_neon_dotprod` there), scalar i32
+/// accumulation elsewhere.
+///
+/// # Safety
+/// `a[..k]` and `b[..k]` must reference live storage.
+#[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+#[inline]
+pub unsafe fn dot_i8_i8(a: *const i8, b: *const i8, k: usize) -> i32 {
+    use core::arch::aarch64::*;
+    // Two independent accumulators hide vdotq_s32's latency (~5 cycles on
+    // M1) across the unrolled pair, mirroring the Q4_K SDOT kernels.
+    let mut acc0 = vdupq_n_s32(0);
+    let mut acc1 = vdupq_n_s32(0);
+    let mut i = 0usize;
+    while i + 32 <= k {
+        acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
+        acc1 = vdotq_s32(acc1, vld1q_s8(a.add(i + 16)), vld1q_s8(b.add(i + 16)));
+        i += 32;
+    }
+    if i + 16 <= k {
+        acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
+        i += 16;
+    }
+    let mut sum = vaddvq_s32(acc0) + vaddvq_s32(acc1);
+    while i < k {
+        sum += (*a.add(i) as i32) * (*b.add(i) as i32);
+        i += 1;
+    }
+    sum
+}
+
+/// Scalar fallback for targets without SDOT.
+///
+/// # Safety
+/// `a[..k]` and `b[..k]` must reference live storage.
+#[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+#[inline]
+pub unsafe fn dot_i8_i8(a: *const i8, b: *const i8, k: usize) -> i32 {
+    let mut sum = 0i32;
+    for i in 0..k {
+        sum += (*a.add(i) as i32) * (*b.add(i) as i32);
+    }
+    sum
+}
+
 /// Dequant + matmul kernel for INT8-quantised A times f32 B.
 ///
 /// A is `[M, K]` stored as i8 with one scale per row.

@@ -72,6 +72,40 @@ extern class QTensor {
     public static function fromBytesQ6K(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
     /**
+     * Build an INT8 per-row QTensor from a GGUF Q5_0 byte buffer (dtype 6,
+     * 22-byte blocks of 32). Q5_0 carries the tensors the 256-wide k-quants
+     * cannot express — models whose inner dims aren't multiples of 256
+     * (e.g. Qwen2-0.5B, hidden 896) ship every attn/ffn projection this
+     * way. Each row is decoded once at load and re-encoded into the INT8
+     * scheme so the matmul stays on a quantised integer-dot path instead
+     * of falling back to an 8× F32 copy. Same `[out, in]` orientation as
+     * `fromBytesQ4KM`. Returns null on malformed input.
+     */
+    @:native("rayzor_qtensor_from_bytes_q5_0_int8")
+    public static function fromBytesQ5_0Int8(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
+    /**
+     * Build an INT8 per-row QTensor from a GGUF Q5_1 byte buffer (dtype 7,
+     * 24-byte blocks of 32). Same rationale as `fromBytesQ5_0Int8` — a
+     * 32-element legacy block has no place in the 256-wide k-quant machinery.
+     * Q5_1 differs from Q5_0 by carrying an explicit min (`y = d*q + m`
+     * rather than `d*(q-16)`). Returns null on malformed input.
+     */
+    @:native("rayzor_qtensor_from_bytes_q5_1_int8")
+    public static function fromBytesQ5_1Int8(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
+    /**
+     * Build a Q4_K_M QTensor from a GGUF Q5_K byte buffer (dtype 13, 176-byte
+     * super-blocks of 256). Q5_K shares Q4_K's super-block geometry, so it is
+     * re-encoded to Q4_K_M rather than INT8: that keeps the per-32-element
+     * scale AND min, rides the fastest kernel in the tree, and SHRINKS the
+     * weights (4.5 bits/weight vs Q5_K's 5.5 — INT8 would have expanded them
+     * to 8). Costs one bit of mantissa, paid once at load. Null on bad input.
+     */
+    @:native("rayzor_qtensor_from_bytes_q5_k_q4km")
+    public static function fromBytesQ5KQ4KM(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
+    /**
      * Re-quantise a Q6_K tensor as Q4_K_M. Returns a fresh owning QTensor;
      * the source is unchanged. Use case: moving the lm_head off the Q6_K
      * SDOT path (which still pays the 6-bit reconstruction overhead per
