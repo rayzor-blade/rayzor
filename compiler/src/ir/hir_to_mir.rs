@@ -10559,6 +10559,51 @@ impl<'a> HirToMirContext<'a> {
                         .or_else(|| {
                             method_name_interned
                                 .and_then(|name| self.resolve_method_function_id(object.ty, name))
+                        })
+                        .or_else(|| {
+                            // Cross-module STATIC call whose method SymbolId
+                            // drifted AND whose forwarded stub carries no
+                            // qualified_name (the resolver above bails on its
+                            // `?`), in a context where the class's methods were
+                            // never registered (so the receiver-type path also
+                            // misses). Construct the EXACT fully-qualified name
+                            // from the CLASS symbol on the Field's object and
+                            // resolve by name — the same mechanism the
+                            // interface fat-ptr slots use. This is exact-FQN
+                            // construction, not suffix matching: an unresolved
+                            // name still errors loudly.
+                            //
+                            // Statics WITH args already survived through the
+                            // param-count name paths; the zero-arg form had no
+                            // name-based route at all (Q4Matmul.dumpCensus()
+                            // from the llama-chat entry module, E0100).
+                            let mname = method_name?;
+                            let class_sym = match &object.kind {
+                                HirExprKind::Variable { symbol, .. } => *symbol,
+                                _ => return None,
+                            };
+                            let csym = self.symbol_table.get_symbol(class_sym)?;
+                            let cqual = csym
+                                .qualified_name
+                                .and_then(|q| self.string_interner.get(q));
+                            let cbare = self.string_interner.get(csym.name);
+                            for cname in [cqual, cbare].into_iter().flatten() {
+                                let key = format!("{}.{}", cname, mname);
+                                if let Some(&fid) = self.external_function_name_map.get(&key) {
+                                    return Some(fid);
+                                }
+                                for (ext_sym, &fid) in &self.external_function_map {
+                                    let ext_qual = self
+                                        .symbol_table
+                                        .get_symbol(*ext_sym)
+                                        .and_then(|sy| sy.qualified_name)
+                                        .and_then(|q| self.string_interner.get(q));
+                                    if ext_qual == Some(key.as_str()) {
+                                        return Some(fid);
+                                    }
+                                }
+                            }
+                            None
                         });
                     if let Some(func_id) = maybe_func_id {
                         // If the resolved function is from an import module (renumbered to
