@@ -2920,6 +2920,216 @@ impl HaxeBytes {
     }
 }
 
+/// Effective memory budget for this process, in bytes.
+///
+/// `total` is the limit that actually applies: inside a container the cgroup
+/// limit, not the host's RAM — `/proc/meminfo` reports HOST memory to a
+/// container, so keying a policy on it would size decisions to a machine the
+/// process cannot use. `available` is what can be had without evicting
+/// something; `swap_used`/`swap_total` say how hard the box is already paging.
+#[cfg(unix)]
+struct MemFacts {
+    total: u64,
+    available: u64,
+    swap_used: u64,
+    swap_total: u64,
+    /// True when `total` came from a cgroup ceiling rather than host RAM —
+    /// i.e. exceeding it gets the process OOM-killed rather than swapped.
+    cgroup_limited: bool,
+}
+
+/// Pure `/proc/meminfo` + cgroup-limit -> `MemFacts`. Split from the I/O so
+/// the container and swap arithmetic can be unit-tested on any host (the
+/// Linux target cannot be cross-checked from this dev machine).
+#[cfg(unix)]
+// Live on Linux; compiled everywhere so the container/swap arithmetic stays
+// unit-testable from a macOS dev box (the Linux target cannot be cross-checked
+// here — an unrelated C dependency blocks the cross build).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_mem_facts_from(meminfo: &str, cgroup_limit: Option<u64>) -> Option<MemFacts> {
+    fn kb(txt: &str, key: &str) -> Option<u64> {
+        txt.lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    }
+    let host_total = kb(meminfo, "MemTotal:")?;
+    let swap_total = kb(meminfo, "SwapTotal:").unwrap_or(0);
+    let swap_free = kb(meminfo, "SwapFree:").unwrap_or(0);
+    // A cgroup ceiling below the host's RAM is the limit that actually binds;
+    // "max"/unlimited sentinels are >= host RAM and are ignored.
+    let binding = cgroup_limit.filter(|l| *l > 0 && *l < host_total);
+    let total = binding.unwrap_or(host_total);
+    Some(MemFacts {
+        total,
+        available: kb(meminfo, "MemAvailable:").unwrap_or(0).min(total),
+        swap_used: swap_total.saturating_sub(swap_free),
+        swap_total,
+        cgroup_limited: binding.is_some(),
+    })
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn mem_facts() -> Option<MemFacts> {
+    let txt = std::fs::read_to_string("/proc/meminfo").ok()?;
+    // cgroup v2 first, then v1.
+    let cgroup_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .or_else(|| {
+            std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        });
+    linux_mem_facts_from(&txt, cgroup_limit)
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+fn mem_facts() -> Option<MemFacts> {
+    unsafe fn sysctl_u64(name: &str) -> Option<u64> {
+        let cname = std::ffi::CString::new(name).ok()?;
+        let mut val: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let rc = libc::sysctlbyname(
+            cname.as_ptr(),
+            &mut val as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        );
+        if rc == 0 {
+            Some(val)
+        } else {
+            None
+        }
+    }
+    unsafe {
+        let total = sysctl_u64("hw.memsize")?;
+        let (swap_used, swap_total) = {
+            let cname = std::ffi::CString::new("vm.swapusage").ok()?;
+            // libc's `xsw_usage` matches <sys/sysctl.h> exactly (32 bytes;
+            // xsu_encrypted is boolean_t = i32, NOT a bool byte) — use it
+            // rather than hand-rolling the layout.
+            let mut u: libc::xsw_usage = std::mem::zeroed();
+            let mut len = std::mem::size_of::<libc::xsw_usage>();
+            let rc = libc::sysctlbyname(
+                cname.as_ptr(),
+                &mut u as *mut _ as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            );
+            if rc == 0 {
+                (u.xsu_used, u.xsu_total)
+            } else {
+                (0, 0)
+            }
+        };
+        // No honest "available" figure exists on macOS: the OS drives free
+        // memory to near zero on purpose (measured 0.33-1.24% free on a
+        // healthy 16GB box while ~6GB sat in the compressor), so any
+        // "available < X" rule fires permanently. Report 0 = unknown rather
+        // than a number that invites a wrong comparison; the macOS branch of
+        // `decide_mlock` never consults it.
+        Some(MemFacts {
+            total,
+            available: 0,
+            swap_used,
+            swap_total,
+            cgroup_limited: false,
+        })
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn mem_facts() -> Option<MemFacts> {
+    None
+}
+
+/// Decide whether to wire (`mlock`) the model mapping, from the host itself.
+///
+/// Wiring makes the mapping non-reclaimable, which is exactly the point on a
+/// box that is actively evicting — a re-fault mid-decode costs a visible
+/// latency spike (measured on a 92%-swap-full 16GB box: step p50 9.75ms ->
+/// 17.5ms, p95 spikes 60-236ms). It is also exactly the cost everywhere else:
+/// the mapping's full size becomes permanently-resident memory the kernel
+/// cannot reclaim (770MB for Llama-1B Q4_K_M => process footprint 1.3GB
+/// wired vs 0.40GB unwired).
+///
+/// So decide, rather than pick a global default:
+///   - Never wire more than half the effective budget. Pinning that much
+///     starves everything else (including this process's own activations),
+///     and on Linux it may simply fail against RLIMIT_MEMLOCK.
+///   - macOS: never auto-wire, because no cheap signal here reports PRESENT
+///     pressure. `vm.swapusage.xsu_used` counts every compressor swap-out
+///     since boot and is effectively monotonic (macOS does not proactively
+///     swap back in), so it is history, not distress; `vm.page_free_count`
+///     sits near zero by design (~59MB free with 5.7GB compressed on a
+///     healthy 16GB box), so any "available < X" rule fires permanently; and
+///     `kern.memorystatus_vm_pressure_level` reads WARN on an idle machine.
+///     Measured on this 16GB box at 85% swap used, wiring changed throughput
+///     not at all (median 86.7 vs 87.2 tok/s, interleaved A/B) while costing
+///     ~900MB of footprint.
+///   - Linux: wire only under real distress — little left to allocate, or the
+///     box already leaning on swap. That is the regime the win was measured in.
+///
+/// `RAYZOR_MLOCK_MMAP=1` forces wiring on, `RAYZOR_NO_MLOCK_MMAP=1` forces it
+/// off; both beat the automatic decision.
+#[cfg(unix)]
+fn should_mlock_mapping(len: usize) -> bool {
+    if std::env::var_os("RAYZOR_NO_MLOCK_MMAP").is_some() {
+        return false;
+    }
+    if std::env::var_os("RAYZOR_MLOCK_MMAP").is_some() {
+        return true;
+    }
+    let Some(f) = mem_facts() else {
+        return false; // unknown host => the cheap, reclaimable choice
+    };
+    if !decide_mlock(len as u64, &f, cfg!(target_os = "macos")) {
+        return false;
+    }
+    // On Linux RLIMIT_MEMLOCK is the actual gate (on macOS it is not — see the
+    // failure message below), so check it rather than attempt a wire that can
+    // only fail and warn.
+    #[cfg(target_os = "linux")]
+    {
+        let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rl) } == 0
+            && rl.rlim_cur != libc::RLIM_INFINITY
+            && (rl.rlim_cur as u64) < len as u64
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// The policy itself, pure so every branch is testable.
+#[cfg(unix)]
+fn decide_mlock(len: u64, f: &MemFacts, is_macos: bool) -> bool {
+    // Never pin more than half the budget that actually applies.
+    if f.total == 0 || len > f.total / 2 {
+        return false;
+    }
+    // macOS: no cheap signal here means distress (see `should_mlock_mapping`).
+    if is_macos {
+        return false;
+    }
+    // Under a hard cgroup ceiling, unreclaimable pages are an OOM-KILL hazard,
+    // not a latency win: the kernel cannot fall back to eviction, so pinning
+    // moves the failure mode from "slow" to "killed". The measured benefit
+    // came from a bare-metal box that could still swap. Stay reclaimable and
+    // let an operator force it with RAYZOR_MLOCK_MMAP=1.
+    if f.cgroup_limited {
+        return false;
+    }
+    let low_available = f.available > 0 && f.available < f.total / 5;
+    let leaning_on_swap = f.swap_total > 0 && f.swap_used > f.swap_total / 2;
+    low_available || leaning_on_swap
+}
+
 /// Mmap a file into a `HaxeBytes` as `MAP_PRIVATE`. The file descriptor
 /// is retained on the returned struct so the underlying inode stays
 /// alive even if the file is unlinked under us (a Linux safety net —
@@ -3003,18 +3213,30 @@ pub fn haxe_bytes_mmap_file(path: &str) -> *mut HaxeBytes {
             // step (measured: step p50 9.75ms -> 17.5ms with 60-236ms p95
             // spikes on a 92%-swap-full 16GB box). mlock wires the mapping
             // so eviction cannot touch it; the preload above already paid
-            // the population cost. On failure (Linux RLIMIT_MEMLOCK
-            // defaults, or extreme pressure) fall back to the evictable
-            // behavior and say so once. Opt out via RAYZOR_NO_MLOCK_MMAP=1.
-            let want_mlock = std::env::var_os("RAYZOR_NO_MLOCK_MMAP").is_none();
+            // the population cost.
+            //
+            // Wire only when the host says it is worth it — see
+            // `should_mlock_mapping` for the policy and the measurements
+            // behind it. Env overrides still win in both directions.
+            let want_mlock = should_mlock_mapping(len);
             let locked = want_mlock && libc::mlock(ptr, len) == 0;
             if want_mlock && !locked {
+                // The knob differs per platform: Linux gates on RLIMIT_MEMLOCK,
+                // while macOS reports `ulimit -l unlimited` and gates on the
+                // Mach wire limit instead — naming the wrong one sends people
+                // chasing a setting that does nothing.
+                let knob = if cfg!(target_os = "macos") {
+                    "vm.global_user_wire_limit"
+                } else {
+                    "RLIMIT_MEMLOCK"
+                };
                 eprintln!(
                     "  warning: mlock of {} MB model mapping failed (errno {}); \
                      pages stay evictable under memory pressure \
-                     (raise RLIMIT_MEMLOCK or free memory)",
+                     (raise {} or free memory)",
                     len / (1024 * 1024),
-                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                    std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                    knob
                 );
             }
             if !locked {
@@ -4168,5 +4390,97 @@ pub extern "C" fn haxe_objectmap_copy(map_ptr: *mut HaxeObjectMap) -> *mut HaxeO
         Box::into_raw(Box::new(HaxeObjectMap {
             map: map.map.clone(),
         }))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mlock_policy_tests {
+    use super::{decide_mlock, linux_mem_facts_from, MemFacts};
+
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MODEL: u64 = 770 * 1024 * 1024; // Llama-1B Q4_K_M
+
+    fn meminfo(total_kb: u64, avail_kb: u64, swap_total_kb: u64, swap_free_kb: u64) -> String {
+        format!(
+            "MemTotal:       {total_kb} kB\nMemFree:        1000 kB\nMemAvailable:   {avail_kb} kB\n\
+             SwapTotal:      {swap_total_kb} kB\nSwapFree:       {swap_free_kb} kB\n"
+        )
+    }
+
+    #[test]
+    fn idle_host_does_not_wire() {
+        // 32GB, plenty available, swap untouched => reclaimable wins.
+        let f =
+            linux_mem_facts_from(&meminfo(32 * 1024 * 1024, 24 * 1024 * 1024, 0, 0), None).unwrap();
+        assert!(!decide_mlock(MODEL, &f, false));
+    }
+
+    #[test]
+    fn swap_pressured_host_wires() {
+        // The measured win case: 16GB box leaning hard on swap.
+        let f = linux_mem_facts_from(
+            &meminfo(16 * 1024 * 1024, 900 * 1024, 8 * 1024 * 1024, 600 * 1024),
+            None,
+        )
+        .unwrap();
+        assert!(decide_mlock(MODEL, &f, false));
+    }
+
+    #[test]
+    fn macos_never_auto_wires() {
+        // Same distress numbers, but macOS's compressor makes them normal.
+        let f = linux_mem_facts_from(
+            &meminfo(16 * 1024 * 1024, 900 * 1024, 8 * 1024 * 1024, 600 * 1024),
+            None,
+        )
+        .unwrap();
+        assert!(!decide_mlock(MODEL, &f, true));
+    }
+
+    #[test]
+    fn container_limit_beats_host_ram() {
+        // /proc/meminfo shows a 64GB HOST, but the cgroup allows 2GB. Wiring
+        // a 770MB model would pin >1/3 of the real budget -> refuse.
+        let f = linux_mem_facts_from(
+            &meminfo(64 * 1024 * 1024, 200 * 1024, 4 * 1024 * 1024, 100 * 1024),
+            Some(2 * GB),
+        )
+        .unwrap();
+        assert_eq!(f.total, 2 * GB, "cgroup limit must win over host MemTotal");
+        assert!(!decide_mlock(MODEL, &f, false));
+    }
+
+    #[test]
+    fn cgroup_unlimited_sentinel_ignored() {
+        // v1 "unlimited" is a huge sentinel; must fall back to host RAM.
+        let f = linux_mem_facts_from(
+            &meminfo(16 * 1024 * 1024, 8 * 1024 * 1024, 0, 0),
+            Some(u64::MAX),
+        )
+        .unwrap();
+        assert_eq!(f.total, 16 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn oversized_model_never_wires_even_under_pressure() {
+        // 6GB model on an 8GB pressured box: pinning it would starve the box.
+        let f = linux_mem_facts_from(
+            &meminfo(8 * 1024 * 1024, 300 * 1024, 4 * 1024 * 1024, 100 * 1024),
+            None,
+        )
+        .unwrap();
+        assert!(!decide_mlock(6 * GB, &f, false));
+    }
+
+    #[test]
+    fn unknown_facts_are_not_wired() {
+        let f = MemFacts {
+            total: 0,
+            available: 0,
+            swap_used: 0,
+            swap_total: 0,
+            cgroup_limited: false,
+        };
+        assert!(!decide_mlock(MODEL, &f, false));
     }
 }

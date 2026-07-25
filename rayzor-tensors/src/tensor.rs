@@ -734,6 +734,19 @@ fn leak_stats_enabled() -> bool {
     })
 }
 
+/// Ops between `[leak-stats]` lines (`RZT_LEAK_INTERVAL`, default 20k).
+fn leak_stats_interval() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        crate::env_var("RZT_LEAK_INTERVAL", "RAYZOR_LEAK_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(20_000)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
 fn proc_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -747,6 +760,60 @@ fn proc_rss_mb() -> f64 {
         .unwrap_or(-1.0)
 }
 
+/// macOS has no /proc; ask the kernel for this task's resident size so the
+/// leak oracle reports real numbers here too (it previously returned -1 on
+/// Mac, which is why the residual leak was only ever visible on Linux).
+#[cfg(target_os = "macos")]
+fn proc_rss_mb() -> f64 {
+    #[repr(C)]
+    struct ProcTaskInfo {
+        pti_virtual_size: u64,
+        pti_resident_size: u64,
+        pti_total_user: u64,
+        pti_total_system: u64,
+        pti_threads_user: u64,
+        pti_threads_system: u64,
+        pti_policy: i32,
+        pti_faults: i32,
+        pti_pageins: i32,
+        pti_cow_faults: i32,
+        pti_messages_sent: i32,
+        pti_messages_received: i32,
+        pti_syscalls_mach: i32,
+        pti_syscalls_unix: i32,
+        pti_csw: i32,
+        pti_threadnum: i32,
+        pti_numrunning: i32,
+        pti_priority: i32,
+    }
+    const PROC_PIDTASKINFO: libc::c_int = 4;
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+    let mut info: ProcTaskInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcTaskInfo>() as libc::c_int;
+    let rc = unsafe {
+        proc_pidinfo(
+            std::process::id() as libc::c_int,
+            PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if rc == size {
+        info.pti_resident_size as f64 / 1e6
+    } else {
+        -1.0
+    }
+}
+
 #[inline]
 fn leak_on_alloc(bytes: usize) {
     if !leak_stats_enabled() {
@@ -754,7 +821,7 @@ fn leak_on_alloc(bytes: usize) {
     }
     LEAK_NET_TENSOR_BYTES.fetch_add(bytes as i64, MemOrdering::Relaxed);
     let n = LEAK_OP_COUNT.fetch_add(1, MemOrdering::Relaxed);
-    if n.is_multiple_of(20_000) {
+    if n.is_multiple_of(leak_stats_interval()) {
         let tensor_mb = LEAK_NET_TENSOR_BYTES.load(MemOrdering::Relaxed) as f64 / 1e6;
         let rss = proc_rss_mb();
         eprintln!(
