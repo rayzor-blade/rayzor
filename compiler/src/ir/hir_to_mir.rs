@@ -671,6 +671,61 @@ struct SavedLoweringState {
     strict_move_locals: BTreeSet<IrId>,
 }
 
+/// Process-global class field layouts, keyed by NAME.
+///
+/// `class_instance_fields` is per-lowering-context and populated only from that
+/// context's own `hir_module.types`. Measured (RAYZOR_E0100_DEBUG): the context
+/// that lowers a field access frequently holds 1-2 non-class type decls and NO
+/// class layouts at all — `cif_len=0` while the receiver resolves to a valid
+/// `Class{symbol_id}` whose name recovers cleanly. The TYPE crosses the module
+/// boundary; the LAYOUT does not. That is the whole E0100
+/// "class not registered or field does not exist" family.
+///
+/// Stores only (field name -> GEP index). Deliberately NOT TypeId: type ids are
+/// per-context indices and are meaningless in a consumer. The access site
+/// already knows the field's own type, so only the index has to travel.
+/// Keyed by name because SymbolIds drift across contexts (both the class's and
+/// the field's — verified by two failed id/name hybrid fixes).
+static CLASS_FIELD_LAYOUTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>>,
+> = std::sync::OnceLock::new();
+
+fn class_field_layouts(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>> {
+    CLASS_FIELD_LAYOUTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record a class's field layout so any later lowering context can find it.
+fn record_class_field_layout(class_name: &str, fields: Vec<(String, u32)>) {
+    if let Ok(mut m) = class_field_layouts().lock() {
+        // First writer wins: the declaring context has the authoritative layout.
+        m.entry(class_name.to_string()).or_insert(fields);
+    }
+}
+
+/// Record one field's index under its class NAME. Called from the same loop
+/// that populates `field_index_map` — the loop that provably runs for every
+/// registered class ([reg-class] traced 88 executions while the
+/// class_instance_fields insert never fired once). Idempotent: re-registration
+/// writes the same layout.
+fn record_class_field(class_name: &str, field_name: &str, idx: u32) {
+    if let Ok(mut m) = class_field_layouts().lock() {
+        let v = m.entry(class_name.to_string()).or_default();
+        if !v.iter().any(|(n, _)| n == field_name) {
+            v.push((field_name.to_string(), idx));
+        }
+    }
+}
+
+/// Look up a field's GEP index by class name + field name.
+fn lookup_class_field_gep(class_name: &str, field_name: &str) -> Option<u32> {
+    let m = class_field_layouts().lock().ok()?;
+    m.get(class_name)?
+        .iter()
+        .find(|(n, _)| n == field_name)
+        .map(|(_, idx)| *idx)
+}
+
 impl<'a> HirToMirContext<'a> {
     /// Create a new lowering context
     pub fn new(
@@ -28794,6 +28849,34 @@ impl<'a> HirToMirContext<'a> {
                     None
                 });
 
+                // Cross-context fallback: resolve the field's GEP index from the
+                // process-global, name-keyed layout registry.
+                //
+                // `class_instance_fields` is per-context and populated only from
+                // this context's own `hir_module.types`. Measured with
+                // RAYZOR_E0100_DEBUG across 69 failing sites: the lowering context
+                // frequently holds 1-2 non-class type decls and NO class layouts
+                // (`cif_len=0`), while the receiver still resolves to a valid
+                // `Class{symbol_id}` whose NAME recovers fine. So the type crosses
+                // the module boundary and the layout does not — which is why two
+                // earlier attempts to re-key the lookup (by SymbolId, then by
+                // name) both failed: the map they searched was empty.
+                //
+                // Only the GEP index travels; the field's type comes from this
+                // access site, since TypeIds are per-context indices.
+                let found_result = found_result.or_else(|| {
+                    let class_sym = match self.type_table.get(receiver_ty).map(|ti| &ti.kind) {
+                        Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+                        _ => return None,
+                    };
+                    let class_name = self
+                        .symbol_table
+                        .get_symbol(class_sym)
+                        .and_then(|s| self.string_interner.get(s.name))?;
+                    let gep_idx = lookup_class_field_gep(class_name, field_name_str)?;
+                    Some((receiver_ty, gep_idx, field_ty))
+                });
+
                 match found_result {
                     Some(result) => result,
                     None => {
@@ -28947,6 +29030,16 @@ impl<'a> HirToMirContext<'a> {
                                         })
                                     })
                                     .unwrap_or(false);
+                                if let Ok(reg) = class_field_layouts().lock() {
+                                    let mut keys: Vec<&String> = reg.keys().collect();
+                                    keys.sort();
+                                    eprintln!(
+                                        "[E0100]   GLOBAL registry: {} classes, has_this={}, keys={:?}",
+                                        reg.len(),
+                                        class_name.map(|c| reg.contains_key(c)).unwrap_or(false),
+                                        keys.iter().take(12).collect::<Vec<_>>()
+                                    );
+                                }
                                 eprintln!(
                                     "[E0100]   class_name={:?} in_cif_by_id={} in_cif_by_name={} cif_len={} type_meta_calls={} cur_fn={:?}",
                                     class_name,
@@ -39571,6 +39664,14 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn register_class_metadata(&mut self, type_id: TypeId, class: &HirClass) {
+        if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {
+            let cname = self
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .and_then(|sym| self.string_interner.get(sym.name))
+                .unwrap_or("<?>");
+            eprintln!("[reg-class] {} (type_id={:?})", cname, type_id);
+        }
         // Store class TypeId → SymbolId mapping (survives type_table overwrites)
         self.class_type_to_symbol.insert(type_id, class.symbol_id);
 
@@ -39676,6 +39777,22 @@ impl<'a> HirToMirContext<'a> {
             }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
+            // Publish (class name, field name) -> field_index to the global
+            // name-keyed registry. The E0100 fallback consumes this: the same
+            // field carries DIFFERENT SymbolIds per lowering context (measured:
+            // spinPool = SymbolId(7750) and SymbolId(9260) at two access
+            // sites), so the SymbolId-keyed map above misses cross-context.
+            // Same u32 as the primary lookup returns — identical index space.
+            {
+                let cn = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .and_then(|sym| self.string_interner.get(sym.name));
+                let fname = self.string_interner.get(field.name);
+                if let (Some(cn), Some(fname)) = (cn, fname) {
+                    record_class_field(cn, fname, field_index);
+                }
+            }
 
             // Store qualified class name for BLADE cache serialization
             let class_name_str = self
@@ -40158,6 +40275,25 @@ impl<'a> HirToMirContext<'a> {
                                 .insert(field.symbol_id, init_expr.clone());
                         }
                     }
+                }
+                // Also publish to the process-global, name-keyed registry so a
+                // lowering context that never saw this class's declaration can
+                // still resolve its fields (see CLASS_FIELD_LAYOUTS).
+                if let Some(cname) = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .and_then(|sym| self.string_interner.get(sym.name))
+                {
+                    let named: Vec<(String, u32)> = instance_fields
+                        .iter()
+                        .filter_map(|(fsym, _, gep)| {
+                            self.symbol_table
+                                .get_symbol(*fsym)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .map(|n| (n.to_string(), *gep))
+                        })
+                        .collect();
+                    record_class_field_layout(cname, named);
                 }
                 self.class_instance_fields
                     .insert(class.symbol_id, instance_fields);
