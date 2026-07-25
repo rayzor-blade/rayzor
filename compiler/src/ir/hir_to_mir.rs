@@ -36671,7 +36671,7 @@ impl<'a> HirToMirContext<'a> {
                     func_id_opt.is_some()
                 );
             }
-            if let Some(func_id) = func_id_opt {
+            let dispatch_func_id = match func_id_opt {
                 // Slots MUST hold dispatch thunks, never raw methods: the
                 // CallIndirect lowering on every backend uses the closure
                 // ABI (env prepended), so a raw `(this, args)` method in a
@@ -36679,24 +36679,49 @@ impl<'a> HirToMirContext<'a> {
                 // Natively this was masked by devirtualization; on wasm it
                 // surfaced as iface methods silently reading garbage
                 // (Tokenizer.encode returning [] in llama-chat).
-                let dispatch_func_id = self
+                Some(func_id) => self
                     .ensure_vtable_dispatch_thunk(func_id)
                     .or_else(|| {
                         method_sym_opt
                             .and_then(|ms| self.ensure_cross_module_dispatch_thunk(ms, func_id))
                     })
-                    .unwrap_or(func_id);
-                let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
-                let offset_val = self
-                    .builder
-                    .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
-                let slot_ptr = self.builder.build_ptr_add(
-                    fat_ptr,
-                    offset_val,
-                    IrType::Ptr(Box::new(IrType::U8)),
-                )?;
-                self.builder.build_store(slot_ptr, fn_ref);
-            }
+                    .unwrap_or(func_id),
+                // Last tier: the class is imported and NOT lowered in this
+                // context, so neither its method SymbolIds nor its compiled
+                // functions are visible here. Emit the NAME-keyed forward-ref
+                // thunk that dedupes with the real dispatcher at merge — the
+                // same mechanism `wrap_new_class_as_interface_by_name` uses.
+                //
+                // Leaving the slot unwritten (what this loop used to do) is
+                // never acceptable: the wrapper is still non-null, so the
+                // caller's `x == null` guard passes and dispatch jumps through
+                // uninitialised malloc bytes. That is a SIGSEGV in JIT'd code
+                // with no symbol, arbitrarily far from the real cause — it is
+                // how a quantised `BertArch` registered into `ArchRegistry`
+                // crashed inside an unrelated `build()`.
+                None => {
+                    let key = match (
+                        class_fqn.as_ref(),
+                        iface_method_names.get(i).and_then(|o| o.as_ref()),
+                    ) {
+                        (Some(fqn), Some(mname)) => format!("{}.{}", fqn, mname),
+                        // No FQN and no symbol: nothing addresses this method.
+                        // Refuse the wrapper rather than booby-trap the slot.
+                        _ => return None,
+                    };
+                    self.forward_ref_dispatch_thunk_by_name(&key)?
+                }
+            };
+            let fn_ref = self.builder.build_function_ref(dispatch_func_id)?;
+            let offset_val = self
+                .builder
+                .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
+            let slot_ptr = self.builder.build_ptr_add(
+                fat_ptr,
+                offset_val,
+                IrType::Ptr(Box::new(IrType::U8)),
+            )?;
+            self.builder.build_store(slot_ptr, fn_ref);
         }
 
         Some(fat_ptr)
@@ -36855,6 +36880,40 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let slot_count = 1 + target_method_count; // object ptr + method slots
+
+        // NULL GUARD. A null interface value is legitimate — `get()` returning
+        // "not found", an unset field, a failed cast — and it must survive an
+        // assignment as null so the caller's `x == null` check can see it.
+        // The clone below DEREFERENCES the source wrapper to copy its slots,
+        // so without this branch `var a:Iface = returnsNull()` segfaults on the
+        // BIND, before any null check the user wrote can run. That crash lands
+        // in JIT'd code with no symbol and no message.
+        //
+        //   if src == 0 { result = 0 } else { result = <clone> }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let src_as_int = self
+            .builder
+            .build_bitcast(fat_ptr_reg, IrType::I64)
+            .unwrap_or(fat_ptr_reg);
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, src_as_int, zero)?;
+        let null_block = self.builder.create_block()?;
+        let clone_block = self.builder.create_block()?;
+        let join_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(is_null, null_block, clone_block)?;
+
+        // null path: propagate a null interface value untouched.
+        self.builder.switch_to_block(null_block);
+        let null_ptr = self.builder.build_const(IrValue::I64(0))?;
+        let null_ptr = self
+            .builder
+            .build_bitcast(null_ptr, ptr_u8.clone())
+            .unwrap_or(null_ptr);
+        self.builder.build_branch(join_block)?;
+
+        // clone path (the original body).
+        self.builder.switch_to_block(clone_block);
         let fat_ptr_size = (slot_count * 8) as u64;
         let malloc_fn = self.get_or_register_extern_function(
             "malloc",
@@ -36900,8 +36959,16 @@ impl<'a> HirToMirContext<'a> {
             )?;
             self.builder.build_store(dst_slot_ptr, slot_val);
         }
+        self.builder.build_branch(join_block)?;
 
-        Some(cloned_ptr)
+        // join: pick whichever path ran.
+        self.builder.switch_to_block(join_block);
+        let result = self.builder.build_phi(join_block, ptr_u8)?;
+        self.builder
+            .add_phi_incoming(join_block, result, null_block, null_ptr);
+        self.builder
+            .add_phi_incoming(join_block, result, clone_block, cloned_ptr);
+        Some(result)
     }
 
     /// Return the "effective" HIR type for a receiver expression — i.e.
