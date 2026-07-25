@@ -147,6 +147,7 @@ rayzor_plugin::declare_native_methods! {
     "rayzor_ds_QTensor", "fromBytesQ5_0Int8", static, "rayzor_qtensor_from_bytes_q5_0_int8", [Ptr, I64, I64] => Ptr;
     "rayzor_ds_QTensor", "fromBytesQ5_1Int8", static, "rayzor_qtensor_from_bytes_q5_1_int8", [Ptr, I64, I64] => Ptr;
     "rayzor_ds_QTensor", "fromBytesQ5KQ4KM", static, "rayzor_qtensor_from_bytes_q5_k_q4km", [Ptr, I64, I64] => Ptr;
+    "rayzor_ds_QTensor", "fromBytesQ8_0", static, "rayzor_qtensor_from_bytes_q8_0", [Ptr, I64, I64] => Ptr;
     "rayzor_ds_QTensor", "fusedQkvIntoArr", static, "rayzor_tensor_matmul_qkv_fused_arr", [Ptr, Ptr, Ptr, Ptr, I64, Ptr] => I64;
     "rayzor_ds_QTensor", "requantQ6KToQ4KM", instance, "rayzor_qtensor_requant_q6k_to_q4km", [Ptr] => Ptr;
     "rayzor_ds_QTensor", "clone",        instance, "rayzor_qtensor_clone",             [Ptr] => Ptr;
@@ -502,6 +503,10 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         entry!(
             b"rayzor_qtensor_from_bytes_q5_k_q4km",
             crate::quant::rayzor_qtensor_from_bytes_q5_k_q4km
+        ),
+        entry!(
+            b"rayzor_qtensor_from_bytes_q8_0",
+            crate::quant::rayzor_qtensor_from_bytes_q8_0
         ),
         entry!(
             b"rayzor_qtensor_requant_q6k_to_q4km",

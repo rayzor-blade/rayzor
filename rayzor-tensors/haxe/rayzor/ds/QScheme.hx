@@ -16,11 +16,18 @@ package rayzor.ds;
  *   i8 per-sub-block scales and an f16 super-block scale. Q4_K_M GGUFs
  *   promote accuracy-sensitive weights (e.g. `attn_v`, `ffn_down`) to Q6_K.
  *
+ * - `Q8_0`: GGUF's 8-bit legacy format — 32 weights per 34-byte block, one
+ *   f16 scale each. Wrapped ZERO-COPY off the mapped file (it is already
+ *   int8, so there is nothing to re-encode), unlike the 32-element Q5_0/Q5_1
+ *   blocks which are re-encoded into the row-scaled `INT8` scheme above.
+ *
  * Enum order is load-bearing — ordinals match the runtime tag values
- * (`QSCHEME_INT8 = 0`, `QSCHEME_Q4_K_M = 1`, `QSCHEME_Q6_K = 2`).
+ * (`QSCHEME_INT8 = 0`, `QSCHEME_Q4_K_M = 1`, `QSCHEME_Q6_K = 2`,
+ * `QSCHEME_Q8_0 = 3`). APPEND only; never reorder.
  */
 enum QScheme {
     INT8;
     Q4_K_M;
     Q6_K;
+    Q8_0;
 }

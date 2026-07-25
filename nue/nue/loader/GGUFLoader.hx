@@ -36,7 +36,9 @@ import nue.engine.PrefillGraph;
  *   - Q5_K    (GGML 13) — re-encoded to Q4_K_M at load (shared super-block
  *                         geometry; smaller than the source and on the
  *                         fastest kernel).
- *   - Q8_0    (GGML 8)  — dequantised to F32 via `Tensor.fromBytesQ8_0`.
+ *   - Q8_0    (GGML 8)  — wrapped ZERO-COPY as a native Q8_0 `QTensor` when
+ *                         2-D with a 32-aligned contraction dim; otherwise
+ *                         dequantised to F32.
  *   - Q4_K    (GGML 12) — zero-copy `QTensor.fromBytesQ4KM`.
  *   - Q6_K    (GGML 14) — zero-copy `QTensor.fromBytesQ6K`.
  *
@@ -331,8 +333,21 @@ class GGUFLoader implements ModelLoader {
                     // reason (a 32-element block cannot ride the 256-wide
                     // k-quant path).
                 result.setQuant(info.name, decodeQ5_1Int8(raw, info));
-            case 8: // Q8_0
-                result.set(info.name, Tensor.fromBytesQ8_0(raw, dims));
+            case 8: // Q8_0 — 34-byte blocks of 32. Wrapped ZERO-COPY as a
+                    // QTensor when it is a 2-D weight whose contraction dim is
+                    // a multiple of 32: it is already int8 with a per-block
+                    // scale, so dequantising to F32 cost ~3.8x the bytes and
+                    // forced the F32 matmul for no accuracy gain.
+                    //
+                    // 1-D tensors (norms, biases) and any odd contraction dim
+                    // stay on the F32 path: a QTensor carries an [out, in]
+                    // shape that a 1-D weight has no meaning for, and the
+                    // block view requires cols % 32 == 0.
+                if (info.dims.length >= 2 && q8_0QuantEligible(info)) {
+                    result.setQuant(info.name, decodeQ8_0Raw(raw, info));
+                } else {
+                    result.set(info.name, Tensor.fromBytesQ8_0(raw, dims));
+                }
             case 12: // Q4_K — 144-byte super-blocks; the dominant Q4_K_M weight scheme.
                 result.setQuant(info.name, decodeQ4KMRaw(raw, info));
             case 13: // Q5_K — 176-byte super-blocks. Re-encoded to Q4_K_M (same
@@ -391,6 +406,43 @@ class GGUFLoader implements ModelLoader {
         var qt = QTensor.fromBytesQ5_0Int8(raw, rows, cols);
         if (qt == null) {
             throw "GGUFLoader: QTensor.fromBytesQ5_0Int8 returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        return qt;
+    }
+
+    /** True when a Q8_0 tensor can be wrapped as a QTensor: 2-D, and the
+     *  contraction dim (`cols`, the product of all but the last GGUF dim) is a
+     *  whole number of 32-element blocks. */
+    private static function q8_0QuantEligible(info:GGUFReader.TensorInfo):Bool {
+        if (!q8_0Quant()) return false;
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        return (cols % 32) == 0;
+    }
+
+    /** `NUE_Q8_0_QUANT=0` forces Q8_0 back to the legacy F32 dequant path.
+        Kept as an escape hatch for A/B and for any consumer that still
+        assumes an F32 `Tensor`. Cached: 0 = unread, 1 = on, 2 = off. */
+    static var _q8Quant:Int = 0;
+
+    static function q8_0Quant():Bool {
+        if (_q8Quant == 0) {
+            var v = Sys.getEnvOr("NUE_Q8_0_QUANT", "RAYZOR_Q8_0_QUANT");
+            _q8Quant = (v == "0" || v == "false") ? 2 : 1;
+        }
+        return _q8Quant == 1;
+    }
+
+    /** Wrap a Q8_0 (GGUF dtype 8) tensor as a zero-copy QTensor over the
+     *  file's bytes — no dequant, no copy, bit-exact. */
+    private static function decodeQ8_0Raw(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        var qt = QTensor.fromBytesQ8_0(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ8_0 returned null for '"
                 + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
         }
         return qt;

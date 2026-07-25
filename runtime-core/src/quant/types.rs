@@ -9,6 +9,12 @@
 pub const QSCHEME_INT8: u8 = 0;
 pub const QSCHEME_Q4_K_M: u8 = 1;
 pub const QSCHEME_Q6_K: u8 = 2;
+/// GGUF Q8_0: 32 weights per 34-byte block (f16 scale + 32 int8). Wrapped
+/// ZERO-COPY straight off the mapped file — it is already int8, so there is
+/// nothing to re-encode and nothing to lose.
+pub const QSCHEME_Q8_0: u8 = 3;
+pub const Q8_0_BLOCK_SIZE: usize = 32;
+pub const Q8_0_BLOCK_BYTES: usize = 34;
 
 /// Q4_K_M block dimensions. Fixed by the GGUF spec.
 pub const Q4_K_M_BLOCK_SIZE: usize = 256;

@@ -367,11 +367,18 @@ class Q4Matmul {
      * batch-outer nesting made prefill cost seq × decode. All activation rows
      * are Q8_K-quantized up front into packed scratch (batch × one row).
      */
+    /** True for schemes whose storage is NOT a 256-element k-quant super-block
+        (per-row INT8, or native Q8_0's 32-element blocks) — those must never
+        reach the banded k-quant loops, which would misread the layout. */
+    static inline function isRowwise(qw:QTensor):Bool {
+        return qw.scheme() == QScheme.INT8 || qw.scheme() == QScheme.Q8_0;
+    }
+
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
         // INT8 per-row weights (Q5_0-sourced) have no Haxe band kernel —
         // the band loop below is 256-wide k-quant machinery. The runtime
         // XTQ path dispatches the INT8 scheme natively (integer SDOT dot).
-        if (qw.scheme() == QScheme.INT8) {
+        if (qw.scheme() == QScheme.INT8 || qw.scheme() == QScheme.Q8_0) {
             return qw.matmulXTQThreaded(x, 0);
         }
         var K = qw.cols();
@@ -385,7 +392,7 @@ class Q4Matmul {
         // routed Q6_K falls to its legacy per-block fallback (~700ms/call at
         // batch=497 — measured, the whole "AMX long-prompt bleed"). Q6_K and
         // decode stay on the Haxe band loop below.
-        if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() != QScheme.Q6_K) {
+        if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() == QScheme.Q4_K_M) {
             return qw.matmulXTQThreaded(x, 0);
         }
 
@@ -550,9 +557,10 @@ class Q4Matmul {
         // per-weight calls — `matmul` routes each INT8 weight to the
         // runtime XTQ path, and the banded/fused machinery below is
         // k-quant-only.
-        var anyInt8 = (w0.scheme() == QScheme.INT8) || (w1.scheme() == QScheme.INT8)
-            || (w2 != null && w2.scheme() == QScheme.INT8);
-        if (!useFusedMatmul() || anyInt8) {
+        // Row-wise/32-block schemes (INT8 from Q5_0/Q5_1, and native Q8_0)
+        // have no place in the 256-wide banded fused path below.
+        var anyRowwise = isRowwise(w0) || isRowwise(w1) || (w2 != null && isRowwise(w2));
+        if (!useFusedMatmul() || anyRowwise) {
             var split = [matmul(w0, x, sp), matmul(w1, x, sp)];
             if (w2 != null) split.push(matmul(w2, x, sp));
             return split;
@@ -565,9 +573,9 @@ class Q4Matmul {
             // (attn_v in the QKV triple) would hit the runtime's legacy
             // fallback; keep such triples on the banded path. matmulXTQThreaded
             // does NOT free x, so the shared activation survives all calls.
-            var anyQ6 = (w0.scheme() == QScheme.Q6_K) || (w1.scheme() == QScheme.Q6_K)
-                || (w2 != null && w2.scheme() == QScheme.Q6_K);
-            if (batch >= AMX_MIN_BATCH && amxPrefill() && !anyQ6) {
+            var allQ4 = (w0.scheme() == QScheme.Q4_K_M) && (w1.scheme() == QScheme.Q4_K_M)
+                && (w2 == null || w2.scheme() == QScheme.Q4_K_M);
+            if (batch >= AMX_MIN_BATCH && amxPrefill() && allQ4) {
                 var outs = [w0.matmulXTQThreaded(x, 0), w1.matmulXTQThreaded(x, 0)];
                 if (w2 != null) outs.push(w2.matmulXTQThreaded(x, 0));
                 return outs;

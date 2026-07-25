@@ -111,7 +111,8 @@ use rayzor_runtime_core::quant::{
 };
 pub use rayzor_runtime_core::quant::{
     Q4KBlock, Q4KMBlock, Q8Block, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE,
-    Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE, QSCHEME_INT8, QSCHEME_Q4_K_M, QSCHEME_Q6_K,
+    Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_SIZE, QSCHEME_INT8,
+    QSCHEME_Q4_K_M, QSCHEME_Q6_K, QSCHEME_Q8_0,
 };
 
 /// Internal opaque tensor representation. The layout depends on `scheme`:
@@ -155,6 +156,7 @@ impl RayzorQTensor {
             QSCHEME_INT8 => self.numel,
             QSCHEME_Q4_K_M => (self.numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
             QSCHEME_Q6_K => (self.numel / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES,
+            QSCHEME_Q8_0 => (self.numel / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES,
             _ => 0,
         }
     }
@@ -321,6 +323,7 @@ unsafe fn alloc_qtensor(
     let data_bytes = match scheme {
         QSCHEME_INT8 => numel,
         QSCHEME_Q4_K_M => (numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
+        QSCHEME_Q8_0 => (numel / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES,
         _ => return std::ptr::null_mut(),
     };
 
@@ -978,6 +981,193 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_k_q4km(
     dst_ptr as i64
 }
 
+// ============================================================================
+// Q8_0 (GGUF dtype 8) — native, zero-copy.
+// ============================================================================
+
+/// Dequantise one Q8_0 block into `dst[0..32]`: f16 scale then 32 int8.
+unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32]) {
+    let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
+    let q = src.add(2) as *const i8;
+    for j in 0..Q8_0_BLOCK_SIZE {
+        dst[j] = (*q.add(j) as f32) * d;
+    }
+}
+
+/// Wrap a GGUF Q8_0 byte buffer as a QTensor, ZERO-COPY.
+///
+/// Q8_0 is already int8 with a per-32-element f16 scale, so unlike Q5_0/Q5_1
+/// (re-encoded to per-row INT8) or Q5_K (re-encoded to Q4_K_M) there is
+/// nothing to convert: the block layout IS the storage format. The previous
+/// path dequantised these to F32 at load — a ~3.8x expansion (8.5 bits/weight
+/// -> 32) that also pushed the weight onto the F32 matmul. A view costs zero
+/// bytes beyond the mapping that already exists and is bit-exact.
+///
+/// Same `[out, in]` orientation as the other `from_bytes_*` loaders; `cols`
+/// (the inner/contraction dim) must be a multiple of 32. Returns 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q8_0(
+    bytes_handle: i64,
+    rows: i64,
+    cols: i64,
+) -> i64 {
+    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let rows = rows as usize;
+    let cols = cols as usize;
+    if !cols.is_multiple_of(Q8_0_BLOCK_SIZE) {
+        return 0;
+    }
+    let expected = rows * (cols / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;
+    if bytes.len < expected {
+        return 0;
+    }
+    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+    if qt.is_null() {
+        return 0;
+    }
+    *qt = RayzorQTensor {
+        data: bytes.ptr,
+        meta: std::ptr::null_mut(),
+        numel: rows * cols,
+        group_size: Q8_0_BLOCK_SIZE,
+        scheme: QSCHEME_Q8_0,
+        owns_data: false,
+        rows,
+        cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
+    };
+    qt as i64
+}
+
+/// One worker's row band of the Q8_0 XTQ matmul.
+///
+/// `y[b, n] = sum_over_blocks( d_block * x_scale[b] * dot_i8(w_block, xq_block) )`
+/// — the activation is pre-quantised to int8 per row, so each block is a
+/// single 32-wide integer dot scaled by both sides' scales.
+#[allow(clippy::too_many_arguments)] // hot decode kernel; flat pointer/dim args
+unsafe fn q8_0_xtq_chunk(
+    w_data: *const u8,
+    xq: *const i8,
+    xs: *const f32,
+    y: *mut f32,
+    lo: usize,
+    hi: usize,
+    k: usize,
+    n: usize,
+    batch: usize,
+) {
+    let blocks = k / Q8_0_BLOCK_SIZE;
+    let row_bytes = blocks * Q8_0_BLOCK_BYTES;
+    for n_idx in lo..hi {
+        let w_row = w_data.add(n_idx * row_bytes);
+        for b in 0..batch {
+            let xq_row = xq.add(b * k);
+            let mut acc = 0.0f32;
+            for blk in 0..blocks {
+                let bp = w_row.add(blk * Q8_0_BLOCK_BYTES);
+                let d = half::f16::from_bits(u16::from_le_bytes([*bp, *bp.add(1)])).to_f32();
+                let wq = bp.add(2) as *const i8;
+                let dot = dot_i8_i8(wq, xq_row.add(blk * Q8_0_BLOCK_SIZE), Q8_0_BLOCK_SIZE);
+                acc += d * (dot as f32);
+            }
+            *y.add(b * n + n_idx) = acc * *xs.add(b);
+        }
+    }
+}
+
+/// `Y[B, N] = X[B, K] x Wq[N, K]^T` for the native Q8_0 scheme.
+unsafe fn q8_0_xtq_threaded(x_tensor: i64, qt_w: i64, threads: i64) -> i64 {
+    let qt = &*(qt_w as *const RayzorQTensor);
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let x_head = &*(x_tensor as *const TensorHead);
+    if x_head.ndim != 2 {
+        return 0;
+    }
+    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+    let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
+    let batch = x_shape[0];
+    let k = x_shape[1];
+    if k != qt.cols || x_strides[1] != 1 || !k.is_multiple_of(Q8_0_BLOCK_SIZE) {
+        return 0;
+    }
+    let row_stride = x_strides[0];
+    let n = qt.rows;
+    let x_data = x_head.data as *const f32;
+
+    let out_shape = [batch, n];
+    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+    if out_tensor == 0 {
+        return 0;
+    }
+    let y_data = (&*(out_tensor as *const TensorHead)).data as *mut f32;
+
+    let mut t = if threads > 0 {
+        (threads as usize).min(64)
+    } else {
+        crate::worker_pool::auto_kernel_threads()
+    };
+    if t > n {
+        t = n.max(1);
+    }
+
+    // Same per-thread scratch discipline as the INT8 path: a fresh Vec pair
+    // per call is ~168 allocations per token on a 24-layer model.
+    INT8_X_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let (xq, xs) = &mut *scratch;
+        if xq.len() < batch * k {
+            xq.resize(batch * k, 0);
+        }
+        if xs.len() < batch {
+            xs.resize(batch, 0.0);
+        }
+        for b in 0..batch {
+            let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
+            xs[b] = quantise_int8_row(row, &mut xq[b * k..(b + 1) * k]);
+        }
+        if t <= 1 {
+            q8_0_xtq_chunk(qt.data, xq.as_ptr(), xs.as_ptr(), y_data, 0, n, k, n, batch);
+            return out_tensor;
+        }
+        let w = qt.data as usize;
+        let xq_p = xq.as_ptr() as usize;
+        let xs_p = xs.as_ptr() as usize;
+        let y_p = y_data as usize;
+        crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
+            q8_0_xtq_chunk(
+                w as *const u8,
+                xq_p as *const i8,
+                xs_p as *const f32,
+                y_p as *mut f32,
+                lo,
+                hi,
+                k,
+                n,
+                batch,
+            );
+        });
+        out_tensor
+    })
+}
+
 /// Re-quantise a Q6_K QTensor as Q4_K_M, returning a fresh QTensor handle.
 ///
 /// Walks every block of the source row-by-row, dequants Q6_K → f32 into a
@@ -1166,6 +1356,18 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
                 }
             }
         }
+        QSCHEME_Q8_0 => {
+            let blocks = qt.numel / Q8_0_BLOCK_SIZE;
+            let mut stage = [0.0f32; Q8_0_BLOCK_SIZE];
+            for b in 0..blocks {
+                dequant_q8_0_block(qt.data.add(b * Q8_0_BLOCK_BYTES), &mut stage);
+                std::ptr::copy_nonoverlapping(
+                    stage.as_ptr(),
+                    out.add(b * Q8_0_BLOCK_SIZE),
+                    Q8_0_BLOCK_SIZE,
+                );
+            }
+        }
         QSCHEME_Q6_K => {
             let blocks_per_row = qt.cols / Q6_K_BLOCK_SIZE;
             let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
@@ -1219,6 +1421,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
     let (block_size, block_bytes) = match qt.scheme {
         QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
         QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+        QSCHEME_Q8_0 => (Q8_0_BLOCK_SIZE, Q8_0_BLOCK_BYTES),
         // INT8 is row-wise: one byte per weight, one f32 scale per row.
         QSCHEME_INT8 => (1, 1),
         _ => return 0,
@@ -1286,7 +1489,9 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
             continue;
         }
         for b in 0..blocks_per_row {
-            if qt.scheme == QSCHEME_Q4_K_M {
+            if qt.scheme == QSCHEME_Q8_0 {
+                dequant_q8_0_block(row_src.add(b * block_bytes), &mut stage[..Q8_0_BLOCK_SIZE]);
+            } else if qt.scheme == QSCHEME_Q4_K_M {
                 let blk = decode_q4_k_block(row_src.add(b * block_bytes));
                 dequant_q4_k_block(&blk, &mut stage);
             } else {
@@ -1688,6 +1893,11 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     // 256-wide k-quant machinery, and a rowwise scheme has no blocks.
     if qt.scheme == QSCHEME_INT8 {
         return int8_xtq_threaded(x_tensor, qt_w, threads);
+    }
+    // Q8_0 likewise: 32-wide blocks with their own per-block scale have no
+    // place in the 256-wide k-quant `qmatmul_prep` machinery below.
+    if qt.scheme == QSCHEME_Q8_0 {
+        return q8_0_xtq_threaded(x_tensor, qt_w, threads);
     }
 
     let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
@@ -2897,7 +3107,10 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
                             std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
                         sum += dot_f32_simd(x_chunk, &stage);
                     }
-                    _ => unreachable!(),
+                    // A scheme this kernel does not decode must degrade to
+                    // "no contribution", never panic: this runs under an
+                    // extern "C" frame where unwinding aborts the process.
+                    _ => return,
                 }
             }
             *y_data.add(n_idx) = sum;
@@ -2918,7 +3131,8 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
                 QSCHEME_Q6_K => {
                     dequant_q6_k_block(bp, &mut stage);
                 }
-                _ => unreachable!(),
+                // See the sibling arm: never panic under extern "C".
+                _ => return,
             }
 
             for b in 0..batch {
@@ -3618,6 +3832,131 @@ mod tests {
                 // Tolerance covers the one-bit Q5_K -> Q4_K_M re-encode plus the
                 // kernel's Q8_K activation quantisation.
                 let bound = expect.abs() * 0.08 + 0.5;
+                assert!(
+                    (got[r] - expect).abs() <= bound,
+                    "row {r}: got {} expect {expect}",
+                    got[r]
+                );
+            }
+            crate::tensor::rayzor_tensor_free(y);
+            crate::tensor::rayzor_tensor_free(xt);
+            rayzor_qtensor_free(qt);
+        }
+    }
+
+    fn build_q8_0_block(d: f32, q: [i8; 32]) -> [u8; 34] {
+        let mut blk = [0u8; 34];
+        blk[0..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        for (i, v) in q.iter().enumerate() {
+            blk[2 + i] = *v as u8;
+        }
+        blk
+    }
+
+    #[test]
+    fn q8_0_block_dequant_is_exact() {
+        // Q8_0 is already int8 x a per-block f16 scale, so decode is EXACT:
+        // no re-encode, no tolerance.
+        let mut q = [0i8; 32];
+        for (i, v) in q.iter_mut().enumerate() {
+            *v = (i as i32 - 16) as i8;
+        }
+        let d = 0.125f32; // exactly f16-representable
+        let blk = build_q8_0_block(d, q);
+        let mut out = [0.0f32; 32];
+        unsafe { dequant_q8_0_block(blk.as_ptr(), &mut out) };
+        for i in 0..32 {
+            assert_eq!(out[i], (q[i] as f32) * d, "elem {i}");
+        }
+    }
+
+    #[test]
+    fn from_bytes_q8_0_is_zero_copy_and_rejects_bad_shapes() {
+        let mut bytes = vec![0u8; 2 * 34]; // 1 row x 64 cols = 2 blocks
+        bytes[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+        let hb = crate::haxe_sys::HaxeBytes::new_malloc(
+            bytes.as_mut_ptr(),
+            bytes.len(),
+            bytes.capacity(),
+        );
+        let h = &hb as *const _ as i64;
+        let qt = unsafe { rayzor_qtensor_from_bytes_q8_0(h, 1, 64) };
+        assert!(qt != 0);
+        unsafe {
+            let q = &*(qt as *const RayzorQTensor);
+            assert_eq!(q.scheme, QSCHEME_Q8_0);
+            assert_eq!(q.rows, 1);
+            assert_eq!(q.cols, 64);
+            // The whole point: it ALIASES the mapping, it does not copy.
+            assert!(!q.owns_data, "Q8_0 must be zero-copy");
+            assert_eq!(q.data, bytes.as_mut_ptr());
+            rayzor_qtensor_free(qt);
+        }
+        // cols not a multiple of 32 -> refuse rather than mis-slice.
+        assert_eq!(unsafe { rayzor_qtensor_from_bytes_q8_0(h, 1, 60) }, 0);
+        assert_eq!(unsafe { rayzor_qtensor_from_bytes_q8_0(0, 1, 64) }, 0);
+    }
+
+    #[test]
+    fn q8_0_matmul_matches_f32_reference() {
+        // The audit's silent-garbage scenario: k = 384 (MiniLM's hidden), which
+        // is a multiple of 32 but NOT of 256 — a Q4_K_M-shaped reader would see
+        // bpr = 384>>8 = 1 and silently visit only 256 of 384 columns.
+        const ROWS: usize = 3;
+        const COLS: usize = 384;
+        let mut seed = 4242u32;
+        let mut nextq = |m: u32| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 16) % m
+        };
+        let mut bytes = Vec::new();
+        let mut w_ref = vec![0.0f32; ROWS * COLS];
+        for r in 0..ROWS {
+            for b in 0..(COLS / 32) {
+                let mut q = [0i8; 32];
+                for v in q.iter_mut() {
+                    *v = (nextq(255) as i32 - 127) as i8;
+                }
+                let d = 0.0625f32 * ((b % 3) as f32 + 1.0);
+                bytes.extend_from_slice(&build_q8_0_block(d, q));
+                for (j, qv) in q.iter().enumerate() {
+                    w_ref[r * COLS + b * 32 + j] = (*qv as f32) * d;
+                }
+            }
+        }
+        let hb = crate::haxe_sys::HaxeBytes::new_malloc(
+            bytes.as_mut_ptr(),
+            bytes.len(),
+            bytes.capacity(),
+        );
+        let qt = unsafe {
+            rayzor_qtensor_from_bytes_q8_0(&hb as *const _ as i64, ROWS as i64, COLS as i64)
+        };
+        assert!(qt != 0);
+
+        let mut x = vec![0.0f32; COLS];
+        for (i, v) in x.iter_mut().enumerate() {
+            *v = ((i % 11) as f32 - 5.0) * 0.1;
+        }
+        let shape = [1usize, COLS];
+        let xt = unsafe { crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0) };
+        unsafe {
+            let h = &*(xt as *const crate::tensor::RayzorTensor);
+            std::ptr::copy_nonoverlapping(x.as_ptr(), h.data as *mut f32, COLS);
+        }
+        let y = unsafe { rayzor_tensor_matmul_qt_t_f32_threaded(qt, xt, 1) };
+        assert!(y != 0, "Q8_0 must not fall off the matmul dispatch");
+        unsafe {
+            let h = &*(y as *const crate::tensor::RayzorTensor);
+            let got = std::slice::from_raw_parts(h.data as *const f32, ROWS);
+            for r in 0..ROWS {
+                let mut expect = 0.0f32;
+                for c in 0..COLS {
+                    expect += w_ref[r * COLS + c] * x[c];
+                }
+                // Only the activation is re-quantised (weights are exact), so
+                // the tolerance is tight — a truncated-column bug blows past it.
+                let bound = expect.abs() * 0.02 + 0.05;
                 assert!(
                     (got[r] - expect).abs() <= bound,
                     "row {r}: got {} expect {expect}",

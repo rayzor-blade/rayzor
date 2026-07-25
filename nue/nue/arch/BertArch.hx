@@ -58,10 +58,27 @@ class BertArch implements ArchBuilder {
     }
 
     public function build(meta:ModelMetadata, weights:NamedTensorMap):Module {
-        var tokenEmbed = new Embedding(
-            takeWeight(weights, "token_embd.weight"),
-            meta.vocabSize, meta.hiddenSize, "weight"
-        );
+        // Encoder GGUFs commonly ship `token_embd` quantised (the shipped
+        // MiniLM Q8_0 does). Route it through the QTensor gather rather than
+        // demanding an F32 table — see `makeLinear` for the same split.
+        var tokenEmbed:Embedding;
+        if (weights.isQuantised("token_embd.weight")) {
+            var qEmbed = weights.getQuant("token_embd.weight");
+            if (qEmbed == null) {
+                throw "nue.arch.Bert: missing quant weight 'token_embd.weight'";
+            }
+            // Dequantise to F32 rather than keeping the QTensor: the encoder
+            // path is not yet validated on quantised weights (it crashes at
+            // load), and this reproduces exactly the representation BERT got
+            // before Q8_0 started arriving as a QTensor. The LLM path does use
+            // the quantised weights directly. TODO: native quant encoder.
+            tokenEmbed = new Embedding(qEmbed.dequant(), meta.vocabSize, meta.hiddenSize, "weight");
+        } else {
+            tokenEmbed = new Embedding(
+                takeWeight(weights, "token_embd.weight"),
+                meta.vocabSize, meta.hiddenSize, "weight"
+            );
+        }
         var positionEmbed = new Embedding(
             takeWeight(weights, "position_embd.weight"),
             meta.maxSeqLen, meta.hiddenSize, "weight"
@@ -128,11 +145,21 @@ class BertArch implements ArchBuilder {
     }
 
     static function makeLinear(weights:NamedTensorMap, baseName:String):Linear {
-        var weight = takeWeight(weights, baseName + ".weight");
+        // Biases stay F32 (GGUF keeps them unquantised); only the weight can
+        // arrive as a QTensor.
         var bias:Tensor = weights.exists(baseName + ".bias")
             ? weights.get(baseName + ".bias")
             : null;
-        return new Linear(weight, bias, "weight");
+        if (weights.isQuantised(baseName + ".weight")) {
+            var qw = weights.getQuant(baseName + ".weight");
+            if (qw == null) {
+                throw "nue.arch.Bert: missing quant weight '" + baseName + ".weight'";
+            }
+            // See the token-embedding comment above: dequantise for now so the
+            // encoder keeps its pre-existing F32 behaviour bit-for-bit.
+            return new Linear(qw.dequant(), bias, "weight");
+        }
+        return new Linear(takeWeight(weights, baseName + ".weight"), bias, "weight");
     }
 
     static function takeNorm(weights:NamedTensorMap, baseName:String, eps:Float):LayerNorm {
@@ -158,6 +185,15 @@ class BertArch implements ArchBuilder {
     }
 
     static function takeWeight(weights:NamedTensorMap, name:String):Tensor {
+        // Check `isQuantised` FIRST. A quantised weight lives only in the
+        // QTensor map, so `get` would miss it — and `StringMap.get` on a
+        // missing key returns a raw 0 rather than null (bugs_stringmap_null_get),
+        // so the null guard below cannot be trusted to catch it. Without this
+        // the caller receives a 0-handle Tensor and dies later inside a kernel.
+        if (weights.isQuantised(name)) {
+            throw "nue.arch.Bert: weight '" + name + "' is quantised; "
+                + "this call site needs the QTensor path";
+        }
         var t = weights.get(name);
         if (t == null) throw "nue.arch.Bert: missing weight '" + name + "'";
         return t;
