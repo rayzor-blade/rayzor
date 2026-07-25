@@ -68,6 +68,78 @@ class Q4Matmul {
         return _useFused == 1;
     }
 
+    /**
+     * `NUE_HAXE_Q8_0=0` routes Q8_0 back to the runtime XTQ kernel.
+     *
+     * Exists so the Haxe Q8_0 kernel can be A/B'd against the Rust one with the
+     * SAME BINARY and the SAME flags — one variable, with the census printing
+     * which path actually ran. Measuring it by editing dispatch and rebuilding
+     * changes the compile as well as the kernel, and that is how a three-way
+     * change got mistaken for a kernel result.
+     *
+     * Defaults OFF *for now*, and only because the kernel is not yet fast:
+     * measured 3-4x behind the runtime kernel on Qwen Q6_K (33.5/19.1 vs
+     * 75.6/91.5 tok/s, same binary, census-verified arms). Q8_0 is ~191 matmul
+     * calls per token on that model — most of its tensors are Q8_0, not just
+     * the lm_head — so shipping this on by default would be a 3x regression.
+     * Flip to ON once it reaches parity; the direction is Haxe-owned kernels.
+     *
+     * Cached like useHaxeMatmul (0 = uninitialised, load-bearing for x-module
+     * static dups).
+     */
+    static var _haxeQ8_0:Int = 0;
+
+    static function useHaxeQ8_0():Bool {
+        if (_haxeQ8_0 == 0) {
+            var v = Sys.getEnvOr("NUE_HAXE_Q8_0", "RAYZOR_HAXE_Q8_0");
+            _haxeQ8_0 = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _haxeQ8_0 == 1;
+    }
+
+    // ---- dispatch census -------------------------------------------------
+    // `NUE_DUMP_Q4_GATES=1` prints, per QScheme, how many matmuls went to a
+    // Haxe kernel vs escaped to the Rust FFI. "Is this run actually pure
+    // Haxe?" must be a PRINTED FACT: inferring it from dispatch source and
+    // perf deltas is how a Q8_0 lm_head kept running Rust on every token
+    // inside a run labelled pure-Haxe. A parity claim requires ffi=0.
+    // Index = QScheme ordinal (0 INT8, 1 Q4_K_M, 2 Q6_K, 3 Q8_0).
+    static var _censusHaxe:Array<Int> = [0, 0, 0, 0];
+    static var _censusFfi:Array<Int> = [0, 0, 0, 0];
+    static var _censusOn:Int = 0;
+
+    static function censusEnabled():Bool {
+        if (_censusOn == 0) {
+            var v = Sys.getEnvOr("NUE_DUMP_Q4_GATES", "RAYZOR_DUMP_Q4_GATES");
+            _censusOn = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _censusOn == 1;
+    }
+
+    static inline function census(schemeOrd:Int, ffi:Bool):Void {
+        if (censusEnabled() && schemeOrd >= 0 && schemeOrd < 4) {
+            if (ffi) _censusFfi[schemeOrd] = _censusFfi[schemeOrd] + 1;
+            else _censusHaxe[schemeOrd] = _censusHaxe[schemeOrd] + 1;
+        }
+    }
+
+    /** Print the census. Callers dump this at exit; safe to call when the
+        census is off (prints nothing). */
+    public static function dumpCensus():Void {
+        if (!censusEnabled()) return;
+        var names = ["INT8", "Q4_K_M", "Q6_K", "Q8_0"];
+        var totalFfi = 0;
+        for (i in 0...4) totalFfi += _censusFfi[i];
+        for (i in 0...4) {
+            if (_censusHaxe[i] > 0 || _censusFfi[i] > 0) {
+                Sys.println("[q4-census] " + names[i] + " haxe=" + _censusHaxe[i]
+                    + " ffi=" + _censusFfi[i]);
+            }
+        }
+        Sys.println("[q4-census] total ffi=" + totalFfi
+            + (totalFfi == 0 ? "  (PURE HAXE)" : "  (NOT pure Haxe)"));
+    }
+
     static inline function f16ToF32(bits:Int):Float {
         var sign:Int = (bits >> 15) & 1; var exp:Int = (bits >> 10) & 0x1F; var mant:Int = bits & 0x3FF;
         var sgn = (sign == 1) ? -1.0 : 1.0;
@@ -375,10 +447,21 @@ class Q4Matmul {
     }
 
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
-        // INT8 per-row weights (Q5_0-sourced) have no Haxe band kernel —
-        // the band loop below is 256-wide k-quant machinery. The runtime
-        // XTQ path dispatches the INT8 scheme natively (integer SDOT dot).
-        if (qw.scheme() == QScheme.INT8 || qw.scheme() == QScheme.Q8_0) {
+        // Q8_0 has its own pure-Haxe kernel: 32-element blocks with a per-block
+        // f16 scale, which the 256-wide k-quant band loop below would misread.
+        if (qw.scheme() == QScheme.Q8_0) {
+            if (useHaxeQ8_0()) {
+                census(3, false);
+                return matmulQ8_0(qw, x, sp);
+            }
+            census(3, true);
+            return qw.matmulXTQThreaded(x, 0);
+        }
+        // INT8 per-row weights (Q5_0-sourced) have no Haxe band kernel yet —
+        // still on the runtime XTQ path (integer SDOT dot). TODO: port, same
+        // shape as matmulQ8_0 but one scale per row instead of per block.
+        if (qw.scheme() == QScheme.INT8) {
+            census(0, true);
             return qw.matmulXTQThreaded(x, 0);
         }
         var K = qw.cols();
@@ -393,6 +476,10 @@ class Q4Matmul {
         // batch=497 — measured, the whole "AMX long-prompt bleed"). Q6_K and
         // decode stay on the Haxe band loop below.
         if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() == QScheme.Q4_K_M) {
+            // Counted as FFI, but this one is legitimate: Apple's AMX/Accelerate
+            // only exists across the FFI boundary. Platform APIs stay FFI;
+            // kernels do not.
+            census(1, true);
             return qw.matmulXTQThreaded(x, 0);
         }
 
@@ -410,12 +497,168 @@ class Q4Matmul {
         quantizeAll(xBase, aBase, bsums, dBase, batch * bpr, sp);
         if (_prof) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
+        census(qw.scheme() == QScheme.Q6_K ? 2 : 1, false);
         var y = runBanded(qw, batch, K, aBase, bsums, dBase, sp);
 
         if (!pooled) {
             qs.free();
             bsums.free();
             dScales.free();
+        }
+        return y;
+    }
+
+    // ---- Q8_0 -----------------------------------------------------------
+    // Q8_0 block = 34 bytes: little-endian f16 scale at [0..1], then 32
+    // signed int8 weights at [2..33]. No super-block and no mins — the
+    // simplest layout we carry, and the one Qwen's 152k-vocab lm_head uses,
+    // so it runs on EVERY decoded token.
+    //
+    // Activations are quantised per ROW (one scale for the whole row), not
+    // per 256-element super-block like Q8_K, so this path owns its own
+    // quantiser and cannot share the banded k-quant machinery above.
+    static inline var Q8_0_BLOCK_BYTES:Int = 34;
+    static inline var Q8_0_BLOCK_ELEMS:Int = 32;
+
+    /**
+     * Symmetric per-row int8 quantise: `scale = max|x| / 127`, round half
+     * away from zero, clamp to +/-127. Writes `K` int8 bytes at `aBase` and
+     * returns the row scale (0.0 for an all-zero row, whose bytes are zeroed).
+     *
+     * Deliberately branch-free in the inner loop via ternaries: an
+     * `if (c) f = expr` on a loop-carried Float next to Math.floor/ceil boxes
+     * per element here (see bugs_float_conditional_reassign_boxes), which on
+     * a 151936-row lm_head is a per-token allocation storm.
+     */
+    static function quantizeRowI8(xBase:Usize, aBase:Usize, K:Int):Float {
+        var maxAbs = 0.0;
+        for (i in 0...K) {
+            var v = Mem.loadF32(xBase + Usize.fromInt(i << 2));
+            var a = (v < 0.0) ? -v : v;
+            maxAbs = (a > maxAbs) ? a : maxAbs;
+        }
+        if (maxAbs == 0.0) {
+            for (i in 0...K) Mem.storeU8(aBase + Usize.fromInt(i), 0);
+            return 0.0;
+        }
+        var inv = 127.0 / maxAbs;
+        for (i in 0...K) {
+            var v = Mem.loadF32(xBase + Usize.fromInt(i << 2)) * inv;
+            // Round-half-away via Std.int (fptosi intrinsic, no box) — the
+            // same idiom quantizeBlock uses. Math.floor/ceil boxes the Float
+            // argument per element, which on a 151936-row lm_head is millions
+            // of heap allocs per token. Clamp to +/-127 (not -128): the
+            // reference kernel keeps the activation range sign-symmetric.
+            var q = v >= 0 ? Std.int(v + 0.5) : Std.int(v - 0.5);
+            if (q > 127) q = 127; else if (q < -127) q = -127;
+            Mem.storeU8(aBase + Usize.fromInt(i), q & 0xFF);
+        }
+        return maxAbs / 127.0;
+    }
+
+    /** One 32-element Q8_0 weight block against 32 int8 activations -> i32.
+        Two 16-lane SDOT chains; `dot` (signed x signed), NOT `dotI8I7` —
+        Q8_0 weights use the full i8 range, which the i7 variant forbids. */
+    static inline function q8DotBlock(wBase:Usize, wOff:Int, aBase:Usize, aOff:Int):Int {
+        // Distinct bindings per step, never a reassigned accumulator: passing
+        // a SIMD value as an argument MOVES it, so `acc = dot(acc, ..)`
+        // followed by `acc.sum()` is a use-after-move. Chaining keeps one
+        // horizontal sum for the whole 32-element block.
+        var acc0 = SIMD4i32.dot(SIMD4i32.splat(0),
+            SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff))),
+            SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + 2))));
+        var acc1 = SIMD4i32.dot(acc0,
+            SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + 16))),
+            SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + 2 + 16))));
+        return acc1.sum();
+    }
+
+    /**
+     * `y = x @ qw.T` for a Q8_0 weight, in pure Haxe.
+     *
+     * Replaces the `matmulXTQThreaded` FFI bail-out this path used to take:
+     * the band loop below is 256-wide k-quant machinery that would misread
+     * Q8_0's 32-element blocks, so the scheme escaped to Rust rather than
+     * getting a kernel. Row scales fold in once at the end of each row —
+     * `y[b,n] = xScale[b] * SUM_blk wScale[blk] * dot_i32(...)`.
+     */
+    // Private + explicit `sp` (no `?optional`): a public static with a
+    // trailing optional arg perturbed module registration enough to break an
+    // unrelated cross-module field access (LlamaArch's `model.spinPool`,
+    // E0100) — the x-module resolution cluster. Only `matmul` calls this.
+    static function matmulQ8_0(qw:QTensor, x:Tensor, sp:Null<SpinPool>):Tensor {
+        var K = qw.cols();
+        var rows = qw.rows();
+        var blocks = Std.int(K / Q8_0_BLOCK_ELEMS);
+        var batch = Std.int(x.numel() / K);
+        if (batch < 1) batch = 1;
+
+        var pooled = sp != null;
+        var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
+        var aBase = qs.address();
+        var xBase = x.data().raw();
+
+        // One scale per activation row. Kept in a raw f32 buffer so the hot
+        // row reads it with Mem.loadF32 and makes no boxing extern call.
+        var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
+        var sBase = xScales.address();
+        for (b in 0...batch) {
+            var s = quantizeRowI8(xBase + Usize.fromInt(b * K * 4), aBase + Usize.fromInt(b * K), K);
+            Mem.storeF32(sBase + Usize.fromInt(b << 2), s);
+        }
+
+        var wBase = qw.dataPtr();
+        var y = Tensor.uninit([batch, rows], DType.F32);
+        var yBase = y.data().raw();
+        // Hoisted to locals: the band closure must capture plain values, not
+        // reference class-level `static inline var`s (that shape broke an
+        // unrelated cross-module field access — E0100 on LlamaModel.spinPool).
+        var blockBytes = Q8_0_BLOCK_BYTES;
+        var blockElems = Q8_0_BLOCK_ELEMS;
+
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            for (n in n0...n1) {
+                var rowBase = n * blocks * blockBytes;
+                for (b in 0...batch) {
+                    var aRow = b * K;
+                    var acc = 0.0;
+                    var blk = 0;
+                    // Pair adjacent blocks: they are independent, so two SDOT
+                    // chains stay in flight and each block's scalar tail (f16
+                    // widen + scale multiply) hides under the other's vectors.
+                    while (blk + 2 <= blocks) {
+                        var o0 = rowBase + blk * blockBytes;
+                        var o1 = o0 + blockBytes;
+                        // ONE 32-bit load per block scale, not two byte loads +
+                        // shift + or. Bytes 2..3 are weight data and are masked
+                        // off; the read never leaves the 34-byte block, so there
+                        // is no overread even on the final block. (Mem has no
+                        // 16-bit load.) This runs 4.25M times/token on Qwen's
+                        // 151936-row Q8_0 lm_head, so the halved load count is
+                        // the difference between two and one issue slot there.
+                        var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
+                        var d1 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF);
+                        acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems)
+                             + d1 * q8DotBlock(wBase, o1, aBase, aRow + (blk + 1) * blockElems);
+                        blk += 2;
+                    }
+                    while (blk < blocks) {
+                        var o0 = rowBase + blk * blockBytes;
+                        var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
+                        acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems);
+                        blk++;
+                    }
+                    Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
+                        acc * Mem.loadF32(sBase + Usize.fromInt(b << 2)));
+                }
+            }
+        };
+        if (sp != null) sp.parallelRows(rows, band);
+        else band(0, rows, 0);
+
+        if (!pooled) {
+            qs.free();
+            xScales.free();
         }
         return y;
     }
