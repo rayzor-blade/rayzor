@@ -616,59 +616,71 @@ class Q4Matmul {
         var blockBytes = Q8_0_BLOCK_BYTES;
         var blockElems = Q8_0_BLOCK_ELEMS;
 
+        // ONE output row: 4 Q8_0 blocks folded through a SIMD4f, scalar tail.
+        // Extracted so the band loop can evaluate FOUR rows per step as four
+        // INDEPENDENT accumulator chains — `vdotq_s32` has ~5-cycle latency, so
+        // a single dependent chain per row stalls on it. Four inlined chains
+        // give the scheduler something to interleave. (Sharing one activation
+        // LOAD across the four rows would be better still, but passing a
+        // SIMD16i8 moves it, so the operand cannot be reused across calls
+        // without a clone — revisit when SIMD values are Copy.)
+        var rowDot = function(rowBase:Int, aRow:Int):Float {
+            var acc = 0.0;
+            var blk = 0;
+            var vacc = SIMD4f.splat(0.0);
+            while (blk + 4 <= blocks) {
+                var o0 = rowBase + blk * blockBytes;
+                var o1 = o0 + blockBytes;
+                var o2 = o1 + blockBytes;
+                var o3 = o2 + blockBytes;
+                var e0 = aRow + blk * blockElems;
+                var vd = SIMD4f.make(
+                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF),
+                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF),
+                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o2)) & 0xFFFF),
+                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o3)) & 0xFFFF));
+                var vs = SIMD4f.make(
+                    q8DotBlock(wBase, o0, aBase, e0),
+                    q8DotBlock(wBase, o1, aBase, e0 + blockElems),
+                    q8DotBlock(wBase, o2, aBase, e0 + 2 * blockElems),
+                    q8DotBlock(wBase, o3, aBase, e0 + 3 * blockElems));
+                vacc = vacc.add(vd.mul(vs));
+                blk += 4;
+            }
+            acc = vacc.get(0) + vacc.get(1) + vacc.get(2) + vacc.get(3);
+            while (blk < blocks) {
+                var o0 = rowBase + blk * blockBytes;
+                var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
+                acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems);
+                blk++;
+            }
+            return acc;
+        };
+
         var band = function(n0:Int, n1:Int, node:Int):Void {
-            for (n in n0...n1) {
-                var rowBase = n * blocks * blockBytes;
-                for (b in 0...batch) {
-                    var aRow = b * K;
-                    var acc = 0.0;
-                    var blk = 0;
-                    // FOUR blocks per step, scale-multiplied through one SIMD4f.
-                    //
-                    // The prior 2-at-a-time form did `acc += d * dot` in f64,
-                    // a serial multiply-add chain as deep as the block count on
-                    // every row. Folding four blocks into a vector accumulator
-                    // turns 28 serial f64 mul-adds into 7 vector ones plus a
-                    // single 4-way fold per row, and accumulates in f32 — which
-                    // is what the reference kernel folds in too.
-                    //
-                    // Block scale loads stay as ONE masked 32-bit load each
-                    // (bytes 2..3 are weight data, masked off; never leaves the
-                    // 34-byte block, so no overread — Mem has no 16-bit load).
-                    //
-                    // The per-block hsum inside q8DotBlock STAYS. Q8_0 carries a
-                    // distinct f16 scale per 32-element block, so the integer
-                    // sums cannot be merged across blocks. Amortising the scale
-                    // multiply is legal; merging the dots would be wrong.
-                    var vacc = SIMD4f.splat(0.0);
-                    while (blk + 4 <= blocks) {
-                        var o0 = rowBase + blk * blockBytes;
-                        var o1 = o0 + blockBytes;
-                        var o2 = o1 + blockBytes;
-                        var o3 = o2 + blockBytes;
-                        var e0 = aRow + blk * blockElems;
-                        var vd = SIMD4f.make(
-                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF),
-                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF),
-                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o2)) & 0xFFFF),
-                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o3)) & 0xFFFF));
-                        var vs = SIMD4f.make(
-                            q8DotBlock(wBase, o0, aBase, e0),
-                            q8DotBlock(wBase, o1, aBase, e0 + blockElems),
-                            q8DotBlock(wBase, o2, aBase, e0 + 2 * blockElems),
-                            q8DotBlock(wBase, o3, aBase, e0 + 3 * blockElems));
-                        vacc = vacc.add(vd.mul(vs));
-                        blk += 4;
-                    }
-                    acc = vacc.get(0) + vacc.get(1) + vacc.get(2) + vacc.get(3);
-                    while (blk < blocks) {
-                        var o0 = rowBase + blk * blockBytes;
-                        var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
-                        acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems);
-                        blk++;
-                    }
+            var rowBytes = blocks * blockBytes;
+            for (b in 0...batch) {
+                var aRow = b * K;
+                var xs = Mem.loadF32(sBase + Usize.fromInt(b << 2));
+                var n = n0;
+                // FOUR output rows per step: independent chains, and the shared
+                // activation row stays L1-hot across all four.
+                while (n + 4 <= n1) {
+                    var s0 = rowDot(n * rowBytes, aRow);
+                    var s1 = rowDot((n + 1) * rowBytes, aRow);
+                    var s2 = rowDot((n + 2) * rowBytes, aRow);
+                    var s3 = rowDot((n + 3) * rowBytes, aRow);
+                    var o = (b * rows + n) << 2;
+                    Mem.storeF32(yBase + Usize.fromInt(o), s0 * xs);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 4), s1 * xs);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 8), s2 * xs);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 12), s3 * xs);
+                    n += 4;
+                }
+                while (n < n1) {
                     Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
-                        acc * Mem.loadF32(sBase + Usize.fromInt(b << 2)));
+                        rowDot(n * rowBytes, aRow) * xs);
+                    n++;
                 }
             }
         };
