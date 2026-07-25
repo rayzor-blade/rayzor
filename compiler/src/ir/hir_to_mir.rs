@@ -686,8 +686,21 @@ struct SavedLoweringState {
 /// already knows the field's own type, so only the index has to travel.
 /// Keyed by name because SymbolIds drift across contexts (both the class's and
 /// the field's — verified by two failed id/name hybrid fixes).
+/// Layouts keyed by CANONICAL class name — the fully-qualified name when the
+/// symbol has one (`nue.arch.LlamaModel`), the bare name otherwise.
 static CLASS_FIELD_LAYOUTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>>,
+> = std::sync::OnceLock::new();
+
+/// Bare-name alias: `LlamaModel` -> Some(canonical), or None once two DIFFERENT
+/// canonical classes have claimed the same bare name (poisoned). A consumer
+/// context often only knows the bare name (its forwarded stub may carry no
+/// qualified name), so bare lookups must work — but a bare name that has become
+/// ambiguous must FAIL LOUDLY (fall through to the E0100 error) rather than
+/// resolve to whichever class registered first: a wrong GEP index is silent
+/// memory corruption, strictly worse than a compile error.
+static CLASS_NAME_ALIAS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 > = std::sync::OnceLock::new();
 
 fn class_field_layouts(
@@ -695,32 +708,52 @@ fn class_field_layouts(
     CLASS_FIELD_LAYOUTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Record a class's field layout so any later lowering context can find it.
-fn record_class_field_layout(class_name: &str, fields: Vec<(String, u32)>) {
-    if let Ok(mut m) = class_field_layouts().lock() {
-        // First writer wins: the declaring context has the authoritative layout.
-        m.entry(class_name.to_string()).or_insert(fields);
-    }
+fn class_name_alias() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<String>>>
+{
+    CLASS_NAME_ALIAS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Record one field's index under its class NAME. Called from the same loop
-/// that populates `field_index_map` — the loop that provably runs for every
-/// registered class ([reg-class] traced 88 executions while the
+/// Record one field's index under its class's canonical name. Called from the
+/// same loop that populates `field_index_map` — the loop that provably runs for
+/// every registered class ([reg-class] traced 88 executions while the
 /// class_instance_fields insert never fired once). Idempotent: re-registration
 /// writes the same layout.
-fn record_class_field(class_name: &str, field_name: &str, idx: u32) {
+fn record_class_field(qualified: Option<&str>, bare: &str, field_name: &str, idx: u32) {
+    let canonical = qualified.unwrap_or(bare);
     if let Ok(mut m) = class_field_layouts().lock() {
-        let v = m.entry(class_name.to_string()).or_default();
+        let v = m.entry(canonical.to_string()).or_default();
         if !v.iter().any(|(n, _)| n == field_name) {
             v.push((field_name.to_string(), idx));
         }
     }
+    if let Ok(mut a) = class_name_alias().lock() {
+        match a.get(bare) {
+            None => {
+                a.insert(bare.to_string(), Some(canonical.to_string()));
+            }
+            Some(Some(existing)) if existing != canonical => {
+                // Second distinct canonical class with this bare name: poison.
+                a.insert(bare.to_string(), None);
+            }
+            _ => {}
+        }
+    }
 }
 
-/// Look up a field's GEP index by class name + field name.
+/// Look up a field's GEP index by class name (qualified or bare) + field name.
+/// Bare names route through the alias map so a poisoned (ambiguous) bare name
+/// returns None and the caller errors loudly instead of guessing.
 fn lookup_class_field_gep(class_name: &str, field_name: &str) -> Option<u32> {
+    let canonical: String = {
+        let a = class_name_alias().lock().ok()?;
+        match a.get(class_name) {
+            Some(Some(c)) => c.clone(),
+            Some(None) => return None,      // ambiguous bare name — refuse
+            None => class_name.to_string(), // may itself be a canonical key
+        }
+    };
     let m = class_field_layouts().lock().ok()?;
-    m.get(class_name)?
+    m.get(&canonical)?
         .iter()
         .find(|(n, _)| n == field_name)
         .map(|(_, idx)| *idx)
@@ -28869,11 +28902,19 @@ impl<'a> HirToMirContext<'a> {
                         Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
                         _ => return None,
                     };
-                    let class_name = self
-                        .symbol_table
-                        .get_symbol(class_sym)
-                        .and_then(|s| self.string_interner.get(s.name))?;
-                    let gep_idx = lookup_class_field_gep(class_name, field_name_str)?;
+                    let sym = self.symbol_table.get_symbol(class_sym)?;
+                    // Qualified name first (exact, collision-proof); bare name
+                    // second (routes through the alias map, which refuses
+                    // ambiguous bare names rather than guessing).
+                    let gep_idx = sym
+                        .qualified_name
+                        .and_then(|q| self.string_interner.get(q))
+                        .and_then(|qn| lookup_class_field_gep(qn, field_name_str))
+                        .or_else(|| {
+                            self.string_interner
+                                .get(sym.name)
+                                .and_then(|cn| lookup_class_field_gep(cn, field_name_str))
+                        })?;
                     Some((receiver_ty, gep_idx, field_ty))
                 });
 
@@ -39784,13 +39825,19 @@ impl<'a> HirToMirContext<'a> {
             // sites), so the SymbolId-keyed map above misses cross-context.
             // Same u32 as the primary lookup returns — identical index space.
             {
-                let cn = self
+                let (qn, cn) = self
                     .symbol_table
                     .get_symbol(class.symbol_id)
-                    .and_then(|sym| self.string_interner.get(sym.name));
+                    .map(|sym| {
+                        (
+                            sym.qualified_name.and_then(|q| self.string_interner.get(q)),
+                            self.string_interner.get(sym.name),
+                        )
+                    })
+                    .unwrap_or((None, None));
                 let fname = self.string_interner.get(field.name);
                 if let (Some(cn), Some(fname)) = (cn, fname) {
-                    record_class_field(cn, fname, field_index);
+                    record_class_field(qn, cn, fname, field_index);
                 }
             }
 
@@ -40275,25 +40322,6 @@ impl<'a> HirToMirContext<'a> {
                                 .insert(field.symbol_id, init_expr.clone());
                         }
                     }
-                }
-                // Also publish to the process-global, name-keyed registry so a
-                // lowering context that never saw this class's declaration can
-                // still resolve its fields (see CLASS_FIELD_LAYOUTS).
-                if let Some(cname) = self
-                    .symbol_table
-                    .get_symbol(class.symbol_id)
-                    .and_then(|sym| self.string_interner.get(sym.name))
-                {
-                    let named: Vec<(String, u32)> = instance_fields
-                        .iter()
-                        .filter_map(|(fsym, _, gep)| {
-                            self.symbol_table
-                                .get_symbol(*fsym)
-                                .and_then(|s| self.string_interner.get(s.name))
-                                .map(|n| (n.to_string(), *gep))
-                        })
-                        .collect();
-                    record_class_field_layout(cname, named);
                 }
                 self.class_instance_fields
                     .insert(class.symbol_id, instance_fields);
