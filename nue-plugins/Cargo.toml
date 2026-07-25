@@ -29,7 +29,10 @@ half = { version = "2", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libm = "0.2"
 
-# macOS-only: compiles the CoreML ObjC shim (coreml_shim.m) for the graph
-# engines. Build-time only; nothing links into the wasm/Linux side-module.
-[target.'cfg(target_os = "macos")'.build-dependencies]
+# Compiles the CoreML ObjC shim (coreml_shim.m) for the graph engines on
+# macOS. Unconditional build-dep on purpose: build.rs references cc::Build
+# and must COMPILE on every host even though the shim build is gated at
+# runtime on CARGO_CFG_TARGET_OS == macos — a cfg(target_os)-gated build-dep
+# is absent on Linux and broke the NUC build with "unresolved crate cc".
+[build-dependencies]
 cc = "1"
