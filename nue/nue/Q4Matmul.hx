@@ -248,7 +248,7 @@ class Q4Matmul {
         Decodes this block's f32 d/dmin and its 8 6-bit scale/min pairs inline
         from the 16-byte header — no shared pre-decode buffer, so it is safe to
         call concurrently across output-row bands. */
-    static inline function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
+    static inline function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsAddr:Usize, bsBase:Int, xd:Float):Float {
         // Header decode via four u32 loads + shifts (the llama.cpp kmask
         // shape) instead of 16 SIMD lane extracts — same bit math, fewer
         // and cheaper ops on the ~4M headers decoded per token.
@@ -283,14 +283,14 @@ class Q4Matmul {
         var i3 = SIMD4i32.splat(sc3) * dv3 + SIMD4i32.splat(sc7) * dv7;
         var isum = (i0 + i1) + (i2 + i3);
         var b4 = bsBase * 4;
-        var imin = mn0 * (loadI32(bsums, b4) + loadI32(bsums, b4 + 4))
-                 + mn1 * (loadI32(bsums, b4 + 8) + loadI32(bsums, b4 + 12))
-                 + mn2 * (loadI32(bsums, b4 + 16) + loadI32(bsums, b4 + 20))
-                 + mn3 * (loadI32(bsums, b4 + 24) + loadI32(bsums, b4 + 28))
-                 + mn4 * (loadI32(bsums, b4 + 32) + loadI32(bsums, b4 + 36))
-                 + mn5 * (loadI32(bsums, b4 + 40) + loadI32(bsums, b4 + 44))
-                 + mn6 * (loadI32(bsums, b4 + 48) + loadI32(bsums, b4 + 52))
-                 + mn7 * (loadI32(bsums, b4 + 56) + loadI32(bsums, b4 + 60));
+        var imin = mn0 * (Mem.loadI32(bsAddr + Usize.fromInt(b4)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 4)))
+                 + mn1 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 8)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 12)))
+                 + mn2 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 16)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 20)))
+                 + mn3 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 24)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 28)))
+                 + mn4 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 32)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 36)))
+                 + mn5 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 40)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 44)))
+                 + mn6 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 48)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 52)))
+                 + mn7 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 56)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 60)));
         return xd * (d * isum.sum() - dmin * imin);
     }
 
@@ -310,7 +310,7 @@ class Q4Matmul {
         return (b << 24) >> 24;
     }
 
-    static inline function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsums:Bytes, bsBase:Int, xd:Float):Float {
+    static inline function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsAddr:Usize, bsBase:Int, xd:Float):Float {
         // scales are read per-(n,j) with a dynamic index — take them straight
         // from memory via scaleI8 (see there); dVec keeps its constant-lane gets.
         var dVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 194)));
@@ -354,8 +354,8 @@ class Q4Matmul {
                 var dScHi:Float = d * scaleI8(wBase, wBlk + 192 + scOff + 2 * j + 1);
                 sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
                 var bi = bsBase + ((outOff + j * 32) >> 4);
-                sumTerm2 += 32.0 * dScLo * loadI32(bsums, bi * 4)
-                          + 32.0 * dScHi * loadI32(bsums, (bi + 1) * 4);
+                sumTerm2 += 32.0 * dScLo * Mem.loadI32(bsAddr + Usize.fromInt(bi * 4))
+                          + 32.0 * dScHi * Mem.loadI32(bsAddr + Usize.fromInt((bi + 1)) * 4);
             }
         }
         return xd * (sumTerm1 - sumTerm2);
@@ -718,6 +718,11 @@ class Q4Matmul {
         // Q4_K_M promotes accuracy-sensitive tensors (attn_v, ffn_down) to
         // Q6_K (210-byte super-block). Dispatch to the matching per-block
         // dot; the Q8_K activation side is scheme-agnostic.
+        // Hoist to a RAW ADDRESS so the band closure below captures only
+        // Usize/Int — never the refcounted `bsums` Bytes. A hot closure that
+        // captures a refcounted object pays ARC traffic across the whole banded
+        // pass: the identical shape cost the Q8_0 kernel 2.5x (36.7 -> ~90).
+        var bsAddr = bsums.address();
         var isQ6 = (qw.scheme() == QScheme.Q6_K);
         var blockBytes = isQ6 ? 210 : 144;
 
@@ -746,22 +751,22 @@ class Q4Matmul {
                     var b = 0;
                     if (isQ6) {
                         while (b + 2 <= bpr) {
-                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
-                                 + q6DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
+                                 + q6DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsAddr, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
                             b += 2;
                         }
                         while (b < bpr) {
-                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
+                            sum += q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
                             b++;
                         }
                     } else {
                         while (b + 2 <= bpr) {
-                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
-                                 + q4DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsums, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)))
+                                 + q4DotMA4(wBase, (base + b + 1) * blockBytes, aBase, (b + 1) * 256, bsAddr, (b + 1) * 16, Mem.loadF32(dBase + Usize.fromInt((b + 1) << 2)));
                             b += 2;
                         }
                         while (b < bpr) {
-                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
+                            sum += q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, Mem.loadF32(dBase + Usize.fromInt(b << 2)));
                             b++;
                         }
                     }
@@ -787,15 +792,15 @@ class Q4Matmul {
                         var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
                         var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
-                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
-                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
-                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
+                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
+                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
+                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
                         } else {
-                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
-                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
-                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
-                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
+                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
+                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
+                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
                         }
                     }
                     Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
@@ -810,8 +815,8 @@ class Q4Matmul {
                         var blkOff = (n * bpr + b) * blockBytes;
                         var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
                         sum += isQ6
-                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb)
-                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb);
+                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb)
+                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb);
                     }
                     Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), sum);
                     rt++;
@@ -931,6 +936,7 @@ class Q4Matmul {
         var pooled = sp != null;
         var qs = pooled ? sp.scratchBytes(0, K) : Bytes.alloc(K);
         var bsums = pooled ? sp.scratchBytes(1, bpr * 16 * 4) : Bytes.alloc(bpr * 16 * 4);
+        var bsAddr = bsums.address(); // raw addr for MA4 calls (no Bytes in hot scope)
         var dScales = pooled ? sp.scratchBytes(2, bpr * 4) : Bytes.alloc(bpr * 4);
         var aBase = qs.address();
         var dBase = dScales.address();
@@ -974,8 +980,8 @@ class Q4Matmul {
                     var blk = n * bpr + b;
                     var xdb = Mem.loadF32(dBase + Usize.fromInt(b << 2));
                     sum += isQ6
-                        ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
-                        : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
+                        ? q6DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsAddr, b * 16, xdb)
+                        : q4DotMA4(wBase, blk * blockBytes, aBase, b * 256, bsAddr, b * 16, xdb);
                 }
                 Mem.storeF32(yb + Usize.fromInt(n << 2), sum);
             }
@@ -996,6 +1002,7 @@ class Q4Matmul {
     static function runBandedFused(w0:QTensor, w1:QTensor, w2:QTensor,
             batch:Int, K:Int, aBase:Usize, bsums:Bytes, dBase:Usize,
             sp:Null<SpinPool>):Array<Tensor> {
+        var bsAddr = bsums.address(); // raw addr: band closures capture Usize only
         var bpr = K >> 8;
         var r0 = w0.rows();
         var r1 = w1.rows();
@@ -1035,8 +1042,8 @@ class Q4Matmul {
                     for (b in 0...bpr) {
                         var xdb = Mem.loadF32(dBase + Usize.fromInt(b << 2));
                         sum += isQ6
-                            ? q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, xdb)
-                            : q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsums, b * 16, xdb);
+                            ? q6DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, xdb)
+                            : q4DotMA4(wBase, (base + b) * blockBytes, aBase, b * 256, bsAddr, b * 16, xdb);
                     }
                     Mem.storeF32(yb + Usize.fromInt(n << 2), sum);
                     continue;
@@ -1053,15 +1060,15 @@ class Q4Matmul {
                         var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
                         var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
-                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
-                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
-                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
+                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
+                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
+                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
                         } else {
-                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsums, i0, d0);
-                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsums, i0 + bpr * 16, d1);
-                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsums, i0 + 2 * bpr * 16, d2);
-                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsums, i0 + 3 * bpr * 16, d3);
+                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
+                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
+                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
+                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
                         }
                     }
                     Mem.storeF32(yb + Usize.fromInt((rt * outRows + n) << 2), s0);
@@ -1076,8 +1083,8 @@ class Q4Matmul {
                         var blkOff = (n * bpr + b) * blockBytes;
                         var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
                         sum += isQ6
-                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb)
-                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsums, (rt * bpr + b) * 16, xdb);
+                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb)
+                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb);
                     }
                     Mem.storeF32(yb + Usize.fromInt((rt * outRows + n) << 2), sum);
                     rt++;
