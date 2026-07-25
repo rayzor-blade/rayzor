@@ -588,25 +588,41 @@ class Q4Matmul {
     // E0100) — the x-module resolution cluster. Only `matmul` calls this.
     static function matmulQ8_0(qw:QTensor, x:Tensor, sp:Null<SpinPool>):Tensor {
         var K = qw.cols();
-        var rows = qw.rows();
-        var blocks = Std.int(K / Q8_0_BLOCK_ELEMS);
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
 
         var pooled = sp != null;
         var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
         var aBase = qs.address();
-        var xBase = x.data().raw();
-
-        // One scale per activation row. Kept in a raw f32 buffer so the hot
-        // row reads it with Mem.loadF32 and makes no boxing extern call.
         var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
         var sBase = xScales.address();
+        quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+
+        var y = q8Banded(qw, batch, K, aBase, sBase, sp);
+        if (!pooled) {
+            qs.free();
+            xScales.free();
+        }
+        return y;
+    }
+
+    /** Symmetric int8-quantise `batch` activation rows into `aBase`, one f32
+        scale per row into `sBase`. Split out of matmulQ8_0 so a fused call can
+        quantise a SHARED activation exactly once instead of once per weight. */
+    static function quantiseRowsI8(xBase:Usize, aBase:Usize, sBase:Usize,
+            batch:Int, K:Int):Void {
         for (b in 0...batch) {
-            var s = quantizeRowI8(xBase + Usize.fromInt(b * K * 4), aBase + Usize.fromInt(b * K), K);
+            var s = quantizeRowI8(xBase + Usize.fromInt(b * K * 4),
+                aBase + Usize.fromInt(b * K), K);
             Mem.storeF32(sBase + Usize.fromInt(b << 2), s);
         }
+    }
 
+    /** Band one Q8_0 weight against an ALREADY-quantised activation. */
+    static function q8Banded(qw:QTensor, batch:Int, K:Int, aBase:Usize,
+            sBase:Usize, sp:Null<SpinPool>):Tensor {
+        var rows = qw.rows();
+        var blocks = Std.int(K / Q8_0_BLOCK_ELEMS);
         var wBase = qw.dataPtr();
         var y = Tensor.uninit([batch, rows], DType.F32);
         var yBase = y.data().raw();
@@ -686,11 +702,6 @@ class Q4Matmul {
         };
         if (sp != null) sp.parallelRows(rows, band);
         else band(0, rows, 0);
-
-        if (!pooled) {
-            qs.free();
-            xScales.free();
-        }
         return y;
     }
 
@@ -834,6 +845,45 @@ class Q4Matmul {
         // Row-wise/32-block schemes (INT8 from Q5_0/Q5_1, and native Q8_0)
         // have no place in the 256-wide banded fused path below.
         var anyRowwise = isRowwise(w0) || isRowwise(w1) || (w2 != null && isRowwise(w2));
+
+        // All-Q8_0 triples get their OWN fused path. Q/K/V share the
+        // post-attn-norm activation and gate/up share the post-FFN-norm one, so
+        // the split fallback re-runs the same two-pass O(K) int8 quantise per
+        // weight — on a Qwen Q6_K (most tensors Q8_0, ~191 matmul calls/token)
+        // that is ~5 quantisations per layer where 2 would do. Quantise once,
+        // band each weight against the shared activation.
+        //
+        // Only when ALL are Q8_0: a mixed triple (e.g. Q6_K attn_v alongside
+        // Q8_0 q/k) needs different activation encodings — Q8_K super-blocks vs
+        // per-row int8 — and cannot share one buffer.
+        var allQ8_0 = useHaxeQ8_0()
+            && w0.scheme() == QScheme.Q8_0 && w1.scheme() == QScheme.Q8_0
+            && (w2 == null || w2.scheme() == QScheme.Q8_0);
+        if (useFusedMatmul() && allQ8_0) {
+            var K = w0.cols();
+            var batch = Std.int(x.numel() / K);
+            if (batch < 1) batch = 1;
+            var pooled = sp != null;
+            var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
+            var aBase = qs.address();
+            var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
+            var sBase = xScales.address();
+            quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+            census(3, false);
+            var out = [q8Banded(w0, batch, K, aBase, sBase, sp),
+                       q8Banded(w1, batch, K, aBase, sBase, sp)];
+            census(3, false);
+            if (w2 != null) {
+                out.push(q8Banded(w2, batch, K, aBase, sBase, sp));
+                census(3, false);
+            }
+            if (!pooled) {
+                qs.free();
+                xScales.free();
+            }
+            return out;
+        }
+
         if (!useFusedMatmul() || anyRowwise) {
             var split = [matmul(w0, x, sp), matmul(w1, x, sp)];
             if (w2 != null) split.push(matmul(w2, x, sp));
