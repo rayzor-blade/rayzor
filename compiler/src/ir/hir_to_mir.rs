@@ -264,6 +264,11 @@ pub struct HirToMirContext<'a> {
     /// down through variable bindings so subsequent receiver dispatch
     /// sees the real type instead of falling into the Dynamic path.
     interface_call_result_types: BTreeMap<IrId, TypeId>,
+    /// Registers holding values that `maybe_box_value` actually boxed
+    /// (Dynamic box protocol). Register-keyed and per-function (cleared with
+    /// `symbol_map`): consumers use it to tell a genuine box apart from raw
+    /// payloads that share the same `Ptr(Void)` register type.
+    boxed_value_regs: BTreeSet<IrId>,
 
     /// Variables whose declared HIR type is `Dynamic` but whose RHS at
     /// the binding site was a tracked `interface_call_result_types`
@@ -714,6 +719,7 @@ impl<'a> HirToMirContext<'a> {
             monomorphized_var_types: BTreeMap::new(),
             register_class_hints: BTreeMap::new(),
             interface_call_result_types: BTreeMap::new(),
+            boxed_value_regs: BTreeSet::new(),
             var_concrete_overrides: BTreeMap::new(),
             iface_diag_seen: BTreeSet::new(),
             enums_for_registration: BTreeMap::new(),
@@ -3743,6 +3749,13 @@ impl<'a> HirToMirContext<'a> {
         // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
+
+        // Register-keyed: IrIds restart per function, so stale entries
+
+        // from the previous body would collide with unrelated registers.
+
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         // Per-function: strict_move_locals tracks IrIds bound to @:move locals in
         // THIS function's SSA namespace; clearing prevents cross-function IrId
         // pollution that would otherwise mis-emit MarkMoved/CheckLive.
@@ -3867,6 +3880,11 @@ impl<'a> HirToMirContext<'a> {
             self.builder.current_function = Some(inner_context.func_id);
             self.builder.current_block = Some(inner_context.entry_block);
             self.symbol_map.clear();
+            // Register-keyed: IrIds restart per function, so stale entries
+            // from the previous body would collide with unrelated registers.
+            self.interface_call_result_types.clear();
+            self.boxed_value_regs.clear();
+            self.boxed_value_regs.clear();
             // Per-function isolation: inner async closure has its own SSA namespace;
             // saved_state already snapshotted strict_move_locals for restore.
             self.strict_move_locals.clear();
@@ -4268,6 +4286,13 @@ impl<'a> HirToMirContext<'a> {
         // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
+
+        // Register-keyed: IrIds restart per function, so stale entries
+
+        // from the previous body would collide with unrelated registers.
+
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         // Per-function: clear strict_move_locals at constructor exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
@@ -4424,6 +4449,10 @@ impl<'a> HirToMirContext<'a> {
 
         // Clear per-function state
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         // Per-function: clear strict_move_locals at lower_function exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
@@ -4586,6 +4615,10 @@ impl<'a> HirToMirContext<'a> {
 
         // Clear per-function state
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         // Per-function: clear strict_move_locals at instance-method exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
@@ -4857,21 +4890,65 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     })
                                     .unwrap_or(false);
-                                if !hint_is_concrete {
+                                // The override drives object method dispatch
+                                // (`effective_receiver_type`). Setting it for a
+                                // scalar (Int/Float/Bool) return is meaningless
+                                // and disturbs direct uses of the value, so
+                                // restrict it to reference-typed returns.
+                                let is_scalar = matches!(
+                                    self.convert_type(real_ty),
+                                    IrType::I8
+                                        | IrType::I16
+                                        | IrType::I32
+                                        | IrType::I64
+                                        | IrType::U8
+                                        | IrType::U16
+                                        | IrType::U32
+                                        | IrType::U64
+                                        | IrType::F32
+                                        | IrType::F64
+                                        | IrType::Bool
+                                );
+                                if !hint_is_concrete && !is_scalar {
                                     self.var_concrete_overrides.insert(*symbol, real_ty);
                                 }
                             }
                         }
 
-                        // Determine the type for the binding
-                        let var_type = type_hint.or(Some(init_expr.ty));
+                        // The RHS's real source type. When the RHS is an
+                        // interface method call, TAST erased its return to
+                        // `Dynamic` but MIR recovered the concrete type into
+                        // `interface_call_result_types` (the call already
+                        // returned a raw concrete value, not a box). The
+                        // box/unbox coercions below key off the source type, so
+                        // they must see that concrete type — using the erased
+                        // `Dynamic` inserts a spurious unbox that reads a raw
+                        // pointer as a box header (→ SIGSEGV for object returns
+                        // like Tensor), or, for an inferred binding, spuriously
+                        // boxes a scalar return (its `var_type` falls back to
+                        // the erased Dynamic and disagrees with the recovered
+                        // override).
+                        let recovered_init_ty =
+                            self.interface_call_result_types.get(&value_reg).copied();
+                        let init_ty = recovered_init_ty.unwrap_or(init_expr.ty);
+
+                        // Determine the type for the binding. An unannotated
+                        // binding infers the recovered concrete type, not the
+                        // erased Dynamic. An erased HINT is kept as the
+                        // binding type on purpose: for scalars the box is the
+                        // representation every Dynamic consumer (string
+                        // concat, Std.string) expects, and `maybe_box_value`
+                        // passes objects through raw regardless. The
+                        // consumers that need the concrete value back
+                        // (return-site, comparisons) unbox it there.
+                        let var_type = type_hint.or(Some(init_ty));
 
                         // Auto-box if assigning concrete value to Dynamic variable
                         // Auto-unbox if assigning Dynamic value to concrete variable
                         let final_value = if let Some(target_ty) = var_type {
                             // Try boxing first (concrete → Dynamic)
                             let after_box = self
-                                .maybe_box_value(value_reg, init_expr.ty, target_ty)
+                                .maybe_box_value(value_reg, init_ty, target_ty)
                                 .unwrap_or(value_reg);
 
                             // Track if boxing actually happened (value was boxed into Dynamic)
@@ -4900,7 +4977,7 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             // Then try unboxing (Dynamic → concrete)
-                            self.maybe_unbox_value(after_box, init_expr.ty, target_ty)
+                            self.maybe_unbox_value(after_box, init_ty, target_ty)
                                 .unwrap_or(after_box)
                         } else {
                             value_reg
@@ -4908,7 +4985,7 @@ impl<'a> HirToMirContext<'a> {
 
                         // Auto-box primitive for Null<T> (Optional) assignment
                         let final_value = if let Some(target_ty) = var_type {
-                            self.maybe_box_for_optional(final_value, init_expr.ty, target_ty)
+                            self.maybe_box_for_optional(final_value, init_ty, target_ty)
                                 .unwrap_or(final_value)
                         } else {
                             final_value
@@ -4916,7 +4993,7 @@ impl<'a> HirToMirContext<'a> {
 
                         // Apply abstract @:from implicit conversion if needed
                         let final_value = if let Some(target_ty) = var_type {
-                            self.maybe_abstract_from_convert(final_value, init_expr.ty, target_ty)
+                            self.maybe_abstract_from_convert(final_value, init_ty, target_ty)
                                 .unwrap_or(final_value)
                         } else {
                             final_value
@@ -5298,9 +5375,49 @@ impl<'a> HirToMirContext<'a> {
                                 .filter(|t| *t != TypeId::invalid()),
                             _ => None,
                         };
+                        // Recover the RHS's concrete type when it came from an
+                        // interface method call: TAST erased the return to
+                        // `Dynamic`, but MIR recovered the concrete type into
+                        // `interface_call_result_types`. Same rationale as the
+                        // Let-binding path — without this the coercion below
+                        // unboxes a raw concrete pointer (reading it as a box
+                        // header → SIGSEGV for object returns like Tensor).
+                        let recovered_rhs_ty =
+                            self.interface_call_result_types.get(&value).copied();
+                        let rhs_ty = recovered_rhs_ty.unwrap_or(rhs.ty);
+                        // For VARIABLE targets whose declared type is itself
+                        // inference-erased, the recovered type also overrides
+                        // the coercion target — mirroring the Let-binding
+                        // policy so a reassigned local keeps the raw concrete
+                        // representation its binding established. Field
+                        // targets keep their declared type: a Dynamic field
+                        // may be deliberate, and its readers use the box
+                        // protocol.
+                        let lhs_target_ty = match (lhs, recovered_rhs_ty, lhs_target_ty) {
+                            (HirLValue::Variable(_), Some(recovered), Some(declared)) => {
+                                let declared_is_erased = self
+                                    .type_table
+                                    .get(declared)
+                                    .map(|t| {
+                                        matches!(
+                                            t.kind,
+                                            TypeKind::Dynamic
+                                                | TypeKind::Placeholder { .. }
+                                                | TypeKind::Unknown
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                                Some(if declared_is_erased {
+                                    recovered
+                                } else {
+                                    declared
+                                })
+                            }
+                            (_, _, t) => t,
+                        };
                         let value = if let Some(target_ty) = lhs_target_ty {
                             let after_box = self
-                                .maybe_box_value(value, rhs.ty, target_ty)
+                                .maybe_box_value(value, rhs_ty, target_ty)
                                 .unwrap_or(value);
                             // Track boxing for Dynamic arithmetic safety (variable targets only).
                             if after_box != value {
@@ -5308,7 +5425,7 @@ impl<'a> HirToMirContext<'a> {
                                     self.boxed_dynamic_symbols.insert(*sym);
                                 }
                             }
-                            self.maybe_unbox_value(after_box, rhs.ty, target_ty)
+                            self.maybe_unbox_value(after_box, rhs_ty, target_ty)
                                 .unwrap_or(after_box)
                         } else {
                             value
@@ -5319,7 +5436,7 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                 let target_ty = sym_info.type_id;
                                 if target_ty != TypeId::invalid() {
-                                    self.maybe_abstract_from_convert(value, rhs.ty, target_ty)
+                                    self.maybe_abstract_from_convert(value, rhs_ty, target_ty)
                                         .unwrap_or(value)
                                 } else {
                                     value
@@ -11631,7 +11748,7 @@ impl<'a> HirToMirContext<'a> {
                                         self.builder.build_call_direct(
                                             fid,
                                             arg_regs,
-                                            actual_return_type,
+                                            actual_return_type.clone(),
                                         )?
                                     } else {
                                         let fid = self.get_or_register_extern_function(
@@ -11642,10 +11759,17 @@ impl<'a> HirToMirContext<'a> {
                                         self.builder.build_call_direct(
                                             fid,
                                             arg_regs,
-                                            actual_return_type,
+                                            actual_return_type.clone(),
                                         )?
                                     };
-                                    return Some(call_result);
+                                    // Reconcile the descriptor's NATIVE return type with the
+                                    // Haxe-declared type at this callsite.
+                                    let declared_ir = self.convert_type(expr.ty);
+                                    return Some(self.reconcile_extern_return(
+                                        call_result,
+                                        &actual_return_type,
+                                        &declared_ir,
+                                    ));
                                 }
                             }
                         }
@@ -16260,11 +16384,17 @@ impl<'a> HirToMirContext<'a> {
                                                         );
 
                                                     // Generate the call to the runtime function
-                                                    return self.builder.build_call_direct(
-                                                        runtime_func_id_qn,
-                                                        final_arg_regs,
-                                                        expected_return_type_qn,
-                                                    );
+                                                    let call_result_qn =
+                                                        self.builder.build_call_direct(
+                                                            runtime_func_id_qn,
+                                                            final_arg_regs,
+                                                            expected_return_type_qn.clone(),
+                                                        )?;
+                                                    return Some(self.reconcile_extern_return(
+                                                        call_result_qn,
+                                                        &expected_return_type_qn,
+                                                        &result_type,
+                                                    ));
 
                                                     // DEAD CODE below (kept for reference): old ptr_conversion path
                                                     #[allow(unreachable_code)]
@@ -23959,6 +24089,22 @@ impl<'a> HirToMirContext<'a> {
             if let Some(resolved) = self.symbol_ir_types.get(symbol) {
                 return resolved.clone();
             }
+            // Erased default (`Dynamic` converts to Ptr(Void)): the
+            // variable's bound register carries the type its producer
+            // actually emitted (e.g. `string_concat` → Ptr(String)).
+            // Register evidence beats the erased HIR type; keep the
+            // default when the register is itself untyped/void.
+            if matches!(&default_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
+            {
+                if let Some(&reg) = self.symbol_map.get(symbol) {
+                    if let Some(reg_ty) = self.builder.get_register_type(reg) {
+                        if !matches!(&reg_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
+                        {
+                            return reg_ty;
+                        }
+                    }
+                }
+            }
         }
         default_type
     }
@@ -24244,6 +24390,24 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn maybe_box_value(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        let out = self.maybe_box_value_inner(value, value_ty, target_ty);
+        if let Some(reg) = out {
+            if reg != value {
+                // A box was emitted: remember the resulting register so
+                // Ptr(Void)-typed consumers can distinguish this genuine
+                // Dynamic box from raw payload temps of the same MIR type.
+                self.boxed_value_regs.insert(reg);
+            }
+        }
+        out
+    }
+
+    fn maybe_box_value_inner(
         &mut self,
         value: IrId,
         value_ty: TypeId,
@@ -24678,7 +24842,32 @@ impl<'a> HirToMirContext<'a> {
         // variable never got a concrete type). Calling `haxe_unbox_int_ptr` on
         // it would dereference the raw integer value → SIGSEGV. Recover the raw
         // bits and cast to the target primitive instead.
-        if matches!(&val_ir, Some(IrType::Ptr(inner)) if !matches!(inner.as_ref(), IrType::U8)) {
+        let mut is_known_box = self.boxed_value_regs.contains(&value);
+        if !is_known_box {
+            // Casts re-wrap a box without changing what it is (e.g. the Let
+            // binding casts the *u8 box to the Dynamic slot's *void). Follow
+            // one level of Cast/BitCast provenance before trusting the
+            // raw-payload heuristic below.
+            if let Some(func) = self.builder.current_function() {
+                'prov: for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        match inst {
+                            crate::ir::IrInstruction::Cast { dest, src, .. }
+                            | crate::ir::IrInstruction::BitCast { dest, src, .. }
+                                if *dest == value =>
+                            {
+                                is_known_box = self.boxed_value_regs.contains(src);
+                                break 'prov;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if !is_known_box
+            && matches!(&val_ir, Some(IrType::Ptr(inner)) if !matches!(inner.as_ref(), IrType::U8))
+        {
             let raw = self.builder.build_bitcast(value, IrType::I64)?;
             return match target_ir {
                 IrType::I32 => self.builder.build_cast(raw, IrType::I64, IrType::I32),
@@ -27881,6 +28070,49 @@ impl<'a> HirToMirContext<'a> {
                     // Class instances retain their `__type_id` header; for those,
                     // `field_exists_in_any_class` further down handles dispatch
                     // correctly after unboxing.
+                    //
+                    // A receiver register already typed String is a RAW
+                    // HaxeString that flowed out of a typed producer (e.g.
+                    // `string_concat`) under an erased HIR type — not a
+                    // DynamicValue box. The unbox+reflect path below walks
+                    // garbage; dispatch the known property directly.
+                    if matches!(&obj_ir_type, Some(IrType::String))
+                        || matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(inner.as_ref(), IrType::String))
+                    {
+                        let fname = self
+                            .symbol_table
+                            .get_symbol(field)
+                            .and_then(|s| self.string_interner.get(s.name));
+                        if fname == Some("length") {
+                            let len_id = self.get_or_register_extern_function(
+                                "haxe_string_length",
+                                vec![IrType::String],
+                                IrType::I64,
+                            );
+                            let raw =
+                                self.builder
+                                    .build_call_direct(len_id, vec![obj], IrType::I64)?;
+                            // Erased field type ⇒ downstream consumers speak
+                            // the Dynamic box protocol; concrete Int callers
+                            // take the raw value.
+                            let field_erased = type_table.get(field_ty).map(|t| {
+                                matches!(
+                                    t.kind,
+                                    TypeKind::Dynamic
+                                        | TypeKind::Placeholder { .. }
+                                        | TypeKind::Unknown
+                                )
+                            });
+                            if field_erased == Some(true) {
+                                return self.box_primitive_as_dynamic(
+                                    raw,
+                                    IrType::I64,
+                                    PrimBoxKind::Int,
+                                );
+                            }
+                            return Some(raw);
+                        }
+                    }
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
                             // Try the stdlib name-based dispatch first. Only
@@ -29182,6 +29414,26 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(field)
             .and_then(|s| self.string_interner.get(s.name))
             .map(|s| s.to_string())?;
+
+        // Register evidence beats the erased HIR type: a receiver whose MIR
+        // register is already a concrete String flowed out of a typed
+        // producer (e.g. `string_concat`) under a Dynamic-erased HIR type.
+        // It is NOT a boxed Dynamic — the unbox_reference peeling below
+        // would walk garbage. Dispatch the known field directly.
+        let obj_reg_ty = self.builder.get_register_type(obj);
+        if (matches!(&obj_reg_ty, Some(IrType::String))
+            || matches!(&obj_reg_ty, Some(IrType::Ptr(inner)) if matches!(inner.as_ref(), IrType::String)))
+            && field_name_str == "length"
+        {
+            let len_id = self.get_or_register_extern_function(
+                "haxe_string_length",
+                vec![IrType::String],
+                IrType::I64,
+            );
+            return self
+                .builder
+                .build_call_direct(len_id, vec![obj], IrType::I64);
+        }
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
@@ -31876,6 +32128,24 @@ impl<'a> HirToMirContext<'a> {
                                              // );
                 self.builder
                     .add_phi_incoming(merge_block, result, else_end_block, val);
+            }
+            // Cross-context interface-return propagation through the phi. When
+            // both arms are interface method calls whose concrete return type
+            // was recovered (tracked in `interface_call_result_types`) and they
+            // agree, the merged result is that same concrete type. Without this
+            // a `cond ? iface.a() : iface.b()` result stays erased to Dynamic,
+            // and a downstream `var x:T = …` unboxes a raw pointer (→ SIGSEGV
+            // for object returns). Require agreement so a mixed merge is never
+            // mislabelled.
+            if let (Some(tv), Some(ev)) = (then_val, else_val) {
+                if let (Some(&t_ty), Some(&e_ty)) = (
+                    self.interface_call_result_types.get(&tv),
+                    self.interface_call_result_types.get(&ev),
+                ) {
+                    if t_ty == e_ty {
+                        self.interface_call_result_types.insert(result, t_ty);
+                    }
+                }
             }
             result_phi = Some(result);
         }
@@ -35325,6 +35595,10 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(entry_block);
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         // Per-function isolation: lambda body has its own SSA register namespace;
         // saved_state already snapshotted strict_move_locals for restore on exit.
         self.strict_move_locals.clear();
@@ -37702,6 +37976,49 @@ impl<'a> HirToMirContext<'a> {
 
     /// Coerce a raw i64 value from anonymous object storage back to the target type.
     /// Inverse of coerce_to_i64.
+    /// Reconcile an extern call's NATIVE return type with the Haxe-declared
+    /// type at the callsite.
+    ///
+    /// A native `i64` count consumed as Haxe `Int` must narrow to `i32`, and
+    /// an `i64`/`f64` mismatch must convert by VALUE. Leaving the register at
+    /// the native width makes the downstream arg-adaptation in
+    /// `IrBuilder::build_call_direct` treat an `I64 -> F64` pairing as
+    /// generic type erasure and BITCAST it (raw bits read as a float).
+    ///
+    /// Only numeric scalars are reconciled: `Any`/pointer/void declarations
+    /// are genuine erased slots where the bits, not the value, are wanted.
+    fn reconcile_extern_return(
+        &mut self,
+        value: IrId,
+        native_ty: &IrType,
+        declared_ty: &IrType,
+    ) -> IrId {
+        if native_ty == declared_ty {
+            return value;
+        }
+        let is_numeric = |t: &IrType| {
+            matches!(
+                t,
+                IrType::I8
+                    | IrType::I16
+                    | IrType::I32
+                    | IrType::I64
+                    | IrType::U8
+                    | IrType::U16
+                    | IrType::U32
+                    | IrType::U64
+                    | IrType::F32
+                    | IrType::F64
+            )
+        };
+        if !is_numeric(native_ty) || !is_numeric(declared_ty) {
+            return value;
+        }
+        self.builder
+            .build_cast(value, native_ty.clone(), declared_ty.clone())
+            .unwrap_or(value)
+    }
+
     fn coerce_from_i64(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
         let ir_type = self.convert_type(type_id);
         match &ir_type {
@@ -40031,6 +40348,10 @@ impl<'a> HirToMirContext<'a> {
         let saved_symbol_map = self.symbol_map.clone();
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         let thunk_id = self
@@ -40145,6 +40466,10 @@ impl<'a> HirToMirContext<'a> {
         let saved_symbol_map = self.symbol_map.clone();
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         let restore = |s: &mut Self| {
@@ -40255,6 +40580,10 @@ impl<'a> HirToMirContext<'a> {
         // inside the thunk body do not collide with the outer function's IrIds.
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         let thunk_id = self
@@ -40377,6 +40706,10 @@ impl<'a> HirToMirContext<'a> {
         // snapshot and clear strict_move_locals in parallel with symbol_map.
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         for (class_type_id, ctor_func_id) in ctor_entries {
@@ -40539,6 +40872,10 @@ impl<'a> HirToMirContext<'a> {
         // snapshot and clear strict_move_locals in parallel with symbol_map.
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         // Register extern functions for vtable operations
@@ -40783,6 +41120,10 @@ impl<'a> HirToMirContext<'a> {
         // and clear strict_move_locals in parallel with symbol_map.
         let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        // Register-keyed: IrIds restart per function, so stale entries
+        // from the previous body would collide with unrelated registers.
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
         // Materialize every global into runtime/backend storage. Some backends load globals
