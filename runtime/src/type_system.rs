@@ -3113,14 +3113,25 @@ fn ensure_flat_vtable() {
 
 /// Look up a vtable slot for an object. Reads type_id from the object header
 /// (first 8 bytes), then returns the closure pointer for the given slot.
-/// Returns 0 if no vtable or slot is found.
 ///
-/// Hot path: two array indexes. No locks, no hash lookups.
+/// THROWS rather than returning 0 when the lookup cannot be satisfied. Every
+/// caller (the three interface-dispatch sites in hir_to_mir) emits a
+/// `call_indirect` straight onto this result with no null check, so returning
+/// 0 turned every dispatch failure — null receiver, unregistered type_id,
+/// out-of-range slot — into an unexplainable SIGSEGV inside JIT'd code with
+/// no symbol and no message. A thrown Haxe exception names the failure at the
+/// point it happens instead.
+///
+/// Hot path is unchanged: two array indexes, no locks, no hash lookups. The
+/// throws sit only on paths that previously produced a guaranteed crash.
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
-        return 0;
+        crate::exception::throw_with_message(format!(
+            "interface call on a null receiver (vtable slot {slot_index}) — \
+             the interface value was null or was never wrapped in a fat pointer"
+        ));
     }
     let type_id = unsafe { *(obj_ptr as *const i64) } as usize;
     let slot = slot_index as usize;
@@ -3148,9 +3159,18 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
             if slot < vtable.len() {
                 return vtable[slot];
             }
+            crate::exception::throw_with_message(format!(
+                "interface dispatch: vtable slot {slot} out of range for type_id \
+                 {type_id} (vtable has {} slots)",
+                vtable.len()
+            ));
         }
     }
-    0
+    crate::exception::throw_with_message(format!(
+        "interface dispatch: no vtable registered for type_id {type_id} \
+         (slot {slot}) — the receiver is not a registered class instance, or \
+         its object header was overwritten"
+    ));
 }
 
 #[cfg(test)]
