@@ -28912,6 +28912,43 @@ impl<'a> HirToMirContext<'a> {
                                     "[E0100] field='{}' sym={:?} receiver_ty={:?} kind={:?}",
                                     field_name_str, field, receiver_ty, recv_kind
                                 );
+                                // Is the receiver's class present in
+                                // class_instance_fields AT ALL in this context?
+                                // Two name/id resolution strategies both failed
+                                // here, which points at the field table being
+                                // ABSENT (never forwarded across the module
+                                // boundary) rather than merely keyed differently.
+                                // Print the evidence instead of guessing again.
+                                let class_sym =
+                                    match self.type_table.get(receiver_ty).map(|ti| &ti.kind) {
+                                        Some(TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
+                                        _ => None,
+                                    };
+                                let class_name = class_sym.and_then(|cs| {
+                                    self.symbol_table
+                                        .get_symbol(cs)
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                });
+                                let by_id = class_sym
+                                    .map(|cs| self.class_instance_fields.contains_key(&cs))
+                                    .unwrap_or(false);
+                                let by_name = class_name
+                                    .map(|cn| {
+                                        self.class_instance_fields.keys().any(|k| {
+                                            self.symbol_table
+                                                .get_symbol(*k)
+                                                .and_then(|s| self.string_interner.get(s.name))
+                                                == Some(cn)
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                                eprintln!(
+                                    "[E0100]   class_name={:?} in_cif_by_id={} in_cif_by_name={} cif_len={}",
+                                    class_name,
+                                    by_id,
+                                    by_name,
+                                    self.class_instance_fields.len()
+                                );
                             }
                             self.add_error(
                                 &format!(
