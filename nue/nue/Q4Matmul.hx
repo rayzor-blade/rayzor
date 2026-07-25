@@ -623,25 +623,44 @@ class Q4Matmul {
                     var aRow = b * K;
                     var acc = 0.0;
                     var blk = 0;
-                    // Pair adjacent blocks: they are independent, so two SDOT
-                    // chains stay in flight and each block's scalar tail (f16
-                    // widen + scale multiply) hides under the other's vectors.
-                    while (blk + 2 <= blocks) {
+                    // FOUR blocks per step, scale-multiplied through one SIMD4f.
+                    //
+                    // The prior 2-at-a-time form did `acc += d * dot` in f64,
+                    // a serial multiply-add chain as deep as the block count on
+                    // every row. Folding four blocks into a vector accumulator
+                    // turns 28 serial f64 mul-adds into 7 vector ones plus a
+                    // single 4-way fold per row, and accumulates in f32 — which
+                    // is what the reference kernel folds in too.
+                    //
+                    // Block scale loads stay as ONE masked 32-bit load each
+                    // (bytes 2..3 are weight data, masked off; never leaves the
+                    // 34-byte block, so no overread — Mem has no 16-bit load).
+                    //
+                    // The per-block hsum inside q8DotBlock STAYS. Q8_0 carries a
+                    // distinct f16 scale per 32-element block, so the integer
+                    // sums cannot be merged across blocks. Amortising the scale
+                    // multiply is legal; merging the dots would be wrong.
+                    var vacc = SIMD4f.splat(0.0);
+                    while (blk + 4 <= blocks) {
                         var o0 = rowBase + blk * blockBytes;
                         var o1 = o0 + blockBytes;
-                        // ONE 32-bit load per block scale, not two byte loads +
-                        // shift + or. Bytes 2..3 are weight data and are masked
-                        // off; the read never leaves the 34-byte block, so there
-                        // is no overread even on the final block. (Mem has no
-                        // 16-bit load.) This runs 4.25M times/token on Qwen's
-                        // 151936-row Q8_0 lm_head, so the halved load count is
-                        // the difference between two and one issue slot there.
-                        var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
-                        var d1 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF);
-                        acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems)
-                             + d1 * q8DotBlock(wBase, o1, aBase, aRow + (blk + 1) * blockElems);
-                        blk += 2;
+                        var o2 = o1 + blockBytes;
+                        var o3 = o2 + blockBytes;
+                        var e0 = aRow + blk * blockElems;
+                        var vd = SIMD4f.make(
+                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF),
+                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF),
+                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o2)) & 0xFFFF),
+                            f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o3)) & 0xFFFF));
+                        var vs = SIMD4f.make(
+                            q8DotBlock(wBase, o0, aBase, e0),
+                            q8DotBlock(wBase, o1, aBase, e0 + blockElems),
+                            q8DotBlock(wBase, o2, aBase, e0 + 2 * blockElems),
+                            q8DotBlock(wBase, o3, aBase, e0 + 3 * blockElems));
+                        vacc = vacc.add(vd.mul(vs));
+                        blk += 4;
                     }
+                    acc = vacc.get(0) + vacc.get(1) + vacc.get(2) + vacc.get(3);
                     while (blk < blocks) {
                         var o0 = rowBase + blk * blockBytes;
                         var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
