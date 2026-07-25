@@ -249,12 +249,7 @@ class Main {
         }
         // Which kernel actually ran, per quant scheme (NUE_DUMP_Q4_GATES=1).
         // A pure-Haxe claim is only credible with ffi=0 printed here.
-        // TODO(compiler): re-enable. A zero-arg cross-module STATIC call from
-        // the ENTRY module hits the statics flavor of the E0100 drift disease
-        // whenever Q4Matmul.hx is edited (instance fields are fixed by the
-        // name-keyed layout registry; statics from the entry module are not).
-        // Cross-module statics WITH args (Linear -> Q4Matmul.matmul) resolve.
-        // Q4Matmul.dumpCensus();
+        Q4Matmul.dumpCensus();
         // The streaming callback above already printed every token. Gate
         // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
         // diagnostic runs (e.g. when comparing decoded text against
