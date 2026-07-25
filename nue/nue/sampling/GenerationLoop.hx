@@ -1,6 +1,6 @@
 package nue.sampling;
 
-import nue.arch.LlamaModel;
+import nue.CausalLanguageModel;
 import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 
@@ -33,14 +33,21 @@ import rayzor.ds.Tensor;
  * arbitrary stop strings; for now EOS is the only stop sentinel.
  */
 class GenerationLoop {
-    public var model:LlamaModel;
+    public var model:CausalLanguageModel;
     public var tokenizer:BPETokenizer;
     public var sampler:LocalTempSampler;
     public var eosId:Int;
     public var maxNewTokens:Int;
+    // Additional stop-token ids beyond `eosId` (e.g. a template's secondary
+    // turn-enders). Empty by default; set before `generate` to honour them.
+    public var stopIds:Array<Int>;
+    // Why the last `generate` stopped: "stop" (a stop token), "length"
+    // (maxNewTokens), "context" (KV cache full), "aborted" (onToken returned
+    // false), or "" before the first run. Read after `generate` returns.
+    public var finishReason:String;
 
     public function new(
-        model:LlamaModel,
+        model:CausalLanguageModel,
         tokenizer:BPETokenizer,
         sampler:LocalTempSampler,
         eosId:Int,
@@ -51,6 +58,16 @@ class GenerationLoop {
         this.sampler = sampler;
         this.eosId = eosId;
         this.maxNewTokens = maxNewTokens;
+        this.stopIds = [];
+        this.finishReason = "";
+    }
+
+    // A token id ends the turn if it is the primary EOS or any configured
+    // secondary stop id.
+    inline function isStop(id:Int):Bool {
+        if (id == eosId) return true;
+        for (s in stopIds) if (id == s) return true;
+        return false;
     }
 
     /**
@@ -153,11 +170,16 @@ class GenerationLoop {
         var carryHolder = [haxe.io.Bytes.alloc(0)];
         var skipText = skipTokenText();
         var step = 0;
+        // Context bound: the KV cache holds at most `_cacheCap` tokens. Each
+        // decode forward appends one; stopping before the cache is full is
+        // what turns "generate until context exhaustion" (see class doc) into
+        // an actual stop condition instead of a `KVCache overflow` throw.
+        var _cacheCap:Int = model.cacheCapacity();
         var _decodeStart = _profileOn ? Sys.time() : 0.0;
         if (_profileWindows) _wStartTime = Sys.time();
         while (true) {
-            if (nextId == eosId) break;
-            if (maxNewTokens > 0 && step >= maxNewTokens) break;
+            if (isStop(nextId)) { finishReason = "stop"; break; }
+            if (maxNewTokens > 0 && step >= maxNewTokens) { finishReason = "length"; break; }
 
             var _stepStart = _profileOn ? Sys.time() : 0.0;
             var _stepIndex = _pCount;
@@ -176,12 +198,19 @@ class GenerationLoop {
 
             // Stream the per-token delta through the callback.
             if (onToken != null) {
-                if (!onToken(nextId, delta)) break;
+                if (!onToken(nextId, delta)) { finishReason = "aborted"; break; }
             }
 
             step++;
             _pCount++;
-            if (maxNewTokens > 0 && step >= maxNewTokens) break;
+            if (maxNewTokens > 0 && step >= maxNewTokens) { finishReason = "length"; break; }
+
+            // Context bound. The forward below appends `nextId` to the KV
+            // cache; once the cache is full the next append would throw
+            // "KVCache overflow: cap+1 > cap". We've already emitted the
+            // current token above, so break here to end cleanly at the
+            // context boundary instead of crashing one token past it.
+            if (_cacheCap > 0 && model.cacheLen() + 1 > _cacheCap) { finishReason = "context"; break; }
 
             // Decode step: only feed the latest token; KV cache
             // carries the rest of the context.

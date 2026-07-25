@@ -26,18 +26,19 @@ import nue.engine.PrefillGraph;
  * (ONNX, safetensors) normalize to it in their loaders so the arch
  * builders don't need format awareness.
  *
- * **Status — supported tensor dtypes (v1):**
- *   - F32     (GGML 0)  — decoded inline via `Tensor.fromArray`.
+ * **Status — supported tensor dtypes:**
+ *   - F32     (GGML 0)  — memcpy'd via `Tensor.fromBytesF32`.
  *   - F16     (GGML 1)  — widened to F32 via `Tensor.fromBytesF16`.
+ *   - Q5_0    (GGML 6)  — converted at load to an INT8 per-row `QTensor`
+ *                         (`QTensor.fromBytesQ5_0Int8`); covers models
+ *                         whose inner dims defeat the 256-wide k-quants.
+ *   - Q5_1    (GGML 7)  — as Q5_0, plus an explicit per-block min.
+ *   - Q5_K    (GGML 13) — re-encoded to Q4_K_M at load (shared super-block
+ *                         geometry; smaller than the source and on the
+ *                         fastest kernel).
  *   - Q8_0    (GGML 8)  — dequantised to F32 via `Tensor.fromBytesQ8_0`.
- *   - Q4_K_M  (GGML 14) — loaded as `QTensor.fromBytesQ4KM`, then
- *                         dequantised to F32 via `qt.dequant()` so it
- *                         drops into the existing `Tensor`-only
- *                         `NamedTensorMap` / `Linear` plumbing. The
- *                         compressed path (keeping weights as QTensor
- *                         and routing through `QTensor.matmulF32`) is
- *                         Phase 4b — requires `Linear` to accept a
- *                         polymorphic weight.
+ *   - Q4_K    (GGML 12) — zero-copy `QTensor.fromBytesQ4KM`.
+ *   - Q6_K    (GGML 14) — zero-copy `QTensor.fromBytesQ6K`.
  *
  * The metadata + tensor-info parsing is fully functional for every
  * dtype today.
@@ -319,10 +320,25 @@ class GGUFLoader implements ModelLoader {
                 result.set(info.name, Tensor.fromBytesF32(raw, dims));
             case 1: // F16
                 result.set(info.name, Tensor.fromBytesF16(raw, dims));
+            case 6: // Q5_0 — 22-byte blocks of 32. Carries the tensors the
+                    // 256-wide k-quants can't express (inner dims not
+                    // divisible by 256, e.g. Qwen2-0.5B hidden 896). Loaded
+                    // as an INT8 per-row QTensor so the matmul stays on a
+                    // quantised integer-dot path instead of an 8× F32 copy.
+                result.setQuant(info.name, decodeQ5_0Int8(raw, info));
+            case 7: // Q5_1 — 24-byte blocks of 32. Like Q5_0 but with an
+                    // explicit min per block; same INT8 landing for the same
+                    // reason (a 32-element block cannot ride the 256-wide
+                    // k-quant path).
+                result.setQuant(info.name, decodeQ5_1Int8(raw, info));
             case 8: // Q8_0
                 result.set(info.name, Tensor.fromBytesQ8_0(raw, dims));
             case 12: // Q4_K — 144-byte super-blocks; the dominant Q4_K_M weight scheme.
                 result.setQuant(info.name, decodeQ4KMRaw(raw, info));
+            case 13: // Q5_K — 176-byte super-blocks. Re-encoded to Q4_K_M (same
+                     // super-block geometry, fastest kernel, and 4.5 bits/weight
+                     // vs Q5_K's 5.5 — so the weights SHRINK rather than grow).
+                result.setQuant(info.name, decodeQ5KToQ4KM(raw, info));
             case 14: // Q6_K — 210-byte super-blocks. Used in Q4_K_M variants for
                      // token_embd, attn_v, and ffn_down (where K_M means "mixed":
                      // some weights get Q6_K to preserve accuracy).
@@ -358,6 +374,55 @@ class GGUFLoader implements ModelLoader {
         var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
         if (qt == null) {
             throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        return qt;
+    }
+
+    /** Convert a Q5_0 (GGUF dtype 6) tensor into an INT8 per-row QTensor.
+     *  Unlike the k-quant decoders this is not zero-copy — each row is
+     *  dequantised once and re-encoded (int8 per-row keeps at least Q5_0's
+     *  16-level granularity unless one row's block scales span >8×) — but
+     *  the result stays quantised and rides the integer-dot matmul path. */
+    private static function decodeQ5_0Int8(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        var qt = QTensor.fromBytesQ5_0Int8(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ5_0Int8 returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        return qt;
+    }
+
+    /** Convert a Q5_1 (GGUF dtype 7) tensor into an INT8 per-row QTensor.
+     *  Q5_1 is Q5_0 plus an explicit per-block min (`y = d*q + m`); both are
+     *  32-element legacy blocks, so both land on the INT8 integer-dot path. */
+    private static function decodeQ5_1Int8(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        var qt = QTensor.fromBytesQ5_1Int8(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ5_1Int8 returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        return qt;
+    }
+
+    /** Convert a Q5_K (GGUF dtype 13) tensor into a Q4_K_M QTensor. Not
+     *  zero-copy — each super-block is dequantised and re-encoded once at
+     *  load — but it preserves Q5_K's per-32-element scale+min structure,
+     *  rides the fastest matmul kernel, and ends up SMALLER than the source
+     *  (4.5 vs 5.5 bits/weight). */
+    private static function decodeQ5KToQ4KM(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        var qt = QTensor.fromBytesQ5KQ4KM(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ5KQ4KM returned null for '"
                 + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
         }
         return qt;

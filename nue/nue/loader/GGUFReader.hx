@@ -189,8 +189,11 @@ class GGUFReader {
         return switch (info.dtype) {
             case 0: nElem * 4;       // F32
             case 1: nElem * 2;       // F16
+            case 6: blockedSize(nElem, 32, 22);        // Q5_0 — 22-byte blocks of 32
+            case 7: blockedSize(nElem, 32, 24);        // Q5_1 — 24-byte blocks of 32 (adds a min)
             case 8: nElem + Std.int(nElem / 32) * 2;   // Q8_0
             case 12: blockedSize(nElem, 256, 144);     // Q4_K — 144-byte super-blocks
+            case 13: blockedSize(nElem, 256, 176);     // Q5_K — 176-byte super-blocks
             case 14: blockedSize(nElem, 256, 210);     // Q6_K — 210-byte super-blocks
             case _: throw "GGUFReader: byte-size for dtype " + info.dtype + " not implemented";
         };
@@ -199,10 +202,14 @@ class GGUFReader {
     private static inline function blockedSize(nElem:Int, blockElems:Int, blockBytes:Int):Int {
         // TODO(bugs_wasm_std_int_large_float): on wasm, `Std.int(nElem / 256)`
         // returns 0 once nElem ≳ 16M (Llama 3.2 1B's 128k×2k token_embd hits
-        // this). blockElems is always 256 in GGUF Q4_K and Q6_K, so a right-
-        // shift produces the correct nBlocks without crossing the broken
-        // Float→Int path. Drop this branch once the compiler bug is fixed.
-        var nBlocks = (blockElems == 256) ? (nElem >> 8) : Std.int(nElem / blockElems);
+        // this). blockElems is 256 (Q4_K/Q5_K/Q6_K) or 32 (Q5_0/Q5_1) — both
+        // powers of two, so a right-shift produces the correct nBlocks without
+        // crossing the broken Float→Int path. Drop once the compiler bug is
+        // fixed. NB: the Q8_0 arm above still divides by 32 via `Std.int` and
+        // so remains exposed to that wasm hazard.
+        var nBlocks = (blockElems == 256) ? (nElem >> 8)
+            : (blockElems == 32) ? (nElem >> 5)
+            : Std.int(nElem / blockElems);
         if (nElem % blockElems != 0) nBlocks += 1;
         return nBlocks * blockBytes;
     }

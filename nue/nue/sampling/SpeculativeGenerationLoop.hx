@@ -1,6 +1,6 @@
 package nue.sampling;
 
-import nue.arch.LlamaModel;
+import nue.CausalLanguageModel;
 import nue.tokenizer.BPETokenizer;
 import rayzor.ds.Tensor;
 
@@ -13,13 +13,18 @@ import rayzor.ds.Tensor;
  * KV cache to the accepted prefix on mismatch.
  */
 class SpeculativeGenerationLoop {
-    public var model:LlamaModel;
+    public var model:CausalLanguageModel;
     public var tokenizer:BPETokenizer;
     public var sampler:LocalTempSampler;
     public var eosId:Int;
     public var maxNewTokens:Int;
     public var maxDraft:Int;
     public var ngram:Int;
+    // Additional stop-token ids beyond `eosId`; empty by default.
+    public var stopIds:Array<Int>;
+    // Why the last `generate` stopped: "stop" | "length" | "aborted", or ""
+    // before the first run. Read after `generate` returns.
+    public var finishReason:String;
 
     var batches:Int;
     var drafted:Int;
@@ -31,7 +36,7 @@ class SpeculativeGenerationLoop {
     var minAcceptPct:Int;
 
     public function new(
-        model:LlamaModel,
+        model:CausalLanguageModel,
         tokenizer:BPETokenizer,
         sampler:LocalTempSampler,
         eosId:Int,
@@ -42,6 +47,8 @@ class SpeculativeGenerationLoop {
         this.sampler = sampler;
         this.eosId = eosId;
         this.maxNewTokens = maxNewTokens;
+        this.stopIds = [];
+        this.finishReason = "";
         this.maxDraft = envInt("RAYZOR_SPEC_MAX", 4);
         this.ngram = envInt("RAYZOR_SPEC_NGRAM", 4);
         if (this.maxDraft < 2) this.maxDraft = 2;
@@ -56,6 +63,14 @@ class SpeculativeGenerationLoop {
         this.rejected = 0;
         this.fallback = 0;
         this.specDisabled = false;
+    }
+
+    // A token id ends the turn if it is the primary EOS or any configured
+    // secondary stop id.
+    inline function isStop(id:Int):Bool {
+        if (id == eosId) return true;
+        for (s in stopIds) if (id == s) return true;
+        return false;
     }
 
     public function generate(prompt:String, onToken:Int->String->Bool):String {
@@ -78,9 +93,12 @@ class SpeculativeGenerationLoop {
         var parts:Array<String> = [];
         var carryHolder = [haxe.io.Bytes.alloc(0)];
         var step = 0;
+        // Set when the onToken callback aborts; disambiguates the finish
+        // reason derived after the loop.
+        var aborted = false;
 
         while (true) {
-            if (nextId == eosId) break;
+            if (isStop(nextId)) break;
             if (maxNewTokens > 0 && step >= maxNewTokens) break;
 
             var remaining = maxDraft;
@@ -104,7 +122,7 @@ class SpeculativeGenerationLoop {
                     var resumedAfterReject = false;
                     var i = 0;
 
-                    if (!emitToken(draftIds[0], parts, carryHolder, onToken)) stopNow = true;
+                    if (!emitToken(draftIds[0], parts, carryHolder, onToken)) { aborted = true; stopNow = true; }
                     ids.push(draftIds[0]);
                     step++;
                     emitted++;
@@ -118,7 +136,7 @@ class SpeculativeGenerationLoop {
 
                         if (target == draftIds[i]) {
                             accepted++;
-                            if (!emitToken(target, parts, carryHolder, onToken)) stopNow = true;
+                            if (!emitToken(target, parts, carryHolder, onToken)) { aborted = true; stopNow = true; }
                             ids.push(target);
                             step++;
                             emitted++;
@@ -130,10 +148,11 @@ class SpeculativeGenerationLoop {
                             model.rewindCache(baseLen + emitted);
                             var terminalAfterReject = false;
 
-                            if (target == eosId) {
+                            if (isStop(target)) {
                                 terminalAfterReject = true;
                             } else {
                                 if (!emitToken(target, parts, carryHolder, onToken)) {
+                                    aborted = true;
                                     terminalAfterReject = true;
                                 }
                                 ids.push(target);
@@ -182,7 +201,7 @@ class SpeculativeGenerationLoop {
 
             fallback++;
             ids.push(nextId);
-            if (!emitToken(nextId, parts, carryHolder, onToken)) break;
+            if (!emitToken(nextId, parts, carryHolder, onToken)) { aborted = true; break; }
             step++;
             if (maxNewTokens > 0 && step >= maxNewTokens) break;
 
@@ -193,6 +212,12 @@ class SpeculativeGenerationLoop {
             nextId = sampler.sample(lrN);
             if (lrN != logits) lrN.free();
         }
+
+        // Single source of truth for the finish reason across every exit
+        // path: an aborted callback wins, then hitting the token cap, else a
+        // stop token was reached.
+        finishReason = aborted ? "aborted"
+            : ((maxNewTokens > 0 && step >= maxNewTokens) ? "length" : "stop");
 
         if (profile) {
             var rate = (drafted > 0) ? (accepted * 100.0 / drafted) : 0.0;

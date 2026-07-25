@@ -238,6 +238,16 @@ class LlamaModel implements CausalLanguageModel {
         return attn.cache.currentLen;
     }
 
+    // Max tokens the KV cache can hold (the model's usable context window).
+    // The decode loop uses this to stop before `KVCache.append` would throw
+    // "KVCache overflow" — the cache is pre-sized to maxSeqLen at build time.
+    public function cacheCapacity():Int {
+        if (blocks.length == 0) return 0;
+        var attn = blocks[0].attn;
+        if (attn == null || attn.cache == null) return 0;
+        return attn.cache.maxSeqLen;
+    }
+
     public function rewindCache(len:Int):Void {
         for (i in 0...blocks.length) {
             var attn = blocks[i].attn;
@@ -248,11 +258,9 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function parameters():Array<nue.Module.NamedTensor> {
-        // Llama GGUF inference builds concrete tensors up front through the
-        // loader, and does not need recursive parameter introspection at run
-        // time. Keeping this inert avoids the current compiler resolver bug
-        // around `NamedTensor.name` typedef fields, which otherwise leaves a
-        // SIGILL stub in release bundles.
+        // GGUF inference materialises all weights up front through the loader,
+        // so introspecting parameters at run time is unnecessary for the
+        // generation path.
         return [];
     }
 }
