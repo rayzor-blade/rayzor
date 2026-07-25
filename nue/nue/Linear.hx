@@ -143,6 +143,14 @@ class Linear implements Module {
         } else {
             y = x.matmulT(weight);
         }
+        if (y == null) {
+            // A null matmul result would otherwise surface as an opaque
+            // null-tensor crash in the bias add or the caller — name the
+            // branch instead.
+            throw "Linear.forward: null matmul result (qweight=" + (qweight != null)
+                + ", haxeMat=" + useHaxeMatmul() + ", int8=" + useInt8()
+                + ", w=" + weight.shape().join("x") + ")";
+        }
         if (bias != null) {
             // `y` is a fresh contiguous owning tensor from matmulT or
             // matmulXTQThreaded. Add bias in place — saves one

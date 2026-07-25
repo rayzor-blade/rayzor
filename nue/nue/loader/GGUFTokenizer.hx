@@ -101,16 +101,20 @@ class GGUFTokenizer {
         registerSpecial(tok, reader, "tokenizer.ggml.padding_token_id", "<|pad|>");
         registerSpecial(tok, reader, "tokenizer.ggml.unknown_token_id", "<|unk|>");
 
-        // Llama-3 chat-template specials live as ordinary vocab entries
-        // with no dedicated GGUF metadata key. Look them up directly so
-        // callers can construct chat-formatted prompts without hard-
-        // coded numeric IDs.
+        // Chat-template control tokens live as ordinary vocab entries with
+        // no dedicated GGUF metadata key. Look them up directly so callers
+        // can construct chat-formatted prompts (and detect turn-ending stop
+        // tokens) by name rather than hard-coded numeric IDs. Covers both
+        // the Llama-3 header format and ChatML (Qwen2, Yi, …).
         var chatSpecials = [
             "<|eot_id|>",
             "<|start_header_id|>",
             "<|end_header_id|>",
             "<|begin_of_text|>",
-            "<|end_of_text|>"
+            "<|end_of_text|>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|endoftext|>"
         ];
         for (i in 0...chatSpecials.length) {
             var name = chatSpecials[i];

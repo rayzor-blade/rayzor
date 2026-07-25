@@ -36,4 +36,21 @@ interface CausalLanguageModel extends Module {
 
     /** Clear every layer's KV cache. Call between independent prompts. */
     function resetCache():Void;
+
+    /** Number of tokens currently held in the KV cache. */
+    function cacheLen():Int;
+
+    /**
+     * Maximum tokens the KV cache can hold — the usable context window.
+     * Generation loops stop before exceeding this so an append never
+     * overflows the pre-sized cache.
+     */
+    function cacheCapacity():Int;
+
+    /**
+     * Drop KV entries back to `len` tokens (roll the cache back to an
+     * earlier position). Used by speculative decoding to discard rejected
+     * draft tokens.
+     */
+    function rewindCache(len:Int):Void;
 }

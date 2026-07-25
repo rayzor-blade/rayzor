@@ -368,6 +368,12 @@ class Q4Matmul {
      * are Q8_K-quantized up front into packed scratch (batch × one row).
      */
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
+        // INT8 per-row weights (Q5_0-sourced) have no Haxe band kernel —
+        // the band loop below is 256-wide k-quant machinery. The runtime
+        // XTQ path dispatches the INT8 scheme natively (integer SDOT dot).
+        if (qw.scheme() == QScheme.INT8) {
+            return qw.matmulXTQThreaded(x, 0);
+        }
         var K = qw.cols();
         var bpr = K >> 8;
         var batch = Std.int(x.numel() / K);
@@ -540,7 +546,13 @@ class Q4Matmul {
      * [1, rows_i] F32 tensor per weight.
      */
     public static function matmulFused(w0:QTensor, w1:QTensor, w2:QTensor, x:Tensor, ?sp:SpinPool):Array<Tensor> {
-        if (!useFusedMatmul()) {
+        // Any INT8 per-row weight (Q5_0-sourced) drops the triple to
+        // per-weight calls — `matmul` routes each INT8 weight to the
+        // runtime XTQ path, and the banded/fused machinery below is
+        // k-quant-only.
+        var anyInt8 = (w0.scheme() == QScheme.INT8) || (w1.scheme() == QScheme.INT8)
+            || (w2 != null && w2.scheme() == QScheme.INT8);
+        if (!useFusedMatmul() || anyInt8) {
             var split = [matmul(w0, x, sp), matmul(w1, x, sp)];
             if (w2 != null) split.push(matmul(w2, x, sp));
             return split;
