@@ -88,7 +88,13 @@ class LlamaArch implements ArchBuilder {
         // KVCache ctor.
         var haxeMatmul = Linear.useHaxeMatmul();
         var flashEnv = Sys.getEnvOr("NUE_FLASH", "RAYZOR_HAXE_FLASH");
-        var useHaxeQ8 = useKvQ8 && haxeMatmul
+        // NOT gated on `haxeMatmul`. The Q8 KV cache + Haxe flash decode are a
+        // separate subsystem — KVCache takes no SpinPool and never calls the
+        // matmul kernel — so conjoining them made `NUE_MATMUL` swap three
+        // subsystems at once and no Haxe-vs-Rust matmul number was ever a
+        // matmul comparison. `NUE_MATMUL` selects the kernel; `NUE_FLASH` and
+        // `NUE_KV_Q8` select attention. One flag, one variable.
+        var useHaxeQ8 = useKvQ8
             && (flashEnv != null && flashEnv != "0" && flashEnv != "" && flashEnv != "false");
 
         // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
