@@ -106,6 +106,16 @@ extern class QTensor {
     public static function fromBytesQ5KQ4KM(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
     /**
+     * Wrap a GGUF Q8_0 buffer (dtype 8, 34-byte blocks of 32) as a QTensor,
+     * ZERO-COPY. Q8_0 is already int8 with a per-block f16 scale, so there is
+     * nothing to re-encode and nothing to lose — this replaces a dequant to
+     * F32 that cost ~3.8x the bytes and forced the F32 matmul path.
+     * `cols` (the contraction dim) must be a multiple of 32; null otherwise.
+     */
+    @:native("rayzor_qtensor_from_bytes_q8_0")
+    public static function fromBytesQ8_0(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
+    /**
      * Re-quantise a Q6_K tensor as Q4_K_M. Returns a fresh owning QTensor;
      * the source is unchanged. Use case: moving the lm_head off the Q6_K
      * SDOT path (which still pays the 6-bit reconstruction overhead per
