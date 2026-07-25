@@ -77,12 +77,14 @@ class Q4Matmul {
      * changes the compile as well as the kernel, and that is how a three-way
      * change got mistaken for a kernel result.
      *
-     * Defaults OFF *for now*, and only because the kernel is not yet fast:
-     * measured 3-4x behind the runtime kernel on Qwen Q6_K (33.5/19.1 vs
-     * 75.6/91.5 tok/s, same binary, census-verified arms). Q8_0 is ~191 matmul
-     * calls per token on that model — most of its tensors are Q8_0, not just
-     * the lm_head — so shipping this on by default would be a 3x regression.
-     * Flip to ON once it reaches parity; the direction is Haxe-owned kernels.
+     * Defaults ON. Rested ABBA at 512 tok on Qwen Q6_K (3 rounds, load-gated,
+     * census-verified arms, same binary): Haxe median 102.6 tok/s vs Rust
+     * 82.3 — the pure-Haxe stack (this kernel + the capture-fixed Q6_K band)
+     * BEATS the runtime kernel by ~25%. The kernel was 3-4x SLOWER until the
+     * band closure stopped capturing refcounted Bytes; the arithmetic never
+     * was the problem (scale-load + SIMD4f fold + row blocking: ~8% combined;
+     * capture-set fix: 2.5x). `NUE_HAXE_Q8_0=0` returns to the Rust kernel
+     * for A/B.
      *
      * Cached like useHaxeMatmul (0 = uninitialised, load-bearing for x-module
      * static dups).
@@ -92,7 +94,7 @@ class Q4Matmul {
     static function useHaxeQ8_0():Bool {
         if (_haxeQ8_0 == 0) {
             var v = Sys.getEnvOr("NUE_HAXE_Q8_0", "RAYZOR_HAXE_Q8_0");
-            _haxeQ8_0 = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+            _haxeQ8_0 = (v != null && (v == "0" || v == "false")) ? 2 : 1;
         }
         return _haxeQ8_0 == 1;
     }
