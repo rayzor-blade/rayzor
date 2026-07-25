@@ -1,8 +1,6 @@
 import nue.loader.GGUFLoader;
 import nue.tokenizer.BPETokenizer;
-import nue.sampling.GenerationLoop;
-import nue.sampling.LocalTempSampler;
-import nue.sampling.SpeculativeGenerationLoop;
+import nue.chat.Conversation;
 import nue.arch.LlamaModel;
 import rayzor.concurrent.Arc;
 import rayzor.concurrent.Channel;
@@ -90,7 +88,10 @@ class Main {
         // de-looping. Default 1.3: the 1B model (and the wasm path, whose f32
         // reduction order drifts from native and lands on a more loop-prone
         // greedy path) needs more than the old 1.15 to break sentence loops.
-        var repPenalty:Float = 1.0;
+        // NB: this default MUST match the doc above — a 1.0 here (penalty off)
+        // is what lets the 1B model collapse into "In conclusion… In
+        // conclusion…" loops on long open-ended generations.
+        var repPenalty:Float = 1.3;
         if (args.length > 5) {
             var rp = Std.parseFloat(args[5]);
             if (rp == rp && rp >= 1.0) repPenalty = rp;
@@ -131,72 +132,26 @@ class Main {
         }
         trace("[tok]  vocab=" + tok.vocabSize());
 
-        // Llama 3 uses `<|end_of_text|>` for base and `<|eot_id|>` for
-        // the instruct-chat turn boundary. Prefer the chat sentinel
-        // when present (instruct GGUFs) — falls back to end_of_text
-        // for base models, then -1 if neither exists (decoder runs
-        // until `maxNew` tokens).
-        var eos = tok.specialId("<|eot_id|>");
-        if (eos < 0) eos = tok.specialId("<|end_of_text|>");
-        trace("[tok]  eos=" + eos);
+        // Build the conversation. The arch-aware chat template, per-arch
+        // stop tokens, and sampling config (rep-penalty 1.3, which breaks the
+        // 1B "In conclusion…" loops) all live in nue.chat.Conversation now.
+        var chat = Conversation.fromLoaded(llama, tok, meta);
+        chat.config.maxNewTokens = maxNew;
+        chat.config.temperature = temperature;
+        chat.config.repetitionPenalty = repPenalty;
+
+        var stops = chat.stopIds();
+        trace("[tok]  eos=" + (stops.length > 0 ? stops[0] : -1));
+        trace("[chat] template=" + chat.template.kind);
         trace("");
 
-        // Sampler choice:
-        //   temp = 0.0 → effective-greedy via LocalTempSampler(epsilon=1e-4)
-        //     with NO repetition penalty. Routes around the trap-stub
-        //     cascade that ArgmaxSampler currently trips on import (see
-        //     bugs_trap_stub_cascade). Numerically equivalent to argmax
-        //     for the dominant case (top-1 probability gap >> epsilon).
-        //   temp > 0.0 → TemperatureSampler with topK=50 + rep-penalty=1.15
-        //     standard chat-quality recipe. O(n) per token.
-        //
-        // When ArgmaxSampler's import cascade is fixed, restore the
-        // direct dispatch: `(temp > 0) ? LocalTempSampler(...) : ArgmaxSampler()`.
-        // Until then the LocalTempSampler(1e-4, 1.0, 1, 42) form is
-        // deterministic-greedy without tripping the cascade.
-        // Repetition penalty is now applied in BOTH modes (greedy + sampled).
-        // For greedy, topK stays 1 so it remains deterministic, but the penalty
-        // is applied before the top-1 pick — a recently-repeated token gets
-        // demoted so the loop breaks without introducing randomness.
-        var sampler:LocalTempSampler = (temperature > 0.0)
-            ? new LocalTempSampler(temperature, repPenalty, 50, 42)
-            : new LocalTempSampler(1e-4, repPenalty, 8, 42);
         trace("rep-penalty: " + repPenalty + "  + no-repeat-8gram");
 
-        // Instruct models behave best when the prompt is wrapped in the
-        // model's chat template. Llama-3 uses
-        //   <|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n
-        //   {prompt}<|eot_id|>
-        //   <|start_header_id|>assistant<|end_header_id|>\n\n
-        // The BPE tokenizer recognises registered specials as atomic
-        // ids; GGUFTokenizer registers the Llama-3 chat specials by
-        // direct vocab lookup so this string round-trips correctly.
-        //
-        // A system prompt would normally help the model stay in
-        // character, but on the 1B Instruct the extra context seems
-        // to make the precision drift through 16 layers worse (a
-        // greedy-decode run with a short system prompt SIGSEGVs;
-        // sampled runs free-associate about whatever the system
-        // prompt mentioned). Skip it until the precision-drift work
-        // lands.
-        var startHdr = tok.specialId("<|start_header_id|>");
-        var modelPrompt:String = prompt;
-        if (startHdr >= 0) {
-            modelPrompt =
-                "<|begin_of_text|>"
-                + "<|start_header_id|>user<|end_header_id|>\n\n"
-                + prompt
-                + "<|eot_id|>"
-                + "<|start_header_id|>assistant<|end_header_id|>\n\n";
-            trace("[chat] wrapping prompt in Llama-3 Instruct template");
-        }
-
-        var promptIds = tok.encode(modelPrompt);
-        // Prompt-encoding dump for diff harnesses (see
-        // tools/llama-diff/compare.sh): one `[dbg.prompt-id]` line per
-        // token. Gated behind RAYZOR_LLAMA_DUMP_PROMPT=1 so normal runs
-        // stay quiet.
+        // Prompt-encoding dump for the tokenizer diff harness (see
+        // tools/llama-diff/compare.sh). Gated behind RAYZOR_LLAMA_DUMP_PROMPT.
         if (Sys.getEnvOr("NUE_LLAMA_DUMP_PROMPT", "RAYZOR_LLAMA_DUMP_PROMPT") != null) {
+            var rendered = chat.nextPrompt(prompt);
+            var promptIds = tok.encode(rendered);
             trace("[dbg.prompt-len] " + promptIds.length);
             for (i in 0...promptIds.length) {
                 trace("[dbg.prompt-id] " + i + " " + promptIds[i]);
@@ -206,6 +161,7 @@ class Main {
         var specEnv = Sys.getEnvOr("NUE_SPEC_DECODE", "RAYZOR_SPEC_DECODE");
         var specOn = specEnv != null && specEnv != "0" && specEnv != ""
             && specEnv.toLowerCase() != "false";
+        chat.config.useSpeculative = specOn;
         var silentStream = truthyEnv("RAYZOR_LLAMA_SILENT_STREAM");
         var streamFlushMs = envInt("RAYZOR_STDOUT_FLUSH_MS", 50);
 
@@ -273,14 +229,8 @@ class Main {
             nTokens[0] = nTokens[0] + 1;
             return true;
         };
-        var output:String = "";
-        if (specOn) {
-            var specLoop = new SpeculativeGenerationLoop(llama, tok, sampler, eos, maxNew);
-            output = specLoop.generate(modelPrompt, emitToken);
-        } else {
-            var loop = new GenerationLoop(llama, tok, sampler, eos, maxNew);
-            output = loop.generate(modelPrompt, emitToken);
-        }
+        var response = chat.ask(prompt, emitToken);
+        var output:String = response.text;
         flushStream(true);
         if (streamArc != null) {
             streamArc.get().send(new StreamMsg("", true));
@@ -291,7 +241,8 @@ class Main {
         trace("");
         var ttft = (firstTokenAt[0] > 0.0) ? (firstTokenAt[0] - startedAt) : elapsed;
         trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
-            + fmt(nTokens[0] / elapsed) + " tok/s, ttft=" + fmt(ttft) + "s)");
+            + fmt(nTokens[0] / elapsed) + " tok/s, ttft=" + fmt(ttft) + "s, finish="
+            + response.finishReasonName() + ")");
         if (profilePool && llama.spinPool != null) {
             trace("[profile-pool] " + llama.spinPool.profReport());
         }

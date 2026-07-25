@@ -43,9 +43,12 @@ fi
 # The long prompt (override with PROMPT=... ./run_bundle.sh).
 PROMPT="${PROMPT:-Explain voronoi regions, and their connection to delauney computation and graph memory models. With coding examples. Describe vector graph database implementation}"
 
-MAX_TOKENS="${MAX_TOKENS:-5000}"
+MAX_TOKENS="${MAX_TOKENS:-1024}"
 CTX="${CTX:-4096}"
 TEMP="${TEMP:-0.5}"
+# Repetition penalty (arg[5] to the bundle). 1.3 breaks the sentence loops a
+# 1B model falls into on long generations; 1.0 disables it.
+REP_PENALTY="${REP_PENALTY:-1.3}"
 PRESET="${PRESET:-server}"
 STATS="${STATS:-0}"   # set STATS=1 to print tier/beadie diagnostics (measurable overhead)
 USE_JEMALLOC="${USE_JEMALLOC:-auto}" # auto|1|0; Linux-only LD_PRELOAD when present
@@ -153,7 +156,7 @@ cmd=(
   --tier-start-interpreted "$START_INTERPRETED"
 )
 [[ "$STATS" == "1" ]] && cmd+=(--stats)
-cmd+=(-- "$GGUF" "$PROMPT" "$MAX_TOKENS" "$CTX" "$TEMP")
+cmd+=(-- "$GGUF" "$PROMPT" "$MAX_TOKENS" "$CTX" "$TEMP" "$REP_PENALTY")
 
 echo ">> ${cmd[*]}"
 if [[ "${LD_PRELOAD:-}" == *jemalloc* ]]; then
@@ -166,6 +169,6 @@ echo "kernels: haxe_matmul=${NUE_MATMUL} fused_matmul=${NUE_FUSED_MATMUL:-auto} 
 echo "pool: spins=${NUE_POOL_SPINS:-auto} relax=${NUE_POOL_RELAX:-auto} perf_affinity=${RAYZOR_PERF_AFFINITY:-off} recycle=${RZT_POOL:-off}"
 echo "tier: promotion=${TIER_PROMOTION} start_interpreted=${START_INTERPRETED} thresholds=${INTERP_THRESHOLD}/${WARM_THRESHOLD}/${HOT_THRESHOLD}/${BLAZING_THRESHOLD}"
 echo "diag: spec_decode=${NUE_SPEC_DECODE:-off} silent_stream=${NUE_LLAMA_SILENT_STREAM:-0} stdout_flush_ms=${RAYZOR_STDOUT_FLUSH_MS:-auto} profile_decode=${NUE_PROFILE_DECODE:-off} profile_pool=${NUE_PROFILE_POOL:-off} dump_block_shapes=${NUE_DUMP_BLOCK_SHAPES:-off}"
-echo "generation: max_tokens=${MAX_TOKENS} ctx=${CTX} temp=${TEMP}"
+echo "generation: max_tokens=${MAX_TOKENS} ctx=${CTX} temp=${TEMP} rep_penalty=${REP_PENALTY}"
 echo
 exec "${cmd[@]}"
