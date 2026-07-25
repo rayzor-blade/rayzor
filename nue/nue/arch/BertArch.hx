@@ -50,6 +50,31 @@ class BertArch implements ArchBuilder {
         return "bert";
     }
 
+    /**
+     * `NUE_BERT_QUANT=1` keeps encoder weights in their GGUF quantised form
+     * (`QTensor`) instead of dequantising to F32 at load. Off by default,
+     * on accuracy: measured on all-MiniLM-L6-v2-Q8_0 against the F32 goldens,
+     * the native path scores min/mean cosine 0.9934 / 0.9970 versus
+     * 0.99969 / 0.99985 dequantised — under this repo's >= 0.999 gate. The
+     * loss is activation quantisation (int8 × int8), not weight precision,
+     * so it is inherent to the kernel rather than a defect. Opt in when
+     * encoder memory matters more than the last fraction of a percent of
+     * cosine; generative models keep quantised weights unconditionally
+     * because sampling tolerates it and the memory win is far larger.
+     *
+     * Cached like `Linear.useHaxeMatmul` (0 = uninitialised — load-bearing
+     * for cross-module static duplication).
+     */
+    static var _quantWeights:Int = 0;
+
+    public static function useQuantWeights():Bool {
+        if (_quantWeights == 0) {
+            var v = Sys.getEnvOr("NUE_BERT_QUANT", "RAYZOR_BERT_QUANT");
+            _quantWeights = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _quantWeights == 1;
+    }
+
     public function validate(meta:ModelMetadata):Bool {
         if (meta.numHeads <= 0 || meta.numKvHeads != meta.numHeads) return false;
         if (meta.headDim * meta.numHeads != meta.hiddenSize) return false;
@@ -59,20 +84,20 @@ class BertArch implements ArchBuilder {
 
     public function build(meta:ModelMetadata, weights:NamedTensorMap):Module {
         // Encoder GGUFs commonly ship `token_embd` quantised (the shipped
-        // MiniLM Q8_0 does). Route it through the QTensor gather rather than
-        // demanding an F32 table — see `makeLinear` for the same split.
+        // MiniLM Q8_0 does), so a QTensor is the normal arrival shape here —
+        // never demand an F32 table. `useQuantWeights` picks the
+        // representation; see `makeLinear` for the same split.
         var tokenEmbed:Embedding;
         if (weights.isQuantised("token_embd.weight")) {
             var qEmbed = weights.getQuant("token_embd.weight");
             if (qEmbed == null) {
                 throw "nue.arch.Bert: missing quant weight 'token_embd.weight'";
             }
-            // Dequantise to F32 rather than keeping the QTensor: the encoder
-            // path is not yet validated on quantised weights (it crashes at
-            // load), and this reproduces exactly the representation BERT got
-            // before Q8_0 started arriving as a QTensor. The LLM path does use
-            // the quantised weights directly. TODO: native quant encoder.
-            tokenEmbed = new Embedding(qEmbed.dequant(), meta.vocabSize, meta.hiddenSize, "weight");
+            if (useQuantWeights()) {
+                tokenEmbed = Embedding.fromQuant(qEmbed, meta.vocabSize, meta.hiddenSize, "weight");
+            } else {
+                tokenEmbed = new Embedding(qEmbed.dequant(), meta.vocabSize, meta.hiddenSize, "weight");
+            }
         } else {
             tokenEmbed = new Embedding(
                 takeWeight(weights, "token_embd.weight"),
@@ -155,8 +180,7 @@ class BertArch implements ArchBuilder {
             if (qw == null) {
                 throw "nue.arch.Bert: missing quant weight '" + baseName + ".weight'";
             }
-            // See the token-embedding comment above: dequantise for now so the
-            // encoder keeps its pre-existing F32 behaviour bit-for-bit.
+            if (useQuantWeights()) return Linear.fromQuant(qw, bias, "weight");
             return new Linear(qw.dequant(), bias, "weight");
         }
         return new Linear(takeWeight(weights, baseName + ".weight"), bias, "weight");
