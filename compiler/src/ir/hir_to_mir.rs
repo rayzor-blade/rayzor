@@ -535,6 +535,10 @@ pub struct HirToMirContext<'a> {
     /// Maps class SymbolId → list of (field_symbol, field_type, gep_index) for non-static fields.
     /// Used by PartialEq/PartialOrd/Hash codegen to iterate fields in order.
     class_instance_fields: BTreeMap<SymbolId, Vec<(SymbolId, TypeId, u32)>>,
+    /// Debug-only: how many times register_type_metadata ran in THIS context.
+    /// Distinguishes "registration never ran here" from "ran but saw no classes"
+    /// when class_instance_fields comes up empty at a field access (E0100).
+    dbg_type_meta_calls: usize,
 
     /// Field default value expressions — from @:default(value) metadata or field initializers.
     /// Maps field SymbolId → HirExpr to use as default in @:derive(Default).
@@ -784,6 +788,7 @@ impl<'a> HirToMirContext<'a> {
             derive_debug_classes: BTreeSet::new(),
             derive_default_classes: BTreeSet::new(),
             class_instance_fields: BTreeMap::new(),
+            dbg_type_meta_calls: 0,
             field_default_exprs: BTreeMap::new(),
             debug_format_strings: BTreeMap::new(),
         };
@@ -28943,11 +28948,13 @@ impl<'a> HirToMirContext<'a> {
                                     })
                                     .unwrap_or(false);
                                 eprintln!(
-                                    "[E0100]   class_name={:?} in_cif_by_id={} in_cif_by_name={} cif_len={}",
+                                    "[E0100]   class_name={:?} in_cif_by_id={} in_cif_by_name={} cif_len={} type_meta_calls={} cur_fn={:?}",
                                     class_name,
                                     by_id,
                                     by_name,
-                                    self.class_instance_fields.len()
+                                    self.class_instance_fields.len(),
+                                    self.dbg_type_meta_calls,
+                                    self.builder.current_function
                                 );
                             }
                             self.add_error(
@@ -39304,6 +39311,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn register_type_metadata(&mut self, type_id: TypeId, type_decl: &HirTypeDecl) {
+        self.dbg_type_meta_calls += 1;
         // Register type definitions in MIR for runtime type information
         // This metadata is used for:
         // - Enum discriminant values (for pattern matching)
