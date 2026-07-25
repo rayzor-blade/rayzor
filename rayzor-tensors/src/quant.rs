@@ -3853,6 +3853,57 @@ mod tests {
         blk
     }
 
+    /// The Rust scheme tags and the Haxe `QScheme` enum are two halves of one
+    /// ABI: `qt.scheme()` returns the raw tag and Haxe compares it against
+    /// enum ordinals. If a scheme is added on the Rust side and the Haxe enum
+    /// is not updated, NOTHING fails to build — every
+    /// `scheme() == QScheme.X` just silently evaluates false, and code that
+    /// if/else-defaults (e.g. "not Q6_K, so treat as Q4_K_M") misreads the
+    /// block layout and produces plausible garbage. This test is the tripwire.
+    #[test]
+    fn haxe_qscheme_enum_matches_rust_tags() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/haxe/rayzor/ds/QScheme.hx");
+        let src = std::fs::read_to_string(path).expect("QScheme.hx must be readable");
+        let body_start = src.find("enum QScheme").expect("enum QScheme not found");
+        let open = src[body_start..].find('{').unwrap() + body_start;
+        let close = src[open..].find('}').unwrap() + open;
+        let variants: Vec<String> = src[open + 1..close]
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .map(|l| l.trim_end_matches(';').trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        // (Rust tag, expected Haxe variant name) in ordinal order.
+        let expected: [(u8, &str); 4] = [
+            (QSCHEME_INT8, "INT8"),
+            (QSCHEME_Q4_K_M, "Q4_K_M"),
+            (QSCHEME_Q6_K, "Q6_K"),
+            (QSCHEME_Q8_0, "Q8_0"),
+        ];
+
+        assert_eq!(
+            variants.len(),
+            expected.len(),
+            "QScheme.hx has {} variants but Rust defines {} scheme tags —              add the missing variant (APPEND ONLY; ordinals are the ABI). Found: {:?}",
+            variants.len(),
+            expected.len(),
+            variants
+        );
+        for (i, (tag, name)) in expected.iter().enumerate() {
+            assert_eq!(
+                *tag as usize, i,
+                "Rust tag for {name} must equal its ordinal {i}"
+            );
+            assert_eq!(
+                &variants[i], name,
+                "QScheme.hx variant {i} is `{}` but the Rust tag {i} is {name} —                  order is load-bearing, do not reorder",
+                variants[i]
+            );
+        }
+    }
+
     #[test]
     fn q8_0_block_dequant_is_exact() {
         // Q8_0 is already int8 x a per-block f16 scale, so decode is EXACT:
