@@ -13519,26 +13519,44 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             });
 
-                        // SIMD4f detection: If the receiver type converts to VecF32x4, force
-                        // the class hint to "rayzor_SIMD4f". This prevents the FALLBACK2 brute-force
-                        // search from matching Tensor methods (which share names like sum, dot, sqrt).
+                        // SIMD4f detection: the DECLARED (TAST) receiver type is the SOLE
+                        // authority for SIMD-vector classification. Two independent hazards,
+                        // both caused by SSA register-id REUSE corrupting the name/register
+                        // class hint computed above, are corrected here:
                         //
-                        // Two-stage detection:
-                        // 1. Check convert_type(receiver_type) — works when HIR type is SIMD4f abstract
-                        // 2. Check receiver variable's register type — works for chained calls like
-                        //    b.sum() where b = a.sqrt(), because build_call_direct sets the register
-                        //    type from the function's actual return type (VecF32x4), even though
-                        //    the HIR expression type might be Dynamic (TypeId(5)).
-                        let receiver_class_hint_owned = if receiver_class_hint_owned.is_none() {
-                            let ir_ty = self.convert_type(receiver_type);
-                            if ir_ty.is_vector() {
-                                // Distinguish the integer companion SIMD4i32 (i32x4)
-                                // from SIMD4f (f32x4) — both are vectors, but their
-                                // instance methods (sum/get/set) map to different
-                                // wrappers. Without this, SIMD4i32.sum() dispatched to
-                                // SIMD4f_sum (f32 reduce) — masked on native (Cranelift
-                                // reduces by SSA value type) but wrong on wasm.
-                                Some(simd_vector_class(&ir_ty).to_string())
+                        //  1. A loop-carried phi accumulator (`vacc = vacc.add(..)`) inherits
+                        //     a stale hint ("rayzor_Usize") from a register a prior Usize
+                        //     value held — masking the real SIMD4f type and routing `.add()`
+                        //     to Usize_add (scalar integer add on a vector — garbage).
+                        //  2. Conversely, a Usize/Bytes receiver (plain address arithmetic)
+                        //     inherits a stale SIMD hint ("rayzor_SIMD4f") from a register a
+                        //     prior SIMD value held — mis-routing it into the SIMD4f arith
+                        //     interception below, which builds a VectorBinOp fed i64 operands
+                        //     that the LLVM tier rejects (panic / Cranelift-only fallback).
+                        //
+                        // Resolution: convert_type(receiver_type) decides. If it IS a vector,
+                        // that class wins unconditionally (hazard 1). If it is NOT, any SIMD
+                        // class named by the hint is stale and is discarded (hazard 2); a
+                        // genuine chained SIMD receiver whose HIR type is opaque (Dynamic) is
+                        // still recovered from the receiver register's type.
+                        let ir_ty = self.convert_type(receiver_type);
+                        let receiver_class_hint_owned = if ir_ty.is_vector() {
+                            // Distinguish the integer companion SIMD4i32 (i32x4)
+                            // from SIMD4f (f32x4) — both are vectors, but their
+                            // instance methods (sum/get/set) map to different
+                            // wrappers. Without this, SIMD4i32.sum() dispatched to
+                            // SIMD4f_sum (f32 reduce) — masked on native (Cranelift
+                            // reduces by SSA value type) but wrong on wasm.
+                            Some(simd_vector_class(&ir_ty).to_string())
+                        } else {
+                            // receiver_type is NOT a vector: a SIMD class named by the
+                            // name/register hint is stale (hazard 2) and MUST be rejected
+                            // before it reaches the arith interception. A non-SIMD hint
+                            // (e.g. a genuine Bytes/Usize) is left intact.
+                            let non_simd_hint = receiver_class_hint_owned
+                                .filter(|h| h != "rayzor_SIMD4f" && h != "rayzor_SIMD4i32");
+                            if non_simd_hint.is_some() {
+                                non_simd_hint
                             } else if self.type_is_native_named(receiver_type, "rayzor::Atomic") {
                                 // Atomic's type-map returns Ptr<I32> (not a vector), so is_vector()
                                 // never fires; resolve it by the abstract's @:native name instead.
@@ -13548,9 +13566,10 @@ impl<'a> HirToMirContext<'a> {
                                 ..
                             } = &receiver.kind
                             {
-                                // Fallback: check the register type of the receiver variable.
-                                // This catches chained calls where the receiver's HIR type is Dynamic
-                                // but its register was typed as VecF32x4 by a previous SIMD4f call.
+                                // Chained-call recovery: receiver's HIR type is Dynamic but its
+                                // register was typed VecF32x4 by a previous SIMD4f call (e.g.
+                                // b.sum() where b = a.sqrt()). Only trust the register type when
+                                // it is genuinely a vector — a plain address register is I64.
                                 self.symbol_map
                                     .get(recv_sym)
                                     .and_then(|reg| self.builder.get_register_type(*reg))
@@ -13559,8 +13578,6 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 None
                             }
-                        } else {
-                            receiver_class_hint_owned
                         };
                         let receiver_class_hint = receiver_class_hint_owned.as_deref();
 
@@ -13585,14 +13602,30 @@ impl<'a> HirToMirContext<'a> {
                                 Some("div") => Some(BinaryOp::Div),
                                 _ => None,
                             };
-                            if let Some(bin_op) = vbop {
+                            // Defense-in-depth: the receiver operand's own DECLARED type
+                            // must itself classify as f32x4. The hint is no longer trusted
+                            // in isolation — this refuses to build a VectorBinOp over a
+                            // non-vector operand (the failure mode a stale SIMD hint on a
+                            // reused register would otherwise cause: VectorBinOp fed i64).
+                            let operands_are_simd4f = {
+                                let t = self.convert_type(args[0].ty);
+                                t.is_vector() && simd_vector_class(&t) == "rayzor_SIMD4f"
+                            };
+                            if let Some(bin_op) = vbop.filter(|_| operands_are_simd4f) {
                                 let lhs_reg = self.lower_expression(&args[0])?;
                                 let rhs_reg = self.lower_expression(&args[1])?;
+                                // vec_ty must ALWAYS be a vector: fall through both operand
+                                // register types (a scalar-typed operand register is a bug)
+                                // to the f32x4 default rather than emitting VectorBinOp{I64}.
                                 let vec_ty = self
                                     .builder
                                     .get_register_type(lhs_reg)
                                     .filter(|t| matches!(t, IrType::Vector { .. }))
-                                    .or_else(|| self.builder.get_register_type(rhs_reg))
+                                    .or_else(|| {
+                                        self.builder
+                                            .get_register_type(rhs_reg)
+                                            .filter(|t| matches!(t, IrType::Vector { .. }))
+                                    })
                                     .unwrap_or(IrType::Vector {
                                         element: Box::new(IrType::F32),
                                         count: 4,
