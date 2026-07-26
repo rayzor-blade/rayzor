@@ -367,6 +367,39 @@ impl IrBuilder {
             ty.clone()
         };
 
+        // PROBE (RAYZOR_VECCALL_DIAG=1): any direct call taking a VECTOR-typed
+        // argument. `vacc.add(...)` on a loop-carried SIMD4f phi becomes a plain
+        // call to an unrelated function; this names the callee actually chosen.
+        if std::env::var_os("RAYZOR_VECCALL_DIAG").is_some() {
+            let vec_args: Vec<(usize, IrId, IrType)> = args
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| {
+                    self.get_register_type(*a)
+                        .filter(|t| t.is_vector())
+                        .map(|t| (i, *a, t))
+                })
+                .collect();
+            if !vec_args.is_empty() {
+                let fname = self
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .map(|f| f.name.clone())
+                    .or_else(|| {
+                        self.module
+                            .extern_functions
+                            .get(&func_id)
+                            .map(|f| f.name.clone())
+                    })
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                eprintln!(
+                    "[veccall] {:?} name={} ret={:?} vec_args={:?}",
+                    func_id, fname, actual_return_type, vec_args
+                );
+            }
+        }
+
         // Coerce argument types to match the function's parameter types.
         // This handles implicit int→float conversions (e.g., passing integer 0
         // to a Float parameter) which Haxe allows but the backend requires
