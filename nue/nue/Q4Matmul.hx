@@ -732,33 +732,46 @@ class Q4Matmul {
     //   y[b,n] = xScale[b] * wScale[n] * SUM_k a_i8[b,k] * w_i8[n,k]
 
     /** SDOT one INT8 weight row (`K` int8 at wBase+wOff) against `K` int8
-        activations (aBase+aOff) -> i32. 32-element super-chunks: two chained
-        16-lane SDOTs then one hsum — distinct bindings, never a reassigned
-        accumulator (a SIMD value passed as an arg MOVES, so `acc = dot(acc,..)`
-        then `acc.sum()` is a use-after-move). `dot` (signed x signed): INT8
-        weights use the full i8 range, forbidden to the i7 variant. Scalar tail
-        for K not a multiple of 16 (single signed-byte loads). */
+        activations (aBase+aOff) -> i32. FOUR independent loop-carried SIMD4i32
+        accumulators over 16-lane chunks, hsum'd once at the end. SDOT has ~5-cycle
+        latency, so a SINGLE dependent chain stalls on it (measured 45 vs 64 tok/s
+        for one accumulator); four independent chains give the scheduler four
+        in-flight SDOTs to hide the latency, while still paying only 4 hsums per
+        row instead of one per chunk. The loop-carried `acc = SIMD4i32.dot(acc,..)`
+        relies on the SIMD-vector-phi fix (49ab3808). `dot` (signed x signed):
+        INT8 uses the full i8 range, forbidden to the i7 variant. 16-chunk +
+        scalar tail for K not a multiple of 64. */
     static inline function int8DotRow(wBase:Usize, wOff:Int, aBase:Usize,
             aOff:Int, K:Int):Int {
-        var s = 0;
+        var acc0 = SIMD4i32.splat(0);
+        var acc1 = SIMD4i32.splat(0);
+        var acc2 = SIMD4i32.splat(0);
+        var acc3 = SIMD4i32.splat(0);
         var k = 0;
-        while (k + 32 <= K) {
-            var acc0 = SIMD4i32.dot(SIMD4i32.splat(0),
+        while (k + 64 <= K) {
+            acc0 = SIMD4i32.dot(acc0,
                 SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
                 SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
-            var acc1 = SIMD4i32.dot(acc0,
+            acc1 = SIMD4i32.dot(acc1,
                 SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 16))),
                 SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 16))));
-            s += acc1.sum();
-            k += 32;
+            acc2 = SIMD4i32.dot(acc2,
+                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 32))),
+                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 32))));
+            acc3 = SIMD4i32.dot(acc3,
+                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 48))),
+                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 48))));
+            k += 64;
         }
-        if (k + 16 <= K) {
-            var acc = SIMD4i32.dot(SIMD4i32.splat(0),
+        // Remaining 16-lane chunks fold into acc0 (still overlaps the others'
+        // final hsums).
+        while (k + 16 <= K) {
+            acc0 = SIMD4i32.dot(acc0,
                 SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
                 SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
-            s += acc.sum();
             k += 16;
         }
+        var s = acc0.sum() + acc1.sum() + acc2.sum() + acc3.sum();
         while (k < K) {
             var wv = Mem.loadU8(wBase + Usize.fromInt(wOff + k));
             if (wv > 127) wv -= 256;
@@ -810,11 +823,33 @@ class Q4Matmul {
             for (b in 0...batch) {
                 var aRow = b * kk;
                 var xs = Mem.loadF32(sBase + Usize.fromInt(b << 2));
-                for (n in n0...n1) {
+                var n = n0;
+                // FOUR output rows per step: int8DotRow is inline, so four calls
+                // give the scheduler four independent row dots (16 SDOT chains
+                // total with the per-row 4-accumulator split) to overlap, and
+                // the shared activation row stays L1-hot across all four — the
+                // same shape that brought the Q8_0 band to parity.
+                while (n + 4 <= n1) {
+                    var d0 = int8DotRow(wBase, n * kk, aBase, aRow, kk);
+                    var d1 = int8DotRow(wBase, (n + 1) * kk, aBase, aRow, kk);
+                    var d2 = int8DotRow(wBase, (n + 2) * kk, aBase, aRow, kk);
+                    var d3 = int8DotRow(wBase, (n + 3) * kk, aBase, aRow, kk);
+                    var o = (b * rows + n) << 2;
+                    Mem.storeF32(yBase + Usize.fromInt(o),
+                        xs * Mem.loadF32(wScaleBase + Usize.fromInt(n << 2)) * d0);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 4),
+                        xs * Mem.loadF32(wScaleBase + Usize.fromInt((n + 1) << 2)) * d1);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 8),
+                        xs * Mem.loadF32(wScaleBase + Usize.fromInt((n + 2) << 2)) * d2);
+                    Mem.storeF32(yBase + Usize.fromInt(o + 12),
+                        xs * Mem.loadF32(wScaleBase + Usize.fromInt((n + 3) << 2)) * d3);
+                    n += 4;
+                }
+                while (n < n1) {
                     var ws = Mem.loadF32(wScaleBase + Usize.fromInt(n << 2));
-                    var dot = int8DotRow(wBase, n * kk, aBase, aRow, kk);
                     Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
-                        xs * ws * dot);
+                        xs * ws * int8DotRow(wBase, n * kk, aBase, aRow, kk));
+                    n++;
                 }
             }
         };
