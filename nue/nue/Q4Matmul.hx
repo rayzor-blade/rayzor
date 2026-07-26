@@ -747,37 +747,56 @@ class Q4Matmul {
         var acc1 = SIMD4i32.splat(0);
         var acc2 = SIMD4i32.splat(0);
         var acc3 = SIMD4i32.splat(0);
+        // POINTER-WALK. Advancing two i64 base pointers once per iteration
+        // gives the backend clean induction variables to post-increment, and
+        // the +16/+32/+48 are CONSTANT i64 offsets it folds into the load
+        // ([ptr, #16]). The prior `base + Usize.fromInt(aOff + k + C)` form put
+        // the constant INSIDE a 32-bit index add — so the offset could not be
+        // hoisted past the sign-extend, and every load recomputed its address
+        // (add + sxtw, ~10 adds/iter by disasm) vs Rust's pointer-walk.
+        var aP = aBase + Usize.fromInt(aOff);
+        var wP = wBase + Usize.fromInt(wOff);
+        var o16 = Usize.fromInt(16);
+        var o32 = Usize.fromInt(32);
+        var o48 = Usize.fromInt(48);
+        var o64 = Usize.fromInt(64);
         var k = 0;
         while (k + 64 <= K) {
             acc0 = SIMD4i32.dot(acc0,
-                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
-                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
+                SIMD16i8.load(Ptr.fromRaw(aP)),
+                SIMD16i8.load(Ptr.fromRaw(wP)));
             acc1 = SIMD4i32.dot(acc1,
-                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 16))),
-                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 16))));
+                SIMD16i8.load(Ptr.fromRaw(aP + o16)),
+                SIMD16i8.load(Ptr.fromRaw(wP + o16)));
             acc2 = SIMD4i32.dot(acc2,
-                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 32))),
-                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 32))));
+                SIMD16i8.load(Ptr.fromRaw(aP + o32)),
+                SIMD16i8.load(Ptr.fromRaw(wP + o32)));
             acc3 = SIMD4i32.dot(acc3,
-                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 48))),
-                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 48))));
+                SIMD16i8.load(Ptr.fromRaw(aP + o48)),
+                SIMD16i8.load(Ptr.fromRaw(wP + o48)));
+            aP = aP + o64;
+            wP = wP + o64;
             k += 64;
         }
-        // Remaining 16-lane chunks fold into acc0 (still overlaps the others'
-        // final hsums).
+        // Remaining 16-lane chunks fold into acc0.
         while (k + 16 <= K) {
             acc0 = SIMD4i32.dot(acc0,
-                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
-                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
+                SIMD16i8.load(Ptr.fromRaw(aP)),
+                SIMD16i8.load(Ptr.fromRaw(wP)));
+            aP = aP + o16;
+            wP = wP + o16;
             k += 16;
         }
         var s = acc0.sum() + acc1.sum() + acc2.sum() + acc3.sum();
+        var o1 = Usize.fromInt(1);
         while (k < K) {
-            var wv = Mem.loadU8(wBase + Usize.fromInt(wOff + k));
+            var wv = Mem.loadU8(wP);
             if (wv > 127) wv -= 256;
-            var av = Mem.loadU8(aBase + Usize.fromInt(aOff + k));
+            var av = Mem.loadU8(aP);
             if (av > 127) av -= 256;
             s += wv * av;
+            aP = aP + o1;
+            wP = wP + o1;
             k++;
         }
         return s;
