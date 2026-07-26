@@ -550,11 +550,35 @@ class Q4Matmul {
      * a 151936-row lm_head is a per-token allocation storm.
      */
     static function quantizeRowI8(xBase:Usize, aBase:Usize, K:Int):Float {
-        var maxAbs = 0.0;
-        for (i in 0...K) {
+        // SIMD maxAbs: 4-wide abs+max, 2 accumulators (breaks the loop-carried
+        // max latency chain), scalar tail for K not a multiple of 8. IEEE max
+        // is exact + associative and abs(v)==max(v,-v) for non-NaN activations,
+        // so this is bit-identical to the scalar reduction. (The quantise pass
+        // below stays scalar — a SIMD f32->i8 narrow would need new round +
+        // pack primitives; the maxAbs pass needs none.)
+        var m0 = SIMD4f.splat(0.0);
+        var m1 = SIMD4f.splat(0.0);
+        var i = 0;
+        while (i + 8 <= K) {
+            var v0 = SIMD4f.load(Ptr.fromRaw(xBase + Usize.fromInt(i << 2)));
+            var v1 = SIMD4f.load(Ptr.fromRaw(xBase + Usize.fromInt((i + 4) << 2)));
+            m0 = m0.max(v0.abs());
+            m1 = m1.max(v1.abs());
+            i += 8;
+        }
+        var mm = m0.max(m1);
+        var l0 = mm.get(0);
+        var l1 = mm.get(1);
+        var l2 = mm.get(2);
+        var l3 = mm.get(3);
+        var mx01 = l0 > l1 ? l0 : l1;
+        var mx23 = l2 > l3 ? l2 : l3;
+        var maxAbs = mx01 > mx23 ? mx01 : mx23;
+        while (i < K) {
             var v = Mem.loadF32(xBase + Usize.fromInt(i << 2));
             var a = (v < 0.0) ? -v : v;
             maxAbs = (a > maxAbs) ? a : maxAbs;
+            i++;
         }
         if (maxAbs == 0.0) {
             for (i in 0...K) Mem.storeU8(aBase + Usize.fromInt(i), 0);
