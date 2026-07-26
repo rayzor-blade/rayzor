@@ -155,6 +155,7 @@ rayzor_plugin::declare_native_methods! {
     "rayzor_ds_QTensor", "rows",         instance, "rayzor_qtensor_rows",              [Ptr] => I64;
     "rayzor_ds_QTensor", "cols",         instance, "rayzor_qtensor_cols",              [Ptr] => I64;
     "rayzor_ds_QTensor", "dataPtr",      instance, "rayzor_qtensor_data_ptr",          [Ptr] => I64;
+    "rayzor_ds_QTensor", "scalesPtr",    instance, "rayzor_qtensor_scales_ptr",        [Ptr] => I64;
     "rayzor_ds_QTensor", "numel",        instance, "rayzor_qtensor_numel",             [Ptr] => I64;
     "rayzor_ds_QTensor", "scheme",       instance, "rayzor_qtensor_scheme",            [Ptr] => I64;
     "rayzor_ds_QTensor", "dequant",      instance, "rayzor_qtensor_dequant",           [Ptr] => Ptr;
@@ -517,6 +518,10 @@ pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntr
         entry!(
             b"rayzor_qtensor_data_ptr",
             crate::quant::rayzor_qtensor_data_ptr
+        ),
+        entry!(
+            b"rayzor_qtensor_scales_ptr",
+            crate::quant::rayzor_qtensor_scales_ptr
         ),
         entry!(b"rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel),
         entry!(

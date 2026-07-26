@@ -165,6 +165,15 @@ extern class QTensor {
     @:native("rayzor_qtensor_data_ptr")
     public function dataPtr():Usize;
 
+    /**
+        Base address of the per-row f32 scale array, as a `Usize`. INT8 stores
+        one symmetric scale per row here (`rows` f32s); the pure-Haxe INT8 band
+        kernel folds `scale[n]` into row `n`'s output. Non-INT8 schemes keep
+        their scales inline in the block data and return 0 (null).
+    **/
+    @:native("rayzor_qtensor_scales_ptr")
+    public function scalesPtr():Usize;
+
     /** Total element count (rows * cols). */
     @:native("rayzor_qtensor_numel")
     public function numel():Int;
