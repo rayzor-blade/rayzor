@@ -99,6 +99,18 @@ class Q4Matmul {
         return _haxeQ8_0 == 1;
     }
 
+    // Same A/B gate for the pure-Haxe INT8 kernel. Defaults ON;
+    // `NUE_HAXE_INT8=0` returns INT8 matmuls to the runtime XTQ kernel.
+    static var _haxeInt8:Int = 0;
+
+    static function useHaxeInt8():Bool {
+        if (_haxeInt8 == 0) {
+            var v = Sys.getEnvOr("NUE_HAXE_INT8", "RAYZOR_HAXE_INT8");
+            _haxeInt8 = (v != null && (v == "0" || v == "false")) ? 2 : 1;
+        }
+        return _haxeInt8 == 1;
+    }
+
     // ---- dispatch census -------------------------------------------------
     // `NUE_DUMP_Q4_GATES=1` prints, per QScheme, how many matmuls went to a
     // Haxe kernel vs escaped to the Rust FFI. "Is this run actually pure
@@ -459,10 +471,15 @@ class Q4Matmul {
             census(3, true);
             return qw.matmulXTQThreaded(x, 0);
         }
-        // INT8 per-row weights (Q5_0-sourced) have no Haxe band kernel yet —
-        // still on the runtime XTQ path (integer SDOT dot). TODO: port, same
-        // shape as matmulQ8_0 but one scale per row instead of per block.
+        // INT8 per-row weights (Q5_0/Q5_1-sourced): pure-Haxe band kernel,
+        // same shape as matmulQ8_0 but one f32 scale per ROW (read from
+        // qw.scalesPtr()) instead of a per-block f16 scale. `NUE_HAXE_INT8=0`
+        // returns to the runtime XTQ kernel for A/B.
         if (qw.scheme() == QScheme.INT8) {
+            if (useHaxeInt8()) {
+                census(0, false);
+                return matmulInt8(qw, x, sp);
+            }
             census(0, true);
             return qw.matmulXTQThreaded(x, 0);
         }
@@ -699,6 +716,105 @@ class Q4Matmul {
                     Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
                         rowDot(n * rowBytes, aRow) * xs);
                     n++;
+                }
+            }
+        };
+        if (sp != null) sp.parallelRows(rows, band);
+        else band(0, rows, 0);
+        return y;
+    }
+
+    // ---- INT8 (per-row symmetric) --------------------------------------
+    // Weight = packed int8, `numel = rows*K`, ONE f32 scale per row in the
+    // separate `meta` array (qw.scalesPtr()). No blocks, no inline scale, no
+    // f16 decode — simpler than Q8_0. Activations quantise per row exactly as
+    // Q8_0 (shared quantiseRowsI8), so:
+    //   y[b,n] = xScale[b] * wScale[n] * SUM_k a_i8[b,k] * w_i8[n,k]
+
+    /** SDOT one INT8 weight row (`K` int8 at wBase+wOff) against `K` int8
+        activations (aBase+aOff) -> i32. 32-element super-chunks: two chained
+        16-lane SDOTs then one hsum — distinct bindings, never a reassigned
+        accumulator (a SIMD value passed as an arg MOVES, so `acc = dot(acc,..)`
+        then `acc.sum()` is a use-after-move). `dot` (signed x signed): INT8
+        weights use the full i8 range, forbidden to the i7 variant. Scalar tail
+        for K not a multiple of 16 (single signed-byte loads). */
+    static inline function int8DotRow(wBase:Usize, wOff:Int, aBase:Usize,
+            aOff:Int, K:Int):Int {
+        var s = 0;
+        var k = 0;
+        while (k + 32 <= K) {
+            var acc0 = SIMD4i32.dot(SIMD4i32.splat(0),
+                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
+                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
+            var acc1 = SIMD4i32.dot(acc0,
+                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k + 16))),
+                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k + 16))));
+            s += acc1.sum();
+            k += 32;
+        }
+        if (k + 16 <= K) {
+            var acc = SIMD4i32.dot(SIMD4i32.splat(0),
+                SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + k))),
+                SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + k))));
+            s += acc.sum();
+            k += 16;
+        }
+        while (k < K) {
+            var wv = Mem.loadU8(wBase + Usize.fromInt(wOff + k));
+            if (wv > 127) wv -= 256;
+            var av = Mem.loadU8(aBase + Usize.fromInt(aOff + k));
+            if (av > 127) av -= 256;
+            s += wv * av;
+            k++;
+        }
+        return s;
+    }
+
+    /** `y = x @ qw.T` for an INT8 (per-row) weight, pure Haxe. Replaces the
+        matmulXTQThreaded FFI bail. */
+    static function matmulInt8(qw:QTensor, x:Tensor, sp:Null<SpinPool>):Tensor {
+        var K = qw.cols();
+        var batch = Std.int(x.numel() / K);
+        if (batch < 1) batch = 1;
+
+        var pooled = sp != null;
+        var qs = pooled ? sp.scratchBytes(0, batch * K) : Bytes.alloc(batch * K);
+        var aBase = qs.address();
+        var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
+        var sBase = xScales.address();
+        quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+
+        var y = int8Banded(qw, batch, K, aBase, sBase, sp);
+        if (!pooled) {
+            qs.free();
+            xScales.free();
+        }
+        return y;
+    }
+
+    /** Band an INT8 weight against ALREADY-quantised activations. Row scale
+        folds in once per output element: `y[b,n] = xScale[b]*wScale[n]*dot`. */
+    static function int8Banded(qw:QTensor, batch:Int, K:Int, aBase:Usize,
+            sBase:Usize, sp:Null<SpinPool>):Tensor {
+        var rows = qw.rows();
+        // Hoist to RAW addresses / plain Ints: the band closure must capture
+        // only Usize/Int, never the refcounted `qw` (ARC traffic across a hot
+        // banded pass cost the Q8_0 kernel 2.5x — the capture-set rule).
+        var wBase = qw.dataPtr();
+        var wScaleBase = qw.scalesPtr();
+        var kk = K;
+        var y = Tensor.uninit([batch, rows], DType.F32);
+        var yBase = y.data().raw();
+
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            for (b in 0...batch) {
+                var aRow = b * kk;
+                var xs = Mem.loadF32(sBase + Usize.fromInt(b << 2));
+                for (n in n0...n1) {
+                    var ws = Mem.loadF32(wScaleBase + Usize.fromInt(n << 2));
+                    var dot = int8DotRow(wBase, n * kk, aBase, aRow, kk);
+                    Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
+                        xs * ws * dot);
                 }
             }
         };

@@ -1269,6 +1269,18 @@ pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
     (*(qt_ptr as *const RayzorQTensor)).data as i64
 }
 
+/// `qt.scalesPtr() -> i64`: base address of the per-row f32 scale array
+/// (`meta`). INT8 stores `rows` scales here (one per row); non-INT8 schemes
+/// keep their scales inline in the block data and return 0 (null `meta`).
+/// Lets the pure-Haxe INT8 band kernel read row scales without an FFI matmul.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_scales_ptr(qt_ptr: i64) -> i64 {
+    if qt_ptr == 0 {
+        return 0;
+    }
+    (*(qt_ptr as *const RayzorQTensor)).meta as i64
+}
+
 /// `qt.cols() -> i64`
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt_ptr: i64) -> i64 {

@@ -1,0 +1,10 @@
+[project]
+name = "nue-int8-oracle"
+type = "application"
+
+[build]
+# ".", nue root, tensors haxe — same trio as the nue examples.
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
+# Tensor/QTensor kernel symbols. nue-plugins not needed: this test exercises
+# only the matmul path, no KV/flash/graph engines.
+native-libs = ["../../../target/release/librayzor_tensors.dylib"]
