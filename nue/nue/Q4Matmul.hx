@@ -577,8 +577,12 @@ class Q4Matmul {
             && (w2 == null || rowwiseHaxeBandable(w2));
         if (!allRow) return false;
         if (useFusedMatmul()) return true; // opt-in: any row-wise mix
-        return useRowwiseFusion() && int8Bandable(w0) && int8Bandable(w1)
-            && (w2 == null || int8Bandable(w2));
+        // Row-wise triples of ANY mix (INT8 and/or Q8_0) — each weight keeps
+        // its own row kernel and the joined row space is banded in one
+        // dispatch. Previously INT8-only, because Q8_0 fusion measured
+        // neutral-to-negative when it still dispatched PER WEIGHT; with the
+        // single dispatch that objection no longer applies (see PERFORMANCE.md).
+        return useRowwiseFusion();
     }
 
     /** Row-wise AND its pure-Haxe band kernel is enabled — i.e. this weight can
@@ -825,47 +829,6 @@ class Q4Matmul {
         var blockBytes = Q8_0_BLOCK_BYTES;
         var blockElems = Q8_0_BLOCK_ELEMS;
 
-        // ONE output row: 4 Q8_0 blocks folded through a SIMD4f, scalar tail.
-        // Extracted so the band loop can evaluate FOUR rows per step as four
-        // INDEPENDENT accumulator chains — `vdotq_s32` has ~5-cycle latency, so
-        // a single dependent chain per row stalls on it. Four inlined chains
-        // give the scheduler something to interleave. (Sharing one activation
-        // LOAD across the four rows would be better still, but passing a
-        // SIMD16i8 moves it, so the operand cannot be reused across calls
-        // without a clone — revisit when SIMD values are Copy.)
-        var rowDot = function(rowBase:Int, aRow:Int):Float {
-            var acc = 0.0;
-            var blk = 0;
-            var vacc = SIMD4f.splat(0.0);
-            while (blk + 4 <= blocks) {
-                var o0 = rowBase + blk * blockBytes;
-                var o1 = o0 + blockBytes;
-                var o2 = o1 + blockBytes;
-                var o3 = o2 + blockBytes;
-                var e0 = aRow + blk * blockElems;
-                var vd = SIMD4f.make(
-                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF),
-                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF),
-                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o2)) & 0xFFFF),
-                    f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o3)) & 0xFFFF));
-                var vs = SIMD4f.make(
-                    q8DotBlock(wBase, o0, aBase, e0),
-                    q8DotBlock(wBase, o1, aBase, e0 + blockElems),
-                    q8DotBlock(wBase, o2, aBase, e0 + 2 * blockElems),
-                    q8DotBlock(wBase, o3, aBase, e0 + 3 * blockElems));
-                vacc = vacc.add(vd.mul(vs));
-                blk += 4;
-            }
-            acc = vacc.get(0) + vacc.get(1) + vacc.get(2) + vacc.get(3);
-            while (blk < blocks) {
-                var o0 = rowBase + blk * blockBytes;
-                var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
-                acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems);
-                blk++;
-            }
-            return acc;
-        };
-
         var band = function(n0:Int, n1:Int, node:Int):Void {
             var rowBytes = blocks * blockBytes;
             for (b in 0...batch) {
@@ -875,10 +838,10 @@ class Q4Matmul {
                 // FOUR output rows per step: independent chains, and the shared
                 // activation row stays L1-hot across all four.
                 while (n + 4 <= n1) {
-                    var s0 = rowDot(n * rowBytes, aRow);
-                    var s1 = rowDot((n + 1) * rowBytes, aRow);
-                    var s2 = rowDot((n + 2) * rowBytes, aRow);
-                    var s3 = rowDot((n + 3) * rowBytes, aRow);
+                    var s0 = q8RowDot(wBase, n * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                    var s1 = q8RowDot(wBase, (n + 1) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                    var s2 = q8RowDot(wBase, (n + 2) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                    var s3 = q8RowDot(wBase, (n + 3) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
                     var o = (b * rows + n) << 2;
                     Mem.storeF32(yBase + Usize.fromInt(o), s0 * xs);
                     Mem.storeF32(yBase + Usize.fromInt(o + 4), s1 * xs);
@@ -888,7 +851,7 @@ class Q4Matmul {
                 }
                 while (n < n1) {
                     Mem.storeF32(yBase + Usize.fromInt((b * rows + n) << 2),
-                        rowDot(n * rowBytes, aRow) * xs);
+                        q8RowDot(wBase, n * rowBytes, aBase, aRow, blocks, blockBytes, blockElems) * xs);
                     n++;
                 }
             }
@@ -1012,6 +975,79 @@ class Q4Matmul {
 
     /** Band an INT8 weight against ALREADY-quantised activations. Row scale
         folds in once per output element: `y[b,n] = xScale[b]*wScale[n]*dot`. */
+    /** ONE Q8_0 output row: 4 blocks folded through a SIMD4f, scalar tail.
+        Hoisted out of `q8Banded`'s local closure so the fused segment path
+        (`q8Seg`) uses the SAME definition — two copies of this math would be
+        two places for the fused and unfused results to drift apart. */
+    static inline function q8RowDot(wBase:Usize, rowBase:Int, aBase:Usize,
+            aRow:Int, blocks:Int, blockBytes:Int, blockElems:Int):Float {
+        var acc = 0.0;
+        var blk = 0;
+        var vacc = SIMD4f.splat(0.0);
+        while (blk + 4 <= blocks) {
+            var o0 = rowBase + blk * blockBytes;
+            var o1 = o0 + blockBytes;
+            var o2 = o1 + blockBytes;
+            var o3 = o2 + blockBytes;
+            var e0 = aRow + blk * blockElems;
+            var vd = SIMD4f.make(
+                f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF),
+                f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o1)) & 0xFFFF),
+                f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o2)) & 0xFFFF),
+                f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o3)) & 0xFFFF));
+            var vs = SIMD4f.make(
+                q8DotBlock(wBase, o0, aBase, e0),
+                q8DotBlock(wBase, o1, aBase, e0 + blockElems),
+                q8DotBlock(wBase, o2, aBase, e0 + 2 * blockElems),
+                q8DotBlock(wBase, o3, aBase, e0 + 3 * blockElems));
+            vacc = vacc.add(vd.mul(vs));
+            blk += 4;
+        }
+        acc = vacc.get(0) + vacc.get(1) + vacc.get(2) + vacc.get(3);
+        while (blk < blocks) {
+            var o0 = rowBase + blk * blockBytes;
+            var d0 = f16ToF32(Mem.loadI32(wBase + Usize.fromInt(o0)) & 0xFFFF);
+            acc += d0 * q8DotBlock(wBase, o0, aBase, aRow + blk * blockElems);
+            blk++;
+        }
+        return acc;
+    }
+
+    /** Q8_0 counterpart of `int8Seg`: this weight's clipped slice of a fused
+        row space, same 4-row unroll as `q8Banded`. */
+    static function q8Seg(n0:Int, n1:Int, segStart:Int, segEnd:Int, wBase:Usize,
+            yBase:Usize, rows:Int, batch:Int, K:Int, aBase:Usize, sBase:Usize,
+            blocks:Int, blockBytes:Int, blockElems:Int):Void {
+        var lo = (n0 > segStart) ? n0 : segStart;
+        var hi = (n1 < segEnd) ? n1 : segEnd;
+        if (lo >= hi) return;
+        var rowBytes = blocks * blockBytes;
+        for (b in 0...batch) {
+            var aRow = b * K;
+            var xs = Mem.loadF32(sBase + Usize.fromInt(b << 2));
+            var n = lo;
+            while (n + 4 <= hi) {
+                var l = n - segStart;
+                var s0 = q8RowDot(wBase, l * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                var s1 = q8RowDot(wBase, (l + 1) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                var s2 = q8RowDot(wBase, (l + 2) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                var s3 = q8RowDot(wBase, (l + 3) * rowBytes, aBase, aRow, blocks, blockBytes, blockElems);
+                var o = (b * rows + l) << 2;
+                Mem.storeF32(yBase + Usize.fromInt(o), s0 * xs);
+                Mem.storeF32(yBase + Usize.fromInt(o + 4), s1 * xs);
+                Mem.storeF32(yBase + Usize.fromInt(o + 8), s2 * xs);
+                Mem.storeF32(yBase + Usize.fromInt(o + 12), s3 * xs);
+                n += 4;
+            }
+            while (n < hi) {
+                var l = n - segStart;
+                Mem.storeF32(yBase + Usize.fromInt((b * rows + l) << 2),
+                    q8RowDot(wBase, l * rowBytes, aBase, aRow, blocks, blockBytes, blockElems) * xs);
+                n++;
+            }
+        }
+    }
+
     /** One weight's slice of a fused row space: clip the dispatched band
         `[n0,n1)` to this weight's `[segStart,segEnd)` and run the SAME 4-row
         unrolled loop `int8Banded` uses, so the math and reduction order (and
@@ -1065,7 +1101,7 @@ class Q4Matmul {
         down 1). Collapsing QKV to one and gate/up to one takes that to ~4 per
         layer. Sharing the activation quantise (which this path already did) was
         worth almost nothing by comparison — it measures 0.1% of band time. */
-    static function int8BandedFused(w0:QTensor, w1:QTensor, w2:QTensor,
+    static function rowwiseBandedFused(w0:QTensor, w1:QTensor, w2:QTensor,
             batch:Int, K:Int, aBase:Usize, sBase:Usize,
             sp:Null<SpinPool>):Array<Tensor> {
         var r0 = w0.rows();
@@ -1078,12 +1114,23 @@ class Q4Matmul {
         // Raw addresses only — the band closure must never capture the
         // refcounted QTensors (the capture-set rule; ARC traffic across a hot
         // banded pass cost the Q8_0 kernel 2.5x).
+        // Per-weight scheme: INT8 and Q8_0 share the activation encoding but
+        // not the weight layout, so each segment picks its own row kernel.
+        // scalesPtr is INT8-only (Q8_0 carries a per-block f16 scale inline).
+        var i0 = (w0.scheme() == QScheme.INT8);
+        var i1 = (w1.scheme() == QScheme.INT8);
+        var i2 = (w2 != null) && (w2.scheme() == QScheme.INT8);
+        var zero = Usize.fromInt(0);
+        var blocks = Std.int(K / Q8_0_BLOCK_ELEMS);
+        var bbytes = Q8_0_BLOCK_BYTES;
+        var belems = Q8_0_BLOCK_ELEMS;
+
         var wb0 = w0.dataPtr();
-        var sc0 = w0.scalesPtr();
+        var sc0 = i0 ? w0.scalesPtr() : zero;
         var wb1 = w1.dataPtr();
-        var sc1 = w1.scalesPtr();
+        var sc1 = i1 ? w1.scalesPtr() : zero;
         var wb2 = (w2 != null) ? w2.dataPtr() : wb0;
-        var sc2 = (w2 != null) ? w2.scalesPtr() : sc0;
+        var sc2 = (w2 != null && w2.scheme() == QScheme.INT8) ? w2.scalesPtr() : sc0;
 
         var y0 = Tensor.uninit([batch, r0], DType.F32);
         var y1 = Tensor.uninit([batch, r1], DType.F32);
@@ -1096,9 +1143,14 @@ class Q4Matmul {
         var hasW2 = (w2 != null);
 
         var band = function(n0:Int, n1:Int, node:Int):Void {
-            int8Seg(n0, n1, 0, e0, wb0, sc0, yb0, r0, bt, kk, aBase, sBase);
-            int8Seg(n0, n1, e0, e1, wb1, sc1, yb1, r1, bt, kk, aBase, sBase);
-            if (hasW2) int8Seg(n0, n1, e1, total, wb2, sc2, yb2, r2, bt, kk, aBase, sBase);
+            if (i0) int8Seg(n0, n1, 0, e0, wb0, sc0, yb0, r0, bt, kk, aBase, sBase);
+            else q8Seg(n0, n1, 0, e0, wb0, yb0, r0, bt, kk, aBase, sBase, blocks, bbytes, belems);
+            if (i1) int8Seg(n0, n1, e0, e1, wb1, sc1, yb1, r1, bt, kk, aBase, sBase);
+            else q8Seg(n0, n1, e0, e1, wb1, yb1, r1, bt, kk, aBase, sBase, blocks, bbytes, belems);
+            if (hasW2) {
+                if (i2) int8Seg(n0, n1, e1, total, wb2, sc2, yb2, r2, bt, kk, aBase, sBase);
+                else q8Seg(n0, n1, e1, total, wb2, yb2, r2, bt, kk, aBase, sBase, blocks, bbytes, belems);
+            }
         };
         if (sp != null) sp.parallelRows(total, band);
         else band(0, total, 0);
@@ -1338,15 +1390,15 @@ class Q4Matmul {
             // All-INT8: band the CONCATENATED row space in ONE dispatch. Mixed
             // INT8/Q8_0 triples keep the per-weight path — their band kernels
             // differ, so they cannot share a single row space.
-            var allInt8 = int8Bandable(w0) && int8Bandable(w1)
-                && (w2 == null || int8Bandable(w2));
             var out:Array<Tensor>;
-            planFused(w2 != null, allInt8 && useFusedDispatch());
-            if (allInt8 && useFusedDispatch()) {
-                census(0, false);
-                census(0, false);
-                if (w2 != null) census(0, false);
-                out = int8BandedFused(w0, w1, w2, batch, K, aBase, sBase, sp);
+            planFused(w2 != null, useFusedDispatch());
+            if (useFusedDispatch()) {
+                // Any row-wise triple (INT8 and/or Q8_0) — each segment picks
+                // its own row kernel, so mixed triples fuse too.
+                census(w0.scheme() == QScheme.INT8 ? 0 : 3, false);
+                census(w1.scheme() == QScheme.INT8 ? 0 : 3, false);
+                if (w2 != null) census(w2.scheme() == QScheme.INT8 ? 0 : 3, false);
+                out = rowwiseBandedFused(w0, w1, w2, batch, K, aBase, sBase, sp);
             } else {
                 out = [rowwiseBand(w0, batch, K, aBase, sBase, sp),
                        rowwiseBand(w1, batch, K, aBase, sBase, sp)];

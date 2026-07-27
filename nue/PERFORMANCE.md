@@ -28,10 +28,18 @@ census-verified `total ffi=0 (PURE HAXE)`. Last measured 2026-07-27.
 
 | Model | pure Haxe | Rust kernel | verdict |
 |---|---|---|---|
-| **Q6_K** (k-quant + Q8_0 lm_head) | **112.57** | 106.59 | **Haxe wins +5.6%** (non-overlapping) |
-| **Q5_0 → INT8** | 94.53 | 116.52 | **Haxe −18.9%** (non-overlapping) — open |
+| **Q6_K** (k-quant + Q8_0) | **112.57** | 106.59 | **Haxe wins +5.6%** (non-overlapping) |
+| **Q5_0 → INT8** | 113.82 | 119.37 | **Haxe −4.6%** (non-overlapping) — narrowing |
 
-Parity is **met and beaten for k-quant/Q8_0**, and **not met for INT8**.
+Parity is **met and beaten for k-quant/Q8_0**; INT8 is **within 5%** and closing.
+
+**Caveat on the INT8 number.** It read −18.9% (94.53 vs 116.52) earlier the same
+day. The code change between the two readings (widening row-wise fusion to Q8_0
+triples) should NOT affect an all-INT8 model, so most of that swing is the Haxe
+arm's own run-to-run instability, not a fix. What *is* new and reproducible: the
+Haxe values tightened from 84.4–96.4 to 110.5–114.5. Treat −4.6% as the current
+best estimate, not a settled figure, until the variance (open item 2) is
+understood.
 
 ---
 
