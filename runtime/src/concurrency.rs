@@ -306,6 +306,7 @@ pub unsafe extern "C" fn rayzor_thread_join(handle: *mut u8) -> *mut u8 {
     ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
     // Box the result as a DynamicValue* so the compiler can properly unbox it
     // (matching the convention used by Channel and other generic containers)
+    crate::type_system::BOX_INT_VIA_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     crate::type_system::haxe_box_int_ptr(result)
 }
 

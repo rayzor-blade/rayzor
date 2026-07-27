@@ -571,9 +571,13 @@ pub extern "C" fn haxe_array_pop_ptr(arr: *mut HaxeArray) -> *mut u8 {
         if arr_ref.elem_size == 8 {
             let value = *(elem_ptr as *const i64);
             // Use haxe_box_int_ptr to create a proper DynamicValue*
+            crate::type_system::BOX_INT_VIA_ARRAY
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::type_system::haxe_box_int_ptr(value)
         } else if arr_ref.elem_size == 4 {
             let value = *(elem_ptr as *const i32);
+            crate::type_system::BOX_INT_VIA_ARRAY
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::type_system::haxe_box_int_ptr(value as i64)
         } else {
             // For other sizes (objects, etc.), the value is already a pointer
