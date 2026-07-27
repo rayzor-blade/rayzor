@@ -240,12 +240,17 @@ class Q4Matmul {
         x-module static-resolution cluster, not a design choice. */
     public static function dumpPlan():Void {
         if (!censusEnabled()) return;
-        // NB: the haxe_matmul gate itself lives on Linear; reading it here
-        // would be a cross-module STATIC access, which the x-module cluster
-        // does not forward (it fails this class's own registration, E0100).
-        // If this line prints at all, Linear routed us here, so haxe_matmul
-        // was on.
-        Sys.println("[nue-plan] gates: haxe_matmul=on(implied)"
+        // The haxe_matmul gate lives on Linear, and reading it here would be a
+        // cross-module STATIC access the x-module cluster does not forward (it
+        // fails this class's own registration, E0100). It used to be reported
+        // as "on(implied)" on the theory that Linear routed us here — FALSE:
+        // dumpPlan is called unconditionally by the runner, so with NUE_MATMUL
+        // off it claimed "on" for a run that never entered this class at all.
+        // Report it from OBSERVATION instead: a Haxe kernel call proves it.
+        var seenHaxe = 0;
+        for (i in 0...4) seenHaxe += _censusHaxe[i];
+        Sys.println("[nue-plan] gates: haxe_matmul="
+            + (seenHaxe > 0 ? "on(observed)" : "off-or-unused(no Haxe kernel call seen)")
             + " int8=" + onOff(useHaxeInt8())
             + " q8_0=" + onOff(useHaxeQ8_0())
             + " rowwise_fusion=" + onOff(useRowwiseFusion())
@@ -293,11 +298,22 @@ class Q4Matmul {
         // The parity verdict keys on KERNEL escapes only. Platform escapes are
         // reported so an AMX run is never mistaken for a pure-Haxe one, but
         // they do not fail the claim.
-        Sys.println("[q4-census] total kernel_ffi=" + totalFfi
-            + " platform=" + totalPlat
-            + (totalFfi == 0
+        // NOTHING COUNTED IS NOT A PASS. With `NUE_MATMUL` off, Linear never
+        // reaches this class, so every counter stays 0 and the old verdict
+        // printed "(PURE HAXE)" for a run that spent its entire time in the
+        // Rust XTQ path — the exact false positive PERFORMANCE.md warns about,
+        // asserted as a pass. Say UNOBSERVED instead: zero calls means the
+        // census had no visibility, not that the kernels were Haxe.
+        var totalHaxe = 0;
+        for (i in 0...4) totalHaxe += _censusHaxe[i];
+        var verdict = (totalHaxe + totalFfi + totalPlat == 0)
+            ? "  (UNOBSERVED — no quant matmul reached the Haxe dispatcher;"
+                + " NUE_MATMUL off? this is NOT a pure-Haxe result)"
+            : (totalFfi == 0
                 ? (totalPlat == 0 ? "  (PURE HAXE)" : "  (PURE HAXE kernels + platform API)")
-                : "  (NOT pure Haxe — escaped to a Rust kernel)"));
+                : "  (NOT pure Haxe — escaped to a Rust kernel)");
+        Sys.println("[q4-census] total kernel_ffi=" + totalFfi
+            + " platform=" + totalPlat + verdict);
     }
 
     static inline function f16ToF32(bits:Int):Float {
