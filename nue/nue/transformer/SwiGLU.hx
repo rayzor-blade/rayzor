@@ -51,7 +51,9 @@ class SwiGLU implements Module {
         // gate/up share the post-FFN-norm activation, so a row-wise (INT8/Q8_0)
         // pair fuses by default — one activation quantise instead of two.
         // Separate, cheaper mechanism than the opt-in k-quant fusion.
-        if (Linear.useHaxeMatmul() && gwq != null && uwq != null
+        var useHaxeMat = Linear.useHaxeMatmul();
+        nue.Q4Matmul.noteFusionSite(false, gwq != null && uwq != null, useHaxeMat);
+        if (useHaxeMat && gwq != null && uwq != null
             && (nue.Q4Matmul.useFusedMatmul() || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null))) {
             var pair = nue.Q4Matmul.matmulFused(gwq, uwq, null, x, gate.pool);
             gLin = pair[0];

@@ -107,6 +107,7 @@ class GQAttention implements Attention {
         // activation ONCE instead of three times. Bit-identical output.
         var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul()
             || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq);
+        nue.Q4Matmul.noteFusionSite(true, qWq != null && kWq != null && vWq != null, useHaxeMat);
         if (qWq != null && kWq != null && vWq != null && useFusedMat) {
             var triple:Array<Tensor>;
             if (Linear.useHaxeMatmul()) {

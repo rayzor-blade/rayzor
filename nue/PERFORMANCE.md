@@ -146,6 +146,15 @@ decode is batch=1 and bandwidth-bound.
 - **Verify the kernel actually ran.** `NUE_DUMP_Q4_GATES=1` must print a
   per-scheme census line (`INT8 haxe=N ffi=0`). `total ffi=0` alone is a false
   positive — it also prints when nothing was counted.
+- **A zero counter can mean "unobserved", not "did not happen".** The
+  `[nue-plan] fusion:` line read `fused=0 split=0` on every k-quant model,
+  which looks exactly like "fusion declined" but actually meant the k-quant
+  banded path had **no instrumentation at all** — only the row-wise path
+  incremented. The `[nue-plan] sites:` line now closes this: it counts call
+  sites *before* any gate, so `sites − fused − split` (`skipped-dispatcher`)
+  separates **forfeited** from **declined**, and `haxe-matmul-off-at-site` /
+  `unquantised` name the two reasons a site bails early. Before trusting a zero,
+  confirm the path that would have incremented it is on the counted list.
 - **Streaming is not a confound.** Measured interleaved on Q6_K: `STREAM=1`
   106.59 vs `STREAM=0` 102.59 — streaming measured *faster*, ranges overlapping,
   i.e. no real difference. Silencing the stream does not flatter a number; it
@@ -207,6 +216,27 @@ worth +13.2%. Re-measured interleaved: **Q6_K +3.1%** (116.95 vs 113.41) and
 **Q4_K_M +1.8%** (111.98 vs 109.96) — positive on both, never negative, but the
 ranges still overlap so it is not yet *established*. The "regressed" claim is
 **refuted**; flipping the default needs a few more pairs, not a new argument.
+
+**2026-07-27 — the extra pairs say do NOT flip it yet.** The gate is a no-op on
+any model with row-wise weights (`canFuseRowwise` already returns true via
+`NUE_FUSED_ROWWISE`), so it only bites on **pure k-quant** models — the Llama
+family. On Llama-3.2-1B-Q4_K_M, 5 interleaved pairs at 120 tokens:
+
+| arm | samples (tok/s) | median | spread |
+|---|---|---|---|
+| fused ON | 88.4 · 59.9 · 84.2 · 85.9 · 66.4 | 84.17 | **28.5** |
+| fused OFF | 83.3 · 83.7 · 82.7 · 82.0 · 80.2 | 82.70 | 3.5 |
+
+Median **+1.8%, ranges overlap**. The ON arm carries two ~30% low outliers while
+the OFF arm stays tight *in the same interleaved window*, so the variance is
+arm-specific, not machine drift. Output is **bit-identical** between arms, so
+this is purely a latency-tail question.
+
+A 3-pair run of this same comparison read **+4.7% with non-overlapping ranges**
+and was wrong. Three pairs is not enough for a default change; that is now the
+bar. Characterise the tail before default-on — it resembles the decode-stall
+signature (low outliers, not a shifted median) but survives the
+[SpinPool floor fix](#) and lives on the single-dispatch joined-row-space path.
 
 Related: there are now three overlapping fusion gates —
 `NUE_FUSED_MATMUL` (k-quant row-space), `NUE_FUSED_ROWWISE` (shared activation

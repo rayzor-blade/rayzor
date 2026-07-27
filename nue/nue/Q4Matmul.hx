@@ -195,6 +195,30 @@ class Q4Matmul {
         }
     }
 
+    static var _planSiteTriple:Int = 0;
+    static var _planSitePair:Int = 0;
+    static var _planSiteNoQw:Int = 0;
+    static var _planSiteNoHaxe:Int = 0;
+
+    /** Record that a fusion CALL SITE was reached, BEFORE any gate applies.
+        Without this the dump cannot separate "the gate chose split" from "the
+        dispatcher was never consulted": both read `fused=0 split=0`, and only
+        the second silently forfeits fusion outright. A k-quant Llama hit
+        exactly that case and looked identical to a deliberate split.
+        Bool/Int params only — a cross-module type here trips the x-module
+        static-resolution cluster documented on `dumpPlan`. */
+    public static function noteFusionSite(isTriple:Bool, haveQuantWeights:Bool,
+                                          haxeMatmul:Bool):Void {
+        if (!censusEnabled()) return;
+        if (!haxeMatmul) _planSiteNoHaxe = _planSiteNoHaxe + 1;
+        if (!haveQuantWeights) {
+            _planSiteNoQw = _planSiteNoQw + 1;
+            return;
+        }
+        if (isTriple) _planSiteTriple = _planSiteTriple + 1;
+        else _planSitePair = _planSitePair + 1;
+    }
+
     static inline function planSplit(isTriple:Bool):Void {
         if (censusEnabled()) {
             if (isTriple) _planSplitTriple = _planSplitTriple + 1;
@@ -234,6 +258,15 @@ class Q4Matmul {
             + " split=" + _planSplitPair
             + " | banding one-dispatch=" + _planOneDispatch
             + " per-weight=" + _planPerWeight);
+        // sites - (fused + split) = reached the site but never the dispatcher.
+        // A non-zero remainder means fusion was forfeited, not chosen against.
+        Sys.println("[nue-plan] sites: triple=" + _planSiteTriple
+            + " pair=" + _planSitePair
+            + " unquantised=" + _planSiteNoQw
+            + " haxe-matmul-off-at-site=" + _planSiteNoHaxe
+            + " | skipped-dispatcher triple="
+            + (_planSiteTriple - _planFusedTriple - _planSplitTriple)
+            + " pair=" + (_planSitePair - _planFusedPair - _planSplitPair));
         Sys.println("[nue-plan] pool: workers=" + workerCount()
             + " profile=" + poolProfile()
             + " spins=" + poolSpins()
@@ -1483,6 +1516,7 @@ class Q4Matmul {
             if (batch >= amxMinBatch() && amxPrefill() && allQ4) {
                 var outs = [w0.matmulXTQThreaded(x, 0), w1.matmulXTQThreaded(x, 0)];
                 if (w2 != null) outs.push(w2.matmulXTQThreaded(x, 0));
+                planFused(w2 != null, false); // platform escape: one call per weight
                 return outs;
             }
             // Prefill: quantize the shared activation ONCE, then one banded
@@ -1499,6 +1533,7 @@ class Q4Matmul {
             var _tqB = _profB ? Sys.time() : 0.0;
             quantizeAll(xB, aB, bsumsB, dB, batch * bprB, sp);
             if (_profB) sp.addQuantUs(Std.int((Sys.time() - _tqB) * 1e6));
+            planFused(w2 != null, true);
             var outs = runBandedFused(w0, w1, w2, batch, K, aB, bsumsB, dB, sp);
             if (!pooledB) {
                 qsB.free();
@@ -1562,6 +1597,7 @@ class Q4Matmul {
                 Mem.storeF32(yb + Usize.fromInt(n << 2), sum);
             }
         };
+        planFused(w2 != null, true);
         if (sp != null) sp.parallelRows(total, band);
         else band(0, total, 0);
 
