@@ -833,7 +833,13 @@ class Q4Matmul {
         row instead of one per chunk. The loop-carried `acc = SIMD4i32.dot(acc,..)`
         relies on the SIMD-vector-phi fix (49ab3808). `dot` (signed x signed):
         INT8 uses the full i8 range, forbidden to the i7 variant. 16-chunk +
-        scalar tail for K not a multiple of 64. */
+        scalar tail for K not a multiple of 64.
+
+        MEASURED vs runtime-core's `dot_i8_i8` SHAPE (2 accumulators, step 32,
+        two hsums): that form is 5.6% SLOWER here (interleaved A/B medians
+        90.25 vs 95.30 tok/s, non-overlapping ranges, bit-identical output).
+        The inner loop is NOT the Haxe-vs-Rust gap — do not "fix" it by copying
+        the Rust shape. */
     static inline function int8DotRow(wBase:Usize, wOff:Int, aBase:Usize,
             aOff:Int, K:Int):Int {
         var acc0 = SIMD4i32.splat(0);
