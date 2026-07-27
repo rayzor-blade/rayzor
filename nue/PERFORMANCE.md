@@ -83,43 +83,26 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    Unexamined: weight streaming / cache blocking over rows×K,
    `QTensor.fusedQkvIntoArr`'s single-pass traversal, per-row scale-load + f32
    store tail.
-2. **The Haxe pool path is UNSTABLE run-to-run — now the top item.** First seen
-   on INT8 (84.4 / 94.5 / 96.4 while the Rust arm held 116.1 / 116.5 / 116.7,
-   σ≈0.3), but it is **not INT8-specific**: a Q6_K stream A/B swung
-   97.7–123.5 (±12%) within one arm on identical config. It tracks the Haxe
-   pool, on any model.
+2. **Decode stall — FIXED 2026-07-27.** The Haxe pool showed a rare ~18% drop
+   (4 of 5 runs at 117.5–126.2, one at 103.3). Cause: the adaptive tight-spin
+   window landed earlier the same day could END the spin BEFORE the iteration
+   budget, parking a worker early and paying wake latency on the next dispatch.
+   Fix: the measured dispatch-gap window is a **floor**, never a cutoff — it can
+   only EXTEND spinning, which is what cross-machine calibration actually needs.
 
-   This is the **dominant source of uncertainty in every parity claim**: the
-   same INT8 config read −18.9% in the morning and −4.6% in the evening.
+   Verified, 15 per-request samples per arm, interleaved with cooldowns:
 
-   **It is REAL, not a measurement artifact.** I briefly attributed it to my own
-   session's load (the box carried load ~4.7, WindowServer 28%, VS Code 26%,
-   Chrome 25%) — that amplifies it, but a clean back-to-back pair on a quiet
-   machine settles the question:
+   | adaptive spin | min | median | spread | >10% below median |
+   |---|---|---|---|---|
+   | cutoff (before) | 114.9 | 128.6 | 17.2 | **1/15** |
+   | **floor (after)** | **122.0** | 127.9 | **9.7** | **0/15** |
+   | iteration-only reference | 124.2 | 127.7 | 5.3 | 0/15 |
 
-   Quiet-machine Q6_K observations — Haxe n=5: **103.30, 117.46, 125.69,
-   125.85, 126.20**; Rust n=2: 105.22, 107.38 (spread 2.16).
+   Median is unchanged throughout — this was always a TAIL defect, which is why
+   comparing medians would have missed it. `NUE_POOL_ADAPTIVE=0` still selects
+   the plain iteration bound. Residual: iteration-only remains slightly tighter
+   (spread 5.3 vs 9.7); re-check on a quiet box before chasing it.
 
-   **The shape is an OCCASIONAL STALL, not gaussian jitter.** Four of five
-   cluster at 117.5–126.2 (spread 8.7) with a single outlier at 103.3. Even
-   that worst run is only −2.8% against Rust's median, while the Haxe median is
-   **+18.2%** ahead. So this costs a rare ~18% drop, not a broad slowdown.
-
-   **Prime suspect: the adaptive tight-spin bound landed 2026-07** (in the
-   box-leak fix). It sizes the spin window from the pool's EWMA dispatch gap and
-   parks after ~4x it, so a skewed EWMA — e.g. after the inter-request pause —
-   parks workers early and pays wake latency on the next dispatch. That produces
-   exactly one slow run among fast ones. **`NUE_POOL_ADAPTIVE=0` reverts to the
-   iteration-only bound for A/B** (output bit-identical; the two are
-   indistinguishable under contention, so this needs a quiet machine and several
-   runs since the stall is ~1 in 5). Secondary suspect: the all-P-core spinning
-   pool vs Rust's scoped per-call threads — test `cooperative`/`latency`.
-
-   **Benchmark hygiene must therefore include `uptime` / top-CPU, not just
-   "no lingering rayzor processes".** Numbers taken under GUI load are not
-   comparable to numbers taken on a quiet box, and the all-P-core spin makes
-   this framework unusually sensitive to it. Before treating variance as a code
-   defect, re-measure quiet.
 3. **Prefill is 1.9× slower than Rust** (0.077s vs 0.041s per 150-token run).
    Small on short prompts (~5% of wall), dominant on long ones — i.e. the server
    workload.
