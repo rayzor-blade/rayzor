@@ -22,7 +22,7 @@ medians, census-verified `total ffi=0 (PURE HAXE)`):
 | Model | pure Haxe | Rust reference |
 |---|---|---|
 | Qwen2.5-0.5B **Q6_K** | **112.57 tok/s** | 106.59 — Haxe **+5.6%** |
-| Qwen2.5-0.5B **Q5_0 → INT8** | 94.53 tok/s | 116.52 — Haxe **−18.9%**, open |
+| Qwen2.5-0.5B **Q5_0 → INT8** | 113.82 tok/s | 119.37 — Haxe **−4.6%**, narrowing |
 
 Llama 3.2 1B Instruct (Q4_K_M) measured **90.1 tok/s median decode** on the
 2026-06-12 stack (tiers `1/30/5`, `start_interpreted=false`); that figure
