@@ -167,6 +167,11 @@ decode is batch=1 and bandwidth-bound.
   106.59 vs `STREAM=0` 102.59 — streaming measured *faster*, ranges overlapping,
   i.e. no real difference. Silencing the stream does not flatter a number; it
   just removes a variable.
+- **Say whether the run was WARMED.** `NUE_DECODE_WARM` is default ON and warms
+  both decode entry points at load; without it request 1 decodes partly
+  pre-tier-promotion. Every number in this document is warmed. `NUE_DECODE_WARM=0`
+  is a legitimate and *different* measurement — what a user's first request
+  actually costs — and it has never been measured here.
 - **Never compare profiled and unprofiled runs** (`NUE_PROFILE_DECODE` costs
   2-3 tok/s), and never sample memory during a timed run — a `vmmap` poller
   stole enough CPU to make a 117 tok/s config read 33.
@@ -196,6 +201,21 @@ NUE_PREFILL_LAST_LOGITS=1` — that is the intended product configuration.
 | `NUE_FUSED_MATMUL` | **off** — stale default, see below | k-quant row-space fusion (`runBandedFused`) |
 | `NUE_FLASH` / `NUE_FLASH_POOL` | off in code / on | pure-Haxe flash decode; pooled kv-head bands |
 | `NUE_POOL_SPINS`, `NUE_MATMUL_WORKERS`, `NUE_POOL_PROFILE` | platform defaults | pool tuning; see note below |
+| `NUE_DECODE_WARM` | **on** | warms both decode entry points at load, so request 1 is not measured pre-tier-promotion |
+| `NUE_AMX_MIN_BATCH` | **128** | measured AMX prefill crossover (see above) |
+
+**`NUE_PREFILL_WARM` IS A DEAD FLAG — nothing reads it.** It was renamed on
+2026-07-22 (04162bd1): `warmPrefill()` was gated on the CoreML graph, so a
+pure-CPU server could not warm decode at all, and since the bundle
+**tier-promotes by call count** an unwarmed first request decoded largely
+pre-promotion (~42 vs ~90 steady tok/s). It became `warm()`, ungated by the
+graph, behind `NUE_DECODE_WARM` (default ON). That commit measured pure-CPU
+median 54 -> 81 tok/s and first request 42 -> 66.
+
+Both of us kept passing `NUE_PREFILL_WARM=1` on bench command lines long after
+it stopped existing. The runs *were* warm — because `NUE_DECODE_WARM` defaults
+on, visible as the `[warm] model warmed in ...s` line — but not for the reason
+the command line implied. Drop it from invocations.
 
 **`NUE_FUSED_MATMUL` is off on stale evidence.** Its comment claims the fused
 path "regressed on macOS", but that verdict predates the SpinPool box-leak fix,
