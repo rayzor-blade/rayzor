@@ -61,6 +61,13 @@ class ArchRegistry {
         // Llama recipe; the only structural delta is QKV bias, which LlamaArch
         // loads conditionally. Same builder, distinct arch name.
         r.register("qwen2", new LlamaArch());
+        // Mistral: a GGUF from that family declares `general.architecture`
+        // as "llama", so this alias only fires for the rare converter that
+        // writes "mistral" — the recipe is identical either way (RMSNorm,
+        // SwiGLU, NORM-style RoPE, GQA, no QKV bias). Sliding-window
+        // attention is NOT implemented; it only diverges past the window
+        // (4096 on v0.1, and v0.2+ dropped SWA entirely).
+        r.register("mistral", new LlamaArch());
         r.register("bert", new BertArch());
         return r;
     }
