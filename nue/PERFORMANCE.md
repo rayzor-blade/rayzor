@@ -50,6 +50,7 @@ understood.
 | SpinPool const-reassign box leak fix | ~1GB/request → flat RSS | `SpinPool.hx` (e6e67eb7) |
 | All-INT8 triple fusion (share activation quantise) | +21.3% / +25.0% Q5_0 | `Q4Matmul.matmulFused` (a1dc2c87) |
 | Fused single-dispatch banding (joined row space) | +13.2%; dispatches −49.7% | `Q4Matmul.int8BandedFused` (584df55f) |
+| AMX prefill threshold 16 → 128 (measured crossover) | short-prompt prefill −7%; 16-tok case −61% | `Q4Matmul.amxMinBatch()` |
 
 ### The leak (worth remembering as a bug *class*)
 
@@ -127,6 +128,29 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    work (151,936-vocab logits + repetition penalty + no-repeat-8gram).
 
 ---
+
+### AMX prefill: the gate was wrong, not the platform
+
+`AMX_MIN_BATCH` was 16 — 8x too low. Interleaved arms, cooldown between every
+run, prefill timed directly (`prefill_fwd_s`, Qwen Q5_K_M):
+
+| prompt tokens | AMX on | AMX off | delta |
+|---|---|---|---|
+| 16 | 0.0926 | 0.0574 | **+61.2%** AMX slower |
+| 39 | 0.1639 | 0.1565 | +4.8% slower |
+| 69 | 0.2553 | 0.2368 | +7.8% slower |
+| **129** | 0.5096 | 0.5124 | **−0.5% (crossover)** |
+| 249 | 1.2108 | 1.2870 | −5.9% faster |
+| 429 | 2.8065 | 2.9358 | −4.4% faster |
+
+Set to **128** (`NUE_AMX_MIN_BATCH` overrides — other silicon will differ).
+Verified after: a 69-token prompt now reports `platform=0` and prefills in
+0.2384 (was 0.2553); a 429-token prompt still reports `platform=12` and is
+unchanged.
+
+**The lesson generalises: a platform path is never "remove it to be pure" — it
+is "is it gated correctly?"** Decode never takes this path at all, because
+decode is batch=1 and bandwidth-bound.
 
 ## Benchmarking rules (learned expensively)
 
