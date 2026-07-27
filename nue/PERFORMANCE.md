@@ -7,8 +7,17 @@ kernels and how close they are to the Rust kernels they must replace.**
 **Standing direction:** every Tensor/QTensor kernel moves to pure Haxe and must
 reach Rust parity on the Rayzor runtime. Rayzor is a *Haxe* runtime — Nue is its
 proof. A measured Haxe-vs-Rust gap is a **work item against the kernel, the
-pool, or the compiler**, never a reason to route that scheme back to Rust. FFI
-is reserved for genuine platform APIs (AMX/Accelerate/CoreML).
+pool, or the compiler**, never a reason to route that scheme back to Rust.
+
+FFI is reserved for genuine **platform APIs** — Apple AMX via Accelerate
+(`RZT_AMX_PREFILL`, prefill only, batch ≥ 16), the CoreML prefill graph
+(`nue.engine.PrefillGraph`, ~15× per-op Q4 prefill), the BNNS Graph encoder
+(`nue.engine.BertGraph`), and x86 VNNI (`NUE_INT8=1` → `vpdpbusd`, 2.15× on BERT
+projections). Those are hardware/OS surfaces, not kernels Haxe could replace, so
+using them is not a retreat from the direction. See ARCHITECTURE.md
+§Platform Acceleration. **They are all opt-in or platform-gated and fall back to
+the portable Haxe path**, so a parity measurement must state whether they were
+active — an AMX-assisted prefill number is not a pure-Haxe number.
 
 ---
 

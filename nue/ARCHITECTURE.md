@@ -615,10 +615,85 @@ kept so any Haxe kernel can be A/B'd against the kernel it replaced
 (`NUE_MATMUL=0`, `NUE_HAXE_INT8=0`, `NUE_HAXE_Q8_0=0`, `NUE_FLASH=0`). Treat a
 win here as a **measurement**, not a destination — the direction is to retire
 them. What remains genuinely FFI is construction/lifetime, shape, element-wise,
-norms, positional and gather, plus platform APIs (AMX/Accelerate/CoreML).
+norms, positional and gather — plus the **platform-acceleration surfaces**
+(Apple AMX via Accelerate, CoreML prefill graph, BNNS Graph encoder, x86 VNNI),
+which are documented in their own section below and are *allowed* FFI: they are
+hardware/OS APIs, not kernels we could write in Haxe.
 
 Where the Haxe kernels stand against those references, and which questions are
 already settled, is tracked in **[PERFORMANCE.md](PERFORMANCE.md)**.
+
+---
+
+## Platform Acceleration — AMX / CoreML / BNNS Graph / VNNI
+
+These are the FFI the pure-Haxe direction **explicitly allows**: real platform
+APIs that no amount of Haxe can reimplement (Apple's AMX coprocessor, CoreML,
+BNNS Graph, x86 VNNI). Handing work to them is not a retreat from Haxe the way
+routing a scheme back to a Rust kernel would be — the kernels stay Haxe; these
+are hardware/OS surfaces reached through it.
+
+All four are **opt-in or platform-gated and degrade to the portable Haxe path**
+when absent, so no build depends on them.
+
+```mermaid
+flowchart TD
+    H["nue (pure Haxe kernels)"] --> DEC{"phase / shape / arch"}
+    DEC -->|"decode, any batch"| HAXE["Haxe banded matmul + FlashDecode<br/><i>always the fallback</i>"]
+    DEC -->|"prefill, batch ≥ 16, Q4_K_M, macOS"| AMX["Accelerate / AMX<br/>dequant-once + sgemm / f16 gemm"]
+    DEC -->|"Llama prefill bucket, macOS"| CML["CoreML PrefillGraph<br/>whole block stack in one call"]
+    DEC -->|"BERT encoder, macOS"| BNNS["BNNSGraph BertGraph<br/>whole fused encoder"]
+    DEC -->|"F32 encoder projections, x86"| VNNI["Int8Matmul → vpdpbusd<br/>(SDOT on arm)"]
+```
+
+### Apple AMX via Accelerate — `RZT_AMX_PREFILL` (default ON, macOS)
+
+Prefill is compute-bound and has weight reuse; decode is bandwidth-bound and has
+none. So **prefill only** routes to Accelerate (AMX-backed BLAS): `Q4Matmul`
+hands Q4_K_M batches of `batch >= AMX_MIN_BATCH` (16) to the runtime kernel,
+which dequantises once and runs sgemm. Decode never takes this path. The f16
+`gemm16` route is default-on; `BertEmbedder` also sends its padded GEMM through
+Accelerate f16 under the same gate. Surface: `rayzor-tensors/src/apple_accel.rs`
+(`sgemm_nn/nt`, `matmul_f16_nt`, `matmul_f16f32_nt`, `matmul_i8*_nt`,
+`f32_to_f16`). `RZT_AMX_PREFILL=0` opts out; nothing here compiles off macOS.
+
+Counted as FFI in the kernel census, and legitimately so — Apple's AMX is only
+reachable across that boundary.
+
+### CoreML prefill graph — `nue.engine.PrefillGraph` (macOS)
+
+A **fused Llama prefill engine**: one call runs the whole block stack over a
+prompt bucket and returns final hidden states plus every layer's K (post-RoPE,
+interleaved GGUF convention) and V already in cache layout — roughly **15× the
+per-op Q4 prefill**. Decode stays on the CPU/Haxe path, so this is a TTFT lever.
+
+Artifacts are `<gguf-stem>.prefill_s{S}.mlmodelc` next to the GGUF, authored by
+`nue-plugins/examples/llama_prefill_author.py`; buckets are selected by
+`bucketFor(seq)`. `execute` writes KV as `[layers][2][bucket*kv_heads*head_dim]`
+f32 and `kvCopy` carves one slot's real-prompt prefix into a caller-owned buffer
+for `KVCache.append`. It is a **nue engine, not a stdlib primitive** — the
+CoreML runtime and FFI symbols come from the nue-plugins dylib, but the
+block-stack/KV plumbing is nue's. Default-enable policy is still open.
+
+### BNNS Graph encoder — `nue.engine.BertGraph` (macOS)
+
+The BERT analogue: one `execute` runs the **whole fused encoder** — post-
+embedding hidden states `[S, hidden]` plus an additive key-mask bias `[S]`
+(0 real / −1e4 pad, fp16-safe) → final hidden states. Model-generic across the
+BERT family: `load` takes the artifact directory and the GGUF stem
+(`<stem>.encoder_s{S}.mlmodelc`, authored by `bert_graph_author.py`) and returns
+a **handle**, so several BERT models can be live in one process without
+colliding. No-op off macOS.
+
+### x86 VNNI int8 GEMM — `NUE_INT8=1`
+
+The **x86/NUC analogue of the Apple AMX f16 fast path**: `Int8Matmul` computes
+`y[m,n] = x[m,k] @ w[n,k]ᵀ` with `w` quantised to symmetric per-row int8, and
+lowers through `SIMD4i32.dotI8U8` to **`vpdpbusd`** on x86 (and SDOT on arm — the
+gate is platform-agnostic so it can be A/B'd anywhere). Measured **2.15× on BERT
+encoder projections** on the NUC. Note `vpdpbusd` is *unsigned × signed*, which
+is why the activation side is shifted `+128` and corrected by subtracting
+`128·Σ(weights)`. On macOS the AMX f16 `matmulT` stays the default.
 
 ---
 
