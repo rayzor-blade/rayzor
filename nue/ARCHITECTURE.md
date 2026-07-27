@@ -6,15 +6,36 @@ tokens, with the same Haxe source compiling for native CPU/GPU and (eventually)
 WebGPU+WASM. It is **inference-only** — no autograd, no training. Everything
 above the runtime FFI is pure Haxe.
 
-The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
-`examples/llama-chat-server/Main.hx` on M1 Pro at **90.1 tok/s median decode**
-(tiers `1/30/5`, `start_interpreted=false`, 2026-06-12 stack: caller-assist
-fork-join + QoS-pinned orchestrator + NEON q8_K quantizer + GQA per-token
-frees + morsels-on). `rayzor aot` of the server reaches listening in 0.37s
-with ~0.6s cold TTFT on every launch (the JIT pays 6-8s compile on a cold
-`.rayzor` cache). llama.cpp CPU tg128 on the same machine measures ~95-103
-(Metal: ~140). Bench numbers are thermal-sensitive: deltas only count from
-alternating-pair runs on a rested machine.
+**The kernels are pure Haxe.** Quantised matmul (Q4_K_M / Q6_K / Q8_0 / INT8)
+and decode attention run as Haxe band kernels in `Q4Matmul.hx` and
+`FlashDecode.hx`, threaded over `rayzor.concurrent.SpinPool`. The Rust
+`matmul_qt_t` / `flashAttnDecode` symbols still exist and are still reachable
+(`NUE_MATMUL=0`, `NUE_HAXE_INT8=0`, …), but they are an **A/B reference, not the
+target**: Rayzor is a Haxe runtime and Nue is its proof, so a Haxe-vs-Rust gap is
+a work item against the kernel, the pool or the compiler — never a reason to
+route a scheme back to Rust. FFI is reserved for genuine platform APIs
+(AMX/Accelerate/CoreML) and for tensor construction/lifetime.
+
+Current proof point (2026-07-27, M1 Pro, `bench_server.sh`, interleaved arms,
+medians, census-verified `total ffi=0 (PURE HAXE)`):
+
+| Model | pure Haxe | Rust reference |
+|---|---|---|
+| Qwen2.5-0.5B **Q6_K** | **112.57 tok/s** | 106.59 — Haxe **+5.6%** |
+| Qwen2.5-0.5B **Q5_0 → INT8** | 94.53 tok/s | 116.52 — Haxe **−18.9%**, open |
+
+Llama 3.2 1B Instruct (Q4_K_M) measured **90.1 tok/s median decode** on the
+2026-06-12 stack (tiers `1/30/5`, `start_interpreted=false`); that figure
+predates the pure-Haxe kernel work and has not been re-measured since.
+`rayzor aot` of the server reaches listening in 0.37s with ~0.6s cold TTFT (the
+JIT pays 6-8s compile on a cold `.rayzor` cache). llama.cpp CPU tg128 on the
+same machine measures ~95-103 (Metal: ~140).
+
+Bench numbers are thermal-sensitive — this machine drifts up to **17% between
+batches minutes apart**, so only **interleaved** ON/OFF/ON/OFF medians with
+non-overlapping ranges count. See **[PERFORMANCE.md](PERFORMANCE.md)** for the
+parity scorecard, the settled/refuted kernel questions, and the benchmarking
+rules.
 
 ---
 
@@ -44,7 +65,14 @@ alternating-pair runs on a rested machine.
 Decode throughput work is empirical here: every lever below was A/B-benched
 (alternating pairs, cooldowns, sign tests; see `bench.sh` /
 `bench_server.sh`, including its `SERVER_BIN=` mode for prebuilt AOT
-binaries). Three rules learned the hard way:
+binaries).
+
+**Scope:** the table below is mostly *runtime-side* history — it records how the
+Rust kernels and the worker pool got fast. The pure-Haxe kernels that now serve
+those schemes, and how close each is to parity, live in
+**[PERFORMANCE.md](PERFORMANCE.md)**.
+
+Rules learned the hard way:
 
 - **Microbench the actual overhead before building.** Four llama.cpp-mirroring
   attempts washed out because the overhead they amortised was assumed, not
@@ -68,7 +96,7 @@ binaries). Three rules learned the hard way:
 | Q4_K_M 2-block paired SDOT (register tiling) | +3.0% | `dot_q4_k_q8_kblock_2` |
 | flash-attn per-q_head parallelisation | +4.5% at long context | gated cache_len ≥ 256 |
 | lm_head requant Q6_K → Q4_K_M | ~+21% on long-form | `NUE_REQUANT_LM_HEAD` (default on) |
-| Fused QKV projection | 1 dispatch + 1 activation-quant for q/k/v | `fusedQkvMatmul` |
+| Fused QKV projection | 1 dispatch + 1 activation-quant for q/k/v | `fusedQkvMatmul` (Rust reference) |
 | Prefill morsels | prefill 0.64s → 0.23s | `RZT_PREFILL_MORSELS=1` |
 | Tier tuning `1/30/5`, `start_interpreted=false` | ~70-74 → ~81 band | rayzor.toml (locked in) |
 | Caller-assist fork-join | +0.5%, frees a P-core | worker_pool.rs (RZT_NO_CALLER_BAND=1 reverts) |
@@ -78,6 +106,11 @@ binaries). Three rules learned the hard way:
 | Q8_0 KV cache | 3.76× smaller KV; parity at short ctx, expected win >4k | `NUE_KV_Q8=1` (opt-in) |
 | NEON q8_K activation quantizer | +2.5 tok/s median (ABBA), bit-identical (FCVTAS ties-away = roundf) | runtime-core q8_k.rs |
 | Prefill morsels default ON | bare deployments no longer 2.8× slower prefill | `RZT_PREFILL_MORSELS=0` opts out |
+| **Pure-Haxe quantised bands (Q4_K/Q6_K/Q8_0/INT8)** | replaces the Rust matmul as the default path | `Q4Matmul.hx` (`NUE_MATMUL=0` A/Bs) |
+| **Q8_0 native zero-copy weights** | Qwen Q6_K 10 → 85 tok/s (152k lm_head was Q8_0-in-F32) | loader + `q8Banded` |
+| **SpinPool const-reassign box leak fix** | ~1GB/request → flat RSS | `SpinPool.hx` (e6e67eb7) |
+| **All-INT8 triple fusion** (one shared activation quantise) | +21.3% / +25.0% Q5_0 | `matmulFused` (a1dc2c87) |
+| **Fused single-dispatch banding** (joined row space) | +13.2%; pool dispatches −49.7% | `int8BandedFused` (584df55f) |
 | Hot-path env::var hoist | ~490 env-lock hits/token removed | `llamacpp_kernel_enabled()` OnceLock |
 | Dynamic chunk stealing | variance: σ 33.6→1.5, min 7.6→80.9 on busy box; median +9 vs static bands same conditions | worker_pool.rs (`RZT_STATIC_BANDS=1` reverts) |
 
@@ -100,27 +133,47 @@ binaries). Three rules learned the hard way:
 
 ### Open levers (current state of the hunt)
 
-The step budget at 81.4 tok/s is ~12.3ms: ~85% Q4_K matmul streaming ~0.7
-GB/token of weights, with compute width and dispatch overhead both measured
-to exhaustion. What remains, ranked by evidence:
+Re-derived 2026-07-27 against the pure-Haxe kernels. The step budget is ~8.9ms
+at 112 tok/s (Q6_K) and ~10.6ms at 94 tok/s (Q5_0/INT8). Measured split on a
+300-token INT8 request: **band ~77% of the request**, activation quantise
+**0.1%** (`quant_ms=3.4` vs `band_ms=2151.7`), sampler **12-13% of wall**.
 
-1. **Bytes per token (bandwidth side).** Candidate: int8-activation dot path
-   (ggml dots q4_K×q8_K with activations quantised once per row) and ggml's
-   4-row interleaved repack for GEMV, which amortises scale loads across
-   rows. Under active investigation.
-2. **Metal/GPU decode.** llama.cpp Metal at ~140 tok/s on this hardware is
+The earlier claim that "dispatch overhead is measured to exhaustion" was
+**wrong** — halving pool dispatches (55366 → 27862) was worth **+13.2%** in
+2026-07. Assume nothing here is exhausted without a fresh interleaved A/B.
+
+What remains, ranked by evidence:
+
+1. **INT8 band parity (−18.9% vs the Rust reference).** The top open item, and
+   the only scheme not at parity. Already ruled out: the inner-loop shape (ours
+   is 5.6% *faster* than `dot_i8_i8`'s), dispatch count (halved), the activation
+   quantise (0.1%), `scheme()` FFI traffic (~0.02%). Unexamined: weight
+   streaming / cache blocking over rows×K, `fusedQkvIntoArr`'s single-pass
+   traversal, the per-row scale-load + f32 store tail. See PERFORMANCE.md.
+2. **Pool scheduling variance.** The Haxe INT8 arm swings 84.4 / 94.5 / 96.4
+   across identical runs while the Rust arm holds 116.1 / 116.5 / 116.7
+   (σ≈0.3). A 14% swing in one arm and none in the other implicates work
+   distribution / spin-park policy rather than the kernel — plausibly worth
+   more than any kernel change, and it may be *why* the INT8 median lags.
+3. **Sampler cost.** 1.26 ms/token, 12-13% of wall, identical in both arms and
+   independent of quant scheme (151,936-vocab logits + repetition penalty +
+   no-repeat-8gram). A pure-Haxe win available regardless of matmul work.
+4. **Prefill.** Now quantified: **1.9× slower than the Rust reference** (0.077s
+   vs 0.041s per 150-token run). ~5% of wall on short prompts, dominant on long
+   ones — i.e. the server workload. Prefill is the one matmul with weight reuse,
+   so cache blocking is the real tiling target.
+5. **Metal/GPU decode.** llama.cpp Metal at ~140 tok/s on this hardware is
    the existence proof for a ~1.7× leap; rayzor's `gpu/` crate (KernelIR,
    MSL/WGSL codegen, wgpu) is the substrate. Also the path that converges
    with the WebGPU/WASM edge story. Being scoped.
-3. **Prefill GEMM cache blocking.** Prefill is the one matmul with weight
-   reuse (real tiling target); a TTFT lever, not a tok/s lever.
-4. ~~Dynamic chunk stealing~~ — LANDED as the variance fix (see ledger);
+6. ~~Dynamic chunk stealing~~ — LANDED as the variance fix (see ledger);
    the earlier "median-neutral" call was made before caller-assist created
    an exclusively-owned band that a stalled caller could strand.
-5. **Decode-loop alloc churn**: ~490 frees/token remain after the GQA fixes;
+7. **Decode-loop alloc churn**: ~490 frees/token remain after the GQA fixes;
    bounded at 0.5-2.3% of wall by the arena measurement — cleanup value,
-   not a throughput lever.
-6. **Prefix-cache KV reuse (RadixAttention-lite)** — a TTFT lever for
+   not a throughput lever. (Distinct from the 2026-07 SpinPool box leak, which
+   was ~1GB/request and is fixed; see PERFORMANCE.md for that bug class.)
+8. **Prefix-cache KV reuse (RadixAttention-lite)** — a TTFT lever for
    multi-turn / shared-prefix serving, *not* a decode-tok/s lever, and it
    does NOT pay off until the reuse workload exists. Today every
    `generate()` calls `model.resetCache()` (GenerationLoop.hx) and the chat
@@ -371,27 +424,57 @@ read-back.
 
 ## End-to-end Runtime Flow
 
-Tracing `examples/llama-chat/Main.hx` from process start to streamed tokens:
+Process start to streamed tokens. File references only — no line numbers, they
+go stale faster than the prose.
 
-| # | Where | What |
-|---:|---|---|
-| 1 | [llama-chat/Main.hx:251](examples/llama-chat/Main.hx#L251) | `GGUFLoader.loadWithTokenizer(path, ctx)` opens the file and returns `{model, tokenizer, metadata}`. |
-| 2 | [GGUFLoader.hx:86-106](nue/loader/GGUFLoader.hx#L86-L106) | `File.getBytes()` mmaps the GGUF; `GGUFReader.parse()` extracts header + tensor index without materialising weights. |
-| 3 | [GGUFLoader.hx:115-148](nue/loader/GGUFLoader.hx#L115-L148) | `metadataFromReader()` reads `general.architecture`, `llama.attention.head_count`, etc., populates `ModelMetadata`. |
-| 4 | [GGUFLoader.hx:150-158](nue/loader/GGUFLoader.hx#L150-L158) | `tensorsFromReader()` iterates the tensor index, decodes each block to `QTensor` (Q4_K_M / Q6_K) or `Tensor` (F32 / F16 / Q8_0), registers in `NamedTensorMap`. |
-| 5 | [GGUFLoader.hx:99-101](nue/loader/GGUFLoader.hx#L99-L101) | `registry.build(metadata, weights)` dispatches to the matching `ArchBuilder`. |
-| 6 | [ArchRegistry.hx:104-114](nue/arch/ArchRegistry.hx#L104-L114) | `get("llama")` returns `LlamaArch`; `validate()` checks shape sanity; `build()` instantiates the model tree. |
-| 7 | [LlamaArch.hx:64-151](nue/arch/LlamaArch.hx#L64-L151) | Wires `Embedding` + N `TransformerBlock`s (each with `RMSNorm` + `GQAttention` + `KVCache` + `SwiGLU`) + output `RMSNorm` + LM head. Returns `LlamaModel`. |
-| 8 | [GGUFLoader.hx:103](nue/loader/GGUFLoader.hx#L103) | `GGUFTokenizer.build(reader)` extracts vocab + merges, returns a configured `BPETokenizer`. |
-| 9 | [llama-chat/Main.hx:336](examples/llama-chat/Main.hx#L336) | `new GenerationLoop(model, tokenizer, sampler, eosId, maxNewTokens)`. |
-| 10 | [llama-chat/Main.hx:353](examples/llama-chat/Main.hx#L353) | `loop.generate(modelPrompt, onToken)` enters the autoregressive loop. |
-| 11 | [GenerationLoop.hx:76-86](nue/sampling/GenerationLoop.hx#L76-L86) | **Prefill**: `model.resetCache()` clears all KV caches; `tokenizer.encode(prompt)` → ids; `model.forwardIds(ids)` runs the full stack. |
-| 12 | [LlamaModel.hx:55-64](nue/arch/LlamaModel.hx#L55-L64) | `embedTokens.lookup(ids)` gathers Q6_K rows; each block does pre-norm + attn (KVCache append) + residual + pre-norm + FFN + residual; output norm; LM head; → logits `[seq, vocab]`. |
-| 13 | [GenerationLoop.hx:84-86](nue/sampling/GenerationLoop.hx#L84-L86) | `lastRow(logits)` slices the final row to `[vocab]`; `sampler.sample(logits)` picks the first generated token; logits are explicitly freed. |
-| 14 | [GenerationLoop.hx:90-145](nue/sampling/GenerationLoop.hx#L90-L145) | **Decode loop**: while `!eos && step < maxNew`, `forwardIds([nextId])` (single-token forward; `KVCache.append` of the new K,V), `lastRow + sample`, `onToken(id, partialText)`, repeat. |
-| 15 | [GenerationLoop.hx:159](nue/sampling/GenerationLoop.hx#L159) | `tokenizer.decode(generated)` converts the accumulated ids back to UTF-8. |
+```mermaid
+flowchart TD
+    subgraph LOAD["Load — GGUFLoader"]
+        A["Main.hx<br/>loadWithTokenizer(path, ctx)"] --> B["File.getBytes()<br/>mmaps the GGUF"]
+        B --> C["GGUFReader.parse()<br/>header + tensor index<br/><i>weights not materialised</i>"]
+        C --> D["metadataFromReader()<br/>→ ModelMetadata"]
+        C --> E["tensorsFromReader()<br/>QTensor: Q4_K_M / Q6_K / INT8 (Q5_0 decode)<br/>Tensor: F32 / F16 / Q8_0 (zero-copy)"]
+        C --> F["GGUFTokenizer.build()<br/>vocab + merges → BPETokenizer"]
+    end
 
----
+    subgraph BUILD["Build — ArchRegistry"]
+        D --> G["registry.build(metadata, weights)"]
+        E --> G
+        G --> H["ArchRegistry.get('llama'/'qwen2')<br/>validate() → build()"]
+        H --> I["Embedding + N x TransformerBlock<br/>(RMSNorm + GQAttention + KVCache + SwiGLU)<br/>+ output RMSNorm + LM head"]
+        I --> J["LlamaModel"]
+    end
+
+    subgraph GEN["Generate — GenerationLoop"]
+        J --> K["generate(prompt, onToken)"]
+        F --> K
+        K --> L["PREFILL<br/>resetCache() · encode(prompt) · forwardIds(ids)"]
+        L --> M["lastRow(logits) → sample()<br/>first token; logits freed"]
+        M --> N{"eos or step == maxNew?"}
+        N -->|no| O["DECODE STEP<br/>forwardIds([nextId]) · KVCache.append(K,V)<br/>lastRow → sample → onToken"]
+        O --> N
+        N -->|yes| P["tokenizer.decode(ids) → UTF-8"]
+    end
+```
+
+Inside one forward pass, the quantised projections and decode attention are the
+**pure-Haxe kernels** — `Linear` routes `QTensor` weights through `Q4Matmul`
+(`runBanded` / `q8Banded` / `int8Banded`, banded across `SpinPool`), and
+`GQAttention` runs `FlashDecode` over the Q8 KV cache:
+
+```mermaid
+flowchart LR
+    X["activation x"] --> Q["quantise once<br/>quantizeAll (Q8_K) or<br/>quantiseRowsI8 (per-row int8)"]
+    Q --> BAND["banded matmul<br/>rows split across SpinPool workers"]
+    W["QTensor weight<br/>(stays quantised end-to-end)"] --> BAND
+    BAND --> Y["y = x @ Wᵀ"]
+    Y --> ATT["GQAttention → FlashDecode<br/>over Q8_0 KV cache"]
+```
+
+Fused triples (Q/K/V sharing the post-attn-norm activation, gate/up sharing the
+post-FFN-norm one) quantise that activation **once** and — for all-INT8 — band
+their **joined row space in a single pool dispatch**.
+
 
 ## Cross-cutting Concerns
 
@@ -399,16 +482,26 @@ Tracing `examples/llama-chat/Main.hx` from process start to streamed tokens:
 `nue` is built around the assumption that quantised weights stay quantised
 end-to-end:
 
+Every scheme below is banded by a **pure-Haxe kernel** in `Q4Matmul.hx`
+(`runBanded` for the k-quants, `q8Banded`, `int8Banded`), dispatched over
+`SpinPool`. The Rust `matmul_qt_t` symbols remain as the A/B reference.
+
 - **Q4_K_M** — projections inside `Linear` (attention QKV, FFN gate/up/down, LM
-  head when re-quantised). The fused kernel is
-  `rayzor_tensor_matmul_qt_t_f32_threaded`; the SDOT inner kernel has been
-  hand-ported from `llama.cpp`'s NEON pattern (commit `c5ab136`).
+  head when re-quantised). Banded in Haxe against a Q8_K activation quantised
+  once per call by `quantizeAll`; the SDOT inner shape follows `llama.cpp`'s
+  NEON pattern.
 - **Q6_K** — token embeddings and (by default) the LM head when tied. Row
   dequantisation is selective: `qtensor_gather_rows_q6_k` only decodes the
   rows touched by the prompt, not the full `[vocab, hidden]` table.
-- **Q8_0** — opt-in KV cache storage (`NUE_KV_Q8=1`). The decode path uses
-  `flashAttnDecodeQ8` which dequantises inline; prefill materialises a F32
-  view on demand.
+- **INT8** — per-row symmetric, produced by decoding Q5_0/Q5_1 at load
+  (`decodeQ5_0Int8`). Banded by `int8Banded`/`int8DotRow` (4 accumulators,
+  64-wide step — measured **faster than** runtime-core's 2-accumulator
+  `dot_i8_i8` shape). An all-INT8 triple shares one activation quantise and
+  bands its **joined row space in a single pool dispatch**
+  (`int8BandedFused`).
+- **Q8_0** — native weight storage (zero-copy from GGUF, banded by `q8Banded`),
+  and opt-in KV cache storage (`NUE_KV_Q8=1`). Decode attention runs the Haxe
+  `FlashDecode` path over the Q8 cache.
 - **F32 / F16** — fallback path. Used when no quantised weight is present in
   the file.
 
@@ -513,14 +606,19 @@ as `rayzor_tensor_*` / `rayzor_qtensor_*`.
 | **Positional** | `tensor_rope`, `tensor_ropeCosTable`, `tensor_ropeSinTable` |
 | **Gather** | `tensor_gather_rows`, `qtensor_gather_rows_q6_k` |
 | **Matmul (F32)** | `tensor_matmul_t`, `tensor_bmm`, `tensor_bmmThreaded` |
-| **Matmul (quantised)** | `tensor_matmul_qt_t_f32_threaded`, `qtensor_matmul_xt_q_threaded` |
-| **Attention (fused)** | `tensor_flashAttnDecode`, `tensor_flashAttnDecodeQ8`, `tensor_expandKvHeadsAxis1`, `tensor_causalMask` |
+| **Matmul (quantised) — A/B reference only** | `tensor_matmul_qt_t_f32_threaded`, `qtensor_matmul_xt_q_threaded`, `qtensor_fused_qkv_into_arr` |
+| **Attention (fused) — A/B reference only** | `tensor_flashAttnDecode`, `tensor_flashAttnDecodeQ8`, `tensor_expandKvHeadsAxis1`, `tensor_causalMask` |
 
-The two big perf wins of the current session live behind these symbols:
-`flashAttnDecode` (commit `7835a26`) collapses the unfused
-expand+bmm+softmax+bmm chain into a single kernel for the decode case;
-`matmul_qt_t_f32_threaded`'s inner SDOT path was hand-ported from
-`llama.cpp`'s NEON kernel (commit `c5ab136`).
+**The last two groups are NOT the default path.** Quantised matmul and decode
+attention are pure Haxe (`Q4Matmul.hx`, `FlashDecode.hx`); these symbols are
+kept so any Haxe kernel can be A/B'd against the kernel it replaced
+(`NUE_MATMUL=0`, `NUE_HAXE_INT8=0`, `NUE_HAXE_Q8_0=0`, `NUE_FLASH=0`). Treat a
+win here as a **measurement**, not a destination — the direction is to retire
+them. What remains genuinely FFI is construction/lifetime, shape, element-wise,
+norms, positional and gather, plus platform APIs (AMX/Accelerate/CoreML).
+
+Where the Haxe kernels stand against those references, and which questions are
+already settled, is tracked in **[PERFORMANCE.md](PERFORMANCE.md)**.
 
 ---
 
