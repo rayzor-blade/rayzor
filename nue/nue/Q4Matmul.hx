@@ -499,6 +499,14 @@ class Q4Matmul {
         return s;
     }
 
+    /** Adaptive (wall-clock) tight-spin bound; `NUE_POOL_ADAPTIVE=0` reverts to
+        the iteration-only bound. Prime suspect for the occasional decode stall
+        — see PERFORMANCE.md. */
+    public static function poolAdaptive():Bool {
+        var env = Sys.getEnvOr("NUE_POOL_ADAPTIVE", "RAYZOR_HAXE_POOL_ADAPTIVE");
+        return !(env == "0" || env == "false");
+    }
+
     /** Per-spin relax hint; -1 = platform default. */
     public static function poolRelax():Int {
         var env = Sys.getEnvOr("NUE_POOL_RELAX", "RAYZOR_HAXE_POOL_RELAX");
