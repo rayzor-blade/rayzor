@@ -1,0 +1,8 @@
+[project]
+name = "nue"
+entry = "Main.hx"
+
+[build]
+# "../../" = nue/ ; rayzor-tensors provides rayzor.ds.*
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
+native-libs = ["../../../target/release/librayzor_tensors.dylib", "../../../target/release/libnue_plugins.dylib"]
