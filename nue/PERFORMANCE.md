@@ -135,6 +135,88 @@ unchanged.
 is "is it gated correctly?"** Decode never takes this path at all, because
 decode is batch=1 and bandwidth-bound.
 
+### …and the gate is STILL wrong, because batch size is the wrong variable
+
+Measured on Mistral-7B-Q4_K_M (2026-07-27), which is the first model where the
+AMX gate actually engaged (`platform=192` = 32 layers x 6 weights):
+
+| | |
+|---|---|
+| one-time f16 dequant | **192 weights, 12.63 s** (`RZT_AMX_DEBUG=1` prints each) |
+| RSS cost | **+1.59 GB** (6.09 vs 4.50) |
+| prefill with AMX | 18.88 s |
+| **prefill minus one-time dequant** | **6.25 s** |
+| prefill AMX off | **9.02 s** |
+
+So the AMX GEMM is **~31% FASTER**; a naive interleaved A/B reads **+86.2%
+slower** because a one-shot run builds the cache inside the prefill it is
+timing. **A lever with a one-time cost cannot be judged by a one-shot run.**
+
+`AMX_MIN_BATCH` gates on batch size, but batch size does not predict whether a
+weight's f16 copy gets REUSED — which is the actual economics.
+
+### The ceiling: every Apple path materialises f16, undoing the quantisation
+
+`cached_f16_weight` leaks one f16 copy per routed weight by design (BNNS/AMX
+consume f16 only — `BNNSMatMul` int8 was probed and REJECTED, "the public
+matmul is float-only"). Warming all of a 7B's weights therefore asks for a
+second, fatter copy of the model:
+
+    layer params 7.78 B -> f16 14.5 GB  +  4.07 GB quantised  =  18.6 GB  vs 16 GB
+
+Attempted and REVERTED (nothing committed): warming via a batched `forwardIds`
+took **491 s**; a lean per-weight prewarm did the same job in **16 s**, but the
+box then sat at 12.4 GB with an idle CPU — swapping, not computing.
+
+The same wall bounds the CoreML prefill graph: fp16 artifacts are ~2.0 GB per
+bucket at 1B and **14.8 GB at 7B**. BNNSGraph does not escape it either — it
+executes the *same* mlmodelc and computes in fp16 (it is a shipping engine for
+BERT at ~400 sent/s, cos 0.9999628, but was never wired to LLM prefill).
+
+**One wall, not three.** The escape is an artifact that stays compressed:
+4-bit palettized would be 3.6 GB/bucket at 7B and is readable by CoreML *and*
+BNNSGraph without touching engine code.
+
+Measured (Llama-1B s128, fp16 artifact = 1856 MB, baseline cos 0.999141):
+
+| config | size | ratio | `out` cos | k min | v min |
+|---|---|---|---|---|---|
+| fp16 (baseline) | 1856 MB | 1.000 | 0.9991 | — | — |
+| 4-bit, per-tensor | 464 MB | 0.250 | **0.181** | 0.9860 | 0.9764 |
+| 4-bit, grouped ch. (32) | 465 MB | 0.250 | **0.754** | 0.9914 | 0.9825 |
+| **6-bit, grouped ch. (32)** | **698 MB** | **0.376** | **0.9973** | 0.9995 | 0.9989 |
+
+The 4x compression is exactly as predicted, and granularity helps a lot
+(0.181 -> 0.754) at no size cost — but **4-bit fails the coherence gate either
+way**. 0.75 on the final hidden state is not shippable for a decoder.
+
+**6-bit grouped is the configuration that fits AND nearly holds.** Projected to
+7B: 5.4 GB/bucket + 4.07 GB quantised = 9.5 GB, inside 16 GB (fp16 would be
+18.6 GB). 0.9973 sits just under nue's customary 0.999 accept gate.
+
+END-TO-END (the gate that actually matters — same prompt, temp=0, artifact
+swapped under the runner): both arms produce fluent, factually correct text and
+**agree for ~25 tokens, then diverge**. At greedy decoding that means the argmax
+changed, so 6-bit is **NOT a drop-in equivalent** of fp16 — it is a
+different-but-valid completion. Whether that is acceptable is a product call,
+not a measurement one.
+
+Do NOT read decode tok/s from that A/B (80.98 vs 64.80): the prefill graph runs
+PREFILL only, `ttft` was 0.0910 vs 0.0928 (identical), and decode is the same
+pure-CPU path in both arms. The gap is machine noise.
+
+**The failure shape is the reusable lesson: per-layer k/v stayed at ~0.99 in
+BOTH configs while the final hidden collapsed**, because error compounds through
+16 residual-stream layers. Judging palettization on per-layer cosines alone
+would have passed a config that destroys the output. Gate on the FINAL hidden.
+
+**Measurement cost note:** ~4 min per config, single-threaded. Do NOT set
+`num_kmeans_workers>1` — children re-run the module via `runpy.run_path` and
+trip multiprocessing's import guard regardless of `__main__` protection; it
+wasted 18 min at ~5 s of CPU and blew swap from 11.5 to 21.5 GB.
+`cputime` vs `elapsed` is the stall test: 5 s/18 min = blocked,
+53 s/60 s = working.
+
 ## Benchmarking rules (learned expensively)
 
 - **INTERLEAVE THE ARMS.** This machine drifts up to **17% between batches
