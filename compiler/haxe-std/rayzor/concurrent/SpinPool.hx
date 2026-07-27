@@ -218,18 +218,33 @@ class SpinPool {
                 // 256 iters to amortise the syscall (as the yield-hold does).
                 if (spins == 1) tightStart = Sys.time();
                 var tightDone = spins > spinBudget;
-                if (adaptiveTight && !tightDone && (spins & 255) == 0) {
-                    // Clamp via TERNARY into a FRESH local, never
-                    // `if (c) v = <const>`: a conditional reassign of a local
-                    // to a constant BOXES that constant (haxe_box_int_ptr, 48
-                    // bytes, never freed). In this spin loop that leaked ~5M
-                    // boxes (~240MB) per request — measured with
-                    // RAYZOR_BOX_TRACE=1, which reported value=500 on
-                    // essentially every call. See
-                    // bugs_float_conditional_reassign_boxes (Int variant).
-                    var gap:Int = gapC.load();
-                    var tightUs:Int = (gap < 20) ? 20 : ((gap > 500) ? 500 : gap);
-                    if ((Sys.time() - tightStart) * 1e6 > tightUs) tightDone = true;
+                // The measured dispatch-gap window is a FLOOR, never a cutoff.
+                // It previously could END the tight spin BEFORE the iteration
+                // budget, which parks a worker early and pays wake latency on
+                // the next dispatch — measured as a longer low tail with no
+                // median gain (min 114.9 vs 120.5, spread 17.2 vs 9.3, and the
+                // only >10%-below-median sample in 15). As a floor it can only
+                // EXTEND spinning, which is what the cross-machine requirement
+                // actually needs: where `spinBudget` iterations elapse too
+                // fast (different core, different calibration), keep spinning
+                // until the pool's own cadence says a dispatch is plausible.
+                // On a machine whose budget already covers the gap this
+                // reduces to the plain iteration bound.
+                if (adaptiveTight && tightDone) {
+                    if ((spins & 255) != 0) {
+                        tightDone = false;      // only re-evaluate on sample points
+                    } else {
+                        // Clamp via TERNARY into a FRESH local, never
+                        // `if (c) v = <const>`: a conditional reassign of a
+                        // local to a constant BOXES that constant
+                        // (haxe_box_int_ptr, 48 bytes, never freed). That leaked
+                        // ~5M boxes (~240MB) per request here — found with
+                        // RAYZOR_BOX_TRACE=1 reporting value=500 on essentially
+                        // every call. See bugs_float_conditional_reassign_boxes.
+                        var gap:Int = gapC.load();
+                        var tightUs:Int = (gap < 20) ? 20 : ((gap > 500) ? 500 : gap);
+                        if ((Sys.time() - tightStart) * 1e6 < tightUs) tightDone = false;
+                    }
                 }
                 if (!tightDone) continue;
                 // Idle beyond the tight-spin window: HOLD by yielding —
