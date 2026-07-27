@@ -247,9 +247,10 @@ class Main {
         if (profilePool && llama.spinPool != null) {
             trace("[profile-pool] " + llama.spinPool.profReport());
         }
-        // Which kernel actually ran, per quant scheme (NUE_DUMP_Q4_GATES=1).
+        // The EFFECTIVE PLAN (NUE_DUMP_Q4_GATES=1): gates in force, what the
+        // dispatcher fused/split, pool counters, and the per-scheme census.
         // A pure-Haxe claim is only credible with ffi=0 printed here.
-        Q4Matmul.dumpCensus();
+        Q4Matmul.dumpPlan();
         // The streaming callback above already printed every token. Gate
         // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
         // diagnostic runs (e.g. when comparing decoded text against
