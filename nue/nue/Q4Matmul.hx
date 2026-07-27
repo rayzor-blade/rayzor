@@ -137,6 +137,75 @@ class Q4Matmul {
         }
     }
 
+    // ---- plan census (NueGraph Stage 0: make the implicit plan printable) --
+    // The kernel/fusion/dispatch decisions are currently spread across gates in
+    // Q4Matmul, GQAttention and SwiGLU, so "what plan did this run actually
+    // execute?" was unanswerable without reading source and guessing. These
+    // count what the dispatcher DID; `dumpPlan` prints it next to the gates
+    // that were in force. A stale gate (NUE_FUSED_MATMUL sat off for months on
+    // a refuted verdict) shows up here as fused=0 at a glance.
+    static var _planFusedTriple:Int = 0;
+    static var _planSplitTriple:Int = 0;
+    static var _planFusedPair:Int = 0;
+    static var _planSplitPair:Int = 0;
+    static var _planOneDispatch:Int = 0;
+    static var _planPerWeight:Int = 0;
+
+    static inline function planFused(isTriple:Bool, oneDispatch:Bool):Void {
+        if (censusEnabled()) {
+            if (isTriple) _planFusedTriple = _planFusedTriple + 1;
+            else _planFusedPair = _planFusedPair + 1;
+            if (oneDispatch) _planOneDispatch = _planOneDispatch + 1;
+            else _planPerWeight = _planPerWeight + 1;
+        }
+    }
+
+    static inline function planSplit(isTriple:Bool):Void {
+        if (censusEnabled()) {
+            if (isTriple) _planSplitTriple = _planSplitTriple + 1;
+            else _planSplitPair = _planSplitPair + 1;
+        }
+    }
+
+    static inline function onOff(b:Bool):String return b ? "on" : "off";
+
+    /** Print the EFFECTIVE PLAN: the gates in force and what the dispatcher
+        actually fused/split. Safe to call when the census is off.
+
+        NO PARAMETERS ON PURPOSE. A public static taking a cross-module type
+        (e.g. `SpinPool`) perturbs module registration enough to fail its own
+        registration (`E0100 class not registered`) and to break unrelated
+        cross-module field access — the same trap already documented on
+        `matmulQ8_0`'s explicit-`sp` note. Callers print the pool line
+        themselves from `spinPool.profReport()`. This is a workaround for the
+        x-module static-resolution cluster, not a design choice. */
+    public static function dumpPlan():Void {
+        if (!censusEnabled()) return;
+        // NB: the haxe_matmul gate itself lives on Linear; reading it here
+        // would be a cross-module STATIC access, which the x-module cluster
+        // does not forward (it fails this class's own registration, E0100).
+        // If this line prints at all, Linear routed us here, so haxe_matmul
+        // was on.
+        Sys.println("[nue-plan] gates: haxe_matmul=on(implied)"
+            + " int8=" + onOff(useHaxeInt8())
+            + " q8_0=" + onOff(useHaxeQ8_0())
+            + " rowwise_fusion=" + onOff(useRowwiseFusion())
+            + " fused_dispatch=" + onOff(useFusedDispatch())
+            + " kquant_fusion=" + onOff(useFusedMatmul())
+            + " amx_prefill=" + onOff(amxPrefill()));
+        Sys.println("[nue-plan] fusion: triples fused=" + _planFusedTriple
+            + " split=" + _planSplitTriple
+            + " | pairs fused=" + _planFusedPair
+            + " split=" + _planSplitPair
+            + " | banding one-dispatch=" + _planOneDispatch
+            + " per-weight=" + _planPerWeight);
+        Sys.println("[nue-plan] pool: workers=" + workerCount()
+            + " profile=" + poolProfile()
+            + " spins=" + poolSpins()
+            + "  (band/quant/dispatch counters: NUE_PROFILE_POOL=1)");
+        dumpCensus();
+    }
+
     /** Print the census. Callers dump this at exit; safe to call when the
         census is off (prints nothing). */
     public static function dumpCensus():Void {
@@ -1272,6 +1341,7 @@ class Q4Matmul {
             var allInt8 = int8Bandable(w0) && int8Bandable(w1)
                 && (w2 == null || int8Bandable(w2));
             var out:Array<Tensor>;
+            planFused(w2 != null, allInt8 && useFusedDispatch());
             if (allInt8 && useFusedDispatch()) {
                 census(0, false);
                 census(0, false);
@@ -1290,6 +1360,7 @@ class Q4Matmul {
         }
 
         if (!useFusedMatmul() || anyRowwise) {
+            planSplit(w2 != null);
             var split = [matmul(w0, x, sp), matmul(w1, x, sp)];
             if (w2 != null) split.push(matmul(w2, x, sp));
             return split;

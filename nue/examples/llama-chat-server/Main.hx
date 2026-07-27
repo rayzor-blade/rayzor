@@ -268,6 +268,9 @@ class Main {
                 trace("[profile-pool] request=" + reqNo
                     + " " + llama.spinPool.profReport());
             }
+            // Effective plan, once per request under NUE_DUMP_Q4_GATES=1 —
+            // the server is where stale gates actually cost throughput.
+            nue.Q4Matmul.dumpPlan();
             if (Sys.getEnvOr("NUE_LLAMA_DUMP_OUTPUT", "RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
                 trace("[output] request=" + reqNo + " " + output);
             }
