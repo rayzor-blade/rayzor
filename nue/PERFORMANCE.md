@@ -28,7 +28,7 @@ census-verified `total ffi=0 (PURE HAXE)`. Last measured 2026-07-27.
 
 | Model | pure Haxe | Rust kernel | verdict |
 |---|---|---|---|
-| **Q6_K** (k-quant + Q8_0) | **112.57** | 106.59 | **Haxe wins +5.6%** (non-overlapping) |
+| **Q6_K** (k-quant + Q8_0) | **125.69** | 106.30 | **Haxe wins +18.2%** (quiet machine, n=5 vs 2) |
 | **Q5_0 → INT8** | 113.82 | 119.37 | **Haxe −4.6%** (non-overlapping) — narrowing |
 
 Parity is **met and beaten for k-quant/Q8_0**; INT8 is **within 5%** and closing.
@@ -96,17 +96,23 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    Chrome 25%) — that amplifies it, but a clean back-to-back pair on a quiet
    machine settles the question:
 
-   | Arm | median | stddev | runs |
-   |---|---|---|---|
-   | `NUE_MATMUL=0` (Rust) | 106.30 | **1.08** | 107.38, 105.22 |
-   | `NUE_MATMUL=1` (Haxe) | **114.49** | **11.20** | 125.69, **103.30** |
+   Quiet-machine Q6_K observations — Haxe n=5: **103.30, 117.46, 125.69,
+   125.85, 126.20**; Rust n=2: 105.22, 107.38 (spread 2.16).
 
-   Same machine, same minute: the Haxe arm spans 22 tok/s, the Rust arm 2 —
-   **10x the variance, in the arm we own.** Contention is an amplifier, not the
-   cause. Prime suspect remains the all-P-core SPINNING pool vs Rust's scoped
-   per-call threads: a spinning worker is maximally sensitive to any co-runner,
-   including ordinary desktop background load, so `cooperative`/`latency`
-   (n−1 workers) and the spin/park policy are the first things to test.
+   **The shape is an OCCASIONAL STALL, not gaussian jitter.** Four of five
+   cluster at 117.5–126.2 (spread 8.7) with a single outlier at 103.3. Even
+   that worst run is only −2.8% against Rust's median, while the Haxe median is
+   **+18.2%** ahead. So this costs a rare ~18% drop, not a broad slowdown.
+
+   **Prime suspect: the adaptive tight-spin bound landed 2026-07** (in the
+   box-leak fix). It sizes the spin window from the pool's EWMA dispatch gap and
+   parks after ~4x it, so a skewed EWMA — e.g. after the inter-request pause —
+   parks workers early and pays wake latency on the next dispatch. That produces
+   exactly one slow run among fast ones. **`NUE_POOL_ADAPTIVE=0` reverts to the
+   iteration-only bound for A/B** (output bit-identical; the two are
+   indistinguishable under contention, so this needs a quiet machine and several
+   runs since the stall is ~1 in 5). Secondary suspect: the all-P-core spinning
+   pool vs Rust's scoped per-call threads — test `cooperative`/`latency`.
 
    **Benchmark hygiene must therefore include `uptime` / top-CPU, not just
    "no lingering rayzor processes".** Numbers taken under GUI load are not

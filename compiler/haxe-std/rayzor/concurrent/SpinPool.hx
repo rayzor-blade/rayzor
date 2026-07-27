@@ -56,6 +56,16 @@ class SpinPool {
         RAYZOR_HAXE_POOL_RELAX=1 to trade a little dispatch latency for much
         lower spin power / less throttling. -1 = unresolved. */
     var relaxHint:Int;
+
+    /** When true (default) the tight spin is bounded by WALL TIME sized from
+        the pool's own EWMA dispatch gap; when false it is bounded ONLY by
+        `spinBudget` iterations, which is the pre-2026-07 behaviour. Exposed so
+        the two policies can be A/B'd: the adaptive bound is the prime suspect
+        for the OCCASIONAL STALL seen in decode (runs cluster high with a rare
+        ~18% drop), since a skewed EWMA parks workers early and pays wake
+        latency on the next dispatch. Caller-set — the pool itself stays
+        env-agnostic. */
+    public var adaptiveTight:Bool = true;
     var _n:Int;
     var _ctl:Bytes;
     var _fn:(Int, Int, Int) -> Void;
@@ -208,7 +218,7 @@ class SpinPool {
                 // 256 iters to amortise the syscall (as the yield-hold does).
                 if (spins == 1) tightStart = Sys.time();
                 var tightDone = spins > spinBudget;
-                if (!tightDone && (spins & 255) == 0) {
+                if (adaptiveTight && !tightDone && (spins & 255) == 0) {
                     // Clamp via TERNARY into a FRESH local, never
                     // `if (c) v = <const>`: a conditional reassign of a local
                     // to a constant BOXES that constant (haxe_box_int_ptr, 48
