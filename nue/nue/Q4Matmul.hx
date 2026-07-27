@@ -702,7 +702,13 @@ class Q4Matmul {
         var aBase = qs.address();
         var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
         var sBase = xScales.address();
+        // Time the shared activation quantise like the k-quant path does —
+        // without this the row-wise kernels report quant_ms=0 and the split
+        // between quantise and band is invisible.
+        var _prof = sp != null && sp.profiling();
+        var _tq = _prof ? Sys.time() : 0.0;
         quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+        if (_prof) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var y = q8Banded(qw, batch, K, aBase, sBase, sp);
         if (!pooled) {
@@ -901,7 +907,13 @@ class Q4Matmul {
         var aBase = qs.address();
         var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
         var sBase = xScales.address();
+        // Time the shared activation quantise like the k-quant path does —
+        // without this the row-wise kernels report quant_ms=0 and the split
+        // between quantise and band is invisible.
+        var _prof = sp != null && sp.profiling();
+        var _tq = _prof ? Sys.time() : 0.0;
         quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+        if (_prof) sp.addQuantUs(Std.int((Sys.time() - _tq) * 1e6));
 
         var y = int8Banded(qw, batch, K, aBase, sBase, sp);
         if (!pooled) {
@@ -1132,7 +1144,14 @@ class Q4Matmul {
             var aBase = qs.address();
             var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
             var sBase = xScales.address();
+            // Time the shared quantise like the k-quant path does — without it
+            // the row-wise kernels report quant_ms=0 and the quantise/band
+            // split is invisible. Distinct names: this function declares its
+            // own `_prof` further down for the k-quant branch.
+            var _profR = sp != null && sp.profiling();
+            var _tqR = _profR ? Sys.time() : 0.0;
             quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
+            if (_profR) sp.addQuantUs(Std.int((Sys.time() - _tqR) * 1e6));
             var out = [rowwiseBand(w0, batch, K, aBase, sBase, sp),
                        rowwiseBand(w1, batch, K, aBase, sBase, sp)];
             if (w2 != null) out.push(rowwiseBand(w2, batch, K, aBase, sBase, sp));
