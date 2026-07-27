@@ -650,8 +650,12 @@ flowchart TD
 
 Prefill is compute-bound and has weight reuse; decode is bandwidth-bound and has
 none. So **prefill only** routes to Accelerate (AMX-backed BLAS): `Q4Matmul`
-hands Q4_K_M batches of `batch >= AMX_MIN_BATCH` (16) to the runtime kernel,
-which dequantises once and runs sgemm. Decode never takes this path. The f16
+hands Q4_K_M batches of `batch >= amxMinBatch()` (**128**, `NUE_AMX_MIN_BATCH`
+overrides) to the runtime kernel, which dequantises once and runs sgemm. Decode
+never takes this path. The threshold is a MEASURED crossover, not a guess: at
+16 tokens AMX is 61% slower, at 69 it is 7.8% slower, 129 is a tie, and by
+249-429 it is 4-6% faster. It was 16 for a long time, i.e. 8x too low — AMX is
+sound leverage, the gate was admitting work too small to amortise setup. The f16
 `gemm16` route is default-on; `BertEmbedder` also sends its padded GEMM through
 Accelerate f16 under the same gate. Surface: `rayzor-tensors/src/apple_accel.rs`
 (`sgemm_nn/nt`, `matmul_f16_nt`, `matmul_f16f32_nt`, `matmul_i8*_nt`,

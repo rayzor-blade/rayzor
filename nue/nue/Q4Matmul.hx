@@ -32,7 +32,28 @@ class Q4Matmul {
     static var _useFused:Int = 0;
     static var _dumpFusedGate:Int = 0;
     static var _amx:Int = 0;
-    static inline var AMX_MIN_BATCH:Int = 16;
+    /** Minimum prefill batch (= prompt tokens) worth handing to AMX.
+        MEASURED CROSSOVER, interleaved arms with cooldowns, prefill timed
+        directly on Qwen Q5_K_M (prefill_fwd_s, median of 2):
+            16 tok  +61.2%   AMX much slower
+            39 tok   +4.8%   AMX slower
+            69 tok   +7.8%   AMX slower
+           129 tok   -0.5%   tie  <- crossover
+           249 tok   -5.9%   AMX faster
+           429 tok   -4.4%   AMX faster
+        The old value of 16 admitted work 8x too small to amortise
+        dequant-to-F32 + sgemm setup — a 16-token prompt sat exactly on the
+        threshold and paid 61%. AMX itself is sound platform leverage; the GATE
+        was wrong. `NUE_AMX_MIN_BATCH` overrides (other silicon will differ). */
+    static var _amxMin:Int = 0;
+    public static function amxMinBatch():Int {
+        if (_amxMin == 0) {
+            var v = Sys.getEnvOr("NUE_AMX_MIN_BATCH", "RZT_AMX_MIN_BATCH");
+            var n = (v != null && v != "") ? Std.int(Std.parseFloat(v)) : 0;
+            _amxMin = (n > 0) ? n : 128;
+        }
+        return _amxMin;
+    }
 
     /** Mac AMX prefill routing — ON by default (RZT_AMX_PREFILL=0 opts out):
         compute-bound Q4 batches hand off to the runtime kernel's Accelerate
@@ -673,7 +694,7 @@ class Q4Matmul {
         // routed Q6_K falls to its legacy per-block fallback (~700ms/call at
         // batch=497 — measured, the whole "AMX long-prompt bleed"). Q6_K and
         // decode stay on the Haxe band loop below.
-        if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() == QScheme.Q4_K_M) {
+        if (batch >= amxMinBatch() && amxPrefill() && qw.scheme() == QScheme.Q4_K_M) {
             // PLATFORM escape, not a kernel escape: Apple's AMX/Accelerate
             // only exists across the FFI boundary. Counted separately so an
             // AMX prefill never reads as "NOT pure Haxe" — platform APIs are
@@ -1459,7 +1480,7 @@ class Q4Matmul {
             // does NOT free x, so the shared activation survives all calls.
             var allQ4 = (w0.scheme() == QScheme.Q4_K_M) && (w1.scheme() == QScheme.Q4_K_M)
                 && (w2 == null || w2.scheme() == QScheme.Q4_K_M);
-            if (batch >= AMX_MIN_BATCH && amxPrefill() && allQ4) {
+            if (batch >= amxMinBatch() && amxPrefill() && allQ4) {
                 var outs = [w0.matmulXTQThreaded(x, 0), w1.matmulXTQThreaded(x, 0)];
                 if (w2 != null) outs.push(w2.matmulXTQThreaded(x, 0));
                 return outs;
