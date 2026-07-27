@@ -101,7 +101,12 @@ class GQAttention implements Attention {
         // reshape, then drop the local — leaves only the view refcount on
         // the storage.
         var useHaxeMat = Linear.useHaxeMatmul();
-        var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul();
+        // Row-wise (INT8/Q8_0) triples fuse by default — a separate, cheaper
+        // mechanism than the opt-in k-quant row-space fusion: only the shared
+        // activation quantise is hoisted, so Q/K/V quantise the post-attn-norm
+        // activation ONCE instead of three times. Bit-identical output.
+        var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul()
+            || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq);
         if (qWq != null && kWq != null && vWq != null && useFusedMat) {
             var triple:Array<Tensor>;
             if (Linear.useHaxeMatmul()) {
