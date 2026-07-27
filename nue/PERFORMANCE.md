@@ -91,15 +91,22 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    This is the **dominant source of uncertainty in every parity claim**: the
    same INT8 config read −18.9% in the morning and −4.6% in the evening.
 
-   **But it is probably NOT a pool defect — it is CO-RUNNER CONTENTION, and the
-   measuring session was causing much of it.** The box during those runs carried
-   load average ~4.7 with WindowServer 28%, VS Code 26%, Chrome 25% — while the
-   default `throughput` pool profile claims EVERY P-core and spins. That is the
-   exact regime `cooperative`/`latency` (n−1 workers) exist for: leaving one
-   P-core free stops a co-runner or the OS preempting a spinning worker.
-   Corroboration: the same bench run by the user on a quieter machine gives
-   **stddev 0.90 across 3 runs** and a best-yet **126.20 tok/s** on Q6_K, versus
-   ±12% swings here.
+   **It is REAL, not a measurement artifact.** I briefly attributed it to my own
+   session's load (the box carried load ~4.7, WindowServer 28%, VS Code 26%,
+   Chrome 25%) — that amplifies it, but a clean back-to-back pair on a quiet
+   machine settles the question:
+
+   | Arm | median | stddev | runs |
+   |---|---|---|---|
+   | `NUE_MATMUL=0` (Rust) | 106.30 | **1.08** | 107.38, 105.22 |
+   | `NUE_MATMUL=1` (Haxe) | **114.49** | **11.20** | 125.69, **103.30** |
+
+   Same machine, same minute: the Haxe arm spans 22 tok/s, the Rust arm 2 —
+   **10x the variance, in the arm we own.** Contention is an amplifier, not the
+   cause. Prime suspect remains the all-P-core SPINNING pool vs Rust's scoped
+   per-call threads: a spinning worker is maximally sensitive to any co-runner,
+   including ordinary desktop background load, so `cooperative`/`latency`
+   (n−1 workers) and the spin/park policy are the first things to test.
 
    **Benchmark hygiene must therefore include `uptime` / top-CPU, not just
    "no lingering rayzor processes".** Numbers taken under GUI load are not
