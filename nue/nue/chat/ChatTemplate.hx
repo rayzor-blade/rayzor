@@ -34,6 +34,20 @@ class ChatTemplate {
      * what the `architecture` string claims.
      */
     public static function forModel(arch:Architecture, tok:BPETokenizer):ChatTemplate {
+        // Report the choice on the load banner (alongside [load]/[kv-cache]).
+        // A silently wrong template produces fluent-but-off replies rather than
+        // an error, which is exactly the failure that hid Mistral/Llama-2 being
+        // fed Llama-3 header markup. Printed from INSIDE nue.chat: reading
+        // `conv.template.kind` from a caller module is a cross-module instance
+        // field read, which the x-module cluster does not reliably forward.
+        // NB: no `Architecture.toName(arch)` here — a cross-module STATIC call
+        // in a public static's body fails this class's own registration (E0100).
+        var t = pick(arch, tok);
+        Sys.println("[chat] template=" + t.kind);
+        return t;
+    }
+
+    static function pick(arch:Architecture, tok:BPETokenizer):ChatTemplate {
         // Registered specials win — a GGUF carrying the Llama-3 header ids is
         // a Llama-3 chat model regardless of the declared architecture.
         if (tok.specialId("<|start_header_id|>") >= 0) return new ChatTemplate(LLAMA3);
