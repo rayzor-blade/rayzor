@@ -120,6 +120,12 @@ class Q4Matmul {
     // Index = QScheme ordinal (0 INT8, 1 Q4_K_M, 2 Q6_K, 3 Q8_0).
     static var _censusHaxe:Array<Int> = [0, 0, 0, 0];
     static var _censusFfi:Array<Int> = [0, 0, 0, 0];
+    // Escapes to a PLATFORM API (Apple AMX/Accelerate) are counted apart from
+    // escapes to a Rust KERNEL. Only the latter is a parity failure: platform
+    // APIs are the FFI the pure-Haxe direction sanctions, so a correct AMX
+    // prefill must not read as "NOT pure Haxe" — that sends the next reader
+    // chasing a non-bug (it did).
+    static var _censusPlatform:Array<Int> = [0, 0, 0, 0];
     static var _censusOn:Int = 0;
 
     static function censusEnabled():Bool {
@@ -128,6 +134,14 @@ class Q4Matmul {
             _censusOn = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
         return _censusOn == 1;
+    }
+
+    /** Escape to a platform API (AMX/Accelerate) — sanctioned, not a parity
+        failure. */
+    static inline function censusPlatform(schemeOrd:Int):Void {
+        if (censusEnabled() && schemeOrd >= 0 && schemeOrd < 4) {
+            _censusPlatform[schemeOrd] = _censusPlatform[schemeOrd] + 1;
+        }
     }
 
     static inline function census(schemeOrd:Int, ffi:Bool):Void {
@@ -212,15 +226,24 @@ class Q4Matmul {
         if (!censusEnabled()) return;
         var names = ["INT8", "Q4_K_M", "Q6_K", "Q8_0"];
         var totalFfi = 0;
+        var totalPlat = 0;
         for (i in 0...4) totalFfi += _censusFfi[i];
+        for (i in 0...4) totalPlat += _censusPlatform[i];
         for (i in 0...4) {
-            if (_censusHaxe[i] > 0 || _censusFfi[i] > 0) {
+            if (_censusHaxe[i] > 0 || _censusFfi[i] > 0 || _censusPlatform[i] > 0) {
                 Sys.println("[q4-census] " + names[i] + " haxe=" + _censusHaxe[i]
-                    + " ffi=" + _censusFfi[i]);
+                    + " kernel_ffi=" + _censusFfi[i]
+                    + " platform=" + _censusPlatform[i]);
             }
         }
-        Sys.println("[q4-census] total ffi=" + totalFfi
-            + (totalFfi == 0 ? "  (PURE HAXE)" : "  (NOT pure Haxe)"));
+        // The parity verdict keys on KERNEL escapes only. Platform escapes are
+        // reported so an AMX run is never mistaken for a pure-Haxe one, but
+        // they do not fail the claim.
+        Sys.println("[q4-census] total kernel_ffi=" + totalFfi
+            + " platform=" + totalPlat
+            + (totalFfi == 0
+                ? (totalPlat == 0 ? "  (PURE HAXE)" : "  (PURE HAXE kernels + platform API)")
+                : "  (NOT pure Haxe — escaped to a Rust kernel)"));
     }
 
     static inline function f16ToF32(bits:Int):Float {
@@ -651,10 +674,11 @@ class Q4Matmul {
         // batch=497 — measured, the whole "AMX long-prompt bleed"). Q6_K and
         // decode stay on the Haxe band loop below.
         if (batch >= AMX_MIN_BATCH && amxPrefill() && qw.scheme() == QScheme.Q4_K_M) {
-            // Counted as FFI, but this one is legitimate: Apple's AMX/Accelerate
-            // only exists across the FFI boundary. Platform APIs stay FFI;
-            // kernels do not.
-            census(1, true);
+            // PLATFORM escape, not a kernel escape: Apple's AMX/Accelerate
+            // only exists across the FFI boundary. Counted separately so an
+            // AMX prefill never reads as "NOT pure Haxe" — platform APIs are
+            // the FFI this direction sanctions; Rust kernels are not.
+            censusPlatform(1);
             return qw.matmulXTQThreaded(x, 0);
         }
 
