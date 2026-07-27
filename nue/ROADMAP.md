@@ -110,6 +110,30 @@ the descriptor works), then **Gemma** (GeGLU, norm scaling, tied embeddings,
 head_dim override), **Phi** (partial rotary, fused FFN), then LayerNorm families
 (GPT2/Falcon) and MoE.
 
+**Mistral was run through the current structure first (2026-07-27) to pressure-
+test this design, and it moved the requirement.** The *structure* was indeed
+free — a Mistral GGUF declares `general.architecture = "llama"`, so it already
+routes to `LlamaArch` unchanged. What was broken was **identity**:
+`Architecture.fromString` can never return `Mistral` for a real GGUF, and the
+chat template mapped `Llama, Mistral → LLAMA3`, emitting Llama-3 header markup
+into a model that never saw those tokens (the same bug silently mis-templated
+**Llama-2**). Fixed with an `[INST]` template kind detected from tokenizer
+specials, not the arch string.
+
+So the descriptor requirement is sharper than "declare norm/activation/RoPE":
+
+- **Architecture identity is not the GGUF arch string.** Mistral, Llama-2 and
+  Llama-3 all report `llama` and need different prompt formats — and, for
+  Mistral v0.1, different attention (sliding window, still unimplemented).
+  Identity must be evidence-based (tokenizer specials), with the arch string as
+  a weak hint.
+- **Family ≠ builder.** Several families legitimately share one builder while
+  differing in template, stop tokens and attention policy. The descriptor must
+  separate *how to build the graph* from *how to talk to the model*.
+
+Gemma remains the first real test of the structural half, since it is the first
+that genuinely cannot reuse `LlamaArch`.
+
 Each new family must inherit fusion **automatically** — that is the test of
 whether Stage 1 succeeded.
 
