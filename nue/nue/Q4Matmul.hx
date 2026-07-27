@@ -481,6 +481,18 @@ class Q4Matmul {
         return qw.scheme() == QScheme.INT8 && useHaxeInt8();
     }
 
+    /** Single-dispatch banding over a fused triple's concatenated row space
+        (`NUE_FUSED_DISPATCH=0` falls back to one dispatch per weight, for A/B).
+        Default ON. */
+    static var _fusedDispatch:Int = 0;
+    public static function useFusedDispatch():Bool {
+        if (_fusedDispatch == 0) {
+            var v = Sys.getEnvOr("NUE_FUSED_DISPATCH", "RAYZOR_HAXE_FUSED_DISPATCH");
+            _fusedDispatch = (v != null && (v == "0" || v == "false")) ? 2 : 1;
+        }
+        return _fusedDispatch == 1;
+    }
+
     /** True when this triple would take the fused row-wise path — call sites use
         it to decide whether to route through `matmulFused` at all.
 
@@ -931,6 +943,102 @@ class Q4Matmul {
 
     /** Band an INT8 weight against ALREADY-quantised activations. Row scale
         folds in once per output element: `y[b,n] = xScale[b]*wScale[n]*dot`. */
+    /** One weight's slice of a fused row space: clip the dispatched band
+        `[n0,n1)` to this weight's `[segStart,segEnd)` and run the SAME 4-row
+        unrolled loop `int8Banded` uses, so the math and reduction order (and
+        therefore the output bits) are unchanged. Local row = global - segStart.
+
+        Segment-clipping rather than `runBandedFused`'s per-row weight lookup:
+        that form branches on every row and cannot keep the 4-row unroll, which
+        is what feeds the scheduler 16 independent SDOT chains. */
+    static function int8Seg(n0:Int, n1:Int, segStart:Int, segEnd:Int,
+            wBase:Usize, wScaleBase:Usize, yBase:Usize, rows:Int, batch:Int,
+            kk:Int, aBase:Usize, sBase:Usize):Void {
+        var lo = (n0 > segStart) ? n0 : segStart;
+        var hi = (n1 < segEnd) ? n1 : segEnd;
+        if (lo >= hi) return;
+        for (b in 0...batch) {
+            var aRow = b * kk;
+            var xs = Mem.loadF32(sBase + Usize.fromInt(b << 2));
+            var n = lo;
+            while (n + 4 <= hi) {
+                var l = n - segStart;
+                var d0 = int8DotRow(wBase, l * kk, aBase, aRow, kk);
+                var d1 = int8DotRow(wBase, (l + 1) * kk, aBase, aRow, kk);
+                var d2 = int8DotRow(wBase, (l + 2) * kk, aBase, aRow, kk);
+                var d3 = int8DotRow(wBase, (l + 3) * kk, aBase, aRow, kk);
+                var o = (b * rows + l) << 2;
+                Mem.storeF32(yBase + Usize.fromInt(o),
+                    xs * Mem.loadF32(wScaleBase + Usize.fromInt(l << 2)) * d0);
+                Mem.storeF32(yBase + Usize.fromInt(o + 4),
+                    xs * Mem.loadF32(wScaleBase + Usize.fromInt((l + 1) << 2)) * d1);
+                Mem.storeF32(yBase + Usize.fromInt(o + 8),
+                    xs * Mem.loadF32(wScaleBase + Usize.fromInt((l + 2) << 2)) * d2);
+                Mem.storeF32(yBase + Usize.fromInt(o + 12),
+                    xs * Mem.loadF32(wScaleBase + Usize.fromInt((l + 3) << 2)) * d3);
+                n += 4;
+            }
+            while (n < hi) {
+                var l = n - segStart;
+                var ws = Mem.loadF32(wScaleBase + Usize.fromInt(l << 2));
+                Mem.storeF32(yBase + Usize.fromInt((b * rows + l) << 2),
+                    xs * ws * int8DotRow(wBase, l * kk, aBase, aRow, kk));
+                n++;
+            }
+        }
+    }
+
+    /** Band an all-INT8 triple in ONE pool dispatch over the CONCATENATED row
+        space, instead of one dispatch per weight.
+
+        The measured cost is fork/join, not math: a 300-token request issued
+        55366 dispatches (~184/token, ~7.7 per layer — QKV 3 + O 1 + gate/up 2 +
+        down 1). Collapsing QKV to one and gate/up to one takes that to ~4 per
+        layer. Sharing the activation quantise (which this path already did) was
+        worth almost nothing by comparison — it measures 0.1% of band time. */
+    static function int8BandedFused(w0:QTensor, w1:QTensor, w2:QTensor,
+            batch:Int, K:Int, aBase:Usize, sBase:Usize,
+            sp:Null<SpinPool>):Array<Tensor> {
+        var r0 = w0.rows();
+        var r1 = w1.rows();
+        var r2 = (w2 != null) ? w2.rows() : 0;
+        var e0 = r0;
+        var e1 = r0 + r1;
+        var total = r0 + r1 + r2;
+
+        // Raw addresses only — the band closure must never capture the
+        // refcounted QTensors (the capture-set rule; ARC traffic across a hot
+        // banded pass cost the Q8_0 kernel 2.5x).
+        var wb0 = w0.dataPtr();
+        var sc0 = w0.scalesPtr();
+        var wb1 = w1.dataPtr();
+        var sc1 = w1.scalesPtr();
+        var wb2 = (w2 != null) ? w2.dataPtr() : wb0;
+        var sc2 = (w2 != null) ? w2.scalesPtr() : sc0;
+
+        var y0 = Tensor.uninit([batch, r0], DType.F32);
+        var y1 = Tensor.uninit([batch, r1], DType.F32);
+        var y2 = (w2 != null) ? Tensor.uninit([batch, r2], DType.F32) : null;
+        var yb0 = y0.data().raw();
+        var yb1 = y1.data().raw();
+        var yb2 = (w2 != null) ? y2.data().raw() : yb0;
+        var kk = K;
+        var bt = batch;
+        var hasW2 = (w2 != null);
+
+        var band = function(n0:Int, n1:Int, node:Int):Void {
+            int8Seg(n0, n1, 0, e0, wb0, sc0, yb0, r0, bt, kk, aBase, sBase);
+            int8Seg(n0, n1, e0, e1, wb1, sc1, yb1, r1, bt, kk, aBase, sBase);
+            if (hasW2) int8Seg(n0, n1, e1, total, wb2, sc2, yb2, r2, bt, kk, aBase, sBase);
+        };
+        if (sp != null) sp.parallelRows(total, band);
+        else band(0, total, 0);
+
+        var out = [y0, y1];
+        if (y2 != null) out.push(y2);
+        return out;
+    }
+
     static function int8Banded(qw:QTensor, batch:Int, K:Int, aBase:Usize,
             sBase:Usize, sp:Null<SpinPool>):Tensor {
         var rows = qw.rows();
@@ -1158,9 +1266,22 @@ class Q4Matmul {
             var _tqR = _profR ? Sys.time() : 0.0;
             quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
             if (_profR) sp.addQuantUs(Std.int((Sys.time() - _tqR) * 1e6));
-            var out = [rowwiseBand(w0, batch, K, aBase, sBase, sp),
+            // All-INT8: band the CONCATENATED row space in ONE dispatch. Mixed
+            // INT8/Q8_0 triples keep the per-weight path — their band kernels
+            // differ, so they cannot share a single row space.
+            var allInt8 = int8Bandable(w0) && int8Bandable(w1)
+                && (w2 == null || int8Bandable(w2));
+            var out:Array<Tensor>;
+            if (allInt8 && useFusedDispatch()) {
+                census(0, false);
+                census(0, false);
+                if (w2 != null) census(0, false);
+                out = int8BandedFused(w0, w1, w2, batch, K, aBase, sBase, sp);
+            } else {
+                out = [rowwiseBand(w0, batch, K, aBase, sBase, sp),
                        rowwiseBand(w1, batch, K, aBase, sBase, sp)];
-            if (w2 != null) out.push(rowwiseBand(w2, batch, K, aBase, sBase, sp));
+                if (w2 != null) out.push(rowwiseBand(w2, batch, K, aBase, sBase, sp));
+            }
             if (!pooled) {
                 qs.free();
                 xScales.free();
