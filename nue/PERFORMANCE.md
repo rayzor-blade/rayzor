@@ -82,10 +82,17 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    Unexamined: weight streaming / cache blocking over rows×K,
    `QTensor.fusedQkvIntoArr`'s single-pass traversal, per-row scale-load + f32
    store tail.
-2. **Haxe INT8 throughput is UNSTABLE** — 84.4 / 94.5 / 96.4 across identical
-   runs, while the Rust arm is 116.1 / 116.5 / 116.7 (σ≈0.3). A 14% swing in one
-   arm and none in the other points at **pool scheduling / work distribution**,
-   not the kernel. Likely worth more than any kernel change.
+2. **The Haxe pool path is UNSTABLE run-to-run — now the top item.** First seen
+   on INT8 (84.4 / 94.5 / 96.4 while the Rust arm held 116.1 / 116.5 / 116.7,
+   σ≈0.3), but it is **not INT8-specific**: a Q6_K stream A/B swung
+   97.7–123.5 (±12%) within one arm on identical config. It tracks the Haxe
+   pool, on any model.
+
+   This is no longer just a throughput lever — it is the **dominant source of
+   uncertainty in every parity claim**. An arm that swings ±20% can manufacture
+   or hide a result, and it did both in one day: the same INT8 config read
+   −18.9% in the morning and −4.6% in the evening. Suspect pool scheduling /
+   work distribution. Fix this before trusting any further kernel A/B.
 3. **Prefill is 1.9× slower than Rust** (0.077s vs 0.041s per 150-token run).
    Small on short prompts (~5% of wall), dominant on long ones — i.e. the server
    workload.
@@ -106,6 +113,10 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
 - **Verify the kernel actually ran.** `NUE_DUMP_Q4_GATES=1` must print a
   per-scheme census line (`INT8 haxe=N ffi=0`). `total ffi=0` alone is a false
   positive — it also prints when nothing was counted.
+- **Streaming is not a confound.** Measured interleaved on Q6_K: `STREAM=1`
+  106.59 vs `STREAM=0` 102.59 — streaming measured *faster*, ranges overlapping,
+  i.e. no real difference. Silencing the stream does not flatter a number; it
+  just removes a variable.
 - **Never compare profiled and unprofiled runs** (`NUE_PROFILE_DECODE` costs
   2-3 tok/s), and never sample memory during a timed run — a `vmmap` poller
   stole enough CPU to make a 117 tok/s config read 33.
