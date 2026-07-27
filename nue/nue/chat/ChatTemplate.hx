@@ -18,6 +18,7 @@ import nue.model.Architecture;
 class ChatTemplate {
     public static inline var LLAMA3 = "llama3"; // <|start_header_id|>role<|end_header_id|>\n\n … <|eot_id|>
     public static inline var CHATML = "chatml"; // <|im_start|>role\n … <|im_end|>\n   (Qwen2, Yi, …)
+    public static inline var MISTRAL = "mistral"; // <s>[INST] … [/INST] …</s>  (Mistral, Llama-2)
     public static inline var RAW = "raw";       // no wrapping — base (non-instruct) models
 
     public var kind:String;
@@ -37,10 +38,18 @@ class ChatTemplate {
         // a Llama-3 chat model regardless of the declared architecture.
         if (tok.specialId("<|start_header_id|>") >= 0) return new ChatTemplate(LLAMA3);
         if (tok.specialId("<|im_start|>") >= 0) return new ChatTemplate(CHATML);
+        // No modern chat specials, but a sentencepiece-era `</s>`: this is the
+        // [INST] family (Mistral, Llama-2). It must be checked BEFORE the arch
+        // fallback, because a Mistral GGUF declares `general.architecture` as
+        // "llama" — `fromString` can never return `Mistral` for one — and the
+        // Llama-3 branch would then emit <|start_header_id|> markup as literal
+        // text the tokenizer shreds into subwords the model never saw.
+        if (tok.specialId("</s>") >= 0) return new ChatTemplate(MISTRAL);
         // Fall back to the architecture family.
         switch (arch) {
             case Qwen2: return new ChatTemplate(CHATML);
-            case Llama, Mistral: return new ChatTemplate(LLAMA3);
+            case Mistral: return new ChatTemplate(MISTRAL);
+            case Llama: return new ChatTemplate(LLAMA3);
             default: return new ChatTemplate(RAW);
         }
     }
@@ -52,6 +61,7 @@ class ChatTemplate {
      */
     public function render(messages:Array<Message>, addGenerationPrompt:Bool):String {
         if (kind == CHATML) return renderChatML(messages, addGenerationPrompt);
+        if (kind == MISTRAL) return renderMistral(messages, addGenerationPrompt);
         if (kind == RAW) return renderRaw(messages, addGenerationPrompt);
         return renderLlama3(messages, addGenerationPrompt);
     }
@@ -82,6 +92,34 @@ class ChatTemplate {
         return parts.join("");
     }
 
+    function renderMistral(messages:Array<Message>, _addGen:Bool):String {
+        // Mistral / Llama-2 instruction format. Neither family has a system
+        // ROLE: the system text is folded into the first instruction, which is
+        // what both were fine-tuned on. The trailing `[/INST]` IS the assistant
+        // opener, so `addGen` needs no separate branch — a rendered user turn
+        // always invites a completion.
+        var sys = "";
+        for (m in messages) if (m.role == "system") sys = m.content;
+        var parts:Array<String> = ["<s>"];
+        for (m in messages) {
+            if (m.role == "system") continue;
+            if (m.role == "assistant") {
+                parts.push(m.content);
+                parts.push("</s>");
+                continue;
+            }
+            parts.push("[INST] ");
+            if (sys != "") {
+                parts.push(sys);
+                parts.push("\n\n");
+                sys = ""; // first instruction only
+            }
+            parts.push(m.content);
+            parts.push(" [/INST]");
+        }
+        return parts.join("");
+    }
+
     function renderRaw(messages:Array<Message>, _addGen:Bool):String {
         // Base models have no turn structure — concatenate content in order.
         // A generation-prompt opener would be meaningless here, so ignore it.
@@ -100,6 +138,7 @@ class ChatTemplate {
     public function stopIds(tok:BPETokenizer):Array<Int> {
         var names:Array<String> =
             (kind == CHATML) ? ["<|im_end|>", "<|endoftext|>"]
+            : (kind == MISTRAL) ? ["</s>", "<|end_of_text|>"]
             : (kind == RAW) ? ["<|end_of_text|>", "<|endoftext|>"]
             : ["<|eot_id|>", "<|end_of_text|>"];
         var ids:Array<Int> = [];
