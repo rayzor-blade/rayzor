@@ -460,6 +460,69 @@ class Q4Matmul {
         return qw.scheme() == QScheme.INT8 || qw.scheme() == QScheme.Q8_0;
     }
 
+    /** Row-wise (INT8/Q8_0) triple fusion. Default ON — it is a DIFFERENT
+        mechanism from `useFusedMatmul()`'s k-quant row-space fusion (which
+        stays opt-in because it regressed on macOS): here each weight keeps its
+        own band kernel and only the ACTIVATION QUANTISE is shared, so output is
+        bit-identical to the split path and the win is pure removed work
+        (measured Qwen Q5_0: 73.65 -> 93.81 tok/s, and 107.00 with
+        NUE_POOL_SPINS=100). `NUE_FUSED_ROWWISE=0` disables. */
+    static var _fusedRowwise:Int = 0;
+    public static function useRowwiseFusion():Bool {
+        if (_fusedRowwise == 0) {
+            var v = Sys.getEnvOr("NUE_FUSED_ROWWISE", "RAYZOR_HAXE_FUSED_ROWWISE");
+            _fusedRowwise = (v != null && (v == "0" || v == "false")) ? 2 : 1;
+        }
+        return _fusedRowwise == 1;
+    }
+
+    /** INT8 weight whose Haxe band kernel is live. */
+    static inline function int8Bandable(qw:QTensor):Bool {
+        return qw.scheme() == QScheme.INT8 && useHaxeInt8();
+    }
+
+    /** True when this triple would take the fused row-wise path — call sites use
+        it to decide whether to route through `matmulFused` at all.
+
+        DEFAULT-ON only for ALL-INT8 triples: interleaved A/B (the only kind that
+        survives this machine's drift) measured Q5_0 +25.0% with NON-OVERLAPPING
+        ranges (ON 100.7-102.8 vs OFF 80.7-82.8), but Q6_K's Q8_0 pairs came in
+        at -2.3% with ranges almost entirely overlapping — no win there, so Q8_0
+        triples keep their previous behaviour and only fuse under the explicit
+        `useFusedMatmul()` opt-in. */
+    public static function canFuseRowwise(w0:QTensor, w1:QTensor, w2:QTensor):Bool {
+        if (w0 == null || w1 == null) return false;
+        var allRow = rowwiseHaxeBandable(w0) && rowwiseHaxeBandable(w1)
+            && (w2 == null || rowwiseHaxeBandable(w2));
+        if (!allRow) return false;
+        if (useFusedMatmul()) return true; // opt-in: any row-wise mix
+        return useRowwiseFusion() && int8Bandable(w0) && int8Bandable(w1)
+            && (w2 == null || int8Bandable(w2));
+    }
+
+    /** Row-wise AND its pure-Haxe band kernel is enabled — i.e. this weight can
+        join a fused triple over one shared per-row int8 activation. A weight
+        whose kernel is gated off must NOT be fused: it has to reach `matmul` so
+        it can take the runtime XTQ bail. One `scheme()` read (it is an opaque
+        cross-dylib call the optimiser cannot CSE). */
+    static inline function rowwiseHaxeBandable(qw:QTensor):Bool {
+        var s = qw.scheme();
+        return (s == QScheme.INT8) ? useHaxeInt8() : ((s == QScheme.Q8_0) ? useHaxeQ8_0() : false);
+    }
+
+    /** Band one row-wise weight against an ALREADY-quantised shared activation,
+        picking the kernel that matches its weight layout. Activation encoding is
+        identical for both; only the weight-side scale differs. */
+    static inline function rowwiseBand(qw:QTensor, batch:Int, K:Int, aBase:Usize,
+            sBase:Usize, sp:Null<SpinPool>):Tensor {
+        if (qw.scheme() == QScheme.INT8) {
+            census(0, false);
+            return int8Banded(qw, batch, K, aBase, sBase, sp);
+        }
+        census(3, false);
+        return q8Banded(qw, batch, K, aBase, sBase, sp);
+    }
+
     public static function matmul(qw:QTensor, x:Tensor, ?sp:SpinPool):Tensor {
         // Q8_0 has its own pure-Haxe kernel: 32-element blocks with a per-block
         // f16 scale, which the 256-wide k-quant band loop below would misread.
@@ -1047,20 +1110,20 @@ class Q4Matmul {
         // have no place in the 256-wide banded fused path below.
         var anyRowwise = isRowwise(w0) || isRowwise(w1) || (w2 != null && isRowwise(w2));
 
-        // All-Q8_0 triples get their OWN fused path. Q/K/V share the
-        // post-attn-norm activation and gate/up share the post-FFN-norm one, so
-        // the split fallback re-runs the same two-pass O(K) int8 quantise per
-        // weight — on a Qwen Q6_K (most tensors Q8_0, ~191 matmul calls/token)
-        // that is ~5 quantisations per layer where 2 would do. Quantise once,
-        // band each weight against the shared activation.
+        // ROW-WISE triples (INT8 and/or native Q8_0) get their OWN fused path.
+        // Q/K/V share the post-attn-norm activation and gate/up share the
+        // post-FFN-norm one, so the split fallback re-runs the same two-pass
+        // O(K) int8 quantise PER WEIGHT — ~5 quantisations per layer where 2
+        // would do. Quantise once, band each weight against the shared buffer.
         //
-        // Only when ALL are Q8_0: a mixed triple (e.g. Q6_K attn_v alongside
-        // Q8_0 q/k) needs different activation encodings — Q8_K super-blocks vs
-        // per-row int8 — and cannot share one buffer.
-        var allQ8_0 = useHaxeQ8_0()
-            && w0.scheme() == QScheme.Q8_0 && w1.scheme() == QScheme.Q8_0
-            && (w2 == null || w2.scheme() == QScheme.Q8_0);
-        if (useFusedMatmul() && allQ8_0) {
+        // INT8 and Q8_0 are fused TOGETHER because they share one activation
+        // encoding: both consume per-row int8 from `quantiseRowsI8`, and only
+        // the WEIGHT side differs (per-row scale vs per-32-block f16 scale), so
+        // each weight just picks its own band kernel. It is the K-QUANT schemes
+        // that cannot join — those need Q8_K super-blocks (`quantizeAll`), a
+        // different buffer entirely — so a mixed rowwise+k-quant triple still
+        // falls through to the split path below.
+        if (canFuseRowwise(w0, w1, w2)) {
             var K = w0.cols();
             var batch = Std.int(x.numel() / K);
             if (batch < 1) batch = 1;
@@ -1070,14 +1133,9 @@ class Q4Matmul {
             var xScales = pooled ? sp.scratchBytes(2, batch * 4) : Bytes.alloc(batch * 4);
             var sBase = xScales.address();
             quantiseRowsI8(x.data().raw(), aBase, sBase, batch, K);
-            census(3, false);
-            var out = [q8Banded(w0, batch, K, aBase, sBase, sp),
-                       q8Banded(w1, batch, K, aBase, sBase, sp)];
-            census(3, false);
-            if (w2 != null) {
-                out.push(q8Banded(w2, batch, K, aBase, sBase, sp));
-                census(3, false);
-            }
+            var out = [rowwiseBand(w0, batch, K, aBase, sBase, sp),
+                       rowwiseBand(w1, batch, K, aBase, sBase, sp)];
+            if (w2 != null) out.push(rowwiseBand(w2, batch, K, aBase, sBase, sp));
             if (!pooled) {
                 qs.free();
                 xScales.free();
