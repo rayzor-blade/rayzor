@@ -538,7 +538,10 @@ pub extern "C" fn rayzor_anon_copy(ptr: *mut u8) -> *mut u8 {
 /// Box a raw u64 value as a DynamicValue pointer based on type_id
 fn box_value_as_dynamic(type_id: u32, value: u64) -> *mut u8 {
     match TypeId(type_id) {
-        t if t == TYPE_INT => crate::type_system::haxe_box_int_ptr(value as i64),
+        t if t == TYPE_INT => {
+            crate::type_system::BOX_INT_VIA_ANON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::type_system::haxe_box_int_ptr(value as i64)
+        }
         t if t == TYPE_FLOAT => crate::type_system::haxe_box_float_ptr(f64::from_bits(value)),
         t if t == TYPE_BOOL => crate::type_system::haxe_box_bool_ptr(value != 0),
         t if t == TYPE_STRING => {

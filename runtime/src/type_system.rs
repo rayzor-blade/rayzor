@@ -2353,9 +2353,104 @@ pub extern "C" fn haxe_std_random(max: i64) -> i64 {
 // Pointer-based boxing/unboxing wrappers for MIR (simpler ABI)
 // ============================================================================
 
+// ---- TEMPORARY box-leak trace (RAYZOR_BOX_TRACE=1) ----------------------
+// `haxe_box_int_ptr` leaks by construction (`Box::into_raw`, no matching
+// free). A serve was measured making ~3.08M calls from pool worker threads,
+// yet the call appears in NEITHER the LLVM module nor any dumped CLIF
+// function — so we cannot tell statically who calls it. These counters
+// answer it dynamically: if the per-wrapper counters stay ~0 while
+// `calls` runs into millions, the JIT calls the helper directly.
+pub static BOX_INT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BOX_INT_VIA_ARRAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BOX_INT_VIA_ANON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BOX_INT_VIA_THREAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn box_trace_enabled() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *E.get_or_init(|| std::env::var("RAYZOR_BOX_TRACE").as_deref() == Ok("1"))
+}
+
+/// Interval between `[box-trace]` lines (default 250k calls).
+fn box_trace_interval() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("RAYZOR_BOX_TRACE_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(250_000)
+    })
+}
+
+/// Value-shape buckets. What gets boxed tells us WHO boxes it without needing
+/// a (frame-pointer-less) JIT backtrace: source line/col constants land in
+/// SMALL, data in MID, heap/JIT addresses in PTR.
+pub static BOX_V_ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static BOX_V_SMALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // 1..=1023
+pub static BOX_V_MID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // 1024..=0xFFFFFF
+pub static BOX_V_PTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // >= 0x1_0000_0000
+pub static BOX_V_NEG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn box_trace_tick(value: i64) {
+    if !box_trace_enabled() {
+        return;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    match value {
+        v if v < 0 => &BOX_V_NEG,
+        0 => &BOX_V_ZERO,
+        1..=1023 => &BOX_V_SMALL,
+        1024..=0xFF_FFFF => &BOX_V_MID,
+        _ => &BOX_V_PTR,
+    }
+    .fetch_add(1, Relaxed);
+
+    let n = BOX_INT_CALLS.fetch_add(1, Relaxed);
+    if !n.is_multiple_of(box_trace_interval()) {
+        return;
+    }
+    eprintln!(
+        "[box-trace] calls={} value={} (0x{:x})  zero={} small={} mid={} ptr={} neg={}  \
+         via_array={} via_anon={} via_thread={} thread={:?}",
+        n,
+        value,
+        value,
+        BOX_V_ZERO.load(Relaxed),
+        BOX_V_SMALL.load(Relaxed),
+        BOX_V_MID.load(Relaxed),
+        BOX_V_PTR.load(Relaxed),
+        BOX_V_NEG.load(Relaxed),
+        BOX_INT_VIA_ARRAY.load(Relaxed),
+        BOX_INT_VIA_ANON.load(Relaxed),
+        BOX_INT_VIA_THREAD.load(Relaxed),
+        std::thread::current().id(),
+    );
+    // Caller IPs. JIT frames won't symbolicate, but the ADDRESS is what we
+    // need — it resolves against the JIT symbol map, and a repeated address
+    // pins the single hot call site.
+    let mut depth = 0;
+    backtrace::trace(|frame| {
+        let ip = frame.ip();
+        let mut named = false;
+        backtrace::resolve_frame(frame, |sym| {
+            if let Some(name) = sym.name() {
+                eprintln!("[box-trace]    #{depth} {name}");
+                named = true;
+            }
+        });
+        if !named {
+            eprintln!("[box-trace]    #{depth} ip={ip:p} (unsymbolicated / JIT)");
+        }
+        depth += 1;
+        depth < 8
+    });
+}
+
 /// Box an Int as Dynamic (returns opaque pointer to DynamicValue)
 #[no_mangle]
 pub extern "C" fn haxe_box_int_ptr(value: i64) -> *mut u8 {
+    box_trace_tick(value);
     let dynamic = haxe_box_int(value);
     let boxed = Box::new(dynamic);
     Box::into_raw(boxed) as *mut u8
