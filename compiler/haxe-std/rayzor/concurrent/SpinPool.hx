@@ -173,6 +173,11 @@ class SpinPool {
         var pendC = pending();
         var gapC = gapEwmaUs();
         var spins = 0;
+        // Wall-clock at the start of the current tight-spin window. The tight
+        // spin is bounded by WALL-TIME (below), not an iteration count, so it
+        // holds a core for the same real duration on any machine regardless of
+        // iters/us calibration (M1 ~107/us vs the x86 NUC).
+        var tightStart:Float = 0.0;
         // relaxHint is resolved on the first dispatch; workers spawned before
         // it re-read on each idle entry via the field is too costly, so read
         // it once per idle transition below.
@@ -192,16 +197,41 @@ class SpinPool {
                 // PAUSE/YIELD each idle spin when enabled (x86 thermal; see
                 // relaxHint). Gated: the hint's call cost regresses M-series.
                 if (rlx == 1) Thread.cpuRelax();
-                if (spins <= spinBudget) continue;
+                // Tight-spin bound is WALL-TIME, sized from the pool's own
+                // measured EWMA dispatch gap — so it covers roughly one
+                // inter-dispatch gap of pure spin (avoiding a park/unpark per
+                // matmul) and NO MORE, on any machine, adapting to both the
+                // hardware and the workload's cadence. The old fixed 200k-iter
+                // budget held a P-core ~1.9ms on M1 and collapsed under a
+                // co-runner (the whole point of `Load is adaptive`). spinBudget
+                // survives only as an iteration backstop. Time is sampled every
+                // 256 iters to amortise the syscall (as the yield-hold does).
+                if (spins == 1) tightStart = Sys.time();
+                var tightDone = spins > spinBudget;
+                if (!tightDone && (spins & 255) == 0) {
+                    // Clamp via TERNARY into a FRESH local, never
+                    // `if (c) v = <const>`: a conditional reassign of a local
+                    // to a constant BOXES that constant (haxe_box_int_ptr, 48
+                    // bytes, never freed). In this spin loop that leaked ~5M
+                    // boxes (~240MB) per request — measured with
+                    // RAYZOR_BOX_TRACE=1, which reported value=500 on
+                    // essentially every call. See
+                    // bugs_float_conditional_reassign_boxes (Int variant).
+                    var gap:Int = gapC.load();
+                    var tightUs:Int = (gap < 20) ? 20 : ((gap > 500) ? 500 : gap);
+                    if ((Sys.time() - tightStart) * 1e6 > tightUs) tightDone = true;
+                }
+                if (!tightDone) continue;
                 // Idle beyond the tight-spin window: HOLD by yielding —
                 // the worker stays runnable (no OS wake latency on the
                 // next dispatch) but cedes its core to any thread with
                 // real work (no starvation, degrades gracefully under
                 // thermal throttling). Park only once we have been idle
                 // well past the pool's own measured dispatch cadence.
-                var holdUs:Int = gapC.load() * 4;
-                if (holdUs < 200) holdUs = 200;
-                if (holdUs > 20000) holdUs = 20000;
+                // Ternary clamp into a fresh local — `if (c) v = <const>` boxes
+                // the constant (see the tight-spin clamp above).
+                var rawHold:Int = gapC.load() * 4;
+                var holdUs:Int = (rawHold < 200) ? 200 : ((rawHold > 20000) ? 20000 : rawHold);
                 var idleStart = Sys.time();
                 var parked = false;
                 var holdSpins = 0;
