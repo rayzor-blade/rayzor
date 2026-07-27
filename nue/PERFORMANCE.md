@@ -88,11 +88,24 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
    97.7–123.5 (±12%) within one arm on identical config. It tracks the Haxe
    pool, on any model.
 
-   This is no longer just a throughput lever — it is the **dominant source of
-   uncertainty in every parity claim**. An arm that swings ±20% can manufacture
-   or hide a result, and it did both in one day: the same INT8 config read
-   −18.9% in the morning and −4.6% in the evening. Suspect pool scheduling /
-   work distribution. Fix this before trusting any further kernel A/B.
+   This is the **dominant source of uncertainty in every parity claim**: the
+   same INT8 config read −18.9% in the morning and −4.6% in the evening.
+
+   **But it is probably NOT a pool defect — it is CO-RUNNER CONTENTION, and the
+   measuring session was causing much of it.** The box during those runs carried
+   load average ~4.7 with WindowServer 28%, VS Code 26%, Chrome 25% — while the
+   default `throughput` pool profile claims EVERY P-core and spins. That is the
+   exact regime `cooperative`/`latency` (n−1 workers) exist for: leaving one
+   P-core free stops a co-runner or the OS preempting a spinning worker.
+   Corroboration: the same bench run by the user on a quieter machine gives
+   **stddev 0.90 across 3 runs** and a best-yet **126.20 tok/s** on Q6_K, versus
+   ±12% swings here.
+
+   **Benchmark hygiene must therefore include `uptime` / top-CPU, not just
+   "no lingering rayzor processes".** Numbers taken under GUI load are not
+   comparable to numbers taken on a quiet box, and the all-P-core spin makes
+   this framework unusually sensitive to it. Before treating variance as a code
+   defect, re-measure quiet.
 3. **Prefill is 1.9× slower than Rust** (0.077s vs 0.041s per 150-token run).
    Small on short prompts (~5% of wall), dominant on long ones — i.e. the server
    workload.
