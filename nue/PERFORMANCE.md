@@ -331,6 +331,15 @@ wasted 18 min at ~5 s of CPU and blew swap from 11.5 to 21.5 GB.
   became −2.3% once interleaved. Alternate ON/OFF/ON/OFF, take medians, and
   **report whether the ranges overlap**. A non-overlapping gap is the only claim
   worth making.
+- **Generate at least ~600 tokens (the runners use 808).** A short generation is
+  PREFILL-DOMINATED, so the reported tok/s measures time-to-first-token more
+  than throughput and any prefill difference is amplified out of proportion.
+  Measured on Mistral-7B: at 60 tokens the CPU-vs-graph gap read **3.7x**
+  end-to-end; the same arms at 808 tokens converge toward the steady decode
+  rate, because the graph only changes PREFILL and decode is identical in both.
+  Quote `step_p50_ms` (steady decode) alongside the aggregate tok/s so the two
+  cannot be confused.
+
 - **Verify the kernel actually ran.** `NUE_DUMP_Q4_GATES=1` must print a
   per-scheme census line (`INT8 haxe=N ffi=0`). `total ffi=0` alone is a false
   positive — it also prints when nothing was counted.
