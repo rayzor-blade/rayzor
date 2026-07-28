@@ -1749,6 +1749,17 @@ impl<'a> TastToHirContext<'a> {
                             None
                         });
                 if let Some(literal) = inline_literal {
+                    if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        let fname = self
+                            .symbol_table
+                            .get_symbol(*field_symbol)
+                            .and_then(|sy| self.string_interner.get(sy.name))
+                            .unwrap_or("<?>");
+                        eprintln!(
+                            "[globals] STATIC-READ {} -> INLINED as {:?}",
+                            fname, literal
+                        );
+                    }
                     return HirExpr {
                         kind: HirExprKind::Literal(literal),
                         ty: expr.expr_type,
@@ -1797,6 +1808,22 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
 
+                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                    let fname = self
+                        .symbol_table
+                        .get_symbol(*field_symbol)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                        .unwrap_or("<?>");
+                    eprintln!(
+                        "[globals] STATIC-READ {} -> {}",
+                        fname,
+                        if inlined_value.is_some() {
+                            "INLINED from current_file initializer"
+                        } else {
+                            "fallthrough to Variable"
+                        }
+                    );
+                }
                 if let Some(hir_kind) = inlined_value {
                     hir_kind
                 } else {

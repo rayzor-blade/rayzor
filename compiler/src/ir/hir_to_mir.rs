@@ -128,6 +128,17 @@ pub struct HirToMirContext<'a> {
     /// Used for static class fields and module-level variables
     global_symbol_map: BTreeMap<SymbolId, IrGlobalId>,
 
+    /// Qualified name -> global id for globals defined in ALREADY-LOWERED
+    /// modules. Modules are lowered separately and each starts with an empty
+    /// globals table, so a static declared in an import is invisible to the
+    /// module that reads it — the read fell through to bare-name/suffix scans
+    /// over the local table, missed, and silently yielded ""/0.
+    ///
+    /// Safe to hold ids: imports are renumbered into disjoint ranges
+    /// (`old_id + import_base`) BEFORE the reading module is lowered, and
+    /// backends key global storage by raw id, so these are final.
+    external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
+
     /// External function map from previously compiled modules (e.g., stdlib)
     /// These are functions defined in other modules that can be called from this module
     external_function_map: BTreeMap<SymbolId, crate::ir::IrFunctionId>,
@@ -779,6 +790,7 @@ impl<'a> HirToMirContext<'a> {
             let_target_type_hint: None,
             function_map: BTreeMap::new(),
             global_symbol_map: BTreeMap::new(),
+            external_globals: BTreeMap::new(),
             external_function_map: BTreeMap::new(),
             external_function_name_map: BTreeMap::new(),
             block_map: BTreeMap::new(),
@@ -9084,6 +9096,17 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Literal(lit) => self.lower_literal(lit, expr.ty),
 
             HirExprKind::Variable { symbol, .. } => {
+                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                    if let Some(n) = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                    {
+                        if n.starts_with("PLAIN") {
+                            eprintln!("[globals] VAR-ARM entry: {}", n);
+                        }
+                    }
+                }
                 // Check if this is a class/enum used as a value (e.g., Type.getClassName(Animal))
                 // Must be before function reference check since class symbols may also map to constructors
                 if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
@@ -9351,12 +9374,45 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        if let Some(n) = self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .and_then(|sy| self.string_interner.get(sy.name))
+                        {
+                            if n.starts_with("PLAIN") {
+                                eprintln!("[globals] VAR-ARM reached global check: {}", n);
+                            }
+                        }
+                    }
                     // Check if this is a global variable (static class field, module-level var)
                     if let Some(&global_id) = self.global_symbol_map.get(symbol) {
                         debug!(
                             "[GLOBAL ACCESS] Found global {:?} -> {:?}",
                             symbol, global_id
                         );
+                        // Which global id does this READ target? Compare against the
+                        // id the owning module's __init__ STORES to: if they differ,
+                        // the read and the initialiser are talking about different
+                        // slots and the value will come back empty/zero.
+                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                            let nm = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .and_then(|sy| self.string_interner.get(sy.name))
+                                .unwrap_or("<?>");
+                            let gname = self
+                                .builder
+                                .module
+                                .globals
+                                .get(&global_id)
+                                .map(|g| g.name.clone())
+                                .unwrap_or_else(|| "<not-in-table>".to_string());
+                            eprintln!(
+                                "[globals] READ {} -> @g{} ({})",
+                                nm, global_id.0, gname
+                            );
+                        }
                         // Load the global variable's value
                         // First get the global's type from the module
                         let global_type = self
@@ -9395,10 +9451,43 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(qn) = qual {
                         for global in self.builder.module.globals.values() {
                             if global.name == qn {
+                                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                    eprintln!("[globals] RESOLVED-FQN {} -> @g{}", qn, global.id.0);
+                                }
                                 return self
                                     .builder
                                     .build_load_global(global.id, global.ty.clone());
                             }
+                        }
+                        // Not in THIS module's table — try modules already lowered.
+                        if let Some((gid, gty)) = self.external_globals.get(qn).cloned() {
+                            // Type comes from the DEFINING module: this module's
+                            // table does not contain the global, so looking it up
+                            // locally yields IrType::Any and a String loaded as an
+                            // untyped slot prints as "<unknown type N>" and then
+                            // segfaults.
+                            if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                eprintln!(
+                                    "[globals] RESOLVED-EXTERNAL {} -> @g{} : {:?}",
+                                    qn, gid.0, gty
+                                );
+                            }
+                            return self.builder.build_load_global(gid, gty);
+                        }
+                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                            let have: Vec<String> = self
+                                .builder
+                                .module
+                                .globals
+                                .values()
+                                .map(|g| format!("@g{}={}", g.id.0, g.name))
+                                .collect();
+                            eprintln!(
+                                "[globals] FQN-MISS qualified={:?} — table has {} entry(ies): {:?}",
+                                qn,
+                                have.len(),
+                                have
+                            );
                         }
                     }
                     // Try name-based global lookup as fallback (SymbolIds may differ)
@@ -9407,6 +9496,12 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
                                 if let Some(gname) = self.string_interner.get(gsym_info.name) {
                                     if gname == name_str {
+                                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                            eprintln!(
+                                                "[globals] RESOLVED-BARENAME {} -> @g{}",
+                                                name_str, gid.0
+                                            );
+                                        }
                                         let global_type = self
                                             .builder
                                             .module
@@ -9429,10 +9524,8 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                                     eprintln!(
-                                        "[globals] '{}' resolved by SUFFIX match to '{}' \
-                                         — no qualified name was available, so this is \
-                                         a guess across classes.",
-                                        name_str, global.name
+                                        "[globals] RESOLVED-SUFFIX {} -> @g{} ({})",
+                                        name_str, global.id.0, global.name
                                     );
                                 }
                                 return self
@@ -41555,6 +41648,37 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn generate_module_init_function(&mut self) {
+        // RAYZOR_GLOBALS_DEBUG: dump this module's globals table (id, name) and
+        // which of them this __init__ will initialise. Two entries with the SAME
+        // qualified name mean a static was duplicated across the import merge —
+        // one copy gets initialised, the other is what reads resolve to, and the
+        // read yields "" or 0 while a runtime write to it works fine.
+        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+            let mut names: Vec<(u32, String)> = self
+                .builder
+                .module
+                .globals
+                .values()
+                .map(|g| (g.id.0, g.name.clone()))
+                .collect();
+            names.sort();
+            eprintln!("[globals] module has {} global(s):", names.len());
+            for (id, name) in &names {
+                eprintln!("[globals]   @g{} {}", id, name);
+            }
+            let dyn_syms: Vec<String> = self
+                .dynamic_globals
+                .iter()
+                .map(|(sym, _)| {
+                    self.symbol_table
+                        .get_symbol(*sym)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                        .unwrap_or("<?>")
+                        .to_string()
+                })
+                .collect();
+            eprintln!("[globals] __init__ will initialise: {:?}", dyn_syms);
+        }
         // Generate __init__ function that materializes globals into backend storage.
         // This function is called once at module load time and before repeated benchmark
         // runs so statics behave like standard Haxe and do not retain stale values.
@@ -41585,9 +41709,18 @@ impl<'a> HirToMirContext<'a> {
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
-        // Materialize every global into runtime/backend storage. Some backends load globals
-        // via an out-of-line store rather than the object-file data segment, so constant
-        // initializers must still be explicitly written here.
+        // Materialize this module's globals into runtime/backend storage. Some
+        // backends load globals via an out-of-line store rather than the
+        // object-file data segment, so constant initializers must still be
+        // explicitly written here.
+        //
+        // NOTE: resetting the WHOLE table (not just this module's globals) was
+        // suspected as the cause of cross-module statics reading empty, on the
+        // theory that a later module's __init__ zeroes a global it does not own.
+        // TESTED AND INSUFFICIENT — scoping the reset to
+        // `global_symbol_map.values()` did not fix the repro, so the write is
+        // being lost elsewhere. Left as-is deliberately rather than shipping an
+        // unverified behaviour change.
         let globals_to_reset: Vec<(IrGlobalId, IrType, IrValue)> = self
             .builder
             .module
@@ -41810,6 +41943,7 @@ pub fn lower_hir_to_mir_with_function_map(
     symbol_table: &SymbolTable,
     external_functions: BTreeMap<SymbolId, IrFunctionId>,
     external_functions_by_name: BTreeMap<String, IrFunctionId>,
+    external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
     stdlib_mapping: StdlibMapping,
     external_field_index_map: BTreeMap<SymbolId, (TypeId, u32)>,
     external_property_access_map: BTreeMap<SymbolId, crate::tast::PropertyAccessInfo>,
@@ -41845,6 +41979,7 @@ pub fn lower_hir_to_mir_with_function_map(
     // Set the external function maps (by SymbolId and by qualified name)
     context.external_function_map = external_functions;
     context.external_function_name_map = external_functions_by_name;
+    context.external_globals = external_globals;
 
     // Seed field_index_map and property_access_map from previously compiled imports
     context.field_index_map = external_field_index_map;
