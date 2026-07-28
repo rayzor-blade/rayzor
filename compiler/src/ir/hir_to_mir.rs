@@ -6414,7 +6414,61 @@ impl<'a> HirToMirContext<'a> {
     /// Returns (class_name, method_name, runtime_function_name) if this is a stdlib method
     /// If `param_count` is provided, it's used to disambiguate overloaded methods
     /// If `receiver_class_hint` is provided, it's used to disambiguate when multiple classes have the same method
+    /// Resolve a stdlib method to its runtime mapping, REJECTING a mapping whose
+    /// arity does not match the call.
+    ///
+    /// `get_stdlib_runtime_info_inner` tries arity-matched lookups first and then
+    /// falls back to ~15 name-only ones that ignore arity entirely. When a name
+    /// matches but no arity does, the caller went on to declare the extern with
+    /// the CALL SITE's arity while binding it to a native symbol of a different
+    /// one — LLVM rejects the module ("Incorrect number of arguments"), the tier
+    /// silently falls back, and the enclosing function emits nothing. That is how
+    /// `Sys.command(cmd, args)` and `File.read(path, true)` became programs that
+    /// run and print nothing, with no diagnostic anywhere.
+    ///
+    /// Both are genuine declaration/runtime mismatches: `Sys.command` maps to
+    /// `haxe_sys_command` with `params: 1` while `Sys.hx` declares
+    /// `(cmd, ?args)` — the runtime simply does not implement `?args`.
+    ///
+    /// Default is LOUD, not fatal, because 15 fallbacks is a lot of surface to
+    /// flip blind; `RAYZOR_STRICT_STDLIB_ARITY=1` makes it reject instead, which
+    /// is the intended end state (see feedback: not-found must FAIL, never widen).
     fn get_stdlib_runtime_info(
+        &self,
+        method_symbol: SymbolId,
+        receiver_type: TypeId,
+        param_count: Option<usize>,
+        receiver_class_hint: Option<&str>,
+    ) -> Option<(
+        &'static str,
+        &'static str,
+        &crate::stdlib::RuntimeFunctionCall,
+    )> {
+        let found = self.get_stdlib_runtime_info_inner(
+            method_symbol,
+            receiver_type,
+            param_count,
+            receiver_class_hint,
+        )?;
+        if let Some(want) = param_count {
+            let got = found.2.param_count;
+            if got != want {
+                eprintln!(
+                    "[stdlib-arity] {}.{} called with {} arg(s) but runtime mapping '{}' takes {} \
+                     — the call would be emitted against a mismatched native signature. \
+                     Either the .hx declaration promises parameters the runtime does not \
+                     implement, or the mapping's `params:` is wrong.",
+                    found.0, found.1, want, found.2.runtime_name, got
+                );
+                if std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some() {
+                    return None;
+                }
+            }
+        }
+        Some(found)
+    }
+
+    fn get_stdlib_runtime_info_inner(
         &self,
         method_symbol: SymbolId,
         receiver_type: TypeId,
