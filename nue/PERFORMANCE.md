@@ -106,6 +106,27 @@ Int variant of the same defect as `bugs_float_conditional_reassign_boxes`.
 3. **Prefill is 1.9× slower than Rust** (0.077s vs 0.041s per 150-token run).
    Small on short prompts (~5% of wall), dominant on long ones — i.e. the server
    workload.
+5. **The BPE tokenizer is O(n^2) — it is the long-context wall, not the model.**
+   `encodeBPE` rescans every adjacent pair to find the best merge and then
+   REBUILDS the whole `pieces` array, once per merge: O(n) x O(n) merges, plus
+   an allocation per iteration. Measured (Qwen Q6_K, `tokenize_s`):
+
+   | prompt tokens | tokenize_s | vs previous |
+   |---|---|---|
+   | 347 | 0.282 | — |
+   | 706 (2.03x) | 1.197 | **4.24x** |
+   | 1402 (2.00x) | 4.866 | **4.07x** |
+   | 2865 (2.04x) | 19.816 | **4.07x** |
+
+   Doubling the prompt quadruples tokenisation. Extrapolated: ~160 s at 8k and
+   **~43 MINUTES at Mistral's full 32k context**, before a single weight is
+   touched. On the 2628-token Llama-1B run it was already 20.0 s against 52.4 s
+   of prefill — 28% of time-to-first-token.
+
+   Fix is standard and self-contained: track pair ranks in a heap and merge
+   in place over a linked list instead of rescanning + rebuilding. Pure Haxe,
+   no FFI, no numerics change.
+
 4. **Sampler costs 1.26 ms/token (12-13% of wall)**, identical in both arms and
    independent of quant scheme — a pure-Haxe win available regardless of matmul
    work (151,936-vocab logits + repetition penalty + no-repeat-8gram).
