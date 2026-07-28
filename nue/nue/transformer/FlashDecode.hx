@@ -26,11 +26,16 @@ class FlashDecode {
     static var _shiftedQ:Int = 0;
     static var _pool:Int = 0;
 
-    /** RAYZOR_HAXE_FLASH gates the pure-Haxe decode-attention path. */
+    /** The pure-Haxe decode-attention path. DEFAULT ON; `NUE_FLASH=0` opts out.
+
+        Must agree with `LlamaArch`'s reading of the same variable — that one
+        decides whether the cache is BUILT as guest-owned Q8, this one decides
+        whether the kernel is USED. Two gates on one variable with opposite
+        defaults would build a Q8 cache nothing reads. */
     public static function enabled():Bool {
         if (_enabled == 0) {
             var v = Sys.getEnvOr("NUE_FLASH", "RAYZOR_HAXE_FLASH");
-            _enabled = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+            _enabled = (v != null && (v == "0" || v == "false")) ? 2 : 1;
         }
         return _enabled == 1;
     }

@@ -79,8 +79,13 @@ class LlamaArch implements ArchBuilder {
         // Read here (in a method, threaded through ctor) rather than
         // inside KVCache.new so the per-layer construction is free of
         // env-lookup overhead and the build chain stays self-contained.
+        // DEFAULT ON (opt out with `NUE_KV_Q8=0`). Every shipped runner set it,
+        // so leaving it opt-in meant a plain `rayzor run` carried an F32 KV
+        // cache: measured on Mistral-7B, KV_Q8+FLASH is worth -1.02 GB RSS
+        // (5.54 -> 4.52) on top of the Haxe matmul, with BIT-IDENTICAL output
+        // across a 60-token Qwen generation.
         var kvQ8Env = Sys.getEnvOr("NUE_KV_Q8", "RAYZOR_KV_Q8");
-        var useKvQ8 = (kvQ8Env != null && kvQ8Env != "0" && kvQ8Env != "");
+        var useKvQ8 = !(kvQ8Env != null && (kvQ8Env == "0" || kvQ8Env == "false"));
         // Guest-owned Q8 cache + pure-Haxe flash decode (see FlashDecode).
         // Read here, alongside RAYZOR_KV_Q8, and threaded through as an
         // explicit parameter: this build path is a proven-safe env-read
@@ -94,8 +99,10 @@ class LlamaArch implements ArchBuilder {
         // subsystems at once and no Haxe-vs-Rust matmul number was ever a
         // matmul comparison. `NUE_MATMUL` selects the kernel; `NUE_FLASH` and
         // `NUE_KV_Q8` select attention. One flag, one variable.
+        // Flash decode is also DEFAULT ON (opt out with `NUE_FLASH=0`) — it is
+        // the pure-Haxe attention path, which is the shipping direction.
         var useHaxeQ8 = useKvQ8
-            && (flashEnv != null && flashEnv != "0" && flashEnv != "" && flashEnv != "false");
+            && !(flashEnv != null && (flashEnv == "0" || flashEnv == "false"));
 
         // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
         // routes lookups through `QTensor.gatherRowsQ6K`, dequantising only
