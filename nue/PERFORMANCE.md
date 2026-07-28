@@ -205,6 +205,35 @@ Do NOT read decode tok/s from that A/B (80.98 vs 64.80): the prefill graph runs
 PREFILL only, `ttft` was 0.0910 vs 0.0928 (identical), and decode is the same
 pure-CPU path in both arms. The gap is machine noise.
 
+### The graph's value is dominated by BUCKET FIT, not by compression
+
+Artifacts are FIXED-shape, so a prompt is padded up to the next bucket and the
+graph computes the full bucket. Attention is O(S^2), so the padding is not a
+linear tax. Llama-1B, `NUE_PREFILL=on` vs `off`, 3 pairs each:
+
+| prompt | bucket | graph on | graph off | verdict |
+|---|---|---|---|---|
+| 115 tok | s128 (11% pad) | **0.0945** | 1.7157 | **18.2x FASTER** |
+| 193 tok | s512 (62% pad) | 2.650 | 1.966 | ~35% slower |
+
+**18x when it fits; a liability when it does not.** 128 rows cost 0.0945 s while
+512 rows cost 2.65 s — 4x the rows for ~28x the time. So bucket COVERAGE is the
+policy that matters, and it is a placement decision (NueGraph Stage 4), not a
+compression one. A first-run outlier (7.78 s) is one-time artifact init — do not
+include it in a median.
+
+This is also what makes a 7B artifact worth building despite the cost: Mistral's
+prefill is **76% of wall** (12.54 s of 16.52 s), so an 18x on the aligned case is
+transformative — far larger than any kernel win measured in this document.
+
+**BLOCKED on disk, not RAM.** Authoring needs ~14.5 GB for the fp16 intermediate
+plus ~5.4 GB for the 6-bit copy (~20 GB), on a volume at 97-100% capacity
+(856 GB of 926 GB used). Authoring RSS was only 2.36 GB and climbing steadily,
+so memory was never the constraint. The fix that removes the requirement is to
+bake palettized weights DIRECTLY (emit `constexpr_lut_to_dense`, computing the
+LUT/indices at author time) so the fp16 intermediate never exists: ~5.4 GB
+instead of ~20 GB.
+
 **The failure shape is the reusable lesson: per-layer k/v stayed at ~0.99 in
 BOTH configs while the final hidden collapsed**, because error compounds through
 16 residual-stream layers. Judging palettization on per-layer cosines alone
