@@ -5016,6 +5016,43 @@ impl<'a> AstLowering<'a> {
         let modifier_info = self.lower_modifiers(&field.modifiers)?;
         let visibility = self.lower_access(&field.access);
 
+        // QUALIFY STATIC FIELD SYMBOLS. A static's symbol carried
+        // `qualified_name = None`, so every cross-module lookup downstream had
+        // nothing to match on: `global_symbol_map` is per-module and misses an
+        // imported static, the FQN match cannot run, and resolution degrades to
+        // bare-name and suffix scans over the LOCAL globals table — which also
+        // miss, leaving the read unresolved and silently yielding ""/0.
+        // (`Consts.PLAIN_STR` read from another module printed empty.)
+        //
+        // Use `Class.field`, matching exactly how the global is named when it is
+        // created (`format!("{}.{}", class_name, field_name)` in hir_to_mir), so
+        // the qualified match lines up with the globals table rather than
+        // needing another loosening step.
+        if modifier_info.is_static {
+            if let Some(&class_symbol) = self.context.class_context_stack.last() {
+                let class_name = self
+                    .context
+                    .symbol_table
+                    .get_symbol(class_symbol)
+                    .and_then(|c| self.context.string_interner.get(c.name))
+                    .map(|s| s.to_string());
+                let field_name_str = self
+                    .context
+                    .string_interner
+                    .get(interned_field_name)
+                    .map(|s| s.to_string());
+                if let (Some(cn), Some(fname)) = (class_name, field_name_str) {
+                    let qn = format!("{}.{}", cn, fname);
+                    let qn_interned = self.context.string_interner.intern(&qn);
+                    if let Some(sym) = self.context.symbol_table.get_symbol_mut(field_symbol) {
+                        if sym.qualified_name.is_none() {
+                            sym.qualified_name = Some(qn_interned);
+                        }
+                    }
+                }
+            }
+        }
+
         // Extract @:default(value) metadata for @:derive(Default)
         let metadata_default = field
             .meta
