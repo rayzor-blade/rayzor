@@ -28,10 +28,27 @@ census-verified `total ffi=0 (PURE HAXE)`. Last measured 2026-07-27.
 
 | Model | pure Haxe | Rust kernel | verdict |
 |---|---|---|---|
-| **Q6_K** (k-quant + Q8_0) | **125.69** | 106.30 | **Haxe wins +18.2%** (quiet machine, n=5 vs 2) |
+| **Q6_K** (k-quant + Q8_0) | **135.63** | 106.30 | **best recorded** — darmie's bench, 2026-07-28 |
+| Q6_K (previous) | 125.69 | 106.30 | Haxe +18.2% (quiet machine, n=5 vs 2) |
 | **Q5_0 → INT8** | 113.82 | 119.37 | **Haxe −4.6%** (non-overlapping) — narrowing |
 
 Parity is **met and beaten for k-quant/Q8_0**; INT8 is **within 5%** and closing.
+
+**Q6_K reached 135.63 median on 2026-07-28** (`req_tps` 135.7/135.1/136.1 and
+134.9/141.4/134.8 across two steady subprocesses; a third read 117.46 with
+`ready=7.09s` — a cold first subprocess whose own three requests climb
+110.1 -> 116.5 -> 126.9, so the reported `stddev=8.90 / drift=19.51` is entirely
+that cold run). Candidate contributors, NOT attributed: the SpinPool adaptive
+tight-spin floor fix (which targeted exactly this low tail) and the O(n log n)
+tokenizer (per-request overhead; `ready` fell 7.09 -> 5.82 s).
+
+**Caveat on same-day re-checks.** An interleaved Haxe-vs-Rust A/B run the same
+afternoon gave Haxe 105.00 vs Rust 96.70 (+8.6%, n=9 each, ranges OVERLAPPING) —
+same direction, weaker separation, and absolute numbers ~25% below the figures
+above. That box had been benchmarking all day with the volume at 97-100% and
+swap peaking at 21.5 GB. **Machine state moves the absolute number more than any
+kernel change measured in this document**; only compare arms measured in the
+same interleaved window, and prefer a quiet box for headline figures.
 
 **Caveat on the INT8 number.** It read −18.9% (94.53 vs 116.52) earlier the same
 day. The code change between the two readings (widening row-wise fusion to Q8_0
