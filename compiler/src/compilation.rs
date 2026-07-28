@@ -7603,14 +7603,22 @@ impl CompilationUnit {
                     // Loud rather than fatal by default; RAYZOR_STRICT_STDLIB_ARITY=1
                     // rejects the binding instead (the intended end state).
                     let declared = method.parameters.len();
-                    if declared != call.param_count {
+                    // OFF by default: the six known stdlib mismatches would print
+                    // on every compile, which is noise until they are fixed (and
+                    // buries any NEW mismatch in it). RAYZOR_STDLIB_ARITY_WARN=1
+                    // lists them; RAYZOR_STRICT_STDLIB_ARITY=1 still rejects the
+                    // binding regardless of the warning setting.
+                    let warn_arity = std::env::var_os("RAYZOR_STDLIB_ARITY_WARN").is_some();
+                    if declared != call.param_count && warn_arity {
                         eprintln!(
                             "[stdlib-arity] {}.{} declares {} parameter(s) but runtime mapping '{}' takes {} — a call supplying the extra argument(s) will be emitted against a mismatched native signature and silently produce nothing. Either implement the parameter in the runtime or narrow the .hx declaration.",
                             bare_name, method_name, declared, call.runtime_name, call.param_count
                         );
-                        if std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some() {
-                            continue;
-                        }
+                    }
+                    if declared != call.param_count
+                        && std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some()
+                    {
+                        continue;
                     }
                     // Record the mapping under the Haxe-qualified name so the
                     // WASM backend stub redirect still finds a canonical symbol.

@@ -5018,16 +5018,8 @@ impl<'a> AstLowering<'a> {
 
         // QUALIFY STATIC FIELD SYMBOLS. A static's symbol carried
         // `qualified_name = None`, so every cross-module lookup downstream had
-        // nothing to match on: `global_symbol_map` is per-module and misses an
-        // imported static, the FQN match cannot run, and resolution degrades to
-        // bare-name and suffix scans over the LOCAL globals table — which also
-        // miss, leaving the read unresolved and silently yielding ""/0.
-        // (`Consts.PLAIN_STR` read from another module printed empty.)
-        //
-        // Use `Class.field`, matching exactly how the global is named when it is
-        // created (`format!("{}.{}", class_name, field_name)` in hir_to_mir), so
-        // the qualified match lines up with the globals table rather than
-        // needing another loosening step.
+        // nothing to match on. Use `Class.field`, matching exactly how the
+        // global is named where it is created in hir_to_mir.
         if modifier_info.is_static {
             if let Some(&class_symbol) = self.context.class_context_stack.last() {
                 let class_name = self

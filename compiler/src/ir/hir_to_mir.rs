@@ -6464,7 +6464,7 @@ impl<'a> HirToMirContext<'a> {
         )?;
         if let Some(want) = param_count {
             let got = found.2.param_count;
-            if got != want {
+            if got != want && std::env::var_os("RAYZOR_STDLIB_ARITY_WARN").is_some() {
                 eprintln!(
                     "[stdlib-arity] {}.{} called with {} arg(s) but runtime mapping '{}' takes {} \
                      — the call would be emitted against a mismatched native signature. \
@@ -6472,9 +6472,9 @@ impl<'a> HirToMirContext<'a> {
                      implement, or the mapping's `params:` is wrong.",
                     found.0, found.1, want, found.2.runtime_name, got
                 );
-                if std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some() {
-                    return None;
-                }
+            }
+            if got != want && std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some() {
+                return None;
             }
         }
         Some(found)
