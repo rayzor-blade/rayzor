@@ -366,12 +366,10 @@ impl InliningPass {
                             // Type-erased param (I64) paired with a concrete caller arg type
                             if sig_param.ty == IrType::I64 && i < call_site.args.len() {
                                 if let Some(arg_ty) =
-                                    caller_func.register_types.get(&call_site.args[i])
+                                    concrete_arg_type(caller_func, call_site.args[i])
                                 {
-                                    if !matches!(arg_ty, IrType::I64 | IrType::TypeVar(_)) {
-                                        sub_map.insert(type_param.name.clone(), arg_ty.clone());
-                                        break;
-                                    }
+                                    sub_map.insert(type_param.name.clone(), arg_ty);
+                                    break;
                                 }
                             }
                         }
@@ -886,6 +884,39 @@ fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &BTreeMap<Str
 }
 
 /// Map IrType to runtime type tag for Reflect.compare_typed.
+/// Concrete type of a call argument, seeing through the erasure a generic
+/// call performs on it.
+///
+/// Passing to a type-erased `I64` parameter emits `BitCast %f64 -> i64` at the
+/// call site, so the register type alone reports `I64` and the callee's
+/// type-tag fixup is left at its 0 placeholder — `Std.string(x:T)` with T=Float
+/// then renders the f64 bits as an integer. The bitcast source still carries
+/// the real type. Returns `None` when the type is genuinely erased.
+fn concrete_arg_type(caller: &IrFunction, reg: IrId) -> Option<IrType> {
+    let erased = |t: &IrType| matches!(t, IrType::I64 | IrType::TypeVar(_));
+
+    if let Some(ty) = caller.register_types.get(&reg) {
+        if !erased(ty) {
+            return Some(ty.clone());
+        }
+    }
+
+    caller.cfg.blocks.values().find_map(|block| {
+        block.instructions.iter().find_map(|inst| {
+            let src = match inst {
+                IrInstruction::BitCast { dest, src, .. } if *dest == reg => *src,
+                IrInstruction::Cast { dest, src, .. } if *dest == reg => *src,
+                _ => return None,
+            };
+            caller
+                .register_types
+                .get(&src)
+                .filter(|t| !erased(t))
+                .cloned()
+        })
+    })
+}
+
 fn ir_type_to_type_tag(ty: &IrType) -> i32 {
     match ty {
         IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1,
