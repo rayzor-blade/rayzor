@@ -158,6 +158,55 @@ class BPETokenizer implements Tokenizer {
         return ids;
     }
 
+    /** Min-heap over (rank, leftSlot) in three parallel Int arrays.
+
+        INSTANCE methods with the comparison INLINED, deliberately. Hand-rolled
+        because `Array.sort`'s comparator form has an open codegen defect, and
+        instance rather than static because a static->static call inside this
+        import-compiled module trips the x-module static-resolution cluster
+        (the class traps at runtime rather than failing to compile). Instance
+        dispatch is what every other method here already uses. */
+    private function heapPush(hr:Array<Int>, hi:Array<Int>, hj:Array<Int>,
+                              r:Int, i:Int, j:Int):Void {
+        hr.push(r);
+        hi.push(i);
+        hj.push(j);
+        var c = hr.length - 1;
+        while (c > 0) {
+            var par = (c - 1) >> 1;
+            var less = (hr[c] != hr[par]) ? (hr[c] < hr[par]) : (hi[c] < hi[par]);
+            if (!less) break;
+            var tr = hr[par]; hr[par] = hr[c]; hr[c] = tr;
+            var ti = hi[par]; hi[par] = hi[c]; hi[c] = ti;
+            var tj = hj[par]; hj[par] = hj[c]; hj[c] = tj;
+            c = par;
+        }
+    }
+
+    private function heapPop(hr:Array<Int>, hi:Array<Int>, hj:Array<Int>):Void {
+        var last = hr.length - 1;
+        hr[0] = hr[last]; hi[0] = hi[last]; hj[0] = hj[last];
+        hr.pop(); hi.pop(); hj.pop();
+        var sz = hr.length;
+        var par = 0;
+        while (2 * par + 1 < sz) {
+            var l = 2 * par + 1;
+            var rr = l + 1;
+            var m = par;
+            var lessL = (hr[l] != hr[m]) ? (hr[l] < hr[m]) : (hi[l] < hi[m]);
+            m = lessL ? l : m;
+            if (rr < sz) {
+                var lessR = (hr[rr] != hr[m]) ? (hr[rr] < hr[m]) : (hi[rr] < hi[m]);
+                m = lessR ? rr : m;
+            }
+            if (m == par) break;
+            var tr = hr[par]; hr[par] = hr[m]; hr[m] = tr;
+            var ti = hi[par]; hi[par] = hi[m]; hi[m] = ti;
+            var tj = hj[par]; hj[par] = hj[m]; hj[m] = tj;
+            par = m;
+        }
+    }
+
     /** Raw BPE encode of a span — no special-token recognition. */
     private function encodeBPE(text:String):Array<Int> {
         if (text.length == 0) return [];
@@ -169,35 +218,68 @@ class BPETokenizer implements Tokenizer {
             for (i in 0...text.length) pieces.push(text.charAt(i));
         }
 
-        var iterations = 0;
-        var maxIter = pieces.length * 8 + 16;
-        while (iterations < maxIter) {
-            iterations++;
-            var bestRank = -1;
-            var bestIdx = -1;
-            var n = pieces.length - 1;
+        // O(n log n). The previous version rescanned every adjacent pair to
+        // find the best merge and REBUILT `pieces` for each one — O(n) work x
+        // O(n) merges, plus an allocation per merge. Measured 4.07x per
+        // doubling of the prompt: 19.8 s for 2865 tokens, ~43 min extrapolated
+        // to a 32k context, i.e. the tokenizer was the long-context wall.
+        //
+        // Ordering must reproduce the old scan EXACTLY: lowest rank wins, ties
+        // go to the LEFTMOST pair. Slots never move — a merge retires the right
+        // half — so slot index is left-to-right order and (rank, slot) ordering
+        // is the same tie-break.
+        var n = pieces.length;
+        if (n > 1) {
+            var prevIx:Array<Int> = [];
+            var nextIx:Array<Int> = [];
+            var alive:Array<Bool> = [];
             for (i in 0...n) {
-                var rank = rankOf(pieces[i], pieces[i + 1]);
-                if (rank < 0) continue;
-                if (bestRank == -1 || rank < bestRank) {
-                    bestRank = rank;
-                    bestIdx = i;
+                prevIx.push(i - 1);
+                nextIx.push(i + 1 < n ? i + 1 : -1);
+                alive.push(true);
+            }
+            var hr:Array<Int> = [];
+            var hi:Array<Int> = [];
+            var hj:Array<Int> = [];
+            for (i in 0...(n - 1)) {
+                var r0 = rankOf(pieces[i], pieces[i + 1]);
+                if (r0 >= 0) heapPush(hr, hi, hj, r0, i, i + 1);
+            }
+            while (hr.length > 0) {
+                var r = hr[0];
+                var a = hi[0];
+                var b = hj[0];
+                heapPop(hr, hi, hj);
+                // Stale: a half already merged away, no longer adjacent, or one
+                // side's text changed so this rank is no longer what it scores.
+                if (!alive[a] || !alive[b]) continue;
+                if (nextIx[a] != b) continue;
+                if (rankOf(pieces[a], pieces[b]) != r) continue;
+                pieces[a] = merges[r].merged;
+                alive[b] = false;
+                var bn = nextIx[b];
+                nextIx[a] = bn;
+                if (bn >= 0) prevIx[bn] = a;
+                // `a` changed, so both pairs touching it are new candidates.
+                var ap = prevIx[a];
+                if (ap >= 0) {
+                    var rl = rankOf(pieces[ap], pieces[a]);
+                    if (rl >= 0) heapPush(hr, hi, hj, rl, ap, a);
+                }
+                if (bn >= 0) {
+                    var rt = rankOf(pieces[a], pieces[bn]);
+                    if (rt >= 0) heapPush(hr, hi, hj, rt, a, bn);
                 }
             }
-            if (bestIdx == -1) break;
-            var merged = merges[bestRank].merged;
-            var next:Array<String> = [];
-            var k = 0;
-            while (k < pieces.length) {
-                if (k == bestIdx) {
-                    next.push(merged);
-                    k += 2;
-                } else {
-                    next.push(pieces[k]);
-                    k++;
-                }
+            // Walk surviving slots in order. Slot 0 never dies: a merge always
+            // retires the RIGHT half, whose slot index is the larger one.
+            var out:Array<String> = [];
+            var cur = 0;
+            while (cur >= 0) {
+                out.push(pieces[cur]);
+                cur = nextIx[cur];
             }
-            pieces = next;
+            pieces = out;
         }
 
         var ids:Array<Int> = [];
