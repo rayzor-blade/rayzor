@@ -273,7 +273,36 @@ themselves** — every `MLModel(...)` load leaves a copy of the compiled model i
 sweeps loaded 1.8 GB models hundreds of times (474 bundles). Clearing only the
 session's own entries returned the volume to 320 GB free / 64%.
 
-**So authoring a 7B artifact is feasible and should be retried.** Baking
+**RETRIED AND MEASURED (2026-07-28) — the graph LOSES at 7B.** Authored the
+fp16 s128 bucket for Mistral-7B (13 GB, ~11 min, coherence `hidden=0.999847`
+BETTER than the 1B's 0.999141), palettized it to 6-bit grouped (4.88 GB, ratio
+0.375 — matching the 1B's 0.376, ~2 h at 4.9->31.5 s/op as the wide FFN tensors
+land), compiled and installed both.
+
+| 7B arm | gen tok/s | prefill | load | wall | end-to-end tok/s | RSS |
+|---|---|---|---|---|---|---|
+| 6-bit graph | 1.07 | 45.64 s | 115.9 s | 176.6 s | **0.34** | 4.49 GB |
+| fp16 graph | — | 48.86 / 48.68 s | 238 / 118 s | — | — | — |
+| **CPU prefill** | **1.84** | **16.69 s** | **10.9 s** | **47.7 s** | **1.26** | **4.20 GB** |
+
+**CPU wins on every axis — 3.7x end-to-end, and less memory.** Discounting load
+entirely (fair for a server) CPU prefill is still 2.7x faster. There is no
+regime at 7B where the graph pays.
+
+**Palettization is NOT the cause: fp16 measured marginally WORSE than 6-bit**
+(48.7 vs 44.3 s), so 6-bit is a mild win on both size and speed. The graph
+itself does not scale — 18.2x FASTER at 1B, ~3-4x SLOWER at 7B.
+
+**Revised conclusion: the CoreML prefill graph is a SMALL-MODEL lever (<=1-2B).**
+Bucket policy still matters, but only for models where the graph wins at all.
+Direct-palettized authoring is no longer worth building for 7B — it would make
+a losing artifact cheaper to produce.
+
+(Superseded prediction, kept deliberately: this section previously argued a 7B
+artifact "should be retried" because Mistral's prefill is 76% of wall and an
+aligned 18x would be transformative. The 18x did not survive the scale-up.)
+
+**Original note, now historical:** Baking
 palettized weights directly (`constexpr_lut_to_dense`, LUT computed at author
 time) is still the better design — ~5.4 GB instead of ~20 GB, and no fp16
 intermediate — but it is now an optimisation, not a prerequisite.
