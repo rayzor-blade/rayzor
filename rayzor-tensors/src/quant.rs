@@ -1683,6 +1683,29 @@ fn amx_prefill_min_batch() -> usize {
     })
 }
 
+/// Budget for the leaked f16 weight cache, in bytes. `RZT_AMX_CACHE_MB` overrides.
+///
+/// BNNS/AMX consumes f16 only, so every routed weight leaves a permanent f16
+/// copy here — a SECOND, fatter copy of the model on top of the quantised one.
+/// That is affordable at 1B (~1.6 GB observed) and fatal at 7B: measured 11 GB
+/// of f16 for 192 routed weights, which pushed a 16 GB box into swap and made
+/// prefill SLOWER (18.9 s vs 13.8 s with AMX off). Unbounded growth keyed only
+/// on batch size cannot express "do the copies fit", so cap the cache; past the
+/// cap `cached_f16_weight` returns null and the caller falls back to the
+/// portable path, which is what it already does on any other cache miss.
+fn amx_cache_budget_bytes() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("RZT_AMX_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(3 * 1024 * 1024 * 1024)
+    })
+}
+
+static AMX_CACHE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// f16 dequant of a Q4 weight, cached by QTensor pointer and reused across
 /// prefills. Weights are fixed, so Q4 -> f32 (staging) -> f16 is a one-time
 /// cost; f16 halves the resident copy vs an F32 cache (~1.65 GB vs 3.3 GB for
@@ -1699,6 +1722,20 @@ fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
     let map = g.get_or_insert_with(HashMap::new);
     if let Some(&p) = map.get(&qt_w) {
         return p as *const u16;
+    }
+    // Refuse BEFORE dequantising: the f32 staging copy alone is 2x this.
+    let want = len * 2;
+    let used = AMX_CACHE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+    if used + want > amx_cache_budget_bytes() {
+        if std::env::var_os("RZT_AMX_DEBUG").is_some() {
+            eprintln!(
+                "[amx-dequant] BUDGET REFUSE qt={qt_w:#x} want={:.1}MB used={:.1}MB cap={:.1}MB",
+                want as f64 / 1048576.0,
+                used as f64 / 1048576.0,
+                amx_cache_budget_bytes() as f64 / 1048576.0
+            );
+        }
+        return std::ptr::null();
     }
     let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
     let t0 = if dbg {
@@ -1730,6 +1767,7 @@ fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
         );
     }
     map.insert(qt_w, p as usize); // never freed (leaked): one f16 copy per weight
+    AMX_CACHE_BYTES.fetch_add(len * 2, std::sync::atomic::Ordering::Relaxed);
     p
 }
 
