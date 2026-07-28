@@ -43,12 +43,12 @@ toml = "0.8"   # Workspace manifest parsing
 # `[patch.crates-io]` block in the rayzor workspace root. The
 # 0.133 declaration here just lines the resolver up with the patched
 # source — the actual code comes from the git checkout.
-cranelift = { version = "0.134", features = ["jit", "module", "native"] }
-cranelift-module = "0.134"
-cranelift-jit = "0.134"
-cranelift-codegen = "0.134"
-cranelift-frontend = "0.134"
-cranelift-native = "0.134"
+cranelift = { version = "0.135", features = ["jit", "module", "native"] }
+cranelift-module = "0.135"
+cranelift-jit = "0.135"
+cranelift-codegen = "0.135"
+cranelift-frontend = "0.135"
+cranelift-native = "0.135"
 target-lexicon = "0.12"
 
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
@@ -61,8 +61,8 @@ wit-component = "0.245"  # WASI P2 Component wrapping (core module → component
 # shares the patched cranelift and the Cranelift JIT compiles in. With
 # the old crates.io 43.0.2 (cranelift 0.130) the 0.133 patch made
 # wasmtime-cranelift unresolvable → Pulley interpreter → ~50x slowdown.
-wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19", optional = true }
-wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "5937fbcd7b6bb349fc5b9c1971acef6f0f234d19", package = "wasmtime-wasi", optional = true }
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", optional = true }
+wasi-common = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144", package = "wasmtime-wasi", optional = true }
 
 # wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
 rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }
