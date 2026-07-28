@@ -8899,6 +8899,26 @@ impl<'a> HirToMirContext<'a> {
             "haxe_type_typeof" | "Type.typeof" => {
                 Some(self.lower_type_typeof_call(args, result_type))
             }
+            // `Std.string(x)` is "convert x to String using the best known
+            // type", which is what `convert_to_string_with_hint` does — String
+            // is the identity, a type parameter dispatches on its fixed-up tag,
+            // and only a genuinely Dynamic value reaches haxe_std_string_ptr.
+            // The mapping alone can't decide this: its PtrVoid param descriptor
+            // is shared with raw-HaxeString callees like haxe_string_println,
+            // so the argument can't simply be boxed at the coercion site.
+            "haxe_std_string_ptr" => {
+                // ValueType enum values keep their own routing at the call site.
+                if args.len() != 1 || self.expr_is_value_type_expr(&args[0]) {
+                    return None;
+                }
+                let reg = self.lower_expression(&args[0])?;
+                let reg_ty = self
+                    .builder
+                    .get_register_type(reg)
+                    .unwrap_or(IrType::Ptr(Box::new(IrType::Void)));
+                let arg_ty = self.resolve_expr_type_id(&args[0]);
+                Some(self.convert_to_string_with_hint(reg, &reg_ty, Some(arg_ty)))
+            }
             // Reflect.isFunction / Reflect.isObject need boxed DynamicValue* args
             // to inspect the type_id tag. Raw function/class pointers lack this tag,
             // so we must box via box_value_for_dynamic (same as Type.typeof).
@@ -9408,10 +9428,7 @@ impl<'a> HirToMirContext<'a> {
                                 .get(&global_id)
                                 .map(|g| g.name.clone())
                                 .unwrap_or_else(|| "<not-in-table>".to_string());
-                            eprintln!(
-                                "[globals] READ {} -> @g{} ({})",
-                                nm, global_id.0, gname
-                            );
+                            eprintln!("[globals] READ {} -> @g{} ({})", nm, global_id.0, gname);
                         }
                         // Load the global variable's value
                         // First get the global's type from the module
@@ -27100,6 +27117,11 @@ impl<'a> HirToMirContext<'a> {
             // Function types also pass through: most callees (Thread.spawn, array.map)
             // expect raw closure pointers, not boxed DynamicValue. Reflection APIs that
             // need boxed functions (Reflect.isFunction) handle boxing at their call sites.
+            //
+            // String stays raw: PtrVoid is declared both by DynamicValue
+            // consumers (haxe_std_string_ptr) and by raw-HaxeString ones
+            // (haxe_string_println), so the expected IrType cannot decide this.
+            // Dynamic consumers that need a boxed String box at their own site.
             IrType::Function { .. } | IrType::Ptr(_) | IrType::String | IrType::Any => Some(value),
             // Other types - pass through without boxing (may cause issues, but let's see)
             _ => {
