@@ -128,6 +128,17 @@ pub struct HirToMirContext<'a> {
     /// Used for static class fields and module-level variables
     global_symbol_map: BTreeMap<SymbolId, IrGlobalId>,
 
+    /// Qualified name -> global id for globals defined in ALREADY-LOWERED
+    /// modules. Modules are lowered separately and each starts with an empty
+    /// globals table, so a static declared in an import is invisible to the
+    /// module that reads it — the read fell through to bare-name/suffix scans
+    /// over the local table, missed, and silently yielded ""/0.
+    ///
+    /// Safe to hold ids: imports are renumbered into disjoint ranges
+    /// (`old_id + import_base`) BEFORE the reading module is lowered, and
+    /// backends key global storage by raw id, so these are final.
+    external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
+
     /// External function map from previously compiled modules (e.g., stdlib)
     /// These are functions defined in other modules that can be called from this module
     external_function_map: BTreeMap<SymbolId, crate::ir::IrFunctionId>,
@@ -779,6 +790,7 @@ impl<'a> HirToMirContext<'a> {
             let_target_type_hint: None,
             function_map: BTreeMap::new(),
             global_symbol_map: BTreeMap::new(),
+            external_globals: BTreeMap::new(),
             external_function_map: BTreeMap::new(),
             external_function_name_map: BTreeMap::new(),
             block_map: BTreeMap::new(),
@@ -9446,6 +9458,21 @@ impl<'a> HirToMirContext<'a> {
                                     .builder
                                     .build_load_global(global.id, global.ty.clone());
                             }
+                        }
+                        // Not in THIS module's table — try modules already lowered.
+                        if let Some((gid, gty)) = self.external_globals.get(qn).cloned() {
+                            // Type comes from the DEFINING module: this module's
+                            // table does not contain the global, so looking it up
+                            // locally yields IrType::Any and a String loaded as an
+                            // untyped slot prints as "<unknown type N>" and then
+                            // segfaults.
+                            if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                eprintln!(
+                                    "[globals] RESOLVED-EXTERNAL {} -> @g{} : {:?}",
+                                    qn, gid.0, gty
+                                );
+                            }
+                            return self.builder.build_load_global(gid, gty);
                         }
                         if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                             let have: Vec<String> = self
@@ -41916,6 +41943,7 @@ pub fn lower_hir_to_mir_with_function_map(
     symbol_table: &SymbolTable,
     external_functions: BTreeMap<SymbolId, IrFunctionId>,
     external_functions_by_name: BTreeMap<String, IrFunctionId>,
+    external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
     stdlib_mapping: StdlibMapping,
     external_field_index_map: BTreeMap<SymbolId, (TypeId, u32)>,
     external_property_access_map: BTreeMap<SymbolId, crate::tast::PropertyAccessInfo>,
@@ -41951,6 +41979,7 @@ pub fn lower_hir_to_mir_with_function_map(
     // Set the external function maps (by SymbolId and by qualified name)
     context.external_function_map = external_functions;
     context.external_function_name_map = external_functions_by_name;
+    context.external_globals = external_globals;
 
     // Seed field_index_map and property_access_map from previously compiled imports
     context.field_index_map = external_field_index_map;

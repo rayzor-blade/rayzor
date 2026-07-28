@@ -5634,6 +5634,19 @@ impl CompilationUnit {
         let external_constructor_keys: std::collections::BTreeSet<String> =
             self.import_constructor_name_map.keys().cloned().collect();
 
+        // Globals from modules already lowered, keyed by qualified name. Their
+        // ids are final: imports are renumbered into disjoint ranges before this
+        // module is lowered.
+        let mut external_globals: BTreeMap<String, (crate::ir::IrGlobalId, crate::ir::IrType)> =
+            BTreeMap::new();
+        for import_mir in &self.import_mir_modules {
+            for g in import_mir.globals.values() {
+                external_globals
+                    .entry(g.name.clone())
+                    .or_insert((g.id, g.ty.clone()));
+            }
+        }
+
         let mir_result = lower_hir_to_mir_with_function_map(
             &hir_module,
             &self.string_interner,
@@ -5641,6 +5654,7 @@ impl CompilationUnit {
             &self.symbol_table,
             external_functions,
             external_functions_by_name,
+            external_globals,
             stdlib_mapping,
             self.import_field_index_map.clone(),
             self.import_property_access_map.clone(),
