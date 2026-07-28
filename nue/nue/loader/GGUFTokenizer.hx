@@ -92,12 +92,36 @@ class GGUFTokenizer {
         }
 
         var tok = new BPETokenizer(vocab, merges, byteLevel);
+        // SPM GGUFs ship scores and NO merges — the BPE loop has nothing to
+        // merge and would emit near-character-level tokens.
+        tok.spm = (modelType == "llama");
+        // SPM GGUFs (Llama-1/2, Mistral) ship scores and NO merges: the BPE
+        // merge loop would have nothing to merge and emit near-character-level
+        // tokens. Route them through the score-based unigram path instead.
 
         // Register the standard special-token IDs when present. The
         // string keys here mirror what Llama-3 / Mistral chat templates
         // emit so callers can look them up by familiar name.
         registerSpecial(tok, reader, "tokenizer.ggml.bos_token_id", "<|begin_of_text|>");
         registerSpecial(tok, reader, "tokenizer.ggml.eos_token_id", "<|end_of_text|>");
+        // ALSO register them under the name the vocab actually uses (`<s>`,
+        // `</s>` for sentencepiece). Registering only the Llama-3 aliases
+        // erased the evidence template selection keys on, so a Mistral model
+        // reported specialId("</s>") == -1 and got Llama-3 markup.
+        // Inlined deliberately: as a separate `static` helper calling
+        // vocab/reader methods across modules this trapped at runtime with no
+        // diagnostic (exit 133), the same shape as the documented
+        // "a static's body must not call another module's member" trap.
+        if (reader.findMeta("tokenizer.ggml.bos_token_id") != null) {
+            var bosId = reader.metaInt("tokenizer.ggml.bos_token_id");
+            var bosName = vocab.tokenAt(bosId);
+            if (bosName != "") tok.addSpecial(bosName, bosId);
+        }
+        if (reader.findMeta("tokenizer.ggml.eos_token_id") != null) {
+            var eosId = reader.metaInt("tokenizer.ggml.eos_token_id");
+            var eosName = vocab.tokenAt(eosId);
+            if (eosName != "") tok.addSpecial(eosName, eosId);
+        }
         registerSpecial(tok, reader, "tokenizer.ggml.padding_token_id", "<|pad|>");
         registerSpecial(tok, reader, "tokenizer.ggml.unknown_token_id", "<|unk|>");
 

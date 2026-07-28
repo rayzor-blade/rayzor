@@ -52,6 +52,11 @@ class BPETokenizer implements Tokenizer {
     /** Byte-level tokenizers map raw bytes through a printable alias
         table — required for GPT-2/Llama 3 style vocabs. */
     public var byteLevel:Bool;
+    /** SentencePiece (unigram) mode — Llama-1/2, Mistral. Set by GGUFTokenizer
+        when `tokenizer.ggml.model == "llama"`. Those GGUFs ship `scores` and NO
+        `merges`, so the BPE merge loop has nothing to merge and would emit
+        near-character-level tokens. */
+    public var spm:Bool = false;
     /** Lazily-built byte→Unicode reverse map, cached per instance. Built
         once (vs the per-call rebuild `byteDecode` did) so streaming decode
         is O(1)/token. Instance field — NOT `static var` — to dodge the JIT
@@ -207,9 +212,180 @@ class BPETokenizer implements Tokenizer {
         }
     }
 
+    /** U+2581 word mark, built from UTF-8 bytes — no `\u` escape appears
+        anywhere else in this tree and the lexer does not accept one. */
+    private function wordMark():String {
+        var b = haxe.io.Bytes.alloc(3);
+        b.set(0, 0xE2);
+        b.set(1, 0x96);
+        b.set(2, 0x81);
+        return b.toString();
+    }
+
+    /** Sentinel: this pair is not a vocab entry. */
+    private function spmNoMerge():Int {
+        return 0x7FFFFFFF;
+    }
+
+    /** Split into UTF-8 CHARACTERS — a multi-byte codepoint must stay one
+        symbol or merges would straddle it. */
+    private function utf8Chars(text:String):Array<String> {
+        var out:Array<String> = [];
+        var i = 0;
+        var n = text.length;
+        while (i < n) {
+            var c = text.charCodeAt(i);
+            var len = (c >= 0xF0) ? 4 : ((c >= 0xE0) ? 3 : ((c >= 0xC0) ? 2 : 1));
+            if (i + len > n) len = 1;
+            out.push(text.substr(i, len));
+            i += len;
+        }
+        return out;
+    }
+
+    /** Merge key: negated, scaled vocab score so the shared MIN-heap pops the
+        HIGHEST-scoring merge first. Uses `scoreOf`, NOT `vocab.scores[id]` — a
+        cross-module field read. */
+    private function spmKey(left:String, right:String):Int {
+        var id = vocab.lookup(left + right);
+        if (id < 0) return spmNoMerge();
+        return Std.int(-vocab.scoreOf(id) * 1000.0);
+    }
+
+    private function byteToken(b:Int):String {
+        var hex = "0123456789ABCDEF";
+        return "<0x" + hex.charAt((b >> 4) & 15) + hex.charAt(b & 15) + ">";
+    }
+
+    private function hexVal(c:Int):Int {
+        if (c >= 48 && c <= 57) return c - 48;
+        if (c >= 65 && c <= 70) return c - 55;
+        if (c >= 97 && c <= 102) return c - 87;
+        return -1;
+    }
+
+    /** SPM piece text -> raw bytes: U+2581 becomes a space, `<0xNN>` becomes
+        that byte. Byte-fallback tokens can split a codepoint across tokens, so
+        callers must still carry an incomplete tail. */
+    private function spmDecodeToBytes(sp:String):haxe.io.Bytes {
+        var out:Array<Int> = [];
+        var i = 0;
+        var n = sp.length;
+        while (i < n) {
+            var c = sp.charCodeAt(i);
+            if (c == 60 && i + 5 < n && sp.charCodeAt(i + 1) == 48
+                && (sp.charCodeAt(i + 2) | 32) == 120 && sp.charCodeAt(i + 5) == 62) {
+                var hi = hexVal(sp.charCodeAt(i + 3));
+                var lo = hexVal(sp.charCodeAt(i + 4));
+                if (hi >= 0 && lo >= 0) {
+                    out.push((hi << 4) | lo);
+                    i += 6;
+                    continue;
+                }
+            }
+            if (c == 0xE2 && i + 2 < n && sp.charCodeAt(i + 1) == 0x96
+                && sp.charCodeAt(i + 2) == 0x81) {
+                out.push(32);
+                i += 3;
+                continue;
+            }
+            out.push(c);
+            i++;
+        }
+        var b = haxe.io.Bytes.alloc(out.length);
+        for (k in 0...out.length) b.set(k, out[k]);
+        return b;
+    }
+
+    /** SentencePiece encode. Same machinery as `encodeBPE` — heap over candidate
+        pairs, in-place linked list — but a candidate is "left+right exists in the
+        vocab" and the order is by vocab SCORE, highest first. Ties go leftmost in
+        both. Unknown symbols fall back to per-byte `<0xNN>` tokens. */
+    private function encodeSPM(text:String):Array<Int> {
+        if (text.length == 0) return [];
+        // Space-escaped with a leading word mark, built byte-wise.
+        var esc:Array<Int> = [0xE2, 0x96, 0x81];
+        for (i in 0...text.length) {
+            var c = text.charCodeAt(i);
+            if (c == 32) {
+                esc.push(0xE2);
+                esc.push(0x96);
+                esc.push(0x81);
+            } else {
+                esc.push(c);
+            }
+        }
+        var mb = haxe.io.Bytes.alloc(esc.length);
+        for (i in 0...esc.length) mb.set(i, esc[i]);
+        var pieces = utf8Chars(mb.toString());
+        var n = pieces.length;
+        if (n > 1) {
+            var prevIx:Array<Int> = [];
+            var nextIx:Array<Int> = [];
+            var alive:Array<Bool> = [];
+            for (i in 0...n) {
+                prevIx.push(i - 1);
+                nextIx.push(i + 1 < n ? i + 1 : -1);
+                alive.push(true);
+            }
+            var hr:Array<Int> = [];
+            var hi:Array<Int> = [];
+            var hj:Array<Int> = [];
+            for (i in 0...(n - 1)) {
+                var k0 = spmKey(pieces[i], pieces[i + 1]);
+                if (k0 != spmNoMerge()) heapPush(hr, hi, hj, k0, i, i + 1);
+            }
+            while (hr.length > 0) {
+                var k = hr[0];
+                var a = hi[0];
+                var b = hj[0];
+                heapPop(hr, hi, hj);
+                if (!alive[a] || !alive[b]) continue;
+                if (nextIx[a] != b) continue;
+                if (spmKey(pieces[a], pieces[b]) != k) continue;
+                pieces[a] = pieces[a] + pieces[b];
+                alive[b] = false;
+                var bn = nextIx[b];
+                nextIx[a] = bn;
+                if (bn >= 0) prevIx[bn] = a;
+                var ap = prevIx[a];
+                if (ap >= 0) {
+                    var kl = spmKey(pieces[ap], pieces[a]);
+                    if (kl != spmNoMerge()) heapPush(hr, hi, hj, kl, ap, a);
+                }
+                if (bn >= 0) {
+                    var kt = spmKey(pieces[a], pieces[bn]);
+                    if (kt != spmNoMerge()) heapPush(hr, hi, hj, kt, a, bn);
+                }
+            }
+            var outp:Array<String> = [];
+            var cur = 0;
+            while (cur >= 0) {
+                outp.push(pieces[cur]);
+                cur = nextIx[cur];
+            }
+            pieces = outp;
+        }
+        var ids:Array<Int> = [];
+        for (j in 0...pieces.length) {
+            var p = pieces[j];
+            var id = vocab.lookup(p);
+            if (id >= 0) {
+                ids.push(id);
+                continue;
+            }
+            for (b in 0...p.length) {
+                var bid = vocab.lookup(byteToken(p.charCodeAt(b)));
+                if (bid >= 0) ids.push(bid);
+            }
+        }
+        return ids;
+    }
+
     /** Raw BPE encode of a span — no special-token recognition. */
     private function encodeBPE(text:String):Array<Int> {
         if (text.length == 0) return [];
+        if (spm) return encodeSPM(text);
         var pieces:Array<String>;
         if (byteLevel) {
             pieces = byteEncodePieces(text);
@@ -342,6 +518,7 @@ class BPETokenizer implements Tokenizer {
      * can straddle a token boundary), so callers pass `buf.toString()`.
      */
     public function decodeBuffer(raw:String):String {
+        if (spm) return spmDecodeToBytes(raw).toString();
         return byteLevel ? byteDecodeToBytes(raw, byteDecoderArrayCached()).toString() : raw;
     }
 
@@ -432,7 +609,7 @@ class BPETokenizer implements Tokenizer {
         var piece = (id >= 0 && id < vocab.size()) ? vocab.get(id) : "";
         var pieceBytes = byteLevel
             ? byteDecodeToBytes(piece, byteDecoderArrayCached())
-            : haxe.io.Bytes.ofString(piece);
+            : (spm ? spmDecodeToBytes(piece) : haxe.io.Bytes.ofString(piece));
         var cn = (carry != null) ? carry.length : 0;
         var pbLen = pieceBytes.length;
         // Build `combined = carry ++ pieceBytes` with explicit get/set (NOT
@@ -441,7 +618,7 @@ class BPETokenizer implements Tokenizer {
         var combined = haxe.io.Bytes.alloc(cn + pbLen);
         for (i in 0...cn) combined.set(i, carry.get(i));
         for (i in 0...pbLen) combined.set(cn + i, pieceBytes.get(i));
-        var k = byteLevel ? lastCompleteUtf8(combined) : combined.length;
+        var k = (byteLevel || spm) ? lastCompleteUtf8(combined) : combined.length;
         var delta = (k > 0) ? combined.sub(0, k).toString() : "";
         // Carry the trailing incomplete-codepoint bytes (always <= 3, bounded
         // by lastCompleteUtf8) as an OWNED COPY rather than a `sub` view into
