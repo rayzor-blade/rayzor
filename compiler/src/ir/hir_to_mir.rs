@@ -9084,6 +9084,17 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Literal(lit) => self.lower_literal(lit, expr.ty),
 
             HirExprKind::Variable { symbol, .. } => {
+                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                    if let Some(n) = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                    {
+                        if n.starts_with("PLAIN") {
+                            eprintln!("[globals] VAR-ARM entry: {}", n);
+                        }
+                    }
+                }
                 // Check if this is a class/enum used as a value (e.g., Type.getClassName(Animal))
                 // Must be before function reference check since class symbols may also map to constructors
                 if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
@@ -9351,12 +9362,45 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        if let Some(n) = self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .and_then(|sy| self.string_interner.get(sy.name))
+                        {
+                            if n.starts_with("PLAIN") {
+                                eprintln!("[globals] VAR-ARM reached global check: {}", n);
+                            }
+                        }
+                    }
                     // Check if this is a global variable (static class field, module-level var)
                     if let Some(&global_id) = self.global_symbol_map.get(symbol) {
                         debug!(
                             "[GLOBAL ACCESS] Found global {:?} -> {:?}",
                             symbol, global_id
                         );
+                        // Which global id does this READ target? Compare against the
+                        // id the owning module's __init__ STORES to: if they differ,
+                        // the read and the initialiser are talking about different
+                        // slots and the value will come back empty/zero.
+                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                            let nm = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .and_then(|sy| self.string_interner.get(sy.name))
+                                .unwrap_or("<?>");
+                            let gname = self
+                                .builder
+                                .module
+                                .globals
+                                .get(&global_id)
+                                .map(|g| g.name.clone())
+                                .unwrap_or_else(|| "<not-in-table>".to_string());
+                            eprintln!(
+                                "[globals] READ {} -> @g{} ({})",
+                                nm, global_id.0, gname
+                            );
+                        }
                         // Load the global variable's value
                         // First get the global's type from the module
                         let global_type = self
@@ -9395,10 +9439,28 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(qn) = qual {
                         for global in self.builder.module.globals.values() {
                             if global.name == qn {
+                                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                    eprintln!("[globals] RESOLVED-FQN {} -> @g{}", qn, global.id.0);
+                                }
                                 return self
                                     .builder
                                     .build_load_global(global.id, global.ty.clone());
                             }
+                        }
+                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                            let have: Vec<String> = self
+                                .builder
+                                .module
+                                .globals
+                                .values()
+                                .map(|g| format!("@g{}={}", g.id.0, g.name))
+                                .collect();
+                            eprintln!(
+                                "[globals] FQN-MISS qualified={:?} — table has {} entry(ies): {:?}",
+                                qn,
+                                have.len(),
+                                have
+                            );
                         }
                     }
                     // Try name-based global lookup as fallback (SymbolIds may differ)
@@ -9407,6 +9469,12 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
                                 if let Some(gname) = self.string_interner.get(gsym_info.name) {
                                     if gname == name_str {
+                                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                            eprintln!(
+                                                "[globals] RESOLVED-BARENAME {} -> @g{}",
+                                                name_str, gid.0
+                                            );
+                                        }
                                         let global_type = self
                                             .builder
                                             .module
@@ -9429,10 +9497,8 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                                     eprintln!(
-                                        "[globals] '{}' resolved by SUFFIX match to '{}' \
-                                         — no qualified name was available, so this is \
-                                         a guess across classes.",
-                                        name_str, global.name
+                                        "[globals] RESOLVED-SUFFIX {} -> @g{} ({})",
+                                        name_str, global.id.0, global.name
                                     );
                                 }
                                 return self
