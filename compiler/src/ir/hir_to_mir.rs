@@ -41555,6 +41555,37 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn generate_module_init_function(&mut self) {
+        // RAYZOR_GLOBALS_DEBUG: dump this module's globals table (id, name) and
+        // which of them this __init__ will initialise. Two entries with the SAME
+        // qualified name mean a static was duplicated across the import merge —
+        // one copy gets initialised, the other is what reads resolve to, and the
+        // read yields "" or 0 while a runtime write to it works fine.
+        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+            let mut names: Vec<(u32, String)> = self
+                .builder
+                .module
+                .globals
+                .values()
+                .map(|g| (g.id.0, g.name.clone()))
+                .collect();
+            names.sort();
+            eprintln!("[globals] module has {} global(s):", names.len());
+            for (id, name) in &names {
+                eprintln!("[globals]   @g{} {}", id, name);
+            }
+            let dyn_syms: Vec<String> = self
+                .dynamic_globals
+                .iter()
+                .map(|(sym, _)| {
+                    self.symbol_table
+                        .get_symbol(*sym)
+                        .and_then(|sy| self.string_interner.get(sy.name))
+                        .unwrap_or("<?>")
+                        .to_string()
+                })
+                .collect();
+            eprintln!("[globals] __init__ will initialise: {:?}", dyn_syms);
+        }
         // Generate __init__ function that materializes globals into backend storage.
         // This function is called once at module load time and before repeated benchmark
         // runs so statics behave like standard Haxe and do not retain stale values.
@@ -41585,9 +41616,18 @@ impl<'a> HirToMirContext<'a> {
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
-        // Materialize every global into runtime/backend storage. Some backends load globals
-        // via an out-of-line store rather than the object-file data segment, so constant
-        // initializers must still be explicitly written here.
+        // Materialize this module's globals into runtime/backend storage. Some
+        // backends load globals via an out-of-line store rather than the
+        // object-file data segment, so constant initializers must still be
+        // explicitly written here.
+        //
+        // NOTE: resetting the WHOLE table (not just this module's globals) was
+        // suspected as the cause of cross-module statics reading empty, on the
+        // theory that a later module's __init__ zeroes a global it does not own.
+        // TESTED AND INSUFFICIENT — scoping the reset to
+        // `global_symbol_map.values()` did not fix the repro, so the write is
+        // being lost elsewhere. Left as-is deliberately rather than shipping an
+        // unverified behaviour change.
         let globals_to_reset: Vec<(IrGlobalId, IrType, IrValue)> = self
             .builder
             .module
