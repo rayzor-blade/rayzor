@@ -9374,6 +9374,33 @@ impl<'a> HirToMirContext<'a> {
                         .symbol_table
                         .get_symbol(*symbol)
                         .and_then(|s| self.string_interner.get(s.name));
+                    // FQN-FIRST. `global_symbol_map` is per-module and never
+                    // seeded from imports, so a static declared in another module
+                    // always misses the exact-SymbolId lookup above and falls into
+                    // the name scans below — which only ever search THIS module's
+                    // globals, miss too, and return None. The caller then yields an
+                    // empty value with no diagnostic: `Consts.PLAIN_STR` from
+                    // another module reads as "".
+                    //
+                    // Imported globals ARE merged into `module.globals` (see the
+                    // renumbering in compilation.rs), and `IrGlobal::name` carries
+                    // the qualified form, so an exact qualified-name match resolves
+                    // them without widening to bare names. See feedback: FQN-first,
+                    // bare-name lookup IS the defect.
+                    let qual = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|sy| sy.qualified_name)
+                        .and_then(|q| self.string_interner.get(q));
+                    if let Some(qn) = qual {
+                        for global in self.builder.module.globals.values() {
+                            if global.name == qn {
+                                return self
+                                    .builder
+                                    .build_load_global(global.id, global.ty.clone());
+                            }
+                        }
+                    }
                     // Try name-based global lookup as fallback (SymbolIds may differ)
                     if let Some(name_str) = sym_name {
                         for (&gsym, &gid) in &self.global_symbol_map {
@@ -9392,21 +9419,45 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
-                        // Also try searching globals by name suffix
+                        // Suffix matching is a LOOSENING step: `.foo` matches any
+                        // class's `foo`. Kept as a bridge over SymbolId drift, but
+                        // announced — if this is what resolved the read, the
+                        // qualified name was unavailable and the result is a guess.
                         for global in self.builder.module.globals.values() {
                             if global.name.ends_with(&format!(".{}", name_str))
                                 || global.name == name_str
                             {
+                                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                    eprintln!(
+                                        "[globals] '{}' resolved by SUFFIX match to '{}' \
+                                         — no qualified name was available, so this is \
+                                         a guess across classes.",
+                                        name_str, global.name
+                                    );
+                                }
                                 return self
                                     .builder
                                     .build_load_global(global.id, global.ty.clone());
                             }
                         }
                     }
-                    debug!(
-                        "[UNRESOLVED_VAR] Could not resolve variable {:?} (name={:?})",
-                        symbol, sym_name
-                    );
+                    // TOTAL MISS. Previously a `debug!` (off by default) and a
+                    // silent None, which the caller turns into an empty value —
+                    // the read succeeds and yields "" or 0. Say so: a cross-module
+                    // static that resolves to nothing is a defect, not a default.
+                    // Gated: this also fires for benign stdlib internals (`i64`,
+                    // `base`, ...) that are resolved by other means downstream, so
+                    // always-on would bury the real cases in noise. It is the tool
+                    // to reach for when a cross-module read yields "" or 0.
+                    if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        eprintln!(
+                            "[globals] unresolved variable {:?} (name={:?}, qualified={:?}) \
+                             — this read will produce an empty/zero value. If it names a \
+                             static in another module, that module's globals were not \
+                             visible here.",
+                            symbol, sym_name, qual
+                        );
+                    }
                     None
                 }
             }
