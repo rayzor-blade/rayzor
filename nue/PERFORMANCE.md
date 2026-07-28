@@ -62,6 +62,39 @@ understood.
 
 ## Landed (measured wins)
 
+### SentencePiece tokenizer — the largest single win measured on Mistral
+
+SPM GGUFs (`tokenizer.ggml.model == "llama"` — Mistral, Llama-2) ship `scores`
+and NO `merges`, so the BPE merge loop had nothing to merge and emitted
+near-character-level tokens, while decode passed the U+2581 word mark and
+`<0xNN>` byte-fallback tokens through raw. Mistral-7B, same prompt:
+
+| | before | after |
+|---|---|---|
+| chat template | llama3 (wrong) | **mistral** |
+| prompt_tokens (27-char prompt) | 120 | **13** |
+| prefill | 13.75-16.69 s | **2.14 s** |
+| decode `step_p50` | ~95 ms | **57.75 ms** |
+| aggregate tok/s (808-token run) | 1.84 | **14.49** |
+| peak `phys_footprint` | 11 GB | **314 MB** |
+
+**~7.9x faster and ~35x less memory**, and the output went from
+`ually_a_person...<0x0A>` to correct English over a 461-token generation.
+
+**Most of that is second-order, which is why it is so large.** 13 tokens instead
+of 120 means a far smaller KV cache to scan every decode step — hence decode
+itself got 1.8x faster, which the tokenizer does not touch — and AMX never
+engages at that prompt length, so no f16 weight cache is built at all. **A
+mis-tokenising model looks like a memory and throughput problem.**
+
+Consequence for earlier entries: every Mistral measurement below this line was
+taken on 120-token prompts that should have been ~13. The prefill-graph verdict
+survives (the graph only changes prefill and its prefill was strictly slower),
+but AMX crossover figures measured on Mistral are suspect — the Qwen ones are
+not, since Qwen is byte-level BPE and unaffected.
+
+
+
 | Lever | Gain | Where |
 |---|---|---|
 | SpinPool const-reassign box leak fix | ~1GB/request → flat RSS | `SpinPool.hx` (e6e67eb7) |
