@@ -313,15 +313,27 @@ impl StdlibMapping {
     /// Array/String/Bytes/StringBuf, …). Used to dispatch a field read
     /// on a Dynamic-typed receiver whose actual class is unknown at
     /// compile time but whose runtime value is one of the stdlib
-    /// reference types. Returns the first matching `(signature,
-    /// runtime call)` — the dispatch then runs against the raw pointer.
+    /// reference types. The dispatch then runs against the raw pointer.
+    ///
+    /// Accepted only when every match names the SAME runtime function: with
+    /// no receiver class, distinct targets are a guess, and running the wrong
+    /// one against a raw pointer reads whatever sits at that offset rather
+    /// than failing. Callers fall through to the class/reflect path, which
+    /// dispatches on the instance's `__type_id` header. Same rule as
+    /// `find_unique_by_method`.
     pub fn find_instance_property_by_name(
         &self,
         method: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings
+        let mut matches = self
+            .mappings
             .iter()
-            .find(|(sig, call)| !sig.is_static && sig.method == method && call.param_count == 0)
+            .filter(|(sig, call)| !sig.is_static && sig.method == method && call.param_count == 0);
+        let first = matches.next()?;
+        if matches.any(|(_, call)| call.runtime_name != first.1.runtime_name) {
+            return None;
+        }
+        Some(first)
     }
 
     /// Check if a method is a stdlib method with runtime mapping
