@@ -4058,6 +4058,17 @@ impl CraneliftBackend {
                     (types::I32, types::I64) => builder.ins().sextend(types::I64, src_val),
                     (types::I64, types::I32) => builder.ins().ireduce(types::I32, src_val),
 
+                    // Remaining integer widths. A generic call erases its
+                    // argument to I64, so Bool arrives here as I8 -> I64 and
+                    // used to install a trap stub. Zero-extend: `true` is
+                    // 0xFF and sign-extending it would read back as -1.
+                    (from, to) if from.is_int() && to.is_int() && to.bits() > from.bits() => {
+                        builder.ins().uextend(to, src_val)
+                    }
+                    (from, to) if from.is_int() && to.is_int() && to.bits() < from.bits() => {
+                        builder.ins().ireduce(to, src_val)
+                    }
+
                     // Same type - just copy
                     (from, to) if from == to => src_val,
 
