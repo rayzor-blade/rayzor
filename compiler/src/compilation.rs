@@ -7570,6 +7570,34 @@ impl CompilationUnit {
                     .or_else(|| builtin_mapping.find_by_name(&class_dot_name, &method_name))
                     .or_else(|| builtin_mapping.find_by_name(bare_name, &method_name));
                 if let Some((_sig, call)) = builtin_match {
+                    // DECLARATION vs RUNTIME arity. The lookup above is three
+                    // name-only attempts with no arity awareness, so a method
+                    // whose .hx signature promises more parameters than the
+                    // runtime implements still binds here — and every later call
+                    // inherits that binding. A call passing the extra argument is
+                    // then emitted against a native symbol of a different arity:
+                    // LLVM rejects the module ("Incorrect number of arguments"),
+                    // the tier falls back, and the enclosing function silently
+                    // emits NOTHING. No compile error, no runtime message.
+                    //
+                    // Known live cases: `Sys.command(cmd, ?args)` maps to
+                    // `haxe_sys_command` (params: 1 — `?args` is unimplemented),
+                    // and `File.read(path, binary = true)` maps to
+                    // `file_read_default` (params: 1). Both are real gaps between
+                    // the .hx surface and the runtime, not compiler confusion.
+                    //
+                    // Loud rather than fatal by default; RAYZOR_STRICT_STDLIB_ARITY=1
+                    // rejects the binding instead (the intended end state).
+                    let declared = method.parameters.len();
+                    if declared != call.param_count {
+                        eprintln!(
+                            "[stdlib-arity] {}.{} declares {} parameter(s) but runtime mapping '{}' takes {} — a call supplying the extra argument(s) will be emitted against a mismatched native signature and silently produce nothing. Either implement the parameter in the runtime or narrow the .hx declaration.",
+                            bare_name, method_name, declared, call.runtime_name, call.param_count
+                        );
+                        if std::env::var_os("RAYZOR_STRICT_STDLIB_ARITY").is_some() {
+                            continue;
+                        }
+                    }
                     // Record the mapping under the Haxe-qualified name so the
                     // WASM backend stub redirect still finds a canonical symbol.
                     let class_haxe_name = self
