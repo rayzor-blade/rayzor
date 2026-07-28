@@ -1706,6 +1706,21 @@ fn amx_cache_budget_bytes() -> usize {
 
 static AMX_CACHE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Set once the f16 budget refuses a weight: AMX routing is OFF from then on.
+///
+/// Without this the model runs MIXED — some weights served from the f16 cache,
+/// the rest falling back per call — which measured slower end to end than never
+/// routing at all (Mistral-7B prefill 18.95 s mixed vs 13.75 s AMX-off), on top
+/// of a failed lookup per weight per prefill. A refusal means the copies do not
+/// fit THIS model; the honest response is to stop routing, not keep asking.
+static AMX_BUDGET_EXHAUSTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+fn amx_budget_exhausted() -> bool {
+    AMX_BUDGET_EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// f16 dequant of a Q4 weight, cached by QTensor pointer and reused across
 /// prefills. Weights are fixed, so Q4 -> f32 (staging) -> f16 is a one-time
 /// cost; f16 halves the resident copy vs an F32 cache (~1.65 GB vs 3.3 GB for
@@ -1735,6 +1750,7 @@ fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
                 amx_cache_budget_bytes() as f64 / 1048576.0
             );
         }
+        AMX_BUDGET_EXHAUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
         return std::ptr::null();
     }
     let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
@@ -1900,7 +1916,7 @@ pub(crate) unsafe fn amx_matmul_t_f32(
             amx_prefill_min_batch()
         );
     }
-    if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
+    if !amx_prefill_enabled() || amx_budget_exhausted() || m < amx_prefill_min_batch() {
         return false;
     }
     let fw16 = cached_f16_weight_f32(b as usize, n * k);
@@ -1974,6 +1990,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         }
         if qt.scheme == QSCHEME_Q4_K_M
             && amx_prefill_enabled()
+            && !amx_budget_exhausted()
             && batch >= amx_prefill_min_batch()
             && x_is_contiguous(x_tensor)
         {
