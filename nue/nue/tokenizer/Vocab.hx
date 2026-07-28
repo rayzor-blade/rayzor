@@ -56,6 +56,23 @@ class Vocab {
         rather than boxed null — so `get(...) == null` would be
         false for missing keys and miscompare against a real 0 entry
         (see `bugs_stringmap_null_get.md`). */
+    /** Unigram score for `id`, or 0 when absent.
+
+        An ACCESSOR, not a field read: `vocab.scores[id]` from another module
+        goes through the cross-module instance-field path, which this tree has
+        a documented history of resolving to garbage. Method dispatch does not. */
+    public function scoreOf(id:Int):Float {
+        if (id < 0 || id >= scores.length) return 0.0;
+        return scores[id];
+    }
+
+    /** Token text for `id`, or "" when out of range. Same reasoning as
+        `scoreOf` — callers in other modules must not index `tokens` directly. */
+    public function tokenAt(id:Int):String {
+        if (id < 0 || id >= tokens.length) return "";
+        return tokens[id];
+    }
+
     public function lookup(token:String):Int {
         if (!idOf.exists(token)) return -1;
         return idOf.get(token);
