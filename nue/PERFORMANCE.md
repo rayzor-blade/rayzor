@@ -291,18 +291,38 @@ wasted 18 min at ~5 s of CPU and blew swap from 11.5 to 21.5 GB.
 
 ## Gates and defaults
 
-Code defaults. The shipped runners (`run_bundle.sh`, `bench_server.sh`) export
-`NUE_MATMUL=1 NUE_FLASH=1 NUE_KV_Q8=1 NUE_REQUANT_LM_HEAD=1
-NUE_PREFILL_LAST_LOGITS=1` — that is the intended product configuration.
+Code defaults. **A plain `rayzor run` now takes the full pure-Haxe path — no
+env flags required.** The runners still export them for explicitness.
+
+`NUE_MATMUL`, `NUE_FLASH` and `NUE_KV_Q8` were flipped to default-ON on
+2026-07-28. They had been opt-in while every shipped runner set them, so the
+default path silently used the Rust XTQ kernels and an F32 KV cache. Measured
+on Mistral-7B-Q4_K_M with NO flags, before vs after:
+
+| | max RSS | tok/s |
+|---|---|---|
+| before (opt-in) | 7.58 GB | 0.115 |
+| **after (default-on)** | **4.59 GB** | **0.422** |
+
+**-2.99 GB and 3.7x on the path users actually take.** Output is unchanged
+(bit-identical across a 60-token Qwen generation for the FLASH/KV_Q8 flip), and
+the census now reads `haxe_matmul=on(observed)` + `PURE HAXE` with no flags on
+Qwen, Llama and Mistral. Isolated contributions: `NUE_MATMUL` -2.04 GB / 5.2x,
+`NUE_FLASH`+`NUE_KV_Q8` a further -1.02 GB.
+
+**Two gates read `NUE_FLASH`** — `LlamaArch` (build the cache as guest-owned
+Q8) and `FlashDecode.enabled()` (use the kernel). They must be flipped
+together; opposite defaults would build a Q8 cache nothing reads.
 
 | Gate | Default | Effect |
 |---|---|---|
-| `NUE_MATMUL` | off in code, **=1 in every shipped runner** | routes quantised Linear through the pure-Haxe kernels |
+| `NUE_MATMUL` | **on** (`=0` opts out) | routes quantised Linear through the pure-Haxe kernels |
 | `NUE_HAXE_INT8` / `NUE_HAXE_Q8_0` | **on** | per-scheme Haxe band kernels |
 | `NUE_FUSED_ROWWISE` | **on** (all-INT8 triples only) | share one activation quantise across a triple |
 | `NUE_FUSED_DISPATCH` | **on** | band a fused triple's joined row space in ONE pool dispatch |
 | `NUE_FUSED_MATMUL` | **off** — stale default, see below | k-quant row-space fusion (`runBandedFused`) |
-| `NUE_FLASH` / `NUE_FLASH_POOL` | off in code / on | pure-Haxe flash decode; pooled kv-head bands |
+| `NUE_FLASH` / `NUE_KV_Q8` | **on** (`=0` opts out) | pure-Haxe flash decode + guest-owned Q8 KV cache |
+| `NUE_FLASH_POOL` | **on** | pooled kv-head bands |
 | `NUE_POOL_SPINS`, `NUE_MATMUL_WORKERS`, `NUE_POOL_PROFILE` | platform defaults | pool tuning; see note below |
 | `NUE_DECODE_WARM` | **on** | warms both decode entry points at load, so request 1 is not measured pre-tier-promotion |
 | `NUE_AMX_MIN_BATCH` | **128** | measured AMX prefill crossover (see above) |

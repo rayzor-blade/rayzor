@@ -69,10 +69,24 @@ class Linear implements Module {
     // the env.
     static var _haxeMatmul:Int = 0;
 
+    /** DEFAULT ON (opt out with `NUE_MATMUL=0`).
+
+        The pure-Haxe quant kernels are the shipping path — Rayzor is a Haxe
+        runtime, so the Rust XTQ extern is the fallback, not the baseline. It
+        was opt-in for historical reasons and every runner set `NUE_MATMUL=1`,
+        which meant a plain `rayzor run` silently took the Rust path and paid
+        for it. Measured on Mistral-7B-Q4_K_M, no other flags:
+
+            default (was OFF): 7.58 GB RSS, 0.115 tok/s
+            NUE_MATMUL=1     : 5.54 GB RSS, 0.600 tok/s   (-2.04 GB, 5.2x)
+
+        Q6_K parity on Qwen is +18.2% for the Haxe kernels over Rust, so this
+        is not a trade — it is strictly better on both axes. */
     public static function useHaxeMatmul():Bool {
         if (_haxeMatmul == 0) {
             var v = Sys.getEnvOr("NUE_MATMUL", "RAYZOR_HAXE_MATMUL");
-            _haxeMatmul = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+            var off = (v != null && (v == "0" || v == "false"));
+            _haxeMatmul = off ? 2 : 1;
         }
         return _haxeMatmul == 1;
     }
