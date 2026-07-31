@@ -2,6 +2,7 @@ import nue.loader.GGUFLoader;
 import nue.Q4Matmul;
 import nue.tokenizer.BPETokenizer;
 import nue.chat.Conversation;
+import nue.chat.GenerationConfig;
 import nue.arch.LlamaModel;
 import rayzor.concurrent.Arc;
 import rayzor.concurrent.Channel;
@@ -140,10 +141,15 @@ class Main {
         // Build the conversation. The arch-aware chat template, per-arch
         // stop tokens, and sampling config (rep-penalty 1.3, which breaks the
         // 1B "In conclusion…" loops) all live in nue.chat.Conversation now.
-        var chat = Conversation.fromLoaded(llama, tok, meta);
-        chat.config.maxNewTokens = maxNew;
-        chat.config.temperature = temperature;
-        chat.config.repetitionPenalty = repPenalty;
+        // Both bindings are annotated: without them the field writes below
+        // resolve by NAME across every class declaring `maxNewTokens` /
+        // `temperature` / `repetitionPenalty`, which hard-fails E0803 on Linux
+        // while happening to resolve on macOS.
+        var chat:Conversation = Conversation.fromLoaded(llama, tok, meta);
+        var cfg:GenerationConfig = chat.config;
+        cfg.maxNewTokens = maxNew;
+        cfg.temperature = temperature;
+        cfg.repetitionPenalty = repPenalty;
 
         var stops = chat.stopIds();
         trace("[tok]  eos=" + (stops.length > 0 ? stops[0] : -1));
