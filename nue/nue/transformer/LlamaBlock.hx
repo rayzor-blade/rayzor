@@ -74,24 +74,20 @@ class LlamaBlock {
         var hiddenSize = attn.numQHeads * attn.headDim;
         var label:String = this.blockName;
         if (checkShapes) checkShape(label, "enter x=", x, hiddenSize, traceShapes);
-        // Per-bucket timing: ~72% of decode sat in one undifferentiated
-        // remainder after attention was split out. See DecodeProfile.
-        var _t0 = DecodeProfile.now();
-        // Decode only: a prefill forward carries the whole prompt in one
-        // batch and has a different cost shape, so folding it in would report
-        // prefill ratios under a decode heading.
-        var _rows = DecodeProfile.enabled() ? x.shape()[0] : 0;
+        // Per-bucket decode timing; buckets live on Q4Matmul (see there).
+        var _t0 = nue.Q4Matmul.splitNow();
+        var _rows = x.shape()[0];
         var xClone1 = x.clone();
         var t = attnNorm.forward(xClone1);
         xClone1.free();
-        var _tNorm1 = DecodeProfile.now();
+        var _tNorm1 = nue.Q4Matmul.splitNow();
         if (checkShapes) {
             checkShape(label, "after_attn_norm x=", x, hiddenSize, traceShapes);
             checkShape(label, "after_attn_norm norm=", t, hiddenSize, traceShapes);
         }
         var attnOut = attn.forward(t);
         t.free();
-        var _tAttn = DecodeProfile.now();
+        var _tAttn = nue.Q4Matmul.splitNow();
         if (checkShapes) {
             checkShape(label, "before_attn_residual x=", x, hiddenSize, traceShapes);
             checkShape(label, "before_attn_residual attn=", attnOut, hiddenSize, traceShapes);
@@ -99,28 +95,31 @@ class LlamaBlock {
         x.addInto(attnOut);
         attnOut.free();
         var h1 = x;
-        var _tResid1 = DecodeProfile.now();
+        var _tResid1 = nue.Q4Matmul.splitNow();
 
         var xClone2 = h1.clone();
         var t2 = ffnNorm.forward(xClone2);
         xClone2.free();
-        var _tNorm2 = DecodeProfile.now();
+        var _tNorm2 = nue.Q4Matmul.splitNow();
         if (checkShapes) {
             checkShape(label, "after_ffn_norm h=", h1, hiddenSize, traceShapes);
             checkShape(label, "after_ffn_norm norm=", t2, hiddenSize, traceShapes);
         }
         var ffnOut = ffn.forward(t2);
         t2.free();
-        var _tFfn = DecodeProfile.now();
+        var _tFfn = nue.Q4Matmul.splitNow();
         if (checkShapes) {
             checkShape(label, "before_ffn_residual h=", h1, hiddenSize, traceShapes);
             checkShape(label, "before_ffn_residual ffn=", ffnOut, hiddenSize, traceShapes);
         }
         h1.addInto(ffnOut);
         ffnOut.free();
-        var _tEnd = DecodeProfile.now();
+        // Decode only: a prefill pass batches the whole prompt and has a
+        // different cost shape, so folding it in reports prefill under a
+        // decode heading.
         if (_rows == 1) {
-            DecodeProfile.noteBlock(
+            var _tEnd = nue.Q4Matmul.splitNow();
+            nue.Q4Matmul.noteBlockSplit(
                 (_tNorm1 - _t0) + (_tNorm2 - _tResid1),
                 _tAttn - _tNorm1,
                 _tFfn - _tNorm2,

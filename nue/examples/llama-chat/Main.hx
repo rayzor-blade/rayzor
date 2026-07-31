@@ -265,8 +265,8 @@ class Main {
         // scan, the split that decides whether sliding-window attention is
         // worth building. `fwd` alone cannot separate them.
         nue.transformer.GQAttention.dumpAttnProfile();
-        // NUE_PROFILE_DECODE_SPLIT=1: ffn / attn / lmhead / norm / resid.
-        nue.transformer.DecodeProfile.dump();
+        Q4Matmul.dumpDecodeSplit();
+
         // The streaming callback above already printed every token. Gate
         // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
         // diagnostic runs (e.g. when comparing decoded text against
