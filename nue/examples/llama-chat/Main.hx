@@ -109,7 +109,11 @@ class Main {
         // One open of the file: header + tensor index parsed once,
         // model and tokenizer both materialise off the same reader.
         var loader = new GGUFLoader();
-        trace("[load] reading GGUF (dequants Q4_K_M weights to F32)...");
+        // Q4_K/Q6_K/Q8_0 are wrapped ZERO-COPY as QTensors — see GGUFLoader's
+        // per-dtype table. The old banner claimed an F32 dequant that has not
+        // happened for the dominant scheme in a long time, which reads as an
+        // explanation for a large resident set that has another cause.
+        trace("[load] reading GGUF (k-quants stay quantized; zero-copy)...");
         var startLoad = Sys.time();
         var loaded = loader.loadWithTokenizer(path, ctx);
         trace("[load] done in " + fmt(Sys.time() - startLoad) + "s");
@@ -251,6 +255,10 @@ class Main {
         // dispatcher fused/split, pool counters, and the per-scheme census.
         // A pure-Haxe claim is only credible with ffi=0 printed here.
         Q4Matmul.dumpPlan();
+        // NUE_PROFILE_ATTN=1: projections vs the O(context) score/softmax
+        // scan, the split that decides whether sliding-window attention is
+        // worth building. `fwd` alone cannot separate them.
+        nue.transformer.GQAttention.dumpAttnProfile();
         // The streaming callback above already printed every token. Gate
         // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
         // diagnostic runs (e.g. when comparing decoded text against

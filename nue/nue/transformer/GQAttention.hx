@@ -50,6 +50,58 @@ class GQAttention implements Attention {
     public var headDim:Int;
     public var scale:Float; // 1 / sqrt(headDim)
 
+    // ---- decode split: projections vs the O(context) score/softmax scan ----
+    // GenerationLoop times the whole transformer as one `fwd` bucket, so the
+    // share attributed to attention has only ever been arithmetic over an
+    // assumed cost model. It decides whether sliding-window attention is worth
+    // building, and the last lever ranked that way (Q4 KV cache) turned out to
+    // explain 3.1% of what it was blamed for.
+    //
+    // `_sScan` is the part that grows with cache length; `_sProj` is QKV +
+    // rope + append + oProj, which do not.
+    static var _sProj:Float = 0.0;
+    static var _sScan:Float = 0.0;
+    static var _nCalls:Int = 0;
+    static var _profOn:Int = 0;
+
+    static function attnProfEnabled():Bool {
+        if (_profOn == 0) {
+            var v = Sys.getEnvOr("NUE_PROFILE_ATTN", "RAYZOR_PROFILE_ATTN");
+            _profOn = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _profOn == 1;
+    }
+
+    /** Accumulate one forward's split. Called AFTER oProj so it can close the
+        projection bucket itself. Instance method, Float params only — a static
+        taking a cross-module type trips the x-module cluster documented on
+        `Q4Matmul.dumpPlan`. */
+    function noteTiming(t0:Float, tQkv:Float, tScan:Float):Void {
+        if (!attnProfEnabled()) return;
+        var tEnd = Sys.time();
+        // Unconditional accumulate: `if (c) f = expr` on a loop-carried Float
+        // boxes per iteration (see bugs_float_conditional_reassign_boxes).
+        _sProj = _sProj + (tQkv - t0) + (tEnd - tScan);
+        _sScan = _sScan + (tScan - tQkv);
+        _nCalls = _nCalls + 1;
+    }
+
+    /** Print the projection/scan split. NO PARAMETERS — same registration
+        constraint as `Q4Matmul.dumpPlan`. Safe to call when profiling is off. */
+    public static function dumpAttnProfile():Void {
+        if (!attnProfEnabled()) return;
+        var total = _sProj + _sScan;
+        if (total <= 0.0 || _nCalls == 0) {
+            Sys.println("[attn-split] no attention forward observed");
+            return;
+        }
+        var pctScan = (_sScan / total) * 100.0;
+        Sys.println("[attn-split] calls=" + _nCalls
+            + " proj=" + Std.string(Math.round(_sProj * 1000.0) / 1000.0) + "s"
+            + " scan=" + Std.string(Math.round(_sScan * 1000.0) / 1000.0) + "s"
+            + " scan_share=" + Std.string(Math.round(pctScan * 10.0) / 10.0) + "%");
+    }
+
     public function new(
         qProj:Linear, kProj:Linear, vProj:Linear, oProj:Linear,
         rope:RoPE, cache:KVCache,
@@ -72,6 +124,7 @@ class GQAttention implements Attention {
      * underlying KVCache by appending the new K/V slices.
      */
     public function forward(x:Tensor):Tensor {
+        var _t0 = attnProfEnabled() ? Sys.time() : 0.0;
         var seqQ = x.shape()[0];
         var positionOffset = cache.currentLen;
 
@@ -187,6 +240,7 @@ class GQAttention implements Attention {
         // appendAlong0 or Q8 quantise-on-write) — k and v are dead.
         k.free();
         v.free();
+        var _tQkv = attnProfEnabled() ? Sys.time() : 0.0;
 
         // 4-7) Decode-step fast path: fused attention kernel.
         //
@@ -209,9 +263,11 @@ class GQAttention implements Attention {
                 numQHeads, scale, qProj.pool
             );
             if (ctx != null) {
+                var _tScan = attnProfEnabled() ? Sys.time() : 0.0;
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
                 var out = oProj.forward(ctxFlat);
+                noteTiming(_t0, _tQkv, _tScan);
                 ctxFlat.free();
                 ctx.free();
                 q.free();
@@ -225,9 +281,11 @@ class GQAttention implements Attention {
                 numQHeads, scale, qProj.pool
             );
             if (ctx != null) {
+                var _tScan = attnProfEnabled() ? Sys.time() : 0.0;
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
                 var out = oProj.forward(ctxFlat);
+                noteTiming(_t0, _tQkv, _tScan);
                 ctxFlat.free();
                 ctx.free();
                 q.free();
@@ -249,9 +307,11 @@ class GQAttention implements Attention {
                 );
             }
             if (ctx != null) {
+                var _tScan = attnProfEnabled() ? Sys.time() : 0.0;
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
                 var out = oProj.forward(ctxFlat);
+                noteTiming(_t0, _tQkv, _tScan);
                 ctxFlat.free();
                 ctx.free();
                 q.free();
@@ -269,9 +329,11 @@ class GQAttention implements Attention {
             // returns null and we fall through to the bmm chain.
             var ctx = q.flashAttnDecode(kAll, vAll, scale);
             if (ctx != null) {
+                var _tScan = attnProfEnabled() ? Sys.time() : 0.0;
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
                 var out = oProj.forward(ctxFlat);
+                noteTiming(_t0, _tQkv, _tScan);
                 ctxFlat.free();
                 ctx.free();
                 kAll.free();
@@ -317,12 +379,14 @@ class GQAttention implements Attention {
         //    tensor (non-contiguous source path), so contextFlat is a
         //    new allocation and contextRowMajor can be released alongside
         //    the underlying context.
+        var _tScan = attnProfEnabled() ? Sys.time() : 0.0;
         var contextRowMajor = context.permute([1, 0, 2]); // [seqQ, numQHeads, headDim]
         var hiddenSize = numQHeads * headDim;
         var contextFlat = contextRowMajor.reshape([seqQ, hiddenSize]);
 
         // 9) Output projection back to hidden_size.
         var out = oProj.forward(contextFlat);
+        noteTiming(_t0, _tQkv, _tScan);
 
         // Manual free of the per-layer transients. The compiler's
         // InsertFreePass doesn't know about `rayzor_tensor_free`, so
