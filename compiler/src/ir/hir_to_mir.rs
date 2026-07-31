@@ -239,6 +239,9 @@ pub struct HirToMirContext<'a> {
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
     constructor_name_map: BTreeMap<String, IrFunctionId>,
+    /// Owning class (bare name) per constructor, used to verify candidates
+    /// found through id-space puns before they are called.
+    constructor_owner_map: BTreeMap<IrFunctionId, String>,
 
     /// Reference to HIR type declarations for inheritance lookup
     /// Needed to access parent class fields during field inheritance
@@ -815,6 +818,7 @@ impl<'a> HirToMirContext<'a> {
             method_ref_thunks: BTreeMap::new(),
             vtable_dispatch_thunks: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
+            constructor_owner_map: BTreeMap::new(),
             current_hir_types: hir_types,
             stdlib_mapping,
             symbol_table,
@@ -2752,6 +2756,9 @@ impl<'a> HirToMirContext<'a> {
             } else if let Some(name) = self.string_interner.get(sym_info.name) {
                 // Fallback to simple name if no qualified name
                 self.constructor_name_map.insert(name.to_string(), func_id);
+            }
+            if let Some(bare) = self.string_interner.get(sym_info.name) {
+                self.constructor_owner_map.insert(func_id, bare.to_string());
             }
         }
     }
@@ -19829,14 +19836,42 @@ impl<'a> HirToMirContext<'a> {
                 // Check if constructor exists - try both TypeId and TypeId derived from SymbolId
                 let mut constructor_type_id = *class_type;
                 let mut has_constructor = self.constructor_map.contains_key(class_type);
+                let mut ctor_path = if has_constructor { "typeid" } else { "none" };
 
-                // If not found and we have a SymbolId, try TypeId derived from SymbolId as fallback
+                // If not found and we have a SymbolId, try TypeId derived from SymbolId as fallback.
+                //
+                // SymbolId and TypeId are DIFFERENT numbering spaces sharing this
+                // map, so this lookup can land on another class's entry: `new
+                // ChatResponse` picked up GenerationLoop's ctor (cached at
+                // GenerationLoop's TypeId, numerically equal to ChatResponse's
+                // SymbolId) and the Int passed in a String slot SIGSEGV'd at
+                // runtime — host-dependent, since symbol numbering shifts with
+                // module count. Accept the pun only when the candidate's owning
+                // class matches the class being constructed; an unowned entry
+                // passes (bridge for ctors registered before owners existed).
                 if !has_constructor {
                     if let Some(sym_id) = actual_symbol_id {
                         let type_id_from_symbol = TypeId::from_raw(sym_id.as_raw());
-                        if self.constructor_map.contains_key(&type_id_from_symbol) {
-                            constructor_type_id = type_id_from_symbol;
-                            has_constructor = true;
+                        if let Some(&cand) = self.constructor_map.get(&type_id_from_symbol) {
+                            let owner_ok =
+                                match (self.constructor_owner_map.get(&cand), debug_class_name) {
+                                    (Some(owner), Some(target)) => {
+                                        Self::class_names_match(owner, target)
+                                    }
+                                    _ => true,
+                                };
+                            if owner_ok {
+                                constructor_type_id = type_id_from_symbol;
+                                has_constructor = true;
+                                ctor_path = "SYMBOL-PUN";
+                            } else if std::env::var("RAYZOR_CTOR_DEBUG").is_ok() {
+                                eprintln!(
+                                    "[CTOR] class={:?} REFUSED pun candidate {:?} (owner={:?})",
+                                    debug_class_name,
+                                    cand,
+                                    self.constructor_owner_map.get(&cand)
+                                );
+                            }
                         }
                     }
                 }
@@ -19851,6 +19886,7 @@ impl<'a> HirToMirContext<'a> {
                             if self.constructor_map.contains_key(base_type) {
                                 constructor_type_id = *base_type;
                                 has_constructor = true;
+                                ctor_path = "generic-base";
                             }
                         }
                     }
@@ -19863,7 +19899,12 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(&func_id) = self.constructor_name_map.get(class_name) {
                             constructor_type_id = *class_type;
                             has_constructor = true;
+                            ctor_path = "bare-name";
                             self.constructor_map.insert(*class_type, func_id);
+                            let bare = class_name.rsplit('.').next().unwrap_or(class_name);
+                            self.constructor_owner_map
+                                .entry(func_id)
+                                .or_insert_with(|| bare.to_string());
                         }
                     }
                     // Also try qualified name (e.g., "haxe.ds.List" vs bare "List")
@@ -19877,7 +19918,13 @@ impl<'a> HirToMirContext<'a> {
                                         {
                                             constructor_type_id = *class_type;
                                             has_constructor = true;
+                                            ctor_path = "qual-name";
                                             self.constructor_map.insert(*class_type, func_id);
+                                            let bare =
+                                                qual_name.rsplit('.').next().unwrap_or(qual_name);
+                                            self.constructor_owner_map
+                                                .entry(func_id)
+                                                .or_insert_with(|| bare.to_string());
                                         }
                                     }
                                 }
@@ -20215,6 +20262,13 @@ impl<'a> HirToMirContext<'a> {
 
                 // Look up constructor by TypeId - use the resolved constructor_type_id
                 let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
+                if std::env::var("RAYZOR_CTOR_DEBUG").is_ok() {
+                    let cname = debug_class_name.unwrap_or("?");
+                    eprintln!(
+                        "[CTOR] class={} path={} class_type={:?} resolved_type={:?} fid={:?}",
+                        cname, ctor_path, class_type, constructor_type_id, constructor_func_id
+                    );
+                }
                 if let Some(constructor_func_id) = constructor_func_id {
                     // Call constructor with object as first argument.
                     //
@@ -29094,11 +29148,40 @@ impl<'a> HirToMirContext<'a> {
                 // inherited fields the probe does not attribute to the
                 // receiver's own class). The probe never emits E0803.
                 let mut chosen = (class_ty, idx);
+                let mut probe_tag = "no-name";
                 if let Some(fname) = self.symbol_table.get_symbol(field).map(|s| s.name) {
-                    if let FieldIndexResolution::Unique(nct, nidx) =
-                        self.resolve_field_index_candidates(fname, receiver_ty)
-                    {
-                        chosen = (nct, nidx);
+                    match self.resolve_field_index_candidates(fname, receiver_ty) {
+                        FieldIndexResolution::Unique(nct, nidx) => {
+                            chosen = (nct, nidx);
+                            probe_tag = "unique";
+                        }
+                        FieldIndexResolution::Ambiguous(_) => probe_tag = "ambiguous",
+                        FieldIndexResolution::None => probe_tag = "none",
+                    }
+                }
+                if std::env::var("RAYZOR_FIELD_DEBUG").is_ok() {
+                    let fname = self
+                        .symbol_table
+                        .get_symbol(field)
+                        .and_then(|si| self.string_interner.get(si.name))
+                        .unwrap_or("?");
+                    if fname == "finishReason" {
+                        let recv_kind = {
+                            let tt = self.type_table;
+                            format!("{:?}", tt.get(receiver_ty).map(|t| &t.kind))
+                        };
+                        eprintln!(
+                            "[FLD] {} sym={:?} direct=({:?},{}) probe={} chosen=({:?},{}) recv={:?} {}",
+                            fname,
+                            field,
+                            class_ty,
+                            idx,
+                            probe_tag,
+                            chosen.0,
+                            chosen.1,
+                            receiver_ty,
+                            &recv_kind[..recv_kind.len().min(90)]
+                        );
                     }
                 }
                 let sym_type = if chosen == (class_ty, idx) {
@@ -29602,6 +29685,7 @@ impl<'a> HirToMirContext<'a> {
         receiver_ty: TypeId,
     ) -> FieldIndexResolution {
         let mut all_matches: Vec<(TypeId, u32)> = Vec::new();
+        let mut match_owners: Vec<Option<&str>> = Vec::new();
         let target_name_str = self
             .string_interner
             .get(field_name)
@@ -29619,6 +29703,7 @@ impl<'a> HirToMirContext<'a> {
                 };
                 if id_match || str_match {
                     all_matches.push((class_ty, idx));
+                    match_owners.push(self.field_class_names.get(_sym).map(|s| s.as_str()));
                 }
             } else {
                 debug!(
@@ -29648,6 +29733,58 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Multiple classes have this field name — disambiguate by receiver type.
+        //
+        // Strategy 0: owner-symbol match. Candidate class TypeIds come from the
+        // MODULE THAT DECLARED the field, and TypeIds are context-local — a
+        // candidate's class_ty can numerically equal an unrelated class's
+        // TypeId in THIS context (`loop.finishReason` on a GenerationLoop
+        // receiver matched ChatResponse's entry that way and read the eos Int
+        // slot as a String). Field OWNER names are recorded per declaration
+        // symbol, which is session-global, so a single candidate whose owner
+        // is the receiver's class is the declaration itself and beats any
+        // TypeId comparison. Positive selection only: with zero or several
+        // owner matches (inherited fields carry the PARENT's owner name and
+        // must keep resolving through the type chain), fall through unchanged.
+        {
+            let recv_bare = {
+                let type_table = self.type_table;
+                let mut resolved = self.resolve_through_aliases(receiver_ty);
+                let mut visited = BTreeSet::new();
+                loop {
+                    if !visited.insert(resolved) {
+                        break;
+                    }
+                    match type_table.get(resolved).map(|ti| &ti.kind) {
+                        Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                        _ => break,
+                    }
+                }
+                type_table
+                    .get(resolved)
+                    .and_then(|ti| match &ti.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+                    .and_then(|sym| self.symbol_table.get_symbol(sym))
+                    .and_then(|si| self.string_interner.get(si.name))
+            };
+            if let Some(recv_bare) = recv_bare {
+                let mut owned: Vec<(TypeId, u32)> = all_matches
+                    .iter()
+                    .zip(match_owners.iter())
+                    .filter(|(_, owner)| {
+                        owner.is_some_and(|o| Self::class_names_match(o, recv_bare))
+                    })
+                    .map(|(&m, _)| m)
+                    .collect();
+                owned.sort_unstable_by_key(|&(t, i)| (t.as_raw(), i));
+                owned.dedup();
+                if owned.len() == 1 {
+                    return FieldIndexResolution::Unique(owned[0].0, owned[0].1);
+                }
+            }
+        }
+
         // Strategy 1: Resolve receiver_ty through TypeAlias/GenericInstance chains to find
         // the underlying class TypeId, then match directly against candidates' class_ty.
         {
@@ -42007,7 +42144,16 @@ pub fn lower_hir_to_mir_with_function_map(
     context.field_index_map = external_field_index_map;
     context.property_access_map = external_property_access_map;
 
-    // Seed constructor_name_map from previously compiled imports
+    // Seed constructor_name_map from previously compiled imports; the key is
+    // the owning class's name, which also seeds the owner map used to verify
+    // pun-derived candidates.
+    for (class_name, func_id) in &external_constructor_name_map {
+        let bare = class_name.rsplit('.').next().unwrap_or(class_name);
+        context
+            .constructor_owner_map
+            .entry(*func_id)
+            .or_insert_with(|| bare.to_string());
+    }
     context.constructor_name_map = external_constructor_name_map;
 
     // Seed class_alloc_sizes from previously compiled imports
