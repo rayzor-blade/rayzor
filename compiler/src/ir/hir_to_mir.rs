@@ -2129,9 +2129,16 @@ impl<'a> HirToMirContext<'a> {
                 .copied()
                 .or_else(|| {
                     parent_sym.and_then(|ps| {
-                        self.class_alloc_sizes
-                            .get(&TypeId::from_raw(ps.as_raw()))
-                            .copied()
+                        // SymbolId-as-TypeId pun into a merged, TypeId-keyed
+                        // map — same collision class as bab87ce0. Accept only
+                        // when the punned id is not positively attributed to a
+                        // DIFFERENT class; a wrong hit here under-allocates
+                        // the subclass and corrupts the heap silently.
+                        let pun = TypeId::from_raw(ps.as_raw());
+                        match self.class_type_to_symbol.get(&pun) {
+                            Some(&owner) if owner != ps => None,
+                            _ => self.class_alloc_sizes.get(&pun).copied(),
+                        }
                     })
                 })
                 .or_else(|| {
