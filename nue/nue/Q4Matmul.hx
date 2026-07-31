@@ -228,6 +228,66 @@ class Q4Matmul {
 
     static inline function onOff(b:Bool):String return b ? "on" : "off";
 
+    // ---- decode split (ffn / attn / lmhead / norm / resid) ------------------
+    // Hosted HERE rather than in a class of its own: a new module whose only
+    // use is a cross-module static call SIGSEGVs the x86 build mid-generation
+    // (bisected — see bugs_new_module_static_only_sigsegv). Q4Matmul is already
+    // registered and already called from GQAttention, SwiGLU and Main.
+    static var _dsNorm:Float = 0.0;
+    static var _dsAttn:Float = 0.0;
+    static var _dsFfn:Float = 0.0;
+    static var _dsResid:Float = 0.0;
+    static var _dsLmHead:Float = 0.0;
+    static var _dsBlocks:Int = 0;
+    static var _dsTokens:Int = 0;
+    static var _dsOn:Int = 0;
+
+    /** Timestamp when the split is on, else 0. A ternary at the call site, not
+        `if (c) f = expr`, which boxes a loop-carried Float per iteration. */
+    public static function splitNow():Float {
+        if (_dsOn == 0) {
+            var v = Sys.getEnvOr("NUE_PROFILE_DECODE_SPLIT", "RAYZOR_PROFILE_DECODE_SPLIT");
+            _dsOn = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _dsOn == 1 ? Sys.time() : 0.0;
+    }
+
+    public static function noteBlockSplit(norm:Float, attn:Float, ffn:Float,
+                                          resid:Float):Void {
+        if (_dsOn != 1) return;
+        _dsNorm = _dsNorm + norm;
+        _dsAttn = _dsAttn + attn;
+        _dsFfn = _dsFfn + ffn;
+        _dsResid = _dsResid + resid;
+        _dsBlocks = _dsBlocks + 1;
+    }
+
+    public static function noteLmHeadSplit(seconds:Float):Void {
+        if (_dsOn != 1) return;
+        _dsLmHead = _dsLmHead + seconds;
+        _dsTokens = _dsTokens + 1;
+    }
+
+    public static function dumpDecodeSplit():Void {
+        if (_dsOn != 1) return;
+        var total = _dsNorm + _dsAttn + _dsFfn + _dsResid + _dsLmHead;
+        if (total <= 0.0) {
+            Sys.println("[decode-split] no block forward observed");
+            return;
+        }
+        Sys.println("[decode-split] blocks=" + _dsBlocks + " tokens=" + _dsTokens
+            + "  ffn=" + Std.string(Math.round(_dsFfn * 1000.0) / 1000.0)
+            + "s (" + Math.round((_dsFfn / total) * 1000.0) / 10.0 + "%)"
+            + "  attn=" + Std.string(Math.round(_dsAttn * 1000.0) / 1000.0)
+            + "s (" + Math.round((_dsAttn / total) * 1000.0) / 10.0 + "%)"
+            + "  lmhead=" + Std.string(Math.round(_dsLmHead * 1000.0) / 1000.0)
+            + "s (" + Math.round((_dsLmHead / total) * 1000.0) / 10.0 + "%)"
+            + "  norm=" + Std.string(Math.round(_dsNorm * 1000.0) / 1000.0)
+            + "s (" + Math.round((_dsNorm / total) * 1000.0) / 10.0 + "%)"
+            + "  resid=" + Std.string(Math.round(_dsResid * 1000.0) / 1000.0)
+            + "s (" + Math.round((_dsResid / total) * 1000.0) / 10.0 + "%)");
+    }
+
     /** Print the EFFECTIVE PLAN: the gates in force and what the dispatcher
         actually fused/split. Safe to call when the census is off.
 
