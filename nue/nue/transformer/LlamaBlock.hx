@@ -74,15 +74,24 @@ class LlamaBlock {
         var hiddenSize = attn.numQHeads * attn.headDim;
         var label:String = this.blockName;
         if (checkShapes) checkShape(label, "enter x=", x, hiddenSize, traceShapes);
+        // Per-bucket timing: ~72% of decode sat in one undifferentiated
+        // remainder after attention was split out. See DecodeProfile.
+        var _t0 = DecodeProfile.now();
+        // Decode only: a prefill forward carries the whole prompt in one
+        // batch and has a different cost shape, so folding it in would report
+        // prefill ratios under a decode heading.
+        var _rows = DecodeProfile.enabled() ? x.shape()[0] : 0;
         var xClone1 = x.clone();
         var t = attnNorm.forward(xClone1);
         xClone1.free();
+        var _tNorm1 = DecodeProfile.now();
         if (checkShapes) {
             checkShape(label, "after_attn_norm x=", x, hiddenSize, traceShapes);
             checkShape(label, "after_attn_norm norm=", t, hiddenSize, traceShapes);
         }
         var attnOut = attn.forward(t);
         t.free();
+        var _tAttn = DecodeProfile.now();
         if (checkShapes) {
             checkShape(label, "before_attn_residual x=", x, hiddenSize, traceShapes);
             checkShape(label, "before_attn_residual attn=", attnOut, hiddenSize, traceShapes);
@@ -90,22 +99,34 @@ class LlamaBlock {
         x.addInto(attnOut);
         attnOut.free();
         var h1 = x;
+        var _tResid1 = DecodeProfile.now();
 
         var xClone2 = h1.clone();
         var t2 = ffnNorm.forward(xClone2);
         xClone2.free();
+        var _tNorm2 = DecodeProfile.now();
         if (checkShapes) {
             checkShape(label, "after_ffn_norm h=", h1, hiddenSize, traceShapes);
             checkShape(label, "after_ffn_norm norm=", t2, hiddenSize, traceShapes);
         }
         var ffnOut = ffn.forward(t2);
         t2.free();
+        var _tFfn = DecodeProfile.now();
         if (checkShapes) {
             checkShape(label, "before_ffn_residual h=", h1, hiddenSize, traceShapes);
             checkShape(label, "before_ffn_residual ffn=", ffnOut, hiddenSize, traceShapes);
         }
         h1.addInto(ffnOut);
         ffnOut.free();
+        var _tEnd = DecodeProfile.now();
+        if (_rows == 1) {
+            DecodeProfile.noteBlock(
+                (_tNorm1 - _t0) + (_tNorm2 - _tResid1),
+                _tAttn - _tNorm1,
+                _tFfn - _tNorm2,
+                (_tResid1 - _tAttn) + (_tEnd - _tFfn)
+            );
+        }
         if (checkShapes) checkShape(label, "exit h=", h1, hiddenSize, traceShapes);
         return h1;
     }

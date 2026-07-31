@@ -115,8 +115,11 @@ class LlamaModel implements CausalLanguageModel {
             if (dbgLogit) dumpArgmax(result);
             return result;
         }
+        var _tLm = nue.transformer.DecodeProfile.now();
         var normed1 = outputNorm.forward(h);
         var result1 = lmHead.forward(normed1);
+        nue.transformer.DecodeProfile.noteLmHead(
+            nue.transformer.DecodeProfile.now() - _tLm);
         normed1.free();
         h.free();
         if (dbgLogit) dumpArgmax(result1);
