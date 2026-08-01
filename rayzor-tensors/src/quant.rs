@@ -1356,17 +1356,26 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
             }
         }
         QSCHEME_Q4_K_M => {
+            // Rows are independent, so dequant across them. This is on the AMX
+            // prefill path, where a SERIAL dequant cost MORE than the GEMM it
+            // feeds (measured 7B: 19.8 ms dequant vs 12.9 ms GEMM at 708
+            // GFLOP/s) — one core narrowing while eight sat idle, which is why
+            // routing to AMX was a wash despite the GEMM being fast.
             let blocks_per_row = qt.cols / Q4_K_M_BLOCK_SIZE;
-            let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
-            for r in 0..qt.rows {
-                let row_ptr = qt.data.add(r * blocks_per_row * Q4_K_M_BLOCK_BYTES);
+            let rows = qt.rows;
+            let cols = qt.cols;
+            let data = qt.data as usize;
+            let out_addr = out as usize;
+            (0..rows).into_par_iter().for_each(|r| {
+                let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+                let row_ptr = (data as *const u8).add(r * blocks_per_row * Q4_K_M_BLOCK_BYTES);
                 for b in 0..blocks_per_row {
                     let block = decode_q4_k_block(row_ptr.add(b * Q4_K_M_BLOCK_BYTES));
                     dequant_q4_k_block(&block, &mut stage);
-                    let dst = out.add(r * qt.cols + b * Q4_K_M_BLOCK_SIZE);
+                    let dst = (out_addr as *mut f32).add(r * cols + b * Q4_K_M_BLOCK_SIZE);
                     std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
                 }
-            }
+            });
         }
         QSCHEME_Q8_0 => {
             let blocks = qt.numel / Q8_0_BLOCK_SIZE;
@@ -1814,19 +1823,64 @@ unsafe fn amx_prefill_matmul(
         .map(|t| t.elapsed().as_secs_f64() * 1e6)
         .unwrap_or(0.0);
     if fw16.is_null() {
-        return None;
+        // The cache refused (budget exhausted). Do NOT give up on AMX: within
+        // ONE prefill each weight is used exactly once, so caching buys nothing
+        // there and the permanent copy is the only reason we are here. Dequant
+        // into a REUSABLE scratch for this call — peak extra memory becomes one
+        // weight (~117 MB at 7B) instead of the whole model (~11 GB), and
+        // routing survives for the rest of the run.
+        thread_local! {
+            static W16: std::cell::RefCell<Vec<u16>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        return W16.with(|cell| {
+            let mut w16 = cell.borrow_mut();
+            w16.resize(n * k, 0);
+            let t = rayzor_qtensor_dequant(qt_w);
+            if t == 0 {
+                return None;
+            }
+            let f32_data = (*(t as *const Head)).data as *const f32;
+            let src = std::slice::from_raw_parts(f32_data, n * k);
+            let ok = crate::apple_accel::f32_to_f16(src, &mut w16);
+            crate::tensor::rayzor_tensor_free(t);
+            if !ok {
+                return None;
+            }
+            amx_gemm_f16(x_tensor, &w16, batch, k, n, dbg, cache_us)
+        });
     }
-    let x_data = (*(x_tensor as *const Head)).data as *const f32;
-    let x = std::slice::from_raw_parts(x_data, batch * k);
-    // Per-call activation narrowing into a reused thread-local scratch.
-    thread_local! {
-        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+    let fw = std::slice::from_raw_parts(fw16, n * k);
+    amx_gemm_f16(x_tensor, fw, batch, k, n, dbg, cache_us)
+}
+
+/// The GEMM half of the AMX prefill path, shared by the cached-weight and
+/// scratch-weight routes so the two cannot drift.
+#[cfg(target_os = "macos")]
+unsafe fn amx_gemm_f16(
+    x_tensor: i64,
+    fw: &[u16],
+    batch: usize,
+    k: usize,
+    n: usize,
+    dbg: bool,
+    cache_us: f64,
+) -> Option<i64> {
+    #[repr(C)]
+    struct Head {
+        data: *mut u8,
     }
     let t_x = if dbg {
         Some(std::time::Instant::now())
     } else {
         None
     };
+    let x_data = (*(x_tensor as *const Head)).data as *const f32;
+    let x = std::slice::from_raw_parts(x_data, batch * k);
+    // Per-call activation narrowing into a reused thread-local scratch.
+    thread_local! {
+        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
     let out_tensor = X16.with(|cell| {
         let mut x16 = cell.borrow_mut();
         x16.resize(batch * k, 0);
@@ -1841,7 +1895,6 @@ unsafe fn amx_prefill_matmul(
             return None;
         }
         let out_data = (*(out_tensor as *const Head)).data as *mut f32;
-        let fw = std::slice::from_raw_parts(fw16, n * k);
         let out = std::slice::from_raw_parts_mut(out_data, batch * n);
         let t0 = if dbg {
             Some(std::time::Instant::now())
@@ -1988,9 +2041,16 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
                 x_is_contiguous(x_tensor)
             );
         }
+        // No `amx_budget_exhausted()` gate here any more. That gate existed
+        // because the old fallback was the PORTABLE SDOT path, and a mixed run
+        // (some weights cached, the rest on SDOT) measured slower than never
+        // routing (7B prefill 18.95 s mixed vs 13.75 s AMX-off). The fallback
+        // is now AMX-with-scratch, so an exhausted budget costs a per-call
+        // dequant — which the cached path also paid once — instead of dropping
+        // the weight to a different kernel. Keeping the gate is what made the
+        // models that most need prefill help the only ones never to get it.
         if qt.scheme == QSCHEME_Q4_K_M
             && amx_prefill_enabled()
-            && !amx_budget_exhausted()
             && batch >= amx_prefill_min_batch()
             && x_is_contiguous(x_tensor)
         {
