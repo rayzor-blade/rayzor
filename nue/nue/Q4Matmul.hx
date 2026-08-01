@@ -553,8 +553,18 @@ class Q4Matmul {
         var d = f16ToF32((dVec[14] & 0xFF) | ((dVec[15] & 0xFF) << 8));
         var mask = SIMD16i8.splat(0x0F);
         var mask2 = SIMD16i8.splat(0x03);
-        var sumTerm1 = 0.0;
-        var sumTerm2 = 0.0;
+        // INTEGER scale folding, mirroring q4DotMA4. The per-sub-block scale
+        // is a signed int and `d` is common to every term, so
+        //   Σ (d·sc·dot)      = d · Σ (sc·dot)
+        //   Σ (32·d·sc·bsum)  = 32·d · Σ (sc·bsum)
+        // Accumulating both sums in INT leaves exactly two float multiplies
+        // for the whole super-block instead of eight per sub-block (64).
+        // Bounds: |dot| ≤ 16·127·63 = 128016, |sc| ≤ 127 → |sc·dot| ≤ 16.3M,
+        // and 16 sub-blocks → ≤ 260M, well inside i32. |bsum| ≤ 16·127 = 2032
+        // → |Σ sc·bsum| ≤ 4.1M. Exact in int, so this is also strictly more
+        // accurate than the f64 running sum it replaces.
+        var isum = SIMD4i32.splat(0);
+        var imin = 0;
         for (n in 0...2) {
             var qlB = wBlk + n * 64;
             var qhB = wBlk + 128 + n * 32;
@@ -584,17 +594,17 @@ class Q4Matmul {
                 var xSpan = aBlk + outOff + j * 32;
                 var xLo = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan)));
                 var xHi = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xSpan + 16)));
-                var sdotLo = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xLo, qLo).sum();
-                var sdotHi = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xHi, qHi).sum();
-                var dScLo:Float = d * scaleI8(wBase, wBlk + 192 + scOff + 2 * j);
-                var dScHi:Float = d * scaleI8(wBase, wBlk + 192 + scOff + 2 * j + 1);
-                sumTerm1 += dScLo * sdotLo + dScHi * sdotHi;
+                var dvLo = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xLo, qLo);
+                var dvHi = SIMD4i32.dotI8I7(SIMD4i32.splat(0), xHi, qHi);
+                var scLo = scaleI8(wBase, wBlk + 192 + scOff + 2 * j);
+                var scHi = scaleI8(wBase, wBlk + 192 + scOff + 2 * j + 1);
+                isum = isum + (SIMD4i32.splat(scLo) * dvLo + SIMD4i32.splat(scHi) * dvHi);
                 var bi = bsBase + ((outOff + j * 32) >> 4);
-                sumTerm2 += 32.0 * dScLo * Mem.loadI32(bsAddr + Usize.fromInt(bi * 4))
-                          + 32.0 * dScHi * Mem.loadI32(bsAddr + Usize.fromInt((bi + 1)) * 4);
+                imin += scLo * Mem.loadI32(bsAddr + Usize.fromInt(bi * 4))
+                      + scHi * Mem.loadI32(bsAddr + Usize.fromInt((bi + 1) * 4));
             }
         }
-        return xd * (sumTerm1 - sumTerm2);
+        return xd * d * (isum.sum() - 32 * imin);
     }
 
     // Matmul pool policy — Nue owns it; the SpinPool primitive is env-agnostic
