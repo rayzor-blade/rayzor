@@ -7,6 +7,7 @@
 use super::instructions::IrInstruction;
 use super::modules::IrModule;
 use super::{IrFunctionId, IrGlobalId};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 fn is_keep_function(func: &crate::ir::functions::IrFunction) -> bool {
@@ -75,6 +76,23 @@ pub fn tree_shake_bundle(
     // Worklist: (module_index, func_id) pairs to process
     let mut worklist: Vec<(usize, IrFunctionId)> = Vec::new();
 
+    // Function ids are globally disjoint after import renumbering, so a
+    // reference whose target is not in the CURRENT module resolves to its
+    // owning module here. Without this, a cross-module MakeClosure/FunctionRef
+    // fell through silently and the target was shaken out of the LLVM tier —
+    // the Q4 band lambda ran Cranelift's scalar lowering for the whole decode
+    // while its callers were promoted (NUC: whole-kernel scalar f64 + soft-f16
+    // instead of vpdpbusd).
+    let mut owner_of: BTreeMap<IrFunctionId, (usize, bool)> = BTreeMap::new();
+    for (mod_idx, module) in modules.iter().enumerate() {
+        for func_id in module.functions.keys() {
+            owner_of.entry(*func_id).or_insert((mod_idx, false));
+        }
+        for func_id in module.extern_functions.keys() {
+            owner_of.entry(*func_id).or_insert((mod_idx, true));
+        }
+    }
+
     // Seed with entry function
     worklist.push((entry_mod_idx, entry_func_id));
 
@@ -112,31 +130,19 @@ pub fn tree_shake_bundle(
                 match inst {
                     IrInstruction::CallDirect {
                         func_id: callee, ..
-                    } => {
-                        // Callee could be in functions or extern_functions of same module
-                        if module.functions.contains_key(callee) {
-                            worklist.push((mod_idx, *callee));
-                        } else if module.extern_functions.contains_key(callee) {
-                            reachable_externs.insert((mod_idx, *callee));
-                        }
                     }
-                    IrInstruction::FunctionRef {
-                        func_id: ref_id, ..
-                    } => {
-                        if module.functions.contains_key(ref_id) {
-                            worklist.push((mod_idx, *ref_id));
-                        } else if module.extern_functions.contains_key(ref_id) {
-                            reachable_externs.insert((mod_idx, *ref_id));
-                        }
+                    | IrInstruction::FunctionRef {
+                        func_id: callee, ..
                     }
-                    IrInstruction::MakeClosure {
-                        func_id: closure_id,
-                        ..
+                    | IrInstruction::MakeClosure {
+                        func_id: callee, ..
                     } => {
-                        if module.functions.contains_key(closure_id) {
-                            worklist.push((mod_idx, *closure_id));
-                        } else if module.extern_functions.contains_key(closure_id) {
-                            reachable_externs.insert((mod_idx, *closure_id));
+                        if let Some(&(owner, is_extern)) = owner_of.get(callee) {
+                            if is_extern {
+                                reachable_externs.insert((owner, *callee));
+                            } else {
+                                worklist.push((owner, *callee));
+                            }
                         }
                     }
                     IrInstruction::Const {
@@ -144,10 +150,12 @@ pub fn tree_shake_bundle(
                         ..
                     } => {
                         // Function pointers stored as constants (e.g., `var fn = plusOne;`)
-                        if module.functions.contains_key(ref_id) {
-                            worklist.push((mod_idx, *ref_id));
-                        } else if module.extern_functions.contains_key(ref_id) {
-                            reachable_externs.insert((mod_idx, *ref_id));
+                        if let Some(&(owner, is_extern)) = owner_of.get(ref_id) {
+                            if is_extern {
+                                reachable_externs.insert((owner, *ref_id));
+                            } else {
+                                worklist.push((owner, *ref_id));
+                            }
                         }
                     }
                     IrInstruction::LoadGlobal { global_id, .. }
