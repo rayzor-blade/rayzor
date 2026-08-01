@@ -721,10 +721,25 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         b: inkwell::values::VectorValue<'ctx>,
     ) -> Option<inkwell::values::VectorValue<'ctx>> {
         use inkwell::intrinsics::Intrinsic;
+        let dbg = std::env::var("RAYZOR_VNNI_DEBUG").is_ok();
         if !std::arch::is_x86_feature_detected!("avxvnni") {
+            if dbg {
+                eprintln!("[vnni] avxvnni not detected");
+            }
             return None;
         }
-        let intrinsic = Intrinsic::find("llvm.x86.avx512.vpdpbusd.128")?;
+        let intrinsic = match Intrinsic::find("llvm.x86.avx512.vpdpbusd.128") {
+            Some(i) => i,
+            None => {
+                if dbg {
+                    eprintln!("[vnni] intrinsic llvm.x86.avx512.vpdpbusd.128 NOT FOUND");
+                }
+                return None;
+            }
+        };
+        if dbg {
+            eprintln!("[vnni] emitting vpdpbusd");
+        }
         // Fixed <4 x i32> operands (not overloaded), so no type args.
         let func = intrinsic.get_declaration(&self.module, &[])?;
         let i32x4 = self.context.i32_type().vec_type(4);
