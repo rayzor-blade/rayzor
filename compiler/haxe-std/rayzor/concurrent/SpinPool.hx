@@ -114,6 +114,11 @@ class SpinPool {
 
     inline function pidOf(w:Int):Atomic<Int> return cell(10 + (_n - 1) + (w - 1));
 
+    /** Profile-mode per-participant counters; participant 0 is the caller. */
+    inline function busyUsOf(w:Int):Atomic<Int> return cell(10 + 2 * (_n - 1) + w);
+
+    inline function claimsOf(w:Int):Atomic<Int> return cell(10 + 2 * (_n - 1) + _n + w);
+
     /** Spawn `n - 1` persistent workers (the caller is also a claimant).
         `spinBudget` (0 = platform default), `relaxHint` (-1 = platform
         default) and `profile` (1 = time each dispatch) are supplied by the
@@ -123,7 +128,7 @@ class SpinPool {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
-        var cells = 10 + (n > 1 ? (n - 1) * 2 : 0);
+        var cells = 10 + (n > 1 ? (n - 1) * 2 : 0) + n * 2;
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
@@ -164,11 +169,18 @@ class SpinPool {
         var rows:Int = rowsCell().load();
         var chunk:Int = chunkCell().load();
         var cur = cursor();
+        var claimed = 0;
+        var t0 = _profile != 0 ? Sys.time() : 0.0;
         while (true) {
             var n0:Int = cur.fetchAdd(chunk);
             if (n0 >= rows) break;
             var n1:Int = (n0 + chunk > rows) ? rows : (n0 + chunk);
             f(n0, n1, who);
+            claimed = claimed + 1;
+        }
+        if (_profile != 0) {
+            busyUsOf(who).fetchAdd(Std.int((Sys.time() - t0) * 1e6));
+            claimsOf(who).fetchAdd(claimed);
         }
     }
 
@@ -367,9 +379,14 @@ class SpinPool {
 
     /** One-line profile of accumulated pool time; resets nothing. */
     public function profReport():String {
+        var per = "";
+        for (w in 0..._n) {
+            per += " w" + w + "=" + Std.int(busyUsOf(w).load() / 1000)
+                + "ms/" + claimsOf(w).load() + "c";
+        }
         return "band_ms=" + (bandUs().load() / 1000.0)
             + " quant_ms=" + (quantUs().load() / 1000.0)
-            + " dispatches=" + dispatches().load();
+            + " dispatches=" + dispatches().load() + per;
     }
 
     /** Reusable per-pool scratch for hot kernels with sequential dispatches.
