@@ -505,6 +505,23 @@ class Q4Matmul {
         var sc7 = ((u2 >>> 24) & 0x0F) | (((u0 >>> 30) & 3) << 4);
         var mn7 = ((u2 >>> 28) & 0x0F) | (((u1 >>> 30) & 3) << 4);
 
+        return q4DotBody(wBase, wBlk, aBase, aBlk, bsAddr, bsBase, xd, d, dmin,
+            sc0, sc1, sc2, sc3, sc4, sc5, sc6, sc7,
+            mn0, mn1, mn2, mn3, mn4, mn5, mn6, mn7);
+    }
+
+    /** The dot half of one Q4_K super-block, with the block header ALREADY
+        decoded. Split out so a batch tile can decode a block's scales/mins
+        ONCE and reuse them across its rows: the header is a property of the
+        WEIGHT block, not of the activation row, and re-deriving it per row
+        was ~24 shift/and ops plus two branchy f16 decodes of pure waste.
+        Inline, so the parameter list costs nothing at runtime. Callers must
+        pass values decoded exactly as `q4DotMA4` does — this is the only
+        copy of the math, so the two paths cannot drift. */
+    static inline function q4DotBody(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int,
+            bsAddr:Usize, bsBase:Int, xd:Float, d:Float, dmin:Float,
+            sc0:Int, sc1:Int, sc2:Int, sc3:Int, sc4:Int, sc5:Int, sc6:Int, sc7:Int,
+            mn0:Int, mn1:Int, mn2:Int, mn3:Int, mn4:Int, mn5:Int, mn6:Int, mn7:Int):Float {
         var dv0 = subDotVec(wBase, wBlk + 16 + 0 * 32, false, aBase, aBlk + 0 * 32);
         var dv1 = subDotVec(wBase, wBlk + 16 + 0 * 32, true,  aBase, aBlk + 1 * 32);
         var dv2 = subDotVec(wBase, wBlk + 16 + 1 * 32, false, aBase, aBlk + 2 * 32);
@@ -1475,10 +1492,37 @@ class Q4Matmul {
                             s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
                             s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
                         } else {
-                            s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
-                            s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
-                            s2 += q4DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
-                            s3 += q4DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
+                            // Decode this block's header ONCE for all four rows: the
+                            // scales/mins belong to the WEIGHT block, only the activation
+                            // offset varies across the tile. Raw-pointer loads defeat LLVM's
+                            // alias analysis, so it cannot CSE these across the four inlined
+                            // bodies on its own.
+                            var hw0 = Mem.loadI32(wBase + Usize.fromInt(blkOff));
+                            var hu0 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 4));
+                            var hu1 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 8));
+                            var hu2 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 12));
+                            var hd = f16ToF32(hw0 & 0xFFFF);
+                            var hdm = f16ToF32((hw0 >>> 16) & 0xFFFF);
+                            var e0 = hu0 & 63; var e1 = (hu0 >>> 8) & 63;
+                            var e2 = (hu0 >>> 16) & 63; var e3 = (hu0 >>> 24) & 63;
+                            var g0 = hu1 & 63; var g1 = (hu1 >>> 8) & 63;
+                            var g2 = (hu1 >>> 16) & 63; var g3 = (hu1 >>> 24) & 63;
+                            var e4 = (hu2 & 0x0F) | (((hu0 >>> 6) & 3) << 4);
+                            var g4 = ((hu2 >>> 4) & 0x0F) | (((hu1 >>> 6) & 3) << 4);
+                            var e5 = ((hu2 >>> 8) & 0x0F) | (((hu0 >>> 14) & 3) << 4);
+                            var g5 = ((hu2 >>> 12) & 0x0F) | (((hu1 >>> 14) & 3) << 4);
+                            var e6 = ((hu2 >>> 16) & 0x0F) | (((hu0 >>> 22) & 3) << 4);
+                            var g6 = ((hu2 >>> 20) & 0x0F) | (((hu1 >>> 22) & 3) << 4);
+                            var e7 = ((hu2 >>> 24) & 0x0F) | (((hu0 >>> 30) & 3) << 4);
+                            var g7 = ((hu2 >>> 28) & 0x0F) | (((hu1 >>> 30) & 3) << 4);
+                            s0 += q4DotBody(wBase, blkOff, aBase, a0, bsAddr, i0, d0, hd, hdm,
+                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                            s1 += q4DotBody(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1, hd, hdm,
+                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                            s2 += q4DotBody(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2, hd, hdm,
+                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                            s3 += q4DotBody(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3, hd, hdm,
+                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
                         }
                     }
                     Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
