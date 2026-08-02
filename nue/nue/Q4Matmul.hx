@@ -799,6 +799,98 @@ class Q4Matmul {
         return (b << 24) >> 24;
     }
 
+    /** Four rows of one Q6_K super-block, sharing the weight decode.
+
+        The batch-4 tile called `q6DotMA4` four times with the SAME block
+        offset, so per super-block it re-derived the block scale (a SIMD load
+        plus a branchy f16 decode), 12 weight SIMD loads, the 16 sub-block
+        scales, and — the big one — the whole 6-bit nibble reconstruction:
+        ~10 SIMD ops x 8 sub-blocks to rebuild qLo/qHi. All of that belongs to
+        the WEIGHT block; only the activation offset varies across the tile.
+        Roughly 70% of the per-row work was repeated four times.
+
+        The fix is a loop inversion, not a header hoist: rebuild qLo/qHi once
+        per sub-block and run the four rows INSIDE, so only two vectors stay
+        live rather than all sixteen (holding them all spills — see the failed
+        4->8 tile widening). Results go to `outAddr` as four f64, because Haxe
+        has no out-params and returning a struct would allocate per block.
+
+        Accumulation order per (row, sub-block) is unchanged, so output is
+        bit-identical to four `q6DotMA4` calls. */
+    static inline function q6DotMA4x4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int,
+            K:Int, bsAddr:Usize, bsBase:Int, bprStride:Int,
+            xd0:Float, xd1:Float, xd2:Float, xd3:Float, outAddr:Usize):Void {
+        var dVec = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wBlk + 194)));
+        var d = f16ToF32((dVec[14] & 0xFF) | ((dVec[15] & 0xFF) << 8));
+        var mask = SIMD16i8.splat(0x0F);
+        var mask2 = SIMD16i8.splat(0x03);
+        var isum0 = SIMD4i32.splat(0); var isum1 = SIMD4i32.splat(0);
+        var isum2 = SIMD4i32.splat(0); var isum3 = SIMD4i32.splat(0);
+        var imin0 = 0; var imin1 = 0; var imin2 = 0; var imin3 = 0;
+        for (n in 0...2) {
+            var qlB = wBlk + n * 64;
+            var qhB = wBlk + 128 + n * 32;
+            var scOff = n * 8;
+            var outOff = n * 128;
+            var ql0 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB)));
+            var ql1 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 16)));
+            var ql2 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 32)));
+            var ql3 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qlB + 48)));
+            var qh0 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qhB)));
+            var qh1 = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(qhB + 16)));
+            for (j in 0...4) {
+                var qlP0 = (j == 0) ? SIMD16i8.and(ql0, mask)
+                         : (j == 1) ? SIMD16i8.and(ql2, mask)
+                         : (j == 2) ? SIMD16i8.ushr(ql0, 4) : SIMD16i8.ushr(ql2, 4);
+                var qlP1 = (j == 0) ? SIMD16i8.and(ql1, mask)
+                         : (j == 1) ? SIMD16i8.and(ql3, mask)
+                         : (j == 2) ? SIMD16i8.ushr(ql1, 4) : SIMD16i8.ushr(ql3, 4);
+                var qhP0 = (j == 0) ? SIMD16i8.and(qh0, mask2)
+                         : (j == 1) ? SIMD16i8.and(SIMD16i8.ushr(qh0, 2), mask2)
+                         : (j == 2) ? SIMD16i8.and(SIMD16i8.ushr(qh0, 4), mask2) : SIMD16i8.ushr(qh0, 6);
+                var qhP1 = (j == 0) ? SIMD16i8.and(qh1, mask2)
+                         : (j == 1) ? SIMD16i8.and(SIMD16i8.ushr(qh1, 2), mask2)
+                         : (j == 2) ? SIMD16i8.and(SIMD16i8.ushr(qh1, 4), mask2) : SIMD16i8.ushr(qh1, 6);
+                var qLo = SIMD16i8.or(qlP0, SIMD16i8.shl(qhP0, 4));
+                var qHi = SIMD16i8.or(qlP1, SIMD16i8.shl(qhP1, 4));
+                var scLo = scaleI8(wBase, wBlk + 192 + scOff + 2 * j);
+                var scHi = scaleI8(wBase, wBlk + 192 + scOff + 2 * j + 1);
+                var vLo = SIMD4i32.splat(scLo);
+                var vHi = SIMD4i32.splat(scHi);
+                var span = outOff + j * 32;
+                var bi = bsBase + (span >> 4);
+                // Rows share qLo/qHi/scales; only the activation span moves.
+                var xs0 = aBlk + span;
+                isum0 = isum0 + (vLo * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs0))), qLo)
+                               + vHi * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs0 + 16))), qHi));
+                imin0 += scLo * Mem.loadI32(bsAddr + Usize.fromInt(bi * 4))
+                       + scHi * Mem.loadI32(bsAddr + Usize.fromInt((bi + 1) * 4));
+                var xs1 = xs0 + K;
+                var bi1 = bi + bprStride;
+                isum1 = isum1 + (vLo * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs1))), qLo)
+                               + vHi * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs1 + 16))), qHi));
+                imin1 += scLo * Mem.loadI32(bsAddr + Usize.fromInt(bi1 * 4))
+                       + scHi * Mem.loadI32(bsAddr + Usize.fromInt((bi1 + 1) * 4));
+                var xs2 = xs0 + 2 * K;
+                var bi2 = bi + 2 * bprStride;
+                isum2 = isum2 + (vLo * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs2))), qLo)
+                               + vHi * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs2 + 16))), qHi));
+                imin2 += scLo * Mem.loadI32(bsAddr + Usize.fromInt(bi2 * 4))
+                       + scHi * Mem.loadI32(bsAddr + Usize.fromInt((bi2 + 1) * 4));
+                var xs3 = xs0 + 3 * K;
+                var bi3 = bi + 3 * bprStride;
+                isum3 = isum3 + (vLo * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs3))), qLo)
+                               + vHi * SIMD4i32.dotI8I7(SIMD4i32.splat(0), SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(xs3 + 16))), qHi));
+                imin3 += scLo * Mem.loadI32(bsAddr + Usize.fromInt(bi3 * 4))
+                       + scHi * Mem.loadI32(bsAddr + Usize.fromInt((bi3 + 1) * 4));
+            }
+        }
+        Mem.storeF64(outAddr, xd0 * d * (isum0.sum() - 32 * imin0));
+        Mem.storeF64(outAddr + Usize.fromInt(8), xd1 * d * (isum1.sum() - 32 * imin1));
+        Mem.storeF64(outAddr + Usize.fromInt(16), xd2 * d * (isum2.sum() - 32 * imin2));
+        Mem.storeF64(outAddr + Usize.fromInt(24), xd3 * d * (isum3.sum() - 32 * imin3));
+    }
+
     static inline function q6DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsAddr:Usize, bsBase:Int, xd:Float):Float {
         // scales are read per-(n,j) with a dynamic index — take them straight
         // from memory via scaleI8 (see there); dVec keeps its constant-lane gets.
@@ -1670,6 +1762,10 @@ class Q4Matmul {
         var yBase = y.data().raw();
 
         var band = function(n0:Int, n1:Int, node:Int):Void {
+            // Per-band, so pool workers never share it: q6DotMA4x4 returns its
+            // four row results here (Haxe has no out-params).
+            var q6Scratch = Bytes.alloc(32);
+            var q6Out = q6Scratch.address();
             if (batch == 1) {
                 // Decode fast path: scalar accumulator, no batch indexing.
                 // No software prefetch here: this model's active weight set
@@ -1729,10 +1825,13 @@ class Q4Matmul {
                         var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
                         var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
-                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
-                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
-                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
+                            // One weight decode for all four rows (see q6DotMA4x4).
+                            q6DotMA4x4(wBase, blkOff, aBase, a0, K, bsAddr, i0, bpr * 16,
+                                d0, d1, d2, d3, q6Out);
+                            s0 += Mem.loadF64(q6Out);
+                            s1 += Mem.loadF64(q6Out + Usize.fromInt(8));
+                            s2 += Mem.loadF64(q6Out + Usize.fromInt(16));
+                            s3 += Mem.loadF64(q6Out + Usize.fromInt(24));
                         } else {
                             // Decode this block's header ONCE for all four rows: the
                             // scales/mins belong to the WEIGHT block, only the activation
@@ -2010,6 +2109,10 @@ class Q4Matmul {
         var yb2 = (w2 != null) ? y2.data().raw() : yb0;
 
         var band = function(n0:Int, n1:Int, node:Int):Void {
+            // Per-band, so pool workers never share it: q6DotMA4x4 returns its
+            // four row results here (Haxe has no out-params).
+            var q6Scratch = Bytes.alloc(32);
+            var q6Out = q6Scratch.address();
             for (g in n0...n1) {
                 var wBase:Usize; var isQ6:Bool; var n:Int; var yb:Usize; var outRows:Int;
                 if (g < e0) {
@@ -2044,10 +2147,13 @@ class Q4Matmul {
                         var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
                         var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            s0 += q6DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
-                            s1 += q6DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
-                            s2 += q6DotMA4(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2);
-                            s3 += q6DotMA4(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3);
+                            // One weight decode for all four rows (see q6DotMA4x4).
+                            q6DotMA4x4(wBase, blkOff, aBase, a0, K, bsAddr, i0, bpr * 16,
+                                d0, d1, d2, d3, q6Out);
+                            s0 += Mem.loadF64(q6Out);
+                            s1 += Mem.loadF64(q6Out + Usize.fromInt(8));
+                            s2 += Mem.loadF64(q6Out + Usize.fromInt(16));
+                            s3 += Mem.loadF64(q6Out + Usize.fromInt(24));
                         } else {
                             s0 += q4DotMA4(wBase, blkOff, aBase, a0, bsAddr, i0, d0);
                             s1 += q4DotMA4(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1);
