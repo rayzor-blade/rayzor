@@ -71,14 +71,19 @@ class Q4Matmul {
     }
 
     static var _haxeAmx:Int = 0;
-    /** `NUE_AMX_HAXE=1` — run the AMX prefill's dequant and f16 narrowing in
-        Haxe, leaving Accelerate's GEMM as the only FFI call. Opt-in until
-        measured against the plugin path; the arithmetic is already verified
-        bit-identical to the plugin's dequant. */
+    /** AMX prefill dequant + f16 narrowing in Haxe — ON by default
+        (`NUE_AMX_HAXE=0` opts out), leaving Accelerate's GEMM as the only FFI
+        call. Bit-identical to the plugin dequant over a full 4096x4096 Q4_K_M
+        weight, and it holds ONE reusable weight scratch where the plugin kept
+        a permanent f16 copy per weight. Measured peak RSS 4790 vs 6382 MB; on
+        a memory-pressured 16 GB Mac the plugin path could not keep the model
+        resident (RSS 3.19 GB of a 4.5 GB model, 131% CPU, 8 tokens
+        unfinished in 10 min) while this one completed in 17 s. */
     static function haxeAmx():Bool {
         if (_haxeAmx == 0) {
             var v = Sys.getEnvOr("NUE_AMX_HAXE", "RZT_AMX_HAXE");
-            _haxeAmx = (v != null && (v == "1" || v == "true")) ? 1 : 2;
+            var off = (v != null && (v == "0" || v == "false"));
+            _haxeAmx = off ? 2 : 1;
         }
         return _haxeAmx == 1;
     }
@@ -537,7 +542,10 @@ class Q4Matmul {
         if (!dequantQ4KToF16(qw, _w16, sp)) return null;
         _x16 = growScratch(_x16, batch * K * 2);
         narrowToF16(x.data().raw(), _x16.address(), batch, K, sp);
-        var out = Tensor.zeros([batch, n], DType.F32);
+        // uninit, not zeros: BNNSMatMul takes alpha only (no beta), so it
+        // WRITES C rather than accumulating into it. Zeroing first would
+        // touch batch*n f32 on fresh pages purely to overwrite them.
+        var out = Tensor.uninit([batch, n], DType.F32);
         if (!AmxGemm.gemmF16(batch, K, n, _x16.address(), _w16.address(), out.data().raw())) {
             return null;
         }

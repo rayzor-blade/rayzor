@@ -1692,110 +1692,6 @@ fn amx_prefill_min_batch() -> usize {
     })
 }
 
-/// Budget for the leaked f16 weight cache, in bytes. `RZT_AMX_CACHE_MB` overrides.
-///
-/// BNNS/AMX consumes f16 only, so every routed weight leaves a permanent f16
-/// copy here — a SECOND, fatter copy of the model on top of the quantised one.
-/// That is affordable at 1B (~1.6 GB observed) and fatal at 7B: measured 11 GB
-/// of f16 for 192 routed weights, which pushed a 16 GB box into swap and made
-/// prefill SLOWER (18.9 s vs 13.8 s with AMX off). Unbounded growth keyed only
-/// on batch size cannot express "do the copies fit", so cap the cache; past the
-/// cap `cached_f16_weight` returns null and the caller falls back to the
-/// portable path, which is what it already does on any other cache miss.
-fn amx_cache_budget_bytes() -> usize {
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        std::env::var("RZT_AMX_CACHE_MB")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(3 * 1024 * 1024 * 1024)
-    })
-}
-
-static AMX_CACHE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Set once the f16 budget refuses a weight: AMX routing is OFF from then on.
-///
-/// Without this the model runs MIXED — some weights served from the f16 cache,
-/// the rest falling back per call — which measured slower end to end than never
-/// routing at all (Mistral-7B prefill 18.95 s mixed vs 13.75 s AMX-off), on top
-/// of a failed lookup per weight per prefill. A refusal means the copies do not
-/// fit THIS model; the honest response is to stop routing, not keep asking.
-static AMX_BUDGET_EXHAUSTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "macos")]
-fn amx_budget_exhausted() -> bool {
-    AMX_BUDGET_EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// f16 dequant of a Q4 weight, cached by QTensor pointer and reused across
-/// prefills. Weights are fixed, so Q4 -> f32 (staging) -> f16 is a one-time
-/// cost; f16 halves the resident copy vs an F32 cache (~1.65 GB vs 3.3 GB for
-/// the 1B model) and AMX runs f16 GEMM faster than f32 (BNNS probes:
-/// 1.0-1.6 TF/s). The staging f32 tensor is freed after narrowing (vImage,
-/// correct rounding + subnormals); the f16 buffer is intentionally leaked —
-/// bounded by the model's weight set, and the process outlives it.
-#[cfg(target_os = "macos")]
-fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<i64, usize>>> = Mutex::new(None);
-    let mut g = CACHE.lock().unwrap();
-    let map = g.get_or_insert_with(HashMap::new);
-    if let Some(&p) = map.get(&qt_w) {
-        return p as *const u16;
-    }
-    // Refuse BEFORE dequantising: the f32 staging copy alone is 2x this.
-    let want = len * 2;
-    let used = AMX_CACHE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
-    if used + want > amx_cache_budget_bytes() {
-        if std::env::var_os("RZT_AMX_DEBUG").is_some() {
-            eprintln!(
-                "[amx-dequant] BUDGET REFUSE qt={qt_w:#x} want={:.1}MB used={:.1}MB cap={:.1}MB",
-                want as f64 / 1048576.0,
-                used as f64 / 1048576.0,
-                amx_cache_budget_bytes() as f64 / 1048576.0
-            );
-        }
-        AMX_BUDGET_EXHAUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
-        return std::ptr::null();
-    }
-    let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
-    let t0 = if dbg {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
-    let t = unsafe { rayzor_qtensor_dequant(qt_w) };
-    if t == 0 {
-        return std::ptr::null();
-    }
-    #[repr(C)]
-    struct Head {
-        data: *mut u8,
-    }
-    let f32_data = unsafe { (*(t as *const Head)).data as *const f32 };
-    let src = unsafe { std::slice::from_raw_parts(f32_data, len) };
-    let mut buf = vec![0u16; len];
-    let ok = crate::apple_accel::f32_to_f16(src, &mut buf);
-    unsafe { crate::tensor::rayzor_tensor_free(t) }; // drop the f32 staging copy
-    if !ok {
-        return std::ptr::null();
-    }
-    let p = Box::leak(buf.into_boxed_slice()).as_ptr();
-    if let Some(t0) = t0 {
-        eprintln!(
-            "[amx-dequant] MISS(f16) qt={qt_w:#x} us={:.0}",
-            t0.elapsed().as_secs_f64() * 1e6
-        );
-    }
-    map.insert(qt_w, p as usize); // never freed (leaked): one f16 copy per weight
-    AMX_CACHE_BYTES.fetch_add(len * 2, std::sync::atomic::Ordering::Relaxed);
-    p
-}
-
 /// `rayzor_amx_gemm_f16(m, k, n, a16, b16, cf32) -> bool`
 ///
 /// The PLATFORM CALL ONLY: `c[m,n] = a[m,k] · b[n,k]^T` through
@@ -1839,9 +1735,20 @@ pub unsafe extern "C" fn rayzor_amx_gemm_f16(
 }
 
 /// out[batch,n] = x[batch,k] · dequant(qt)[n,k]^T via Accelerate (AMX f16).
-/// Uses the cached f16 weight (dequant once), converts the f32 activation to
-/// f16 per call (cheap: batch*k), then BNNS f16 x f16 -> f32 GEMM straight
-/// into the out tensor. Returns the out-tensor handle, or None to fall back.
+///
+/// Dequants the weight into a REUSABLE per-thread scratch, narrows the f32
+/// activation into another, then runs BNNS f16 x f16 -> f32 straight into the
+/// out tensor. Returns the out-tensor handle, or None to fall back.
+///
+/// There is deliberately NO f16 weight cache. Within one prefill each weight
+/// is used exactly once, so caching buys nothing and only costs a permanent
+/// second copy of the model (~11 GB at 7B). That copy is what forced the
+/// budget cap, and the cap is what silently disabled AMX on exactly the models
+/// that needed it. Peak extra memory is now one weight (~117 MB at 7B).
+///
+/// This is the fallback path: `nue.Q4Matmul.amxPrefillHaxe` owns the arithmetic
+/// (Q4_K decode + both f16 narrowings) in Haxe and calls
+/// `rayzor_amx_gemm_f16` directly. This runs only when that declines.
 #[cfg(target_os = "macos")]
 unsafe fn amx_prefill_matmul(
     x_tensor: i64,
@@ -1860,44 +1767,32 @@ unsafe fn amx_prefill_matmul(
     } else {
         None
     };
-    let fw16 = cached_f16_weight(qt_w, n * k);
-    let cache_us = t_cache
-        .map(|t| t.elapsed().as_secs_f64() * 1e6)
-        .unwrap_or(0.0);
-    if fw16.is_null() {
-        // The cache refused (budget exhausted). Do NOT give up on AMX: within
-        // ONE prefill each weight is used exactly once, so caching buys nothing
-        // there and the permanent copy is the only reason we are here. Dequant
-        // into a REUSABLE scratch for this call — peak extra memory becomes one
-        // weight (~117 MB at 7B) instead of the whole model (~11 GB), and
-        // routing survives for the rest of the run.
-        thread_local! {
-            static W16: std::cell::RefCell<Vec<u16>> =
-                const { std::cell::RefCell::new(Vec::new()) };
-        }
-        return W16.with(|cell| {
-            let mut w16 = cell.borrow_mut();
-            w16.resize(n * k, 0);
-            let t = rayzor_qtensor_dequant(qt_w);
-            if t == 0 {
-                return None;
-            }
-            let f32_data = (*(t as *const Head)).data as *const f32;
-            let src = std::slice::from_raw_parts(f32_data, n * k);
-            let ok = crate::apple_accel::f32_to_f16(src, &mut w16);
-            crate::tensor::rayzor_tensor_free(t);
-            if !ok {
-                return None;
-            }
-            amx_gemm_f16(x_tensor, &w16, batch, k, n, dbg, cache_us)
-        });
+    thread_local! {
+        static W16: std::cell::RefCell<Vec<u16>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
-    let fw = std::slice::from_raw_parts(fw16, n * k);
-    amx_gemm_f16(x_tensor, fw, batch, k, n, dbg, cache_us)
+    W16.with(|cell| {
+        let mut w16 = cell.borrow_mut();
+        w16.resize(n * k, 0);
+        let t = rayzor_qtensor_dequant(qt_w);
+        if t == 0 {
+            return None;
+        }
+        let f32_data = (*(t as *const Head)).data as *const f32;
+        let src = std::slice::from_raw_parts(f32_data, n * k);
+        let ok = crate::apple_accel::f32_to_f16(src, &mut w16);
+        crate::tensor::rayzor_tensor_free(t);
+        if !ok {
+            return None;
+        }
+        let cache_us = t_cache
+            .map(|t| t.elapsed().as_secs_f64() * 1e6)
+            .unwrap_or(0.0);
+        amx_gemm_f16(x_tensor, &w16, batch, k, n, dbg, cache_us)
+    })
 }
 
-/// The GEMM half of the AMX prefill path, shared by the cached-weight and
-/// scratch-weight routes so the two cannot drift.
+/// The GEMM half of the AMX prefill path.
 #[cfg(target_os = "macos")]
 unsafe fn amx_gemm_f16(
     x_tensor: i64,
@@ -1932,7 +1827,11 @@ unsafe fn amx_gemm_f16(
         let xconv_us = t_x
             .map(|t| t.elapsed().as_secs_f64() * 1e6)
             .unwrap_or(0.0);
-        let out_tensor = crate::tensor::rayzor_tensor_zeros([batch, n].as_ptr() as i64, 2, 0);
+        // uninit, not zeros: BNNSMatMul takes alpha only (no beta), so it
+        // WRITES C. Zeroing batch*n f32 on fresh pages only to overwrite
+        // them is pure traffic — and on the failure path below the tensor is
+        // freed without ever being read.
+        let out_tensor = crate::tensor::rayzor_tensor_uninit([batch, n].as_ptr() as i64, 2, 0);
         if out_tensor == 0 {
             return None;
         }
@@ -1962,7 +1861,7 @@ unsafe fn amx_gemm_f16(
 /// f16 copy of a plain-F32 weight, cached by data pointer and reused across
 /// forwards. Encoder/Linear weights are load-once and fixed, so f32 -> f16 is a
 /// one-time narrowing (vImage, correct rounding); the f16 buffer is leaked,
-/// bounded by the model's weight set (mirrors `cached_f16_weight`). The cached
+/// bounded by the model's weight set. The cached
 /// length guards against a freed+reused buffer of a different shape colliding on
 /// the same address.
 #[cfg(target_os = "macos")]
@@ -2011,7 +1910,7 @@ pub(crate) unsafe fn amx_matmul_t_f32(
             amx_prefill_min_batch()
         );
     }
-    if !amx_prefill_enabled() || amx_budget_exhausted() || m < amx_prefill_min_batch() {
+    if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
         return false;
     }
     let fw16 = cached_f16_weight_f32(b as usize, n * k);
@@ -2083,14 +1982,11 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
                 x_is_contiguous(x_tensor)
             );
         }
-        // No `amx_budget_exhausted()` gate here any more. That gate existed
-        // because the old fallback was the PORTABLE SDOT path, and a mixed run
-        // (some weights cached, the rest on SDOT) measured slower than never
-        // routing (7B prefill 18.95 s mixed vs 13.75 s AMX-off). The fallback
-        // is now AMX-with-scratch, so an exhausted budget costs a per-call
-        // dequant — which the cached path also paid once — instead of dropping
-        // the weight to a different kernel. Keeping the gate is what made the
-        // models that most need prefill help the only ones never to get it.
+        // No budget gate: there is no f16 weight cache to run out of any more.
+        // The dequant goes to a reusable scratch, so routing costs a per-call
+        // dequant at any model size rather than a permanent second copy of the
+        // model — which is what made the models that most need prefill help
+        // the only ones never to get it.
         if qt.scheme == QSCHEME_Q4_K_M
             && amx_prefill_enabled()
             && batch >= amx_prefill_min_batch()
