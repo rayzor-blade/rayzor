@@ -1796,6 +1796,48 @@ fn cached_f16_weight(qt_w: i64, len: usize) -> *const u16 {
     p
 }
 
+/// `rayzor_amx_gemm_f16(m, k, n, a16, b16, cf32) -> bool`
+///
+/// The PLATFORM CALL ONLY: `c[m,n] = a[m,k] · b[n,k]^T` through
+/// Accelerate/BNNS in f16, accumulating to f32. Pointers are raw so Haxe can
+/// own both operands.
+///
+/// Exposed so the dequant and the activation narrow — which are ARITHMETIC —
+/// can live in Haxe (`nue.Q4Matmul`), leaving this the whole FFI surface of
+/// the AMX prefill path. Apple accelerator access is the sanctioned exception
+/// to pure-Haxe tensor ownership; the compute feeding it is not.
+///
+/// Returns false on a non-macOS build or if BNNS declines the shape, so the
+/// caller can fall back to the portable kernel.
+///
+/// # Safety
+/// `a16` must have m*k u16s, `b16` n*k u16s, `cf32` m*n writable f32s.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_amx_gemm_f16(
+    m: i64,
+    k: i64,
+    n: i64,
+    a16: i64,
+    b16: i64,
+    cf32: i64,
+) -> bool {
+    if m <= 0 || k <= 0 || n <= 0 || a16 == 0 || b16 == 0 || cf32 == 0 {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (m, k, n) = (m as usize, k as usize, n as usize);
+        let a = std::slice::from_raw_parts(a16 as *const u16, m * k);
+        let b = std::slice::from_raw_parts(b16 as *const u16, n * k);
+        let c = std::slice::from_raw_parts_mut(cf32 as *mut f32, m * n);
+        crate::apple_accel::matmul_f16f32_nt(m, k, n, a, b, c)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// out[batch,n] = x[batch,k] · dequant(qt)[n,k]^T via Accelerate (AMX f16).
 /// Uses the cached f16 weight (dequant once), converts the f32 activation to
 /// f16 per call (cheap: batch*k), then BNNS f16 x f16 -> f32 GEMM straight

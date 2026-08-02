@@ -376,6 +376,81 @@ class Q4Matmul {
             + " platform=" + totalPlat + verdict);
     }
 
+    /** Dequantise a Q4_K_M weight straight into an f16 buffer, in Haxe.
+        `out` must hold rows*cols u16 (2 bytes each).
+
+        This is the arithmetic half of the AMX prefill path. It used to live in
+        the tensor plugin as `cached_f16_weight`, which kept a PERMANENT f16
+        copy per weight (~11 GB at 7B) and so tripped its own budget cap and
+        switched AMX off on exactly the models that needed it. Producing f16 is
+        arithmetic and belongs here; only `rayzor_amx_gemm_f16` — the
+        Accelerate call — is FFI.
+
+        Mirrors `runtime-core/quant/q4_k_m.rs::dequant_q4_k_block`:
+        `v = scale_j * q - min_j`, with d/dmin already folded into the
+        per-sub-block scale/min the same way `q4DotMA4` derives them, so the
+        two paths share one definition of the header layout. Banded across
+        rows on the pool when one is supplied — rows are independent. */
+    public static function dequantQ4KToF16(w:QTensor, out:Bytes, ?sp:SpinPool):Bool {
+        if (w.scheme() != QScheme.Q4_K_M) return false;
+        var rows = w.rows();
+        var cols = w.cols();
+        if (out.length < rows * cols * 2) return false;
+        var bpr = cols >> 8;
+        var wBase = w.dataPtr();
+        var oBase = out.address();
+
+        var rowFn = function(lo:Int, hi:Int, node:Int):Void {
+            for (r in lo...hi) {
+                for (b in 0...bpr) {
+                    var blk = (r * bpr + b) * 144;
+                    var w0 = Mem.loadI32(wBase + Usize.fromInt(blk));
+                    var u0 = Mem.loadI32(wBase + Usize.fromInt(blk + 4));
+                    var u1 = Mem.loadI32(wBase + Usize.fromInt(blk + 8));
+                    var u2 = Mem.loadI32(wBase + Usize.fromInt(blk + 12));
+                    var d = f16ToF32(w0 & 0xFFFF);
+                    var dmin = f16ToF32((w0 >>> 16) & 0xFFFF);
+                    var dst = oBase + Usize.fromInt((r * cols + b * 256) * 2);
+                    for (j in 0...8) {
+                        // Same 6-bit scale/min unpack as q4DotMA4's header.
+                        var sc:Int; var mn:Int;
+                        if (j < 4) {
+                            sc = (u0 >>> (j * 8)) & 63;
+                            mn = (u1 >>> (j * 8)) & 63;
+                        } else {
+                            var t = j - 4;
+                            sc = ((u2 >>> (t * 8)) & 0x0F) | (((u0 >>> (t * 8 + 6)) & 3) << 4);
+                            mn = ((u2 >>> (t * 8 + 4)) & 0x0F) | (((u1 >>> (t * 8 + 6)) & 3) << 4);
+                        }
+                        var sj = d * sc;
+                        var mj = dmin * mn;
+                        // Sub-block j covers 32 weights: nibble half (j>>1) of
+                        // the 32-byte group, low nibbles for even j, high for odd.
+                        var qOff = blk + 16 + (j >> 1) * 32;
+                        var hi4 = (j & 1) == 1;
+                        // Two f16 per i32 store: rayzor.Mem has no 16-bit
+                        // store, and packing pairs halves the store count.
+                        var e = 0;
+                        while (e < 32) {
+                            var b0 = Mem.loadU8(wBase + Usize.fromInt(qOff + e));
+                            var b1 = Mem.loadU8(wBase + Usize.fromInt(qOff + e + 1));
+                            var q0 = hi4 ? ((b0 >>> 4) & 0x0F) : (b0 & 0x0F);
+                            var q1 = hi4 ? ((b1 >>> 4) & 0x0F) : (b1 & 0x0F);
+                            var h0 = f32ToF16(sj * q0 - mj);
+                            var h1 = f32ToF16(sj * q1 - mj);
+                            Mem.storeI32(dst + Usize.fromInt((j * 32 + e) * 2),
+                                (h0 & 0xFFFF) | (h1 << 16));
+                            e += 2;
+                        }
+                    }
+                }
+            }
+        };
+        if (sp != null && rows >= sp.workers() * 2) sp.parallelRows(rows, rowFn);
+        else rowFn(0, rows, 0);
+        return true;
+    }
+
     /** Public view of the f16 decoder, so the round-trip can be tested
         against `f32ToF16` without exposing the kernel internals. */
     public static function f16ToF32Pub(bits:Int):Float return f16ToF32(bits);
