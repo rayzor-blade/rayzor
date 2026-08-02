@@ -13380,6 +13380,48 @@ impl<'a> AstLowering<'a> {
                             Ok(type_table.float_type())
                         }
                     }
+                    // Bitwise and shift operators are Int -> Int in Haxe.
+                    // Without this arm they fell to the `_ => Dynamic`
+                    // catch-all below, so `var r = x >> 13` typed `r` as
+                    // Dynamic; a later `if (c) r = 0` then BOXED the constant
+                    // (haxe_box_int_ptr) and the merge returned the box
+                    // POINTER truncated to i32 — wrong values plus a 48-byte
+                    // leak per assignment.
+                    BinaryOperator::BitAnd
+                    | BinaryOperator::BitOr
+                    | BinaryOperator::BitXor
+                    | BinaryOperator::Shl
+                    | BinaryOperator::Shr
+                    | BinaryOperator::Ushr => {
+                        let left_type = left.expr_type;
+                        let right_type = right.expr_type;
+                        let dynamic_type = type_table.dynamic_type();
+                        // A user Class/Abstract operand carries an @:op
+                        // overload whose result is that type (e.g. masking a
+                        // Usize address), so it wins over the Int default.
+                        let is_user_type = |t: TypeId| {
+                            type_table
+                                .get(t)
+                                .map(|x| {
+                                    matches!(
+                                        x.kind,
+                                        crate::tast::core::TypeKind::Class { .. }
+                                            | crate::tast::core::TypeKind::Abstract { .. }
+                                    )
+                                })
+                                .unwrap_or(false)
+                        };
+                        if is_user_type(left_type) {
+                            Ok(left_type)
+                        } else if is_user_type(right_type) {
+                            Ok(right_type)
+                        } else if left_type == dynamic_type || right_type == dynamic_type {
+                            // Same convention as the arithmetic arm above.
+                            Ok(dynamic_type)
+                        } else {
+                            Ok(type_table.int_type())
+                        }
+                    }
                     BinaryOperator::Eq
                     | BinaryOperator::Ne
                     | BinaryOperator::Lt
