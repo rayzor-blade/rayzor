@@ -1,12 +1,11 @@
 ============================================
   Rayzor Haxe Test Results
-  Sun Aug  2 02:10:36 BST 2026
+  Sun Aug  2 02:49:31 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
 [33mWarning:[0m [W0110] type of array literal can not be inferred at assignment, this would fall back to Array<Dynamic>; annotate `var a:Array<T> = []` for deterministic behavior at runtime
-
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -723,31 +722,7 @@ hasStack=true
 --- test_exhaustive_switch [PASS] ---
 Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Application]...
 [33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:23:17[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m23 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[31mc[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
- [38;5;240m   │[0m                 [31m┬[0m  
- [38;5;240m   │[0m                 [31m╰[0m[31m─[0m[31m─[0m missing variants: Blue
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mNote[0m: add case for `Blue`
-[38;5;246m────╯[0m
 [33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:42:17[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m42 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[31mo[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
- [38;5;240m   │[0m                 [31m┬[0m  
- [38;5;240m   │[0m                 [31m╰[0m[31m─[0m[31m─[0m missing variants: None
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
-[38;5;246m────╯[0m
-[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
-
-[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
-
 red
 red
 red
@@ -775,9 +750,9 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 2
 1
-300
 100
 200
+300
 done
 
 --- test_forward [PASS] ---
@@ -872,19 +847,7 @@ square
 --- test_interface_cast [PASS] ---
 Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]...
 [38;5;147mAdvice:[0m [W0014] interface method `draw()` return type recovered as `String` at MIR; annotating the binding site (e.g. `var x:String = …`) makes the concrete type visible to earlier compiler passes too
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_interface_cast.hx:37:19[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m37 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[31md[0m[38;5;249m.[0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m([0m[38;5;249m)[0m[38;5;249m)[0m[38;5;249m;[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m/[0m[38;5;249m/[0m[38;5;249m [0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m:[0m[38;5;249mb[0m[38;5;249mo[0m[38;5;249mx[0m
- [38;5;240m   │[0m                   [31m┬[0m  
- [38;5;240m   │[0m                   [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
-[38;5;246m────╯[0m
 [38;5;147mAdvice:[0m [W0014] interface method `draw()` return type recovered as `String` at MIR; annotating the binding site (e.g. `var x:String = …`) makes the concrete type visible to earlier compiler passes too
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_interface_cast.hx:62:19[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m62 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[31md[0m[38;5;249m2[0m[38;5;249m.[0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m([0m[38;5;249m)[0m[38;5;249m)[0m[38;5;249m;[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m/[0m[38;5;249m/[0m[38;5;249m [0m[38;5;249mb[0m[38;5;249mu[0m[38;5;249mt[0m[38;5;249mt[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m-[0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m:[0m[38;5;249ms[0m[38;5;249mu[0m[38;5;249mb[0m[38;5;249mm[0m[38;5;249mi[0m[38;5;249mt[0m
- [38;5;240m   │[0m                   [31m┬[0m  
- [38;5;240m   │[0m                   [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
-[38;5;246m────╯[0m
 draw:box
 fail2
 click:submit
@@ -991,7 +954,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{world => 99, hello => 42}
+{hello => 42, world => 99}
 42
 99
 true
@@ -1010,11 +973,6 @@ false
 
 --- test_map_value_iteration [PASS] ---
 Running compiler/tests/haxe/test_map_value_iteration.hx [debug] [preset: Application]...
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1347: expected expression, found 'is'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1420: expected field declaration, found 'for'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1575: expected field declaration, found 'kv'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1644: expected field declaration, found 'for'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1762: expected field declaration, found 'Sys'; falling back to legacy parser
 PASS
 
 --- test_method_reference_lvalue [PASS] ---
@@ -1215,8 +1173,6 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
-error[IMPORT]: imported module `Resource` failed to compile (1 error(s)); calls into it will trap at runtime. First errors:
-    Cannot find name '__resources__' (78:21)
 42
 42
 

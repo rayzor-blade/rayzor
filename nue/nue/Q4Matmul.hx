@@ -4,6 +4,7 @@ import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.QScheme;
 import rayzor.ds.DType;
+import rayzor.ds.AmxGemm;
 import rayzor.SIMD4f;
 import rayzor.SIMD4i32;
 import rayzor.SIMD16i8;
@@ -67,6 +68,19 @@ class Q4Matmul {
             _amx = on ? 1 : 2;
         }
         return _amx == 1;
+    }
+
+    static var _haxeAmx:Int = 0;
+    /** `NUE_AMX_HAXE=1` — run the AMX prefill's dequant and f16 narrowing in
+        Haxe, leaving Accelerate's GEMM as the only FFI call. Opt-in until
+        measured against the plugin path; the arithmetic is already verified
+        bit-identical to the plugin's dequant. */
+    static function haxeAmx():Bool {
+        if (_haxeAmx == 0) {
+            var v = Sys.getEnvOr("NUE_AMX_HAXE", "RZT_AMX_HAXE");
+            _haxeAmx = (v != null && (v == "1" || v == "true")) ? 1 : 2;
+        }
+        return _haxeAmx == 1;
     }
 
     public static function useFusedMatmul():Bool {
@@ -402,9 +416,11 @@ class Q4Matmul {
 
         var rowFn = function(lo:Int, hi:Int, node:Int):Void {
             // Per-band bitcast scratch: `f32ToF16` goes through memory, so a
-            // shared buffer would race across pool workers.
-            var scratch = Bytes.alloc(4);
+            // shared buffer would race across pool workers. The following 64
+            // bytes hold the 16-entry per-sub-block value LUT.
+            var scratch = Bytes.alloc(68);
             var sAddr = scratch.address();
+            var lut = sAddr + Usize.fromInt(4);
             for (r in lo...hi) {
                 for (b in 0...bpr) {
                     var blk = (r * bpr + b) * 144;
@@ -440,14 +456,24 @@ class Q4Matmul {
                         var hi4 = (j & 1) == 1;
                         // Two f16 per i32 store: rayzor.Mem has no 16-bit
                         // store, and packing pairs halves the store count.
+                        // A sub-block's 32 weights take only 16 distinct
+                        // values (q is a nibble), so encode each ONCE into a
+                        // LUT instead of per element. f32ToF16 bitcasts
+                        // through memory, which is the expensive part — this
+                        // halves the conversions and reduces the inner loop
+                        // to two lookups and a store.
+                        for (q in 0...16) {
+                            Mem.storeI32(lut + Usize.fromInt(q * 4),
+                                f32ToF16At(sj * q - mj, sAddr));
+                        }
                         var e = 0;
                         while (e < 32) {
                             var b0 = Mem.loadU8(wBase + Usize.fromInt(qOff + e));
                             var b1 = Mem.loadU8(wBase + Usize.fromInt(qOff + e + 1));
                             var q0 = hi4 ? ((b0 >>> 4) & 0x0F) : (b0 & 0x0F);
                             var q1 = hi4 ? ((b1 >>> 4) & 0x0F) : (b1 & 0x0F);
-                            var h0 = f32ToF16At(sj * q0 - mj, sAddr);
-                            var h1 = f32ToF16At(sj * q1 - mj, sAddr);
+                            var h0 = Mem.loadI32(lut + Usize.fromInt(q0 * 4));
+                            var h1 = Mem.loadI32(lut + Usize.fromInt(q1 * 4));
                             Mem.storeI32(dst + Usize.fromInt((j * 32 + e) * 2),
                                 (h0 & 0xFFFF) | (h1 << 16));
                             e += 2;
@@ -459,6 +485,63 @@ class Q4Matmul {
         if (sp != null && rows >= sp.workers() * 2) sp.parallelRows(rows, rowFn);
         else rowFn(0, rows, 0);
         return true;
+    }
+
+    /** Narrow `rows*k` f32 activations to f16, banded over rows. Two f16 per
+        `Mem.storeI32`; `k` is a multiple of 256 so the pairing never has a
+        tail. */
+    static function narrowToF16(xBase:Usize, dst:Usize, rows:Int, k:Int, ?sp:SpinPool):Void {
+        var rowFn = function(lo:Int, hi:Int, node:Int):Void {
+            var scratch = Bytes.alloc(4);
+            var sAddr = scratch.address();
+            for (r in lo...hi) {
+                var s = xBase + Usize.fromInt(r * k * 4);
+                var d = dst + Usize.fromInt(r * k * 2);
+                var i = 0;
+                while (i < k) {
+                    var h0 = f32ToF16At(Mem.loadF32(s + Usize.fromInt(i * 4)), sAddr);
+                    var h1 = f32ToF16At(Mem.loadF32(s + Usize.fromInt((i + 1) * 4)), sAddr);
+                    Mem.storeI32(d + Usize.fromInt(i * 2), (h0 & 0xFFFF) | (h1 << 16));
+                    i += 2;
+                }
+            }
+        };
+        if (sp != null && rows >= sp.workers() * 2) sp.parallelRows(rows, rowFn);
+        else rowFn(0, rows, 0);
+    }
+
+    // Reused across calls: within one prefill each weight is touched once, so
+    // caching per weight buys nothing and a permanent f16 copy per weight is
+    // exactly what made the plugin's AMX path disable itself at 7B. One
+    // weight-sized scratch (~117 MB at 7B) instead of ~11 GB.
+    static var _w16:Bytes = null;
+    static var _x16:Bytes = null;
+
+    static function growScratch(cur:Bytes, need:Int):Bytes {
+        if (cur != null && cur.length >= need) return cur;
+        if (cur != null) cur.free();
+        return Bytes.alloc(need);
+    }
+
+    /** Haxe-owned AMX prefill: `out[batch,n] = x[batch,K] · dequant(qw)[n,K]^T`.
+
+        Everything except the GEMM is Haxe — the Q4_K decode and both f16
+        narrowings are arithmetic. `AmxGemm.gemmF16` is the whole FFI surface,
+        and Apple accelerator access is the sanctioned exception.
+
+        Returns null to fall back (non-Q4_K_M, or BNNS declined the shape). */
+    public static function amxPrefillHaxe(qw:QTensor, x:Tensor, batch:Int, K:Int, ?sp:SpinPool):Tensor {
+        if (qw.scheme() != QScheme.Q4_K_M) return null;
+        var n = qw.rows();
+        _w16 = growScratch(_w16, n * K * 2);
+        if (!dequantQ4KToF16(qw, _w16, sp)) return null;
+        _x16 = growScratch(_x16, batch * K * 2);
+        narrowToF16(x.data().raw(), _x16.address(), batch, K, sp);
+        var out = Tensor.zeros([batch, n], DType.F32);
+        if (!AmxGemm.gemmF16(batch, K, n, _x16.address(), _w16.address(), out.data().raw())) {
+            return null;
+        }
+        return out;
     }
 
     /** Public view of the f16 decoder, so the round-trip can be tested
@@ -981,6 +1064,12 @@ class Q4Matmul {
             // AMX prefill never reads as "NOT pure Haxe" — platform APIs are
             // the FFI this direction sanctions; Rust kernels are not.
             censusPlatform(1);
+            // NUE_AMX_HAXE=1: dequant + narrow in Haxe, FFI only for the GEMM.
+            // Opt-in until it is measured against the plugin path on Mac.
+            if (haxeAmx()) {
+                var hy = amxPrefillHaxe(qw, x, batch, K, sp);
+                if (hy != null) return hy;
+            }
             return qw.matmulXTQThreaded(x, 0);
         }
 
