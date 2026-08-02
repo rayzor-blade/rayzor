@@ -376,6 +376,10 @@ class Q4Matmul {
             + " platform=" + totalPlat + verdict);
     }
 
+    /** Public view of the f16 decoder, so the round-trip can be tested
+        against `f32ToF16` without exposing the kernel internals. */
+    public static function f16ToF32Pub(bits:Int):Float return f16ToF32(bits);
+
     static inline function f16ToF32(bits:Int):Float {
         var sign:Int = (bits >> 15) & 1; var exp:Int = (bits >> 10) & 0x1F; var mant:Int = bits & 0x3FF;
         var sgn = (sign == 1) ? -1.0 : 1.0;
@@ -384,6 +388,54 @@ class Q4Matmul {
         // Exact IEEE f16→f32 rebase: same sign/mantissa, exponent re-biased
         // 15→127. Branch-free bit construction (was an iterative pow2 loop).
         return Mem.f32FromBits((sign << 31) | ((exp + 112) << 23) | (mant << 13));
+    }
+
+    /** IEEE-754 f32 -> f16 bits, round-to-nearest-even. The inverse of
+        `f16ToF32`, and the primitive the Haxe-side AMX prefill dequant needs:
+        the GEMM wants f16 weights, and producing them is ARITHMETIC, so it
+        belongs here rather than in the tensor plugin. Only the Accelerate GEMM
+        itself is platform FFI.
+
+        Bits come out of the float via a 4-byte scratch store/load — rayzor has
+        `Mem.f32FromBits` but no inverse bitcast, and a round-trip is exact.
+        Handles subnormals, overflow-to-inf and NaN the way vImage's
+        f32 -> f16 does, so a buffer built here is interchangeable with one
+        built by the plugin. */
+    static var _f16Scratch:Bytes = null;
+
+    public static function f32ToF16(v:Float):Int {
+        if (_f16Scratch == null) _f16Scratch = Bytes.alloc(4);
+        Mem.storeF32(_f16Scratch.address(), v);
+        var bits = Mem.loadI32(_f16Scratch.address());
+        var sign = (bits >>> 16) & 0x8000;
+        var exp = (bits >>> 23) & 0xFF;
+        var mant = bits & 0x7FFFFF;
+        if (exp == 255) {
+            // Inf (mant 0) or NaN — keep a non-zero payload so NaN stays NaN.
+            return sign | 0x7C00 | (mant != 0 ? 0x200 : 0);
+        }
+        // Re-bias 127 -> 15. e <= 0 is subnormal-or-zero in f16, e >= 31 overflows.
+        var e = exp - 112;
+        if (e >= 31) return sign | 0x7C00;
+        if (e <= 0) {
+            if (e < -10) return sign; // rounds to zero
+            // Subnormal: restore the implicit 1 and shift into place.
+            var m = mant | 0x800000;
+            var shift = 14 - e;
+            var half = 1 << (shift - 1);
+            var rem = m & ((1 << shift) - 1);
+            var r = m >> shift;
+            if (rem > half || (rem == half && (r & 1) == 1)) r++;
+            return sign | r;
+        }
+        // Normal: 13 mantissa bits are dropped; round half to even.
+        var r = mant >> 13;
+        var rem = mant & 0x1FFF;
+        if (rem > 0x1000 || (rem == 0x1000 && (r & 1) == 1)) {
+            r++;
+            if (r == 0x400) { r = 0; e++; if (e >= 31) return sign | 0x7C00; }
+        }
+        return sign | (e << 10) | r;
     }
 
     /** Quantise one activation row x[xBase .. xBase+K] to Q8_K (qs/bsums/dOut).
