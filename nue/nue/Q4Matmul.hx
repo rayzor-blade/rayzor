@@ -401,6 +401,10 @@ class Q4Matmul {
         var oBase = out.address();
 
         var rowFn = function(lo:Int, hi:Int, node:Int):Void {
+            // Per-band bitcast scratch: `f32ToF16` goes through memory, so a
+            // shared buffer would race across pool workers.
+            var scratch = Bytes.alloc(4);
+            var sAddr = scratch.address();
             for (r in lo...hi) {
                 for (b in 0...bpr) {
                     var blk = (r * bpr + b) * 144;
@@ -422,8 +426,14 @@ class Q4Matmul {
                             sc = ((u2 >>> (t * 8)) & 0x0F) | (((u0 >>> (t * 8 + 6)) & 3) << 4);
                             mn = ((u2 >>> (t * 8 + 4)) & 0x0F) | (((u1 >>> (t * 8 + 6)) & 3) << 4);
                         }
-                        var sj = d * sc;
-                        var mj = dmin * mn;
+                        // Narrow to f32 before use: the reference keeps its
+                        // effective scale/min in f32 (`scales[j] = d * sc6`),
+                        // so computing them in f64 here is MORE precise and
+                        // therefore not interchangeable. Match its precision.
+                        Mem.storeF32(sAddr, d * sc);
+                        var sj = Mem.loadF32(sAddr);
+                        Mem.storeF32(sAddr, dmin * mn);
+                        var mj = Mem.loadF32(sAddr);
                         // Sub-block j covers 32 weights: nibble half (j>>1) of
                         // the 32-byte group, low nibbles for even j, high for odd.
                         var qOff = blk + 16 + (j >> 1) * 32;
@@ -436,8 +446,8 @@ class Q4Matmul {
                             var b1 = Mem.loadU8(wBase + Usize.fromInt(qOff + e + 1));
                             var q0 = hi4 ? ((b0 >>> 4) & 0x0F) : (b0 & 0x0F);
                             var q1 = hi4 ? ((b1 >>> 4) & 0x0F) : (b1 & 0x0F);
-                            var h0 = f32ToF16(sj * q0 - mj);
-                            var h1 = f32ToF16(sj * q1 - mj);
+                            var h0 = f32ToF16At(sj * q0 - mj, sAddr);
+                            var h1 = f32ToF16At(sj * q1 - mj, sAddr);
                             Mem.storeI32(dst + Usize.fromInt((j * 32 + e) * 2),
                                 (h0 & 0xFFFF) | (h1 << 16));
                             e += 2;
@@ -480,8 +490,16 @@ class Q4Matmul {
 
     public static function f32ToF16(v:Float):Int {
         if (_f16Scratch == null) _f16Scratch = Bytes.alloc(4);
-        Mem.storeF32(_f16Scratch.address(), v);
-        var bits = Mem.loadI32(_f16Scratch.address());
+        return f32ToF16At(v, _f16Scratch.address());
+    }
+
+    /** `f32ToF16` against a caller-owned 4-byte scratch. The bitcast goes
+        through memory, so a shared static buffer would be a data race the
+        moment a caller bands across pool workers — parallel callers must
+        own their scratch. */
+    public static function f32ToF16At(v:Float, scratch:Usize):Int {
+        Mem.storeF32(scratch, v);
+        var bits = Mem.loadI32(scratch);
         var sign = (bits >>> 16) & 0x8000;
         var exp = (bits >>> 23) & 0xFF;
         var mant = bits & 0x7FFFFF;
