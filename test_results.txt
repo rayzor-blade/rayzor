@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Jul  6 16:42:13 BST 2026
+  Sun Aug  2 02:10:36 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -94,9 +94,7 @@ Direct 1 << 8: 256
 
 --- debug_channel [PASS] ---
 Running compiler/tests/haxe/debug_channel.hx [debug] [preset: Application]...
-5
-100
-done
+PASS debug-channel sum=100
 
 --- debug_checksum [PASS] ---
 Running compiler/tests/haxe/debug_checksum.hx [debug] [preset: Application]...
@@ -378,9 +376,33 @@ Expected: 65536
 5 ^ 3 = 6
 10 % 3 = 1
 
+--- test_bitwise_conditional_reassign [PASS] ---
+Running compiler/tests/haxe/test_bitwise_conditional_reassign.hx [debug] [preset: Application]...
+PASS bitwise conditional reassign
+
 --- test_bytes_aligned_i32 [PASS] ---
 Running compiler/tests/haxe/test_bytes_aligned_i32.hx [debug] [preset: Application]...
 PASS bytes-aligned-i32 a=287454020 c=-1234567 d=1432778632 byte4=121 byte8=136
+
+--- test_channel_explicit_int [PASS] ---
+Running compiler/tests/haxe/test_channel_explicit_int.hx [debug] [preset: Application]...
+PASS channel-explicit-int
+
+--- test_channel_inferred_class_threaded [PASS] ---
+Running compiler/tests/haxe/test_channel_inferred_class_threaded.hx [debug] [preset: Application]...
+PASS channel-inferred-class-threaded
+
+--- test_channel_inferred_int_threaded [PASS] ---
+Running compiler/tests/haxe/test_channel_inferred_int_threaded.hx [debug] [preset: Application]...
+PASS channel-inferred-int-threaded
+
+--- test_channel_init_class [PASS] ---
+Running compiler/tests/haxe/test_channel_init_class.hx [debug] [preset: Application]...
+PASS channel-init-class
+
+--- test_channel_prim_roundtrip [PASS] ---
+Running compiler/tests/haxe/test_channel_prim_roundtrip.hx [debug] [preset: Application]...
+PASS channel-prim-roundtrip
 
 --- test_class_instance_reflection [PASS] ---
 Running compiler/tests/haxe/test_class_instance_reflection.hx [debug] [preset: Application]...
@@ -400,7 +422,7 @@ Animal
 
 --- test_closure_field_call [PASS] ---
 Running compiler/tests/haxe/test_closure_field_call.hx [debug] [preset: Application]...
-[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(4)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(22)), func_ptr: IrId(21), args: [], signature: Function { params: [Void], return_type: I32, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
+[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(4)): In block IrBlockId(21), instruction CallIndirect { dest: Some(IrId(22)), func_ptr: IrId(21), args: [], signature: Function { params: [Void], return_type: I32, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
 test_closure_field_call OK
 
 --- test_closures [PASS] ---
@@ -441,6 +463,14 @@ Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Applica
 Hero
 Hero
 done
+
+--- test_cpu_topology_defaults [PASS] ---
+Running compiler/tests/haxe/test_cpu_topology_defaults.hx [debug] [preset: Application]...
+PASS cpu-topology cpus=10 perf=8 relax=0 spins=200000
+
+--- test_cranelift_shift_float_pollution [PASS] ---
+Running compiler/tests/haxe/test_cranelift_shift_float_pollution.hx [debug] [preset: Application]...
+PASS cranelift-shift-float-pollution
 
 --- test_create_enum [PASS] ---
 Running compiler/tests/haxe/test_create_enum.hx [debug] [preset: Application]...
@@ -589,10 +619,6 @@ Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application
 20
 10
 done
-
---- test_empty_array_infer [PASS] ---
-Running compiler/tests/haxe/test_empty_array_infer.hx [debug] [preset: Application]...
-PASS empty-array-infer f0=0.0078125 g0=0.25 i=7 c0=0.0078125 q0=0.125 getFlat=0.5 str=a pt=7
 
 --- test_enum_abstract [PASS] ---
 Running compiler/tests/haxe/test_enum_abstract.hx [debug] [preset: Application]...
@@ -747,8 +773,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-1
 2
+1
 300
 100
 200
@@ -780,6 +806,20 @@ done
 --- test_generic_ctor_untyped_selfref [PASS] ---
 Running compiler/tests/haxe/test_generic_ctor_untyped_selfref.hx [debug] [preset: Application]...
 FAIL h_leaf=1 h_parent=2
+
+--- test_generic_std_string [PASS] ---
+Running compiler/tests/haxe/test_generic_std_string.hx [debug] [preset: Application]...
+Hello
+42
+1.5
+true
+Hello
+42
+1.5
+true
+Hello
+World
+n=42 f=1.5 b=true
 
 --- test_generic_tree [PASS] ---
 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
@@ -904,6 +944,11 @@ false
 null
 hello
 done
+
+--- test_llvm_bitcast_i32_i64 [PASS] ---
+Running compiler/tests/haxe/test_llvm_bitcast_i32_i64.hx [debug] [preset: Application]...
+42
+PASS llvm-bitcast-i32-i64
 
 --- test_loop_counter_from_param [PASS] ---
 Running compiler/tests/haxe/test_loop_counter_from_param.hx [debug] [preset: Application]...
@@ -1085,13 +1130,9 @@ done
 Running compiler/tests/haxe/test_q4km_dot.hx [debug] [preset: Application]...
 PASS q4km-dot case1=75.84 (~75.84) case2=-14.1860595703125 (~-14.186)
 
---- test_q4km_qmatmul [PASS] ---
-Running compiler/tests/haxe/test_q4km_qmatmul.hx [debug] [preset: Application]...
-PASS q4km-qmatmul rows=8 K=512 maxRelErr=0.00000007220598597307485 maxAbsErr=0.0006035890164639568
-
 --- test_rayzor_spec [PASS] ---
 Running compiler/tests/haxe/test_rayzor_spec.hx [debug] [preset: Application]...
-[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(2)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(160)), func_ptr: IrId(3), args: [], signature: Function { params: [Void], return_type: Void, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
+[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(2)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(165)), func_ptr: IrId(3), args: [], signature: Function { params: [Void], return_type: Void, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
   ok   Math > adds
   ok   Math > greater
   ok   Math > bool true
@@ -1221,7 +1262,11 @@ PASS simd4i32 add.sum=50 mul.sum=100 lanes=11,14
 
 --- test_simd_dot [PASS] ---
 Running compiler/tests/haxe/test_simd_dot.hx [debug] [preset: Application]...
-PASS simd-dot sum1=96 sum2=192 sum3=560
+PASS simd-dot sum1=96 sum2=192 sum3=560 sum4=-96 sum5=-96
+
+--- test_simd_dot_signed [PASS] ---
+Running compiler/tests/haxe/test_simd_dot_signed.hx [debug] [preset: Application]...
+PASS simd-dot-signed posNeg=-96 negPos=-96 negNeg=96 i8i7=-480 i8u8=-4576
 
 --- test_simd_from_array [PASS] ---
 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
@@ -1243,6 +1288,10 @@ socket closed
 --- test_socket_read [PASS] ---
 Running compiler/tests/haxe/test_socket_read.hx [debug] [preset: Application]...
 socket read ok
+
+--- test_spinpool_parallel_rows_cranelift [PASS] ---
+Running compiler/tests/haxe/test_spinpool_parallel_rows_cranelift.hx [debug] [preset: Application]...
+PASS spinpool-parallel-rows-cranelift
 
 --- test_ssl [PASS] ---
 Running compiler/tests/haxe/test_ssl.hx [debug] [preset: Application]...
@@ -1316,20 +1365,9 @@ Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
 42
 done
 
---- test_tensor_device_tag [PASS] ---
-Running compiler/tests/haxe/test_tensor_device_tag.hx [debug] [preset: Application]...
-0
--1
-0
--1
-0
--1
-0
--1
-
---- test_tensor_uninit_full_overwrite [PASS] ---
-Running compiler/tests/haxe/test_tensor_uninit_full_overwrite.hx [debug] [preset: Application]...
-PASS tensor-uninit-full-overwrite sum=21
+--- test_sys_cpu_arch [PASS] ---
+Running compiler/tests/haxe/test_sys_cpu_arch.hx [debug] [preset: Application]...
+PASS sys-cpu-arch arch=aarch64
 
 --- test_thread_spawn_function_value [PASS] ---
 Running compiler/tests/haxe/test_thread_spawn_function_value.hx [debug] [preset: Application]...
@@ -1460,8 +1498,8 @@ Done
 
 
 =========================================
-  TOTAL:        159
-  PASSED:       159
+  TOTAL:        168
+  PASSED:       168
   FAILED:       0
   CRASHED:      0
 =========================================

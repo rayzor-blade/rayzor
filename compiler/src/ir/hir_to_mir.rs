@@ -5535,6 +5535,32 @@ impl<'a> HirToMirContext<'a> {
                             (_, _, t) => t,
                         };
                         let value = if let Some(target_ty) = lhs_target_ty {
+                            // RAYZOR_ASSIGN_DEBUG=1: names the variable whose
+                            // declared type drives the box/unbox coercion. A
+                            // primitive local showing target=Dynamic here is
+                            // the shape that boxes a constant into a phi.
+                            if std::env::var("RAYZOR_ASSIGN_DEBUG").is_ok() {
+                                if let HirLValue::Variable(sym) = lhs {
+                                    let name = self
+                                        .symbol_table
+                                        .get_symbol(*sym)
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                        .unwrap_or("?")
+                                        .to_string();
+                                    let kind = |t: TypeId| {
+                                        self.type_table
+                                            .get(t)
+                                            .map(|x| format!("{:?}", x.kind))
+                                            .unwrap_or_else(|| "?".to_string())
+                                    };
+                                    eprintln!(
+                                        "[ASSIGN] {} target={} rhs={}",
+                                        name,
+                                        kind(target_ty),
+                                        kind(rhs_ty)
+                                    );
+                                }
+                            }
                             let after_box = self
                                 .maybe_box_value(value, rhs_ty, target_ty)
                                 .unwrap_or(value);
