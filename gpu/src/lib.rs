@@ -109,6 +109,7 @@ declare_native_methods! {
     // Q4_K weights straight to the shader: no CPU dequant, ~7x less upload.
     "rayzor_gpu_GPUCompute", "matmulQ4K",    instance, "rayzor_gpu_compute_matmul_q4k",    [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
     "rayzor_gpu_GPUCompute", "bufferFromBytes", instance, "rayzor_gpu_compute_buffer_from_bytes", [Ptr, I64, I64] => Ptr;
+    "rayzor_gpu_GPUCompute", "writeBytes",    instance, "rayzor_gpu_compute_write_bytes",   [Ptr, Ptr, I64, I64] => Bool;
     // Batch matmul: (self, a, b, batch, m, k, n) -> GpuBuffer
     "rayzor_gpu_GPUCompute", "batchMatmul",  instance, "rayzor_gpu_compute_batch_matmul",  [Ptr, Ptr, Ptr, I64, I64, I64, I64] => Ptr;
     // Transformer primitives: (self, ...) -> GpuBuffer
@@ -266,6 +267,10 @@ mod native_plugin {
             (
                 "rayzor_gpu_compute_buffer_from_bytes",
                 ops::rayzor_gpu_compute_buffer_from_bytes as *const u8,
+            ),
+            (
+                "rayzor_gpu_compute_write_bytes",
+                ops::rayzor_gpu_compute_write_bytes as *const u8,
             ),
             (
                 "rayzor_gpu_compute_create",

@@ -531,6 +531,58 @@ pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
     Box::into_raw(Box::new(buf)) as i64
 }
 
+/// `rayzor_gpu_compute_write_bytes(ctx, buf, addr, byte_size) -> bool`
+///
+/// Overwrite an existing buffer in place via the queue, so callers can REUSE
+/// one allocation instead of creating and destroying per call.
+///
+/// This matters more than it looks. wgpu's allocator pools freed buffers and
+/// does not return them to the OS for the life of the process: routing a
+/// prefill's ~224 matmuls, each creating and freeing a 31 MiB weight buffer,
+/// held ~3.4 GiB of committed memory (MemAvailable 5953 -> 2503 MiB, recovered
+/// only at exit). On a box where the model itself needs 4 GiB that starves
+/// decode, which streams every weight per token.
+///
+/// # Safety
+/// `addr` must point to `byte_size` readable bytes, and `byte_size` must not
+/// exceed the buffer's size.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_write_bytes(
+    ctx: i64,
+    buffer_ptr: i64,
+    addr: i64,
+    byte_size: i64,
+) -> bool {
+    if ctx == 0 || buffer_ptr == 0 || addr == 0 || byte_size <= 0 {
+        return false;
+    }
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let buf = &mut *(buffer_ptr as *mut GpuBuffer);
+    if buf.ensure_materialized(gpu_ctx).is_err() {
+        return false;
+    }
+    #[cfg(feature = "webgpu-backend")]
+    {
+        let (NativeContext::Wgpu(wc), NativeBuffer::Wgpu(wb)) =
+            (&gpu_ctx.inner, buf.native_buffer().as_ref())
+        else {
+            return false;
+        };
+        let n = byte_size as usize;
+        if n > wb.byte_size {
+            return false;
+        }
+        // Pending compute may still reference this buffer; submit first so the
+        // overwrite cannot race work that has been encoded but not run.
+        wc.flush();
+        let src = std::slice::from_raw_parts(addr as *const u8, n);
+        wc.queue.write_buffer(&wb.buffer, 0, src);
+        return true;
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
 /// `rayzor_gpu_compute_matmul_q4k(ctx, a, bq4, m, k, n) -> GpuBuffer`
 ///
 /// `C[m,n] = A[m,k] * dequant(Bq4)[n,k]^T` with B as raw Q4_K_M blocks.
