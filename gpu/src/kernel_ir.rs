@@ -35,6 +35,9 @@ pub enum KernelOp {
 
     // Linear algebra
     Matmul,
+    /// Matmul whose B operand is raw Q4_K_M blocks, dequantised in-shader.
+    /// Avoids a CPU dequant pass and cuts weight upload ~7x.
+    MatmulQ4K,
     /// Batched matmul: C[b,m,n] = A[b,m,k] × B[b,k,n] for b in 0..B
     BatchMatmul,
 
@@ -67,7 +70,7 @@ impl KernelOp {
             | Self::Gelu
             | Self::Silu => 1,
             Self::ReduceSum | Self::ReduceMax | Self::ReduceMin => 1,
-            Self::Matmul | Self::BatchMatmul => 2,
+            Self::Matmul | Self::BatchMatmul | Self::MatmulQ4K => 2,
             // x, weight
             Self::RmsNorm => 2,
             // x, cos, sin
@@ -96,6 +99,7 @@ impl KernelOp {
             Self::ReduceMax => "reduce_max",
             Self::ReduceMin => "reduce_min",
             Self::Matmul => "matmul",
+            Self::MatmulQ4K => "matmul_q4k",
             Self::BatchMatmul => "batch_matmul",
             Self::RmsNorm => "rms_norm",
             Self::Rope => "rope",

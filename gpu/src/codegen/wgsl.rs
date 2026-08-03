@@ -105,6 +105,9 @@ pub fn wgsl_prelude(dtype: u8) -> &'static str {
 
 /// Returns the WGSL kernel function name for a given op and dtype.
 pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
+    if op == KernelOp::MatmulQ4K {
+        return super::wgsl_matmul::matmul_q4k_fn_name();
+    }
     if op == KernelOp::Matmul {
         return super::wgsl_matmul::matmul_fn_name(dtype);
     }
@@ -119,7 +122,10 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
 pub fn kernel_num_buffers(op: KernelOp) -> usize {
     if op.is_reduction() {
         3 // input, output, numel uniform
-    } else if matches!(op, KernelOp::Matmul | KernelOp::BatchMatmul) {
+    } else if matches!(
+        op,
+        KernelOp::Matmul | KernelOp::BatchMatmul | KernelOp::MatmulQ4K
+    ) {
         4 // A, B, C, dims uniform
     } else if op == KernelOp::RmsNorm {
         4 // x, weight, y, params uniform
@@ -206,6 +212,9 @@ fn {fn_name}(@builtin(global_invocation_id) gid: vec3<u32>) {{
 pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
     if op.is_reduction() {
         return super::wgsl_reduction::emit_reduction(op, dtype);
+    }
+    if op == KernelOp::MatmulQ4K {
+        return super::wgsl_matmul::emit_matmul_q4k();
     }
     if op == KernelOp::Matmul {
         return if super::wgsl_matmul::use_tiled_matmul() {

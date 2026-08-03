@@ -490,6 +490,123 @@ unsafe fn matmul_impl(ctx: i64, a: i64, b: i64, m: usize, k: usize, n: usize) ->
     }
 }
 
+// ---------------------------------------------------------------------------
+// Q4_K matmul — weights stay quantised to the shader
+// ---------------------------------------------------------------------------
+
+/// `rayzor_gpu_compute_buffer_from_bytes(ctx, addr, byte_size) -> GpuBuffer`
+///
+/// Upload raw bytes with no dtype interpretation. The caller owns the layout —
+/// used to hand the shader Q4_K_M blocks straight from the mmap'd GGUF, with
+/// no CPU dequant and ~7x less traffic than the f32 expansion.
+///
+/// # Safety
+/// `addr` must point to `byte_size` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
+    ctx: i64,
+    addr: i64,
+    byte_size: i64,
+) -> i64 {
+    if ctx == 0 || addr == 0 || byte_size <= 0 {
+        return 0;
+    }
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let native = match &gpu_ctx.inner {
+        #[cfg(feature = "webgpu-backend")]
+        NativeContext::Wgpu(wc) => {
+            match crate::wgpu_backend::buffer_ops::WgpuBuffer::from_data(
+                wc,
+                addr as *const u8,
+                byte_size as usize,
+            ) {
+                Some(b) => NativeBuffer::Wgpu(b),
+                None => return 0,
+            }
+        }
+        _ => return 0,
+    };
+    // u8 elements: the shader reinterprets them as u32 blocks.
+    let buf = GpuBuffer::materialized(native, byte_size as usize, buffer::DTYPE_U8);
+    Box::into_raw(Box::new(buf)) as i64
+}
+
+/// `rayzor_gpu_compute_matmul_q4k(ctx, a, bq4, m, k, n) -> GpuBuffer`
+///
+/// `C[m,n] = A[m,k] * dequant(Bq4)[n,k]^T` with B as raw Q4_K_M blocks.
+/// `k` must be a multiple of 256 (the Q4_K super-block size).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_matmul_q4k(
+    ctx: i64,
+    a: i64,
+    b: i64,
+    m: i64,
+    k: i64,
+    n: i64,
+) -> i64 {
+    if ctx == 0 || a == 0 || b == 0 || m <= 0 || k <= 0 || n <= 0 || k % 256 != 0 {
+        return 0;
+    }
+    let (m, k, n) = (m as usize, k as usize, n as usize);
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let a_buf = &mut *(a as *mut GpuBuffer);
+    let b_buf = &mut *(b as *mut GpuBuffer);
+    if a_buf.ensure_materialized(gpu_ctx).is_err() || b_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+
+    let cached = match gpu_ctx.kernel_cache.get_or_compile(
+        &gpu_ctx.inner,
+        KernelOp::MatmulQ4K,
+        buffer::DTYPE_F32,
+    ) {
+        Ok(kk) => kk,
+        Err(_) => return 0,
+    };
+
+    #[cfg(feature = "webgpu-backend")]
+    {
+        use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
+        let (NativeContext::Wgpu(wc), NativeCompiledKernel::Wgpu(kernel)) =
+            (&gpu_ctx.inner, &cached.compiled)
+        else {
+            return 0;
+        };
+        let (NativeBuffer::Wgpu(aw), NativeBuffer::Wgpu(bw)) = (
+            a_buf.native_buffer().as_ref(),
+            b_buf.native_buffer().as_ref(),
+        ) else {
+            return 0;
+        };
+        let out = match WgpuBuffer::allocate(wc, m * n * 4) {
+            Some(o) => o,
+            None => return 0,
+        };
+        // dims.w carries blocks-per-row so the shader can index blocks.
+        let dims: [u32; 4] = [m as u32, k as u32, n as u32, (k / 256) as u32];
+        let dims_buf = match WgpuBuffer::from_data(wc, dims.as_ptr() as *const u8, 16) {
+            Some(d) => d,
+            None => return 0,
+        };
+        let bm = crate::codegen::wgsl_matmul::Q4K_BM as usize;
+        let bn = crate::codegen::wgsl_matmul::Q4K_BN as usize;
+        if dispatch::dispatch_workgroups(
+            wc,
+            kernel,
+            &[aw, bw, &out, &dims_buf],
+            (n.div_ceil(bn), m.div_ceil(bm), 1),
+        )
+        .is_err()
+        {
+            return 0;
+        }
+        let buf = GpuBuffer::materialized(NativeBuffer::Wgpu(out), m * n, buffer::DTYPE_F32);
+        return Box::into_raw(Box::new(buf)) as i64;
+    }
+    #[allow(unreachable_code)]
+    0
+}
+
 /// Backend-dispatch for matmul.
 #[allow(unused_variables, clippy::too_many_arguments)]
 fn matmul_dispatch(
