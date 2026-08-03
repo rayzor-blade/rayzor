@@ -358,7 +358,16 @@ impl ErrorFormatter {
             if byte_offset >= source_content.len() {
                 source_content.chars().count()
             } else {
-                source_content[..byte_offset].chars().count()
+                // A span can land INSIDE a multi-byte character — an em dash in
+                // a comment is enough — and slicing there panics. Walk back to
+                // the nearest boundary instead: rendering a diagnostic must
+                // never be able to kill the compiler, and being a character or
+                // two early in a caret position is a non-issue next to that.
+                let mut b = byte_offset;
+                while b > 0 && !source_content.is_char_boundary(b) {
+                    b -= 1;
+                }
+                source_content[..b].chars().count()
             }
         };
 
