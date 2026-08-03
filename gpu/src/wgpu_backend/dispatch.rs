@@ -49,28 +49,24 @@ pub fn dispatch_workgroups(
         entries: &entries,
     });
 
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rayzor_dispatch"),
-        });
-
-    {
+    // Encode into the context's pending command buffer rather than submitting
+    // and blocking here. Passes within one command buffer execute in encode
+    // order with implicit barriers between them, so a later kernel still sees
+    // an earlier kernel's writes. Submission happens on readback (or at the
+    // pending-pass cap) — see WgpuContext::flush.
+    ctx.encode(bind_group, |encoder, bg| {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("rayzor_compute_pass"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&kernel.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(
             workgroups.0 as u32,
             workgroups.1 as u32,
             workgroups.2 as u32,
         );
-    }
-
-    ctx.queue.submit(std::iter::once(encoder.finish()));
-    ctx.device.poll(wgpu::Maintain::Wait);
+    });
 
     Ok(())
 }
