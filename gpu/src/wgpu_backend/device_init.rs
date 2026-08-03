@@ -22,11 +22,16 @@ impl WgpuContext {
             force_fallback_adapter: false,
         }))?;
 
+        // Take what the adapter actually supports rather than wgpu's portable
+        // defaults. The default caps a storage binding at 128 MiB, which is
+        // smaller than a single 7B FFN weight (4096x14336 f32 = 224 MiB) and
+        // fails validation before any kernel runs.
+        let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("rayzor_gpu"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: limits,
                 ..Default::default()
             },
             None,
