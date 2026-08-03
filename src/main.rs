@@ -1781,13 +1781,29 @@ fn run_file(
         } else {
             "jit"
         };
+        // Auto-define a flag per loaded plugin so library code can guard an
+        // optional backend with `#if gpu` and still compile when the plugin is
+        // absent. Deriving it from what is actually loaded means the define can
+        // never disagree with reality, unlike a user-supplied -D.
+        let mut defines: Vec<String> = vec![tier_define.to_string()];
+        for p in &compiler_plugins {
+            let n = p.name();
+            let short = n
+                .trim_start_matches("lib")
+                .trim_start_matches("rayzor_")
+                .trim_end_matches("_plugins");
+            if !short.is_empty() && !defines.iter().any(|d| d == short) {
+                defines.push(short.to_string());
+            }
+        }
+        let define_refs: Vec<&str> = defines.iter().map(|s| s.as_str()).collect();
         let compile_result = compile_helpers::compile_haxe_to_mir_with_defines_and_cache(
             &source,
             file.to_str().unwrap_or("unknown"),
             compiler_plugins,
             &rpkg_source_dirs,
             safety_warnings,
-            &[tier_define],
+            &define_refs,
             cache_enabled,
             if cache_enabled {
                 Some(run_cache_dir.clone())
