@@ -24,6 +24,6 @@ extern class BindGroupLayout {
     public static function forUniforms(device:GPUDevice, bindingCount:Int):BindGroupLayout;
 
     /** Destroy this layout. */
-    @:native("rayzor_gpu_gfx_bind_group_layout_destroy")
+    @:native("rayzor_gpu_gfx_bind_group_destroy")
     public function destroy():Void;
 }

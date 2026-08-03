@@ -70,7 +70,11 @@
 /// Adding new functions / constants does NOT require a bump — they
 /// land as additive surface, and plugins that don't reference them
 /// stay forward-compatible.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
+
+/// Param-type slots in [`NativeMethodDesc`]. Was 8, which silently truncated
+/// rayzor-gpu's 9-param `rope` descriptor and panicked the loader.
+pub const MAX_PARAMS: usize = 16;
 
 /// Symbol name plugins must export so the host can read their
 /// compiled-in ABI version at dlopen time.
@@ -360,7 +364,7 @@ pub struct NativeMethodDesc {
     /// Total parameter count INCLUDING self for instance methods
     pub param_count: u8,
     pub return_type: u8,
-    pub param_types: [u8; 8],
+    pub param_types: [u8; MAX_PARAMS],
 }
 
 unsafe impl Send for NativeMethodDesc {}
@@ -460,102 +464,27 @@ macro_rules! _count_params {
 
 #[doc(hidden)]
 #[macro_export]
+/// Build the fixed-size param-type array from a variadic type list.
+///
+/// Previously hand-unrolled per arity, and the 9-argument arm still emitted an
+/// EIGHT-element array while `_param_count!` reported 9 — so a 9-param method
+/// (rayzor-gpu's `rope`) made the loader slice `[..9]` of a length-8 array and
+/// panic. One generic arm cannot drift from the count like that.
 macro_rules! _param_array {
-    () => {
-        [0u8; 8]
-    };
-    ($a:ident) => {
-        [$crate::_nt!($a), 0, 0, 0, 0, 0, 0, 0]
-    };
-    ($a:ident, $b:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), 0, 0, 0, 0, 0, 0]
-    };
-    ($a:ident, $b:ident, $c:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            0,
-            0,
-            0,
-            0,
-        ]
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            $crate::_nt!($e),
-            0,
-            0,
-            0,
-        ]
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            $crate::_nt!($e),
-            $crate::_nt!($f),
-            0,
-            0,
-        ]
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            $crate::_nt!($e),
-            $crate::_nt!($f),
-            $crate::_nt!($g),
-            0,
-        ]
-    };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            $crate::_nt!($e),
-            $crate::_nt!($f),
-            $crate::_nt!($g),
-            $crate::_nt!($h),
-        ]
-    };
-    // 9-arg signature: descriptor is fixed [u8; 8] so the 9th tag is
-    // dropped; param_count still records 9 for the dispatcher.
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
-        [
-            $crate::_nt!($a),
-            $crate::_nt!($b),
-            $crate::_nt!($c),
-            $crate::_nt!($d),
-            $crate::_nt!($e),
-            $crate::_nt!($f),
-            $crate::_nt!($g),
-            $crate::_nt!($h),
-        ]
-    };
+    ($($p:ident),* $(,)?) => {{
+        const SRC: &[u8] = &[$($crate::_nt!($p)),*];
+        assert!(
+            SRC.len() <= $crate::MAX_PARAMS,
+            "native method exceeds MAX_PARAMS param slots"
+        );
+        let mut out = [0u8; $crate::MAX_PARAMS];
+        let mut i = 0;
+        while i < SRC.len() {
+            out[i] = SRC[i];
+            i += 1;
+        }
+        out
+    }};
 }
 
 // ============================================================================
