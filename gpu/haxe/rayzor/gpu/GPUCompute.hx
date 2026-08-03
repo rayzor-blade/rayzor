@@ -158,6 +158,13 @@ extern class GPUCompute {
     @:native("rayzor_gpu_compute_buffer_from_bytes")
     public function bufferFromBytes(addr:rayzor.Usize, byteSize:Int):GpuBuffer;
 
+    /** Overwrite an existing buffer in place, so one allocation can be REUSED
+        across calls. wgpu pools freed buffers and does not return them to the
+        OS during the process, so create/free per matmul accumulates committed
+        memory and starves everything else. */
+    @:native("rayzor_gpu_compute_write_bytes")
+    public function writeBytes(buf:GpuBuffer, addr:rayzor.Usize, byteSize:Int):Bool;
+
     /** Batched matrix multiplication: C[b](M×N) = A[b](M×K) × B[b](K×N) for b in 0..batch. */
     @:native("rayzor_gpu_compute_batch_matmul")
     public function batchMatmul(a:GpuBuffer, b:GpuBuffer, batch:Int, m:Int, k:Int, n:Int):GpuBuffer;
