@@ -13,6 +13,9 @@ pub struct WgpuBuffer {
     /// We need this because wgpu readback requires creating a staging buffer.
     pub(crate) device: *const wgpu::Device,
     pub(crate) queue: *const wgpu::Queue,
+    /// Needed so a readback can flush pending encoded work first — results do
+    /// not exist until the command buffer that writes them has been submitted.
+    pub(crate) ctx: *const super::device_init::WgpuContext,
 }
 
 // WgpuBuffer is not Send/Sync (raw pointers), but we only use it single-threaded
@@ -45,6 +48,7 @@ impl WgpuBuffer {
             byte_size,
             device: &ctx.device as *const _,
             queue: &ctx.queue as *const _,
+            ctx: ctx as *const _,
         })
     }
 
@@ -69,11 +73,17 @@ impl WgpuBuffer {
             byte_size,
             device: &ctx.device as *const _,
             queue: &ctx.queue as *const _,
+            ctx: ctx as *const _,
         })
     }
 
     /// Read buffer contents back to CPU via staging buffer.
     pub fn read_to_vec(&self, byte_size: usize) -> Option<Vec<u8>> {
+        // Submit anything still encoded, or we would read a buffer the GPU has
+        // not written yet.
+        if !self.ctx.is_null() {
+            unsafe { &*self.ctx }.flush();
+        }
         let device = unsafe { &*self.device };
         let queue = unsafe { &*self.queue };
         let read_size = byte_size.min(self.byte_size);
