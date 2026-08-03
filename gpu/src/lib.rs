@@ -106,6 +106,9 @@ declare_native_methods! {
     "rayzor_gpu_GPUCompute", "dot",          instance, "rayzor_gpu_compute_dot",           [Ptr, Ptr, Ptr] => F64;
     // Matmul: (self, a, b, m, k, n) -> GpuBuffer
     "rayzor_gpu_GPUCompute", "matmul",       instance, "rayzor_gpu_compute_matmul",        [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
+    // Q4_K weights straight to the shader: no CPU dequant, ~7x less upload.
+    "rayzor_gpu_GPUCompute", "matmulQ4K",    instance, "rayzor_gpu_compute_matmul_q4k",    [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
+    "rayzor_gpu_GPUCompute", "bufferFromBytes", instance, "rayzor_gpu_compute_buffer_from_bytes", [Ptr, I64, I64] => Ptr;
     // Batch matmul: (self, a, b, batch, m, k, n) -> GpuBuffer
     "rayzor_gpu_GPUCompute", "batchMatmul",  instance, "rayzor_gpu_compute_batch_matmul",  [Ptr, Ptr, Ptr, I64, I64, I64, I64] => Ptr;
     // Transformer primitives: (self, ...) -> GpuBuffer
@@ -256,6 +259,14 @@ mod native_plugin {
     pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
         let mut symbols = vec![
             // Device lifecycle
+            (
+                "rayzor_gpu_compute_matmul_q4k",
+                ops::rayzor_gpu_compute_matmul_q4k as *const u8,
+            ),
+            (
+                "rayzor_gpu_compute_buffer_from_bytes",
+                ops::rayzor_gpu_compute_buffer_from_bytes as *const u8,
+            ),
             (
                 "rayzor_gpu_compute_create",
                 device::rayzor_gpu_compute_create as *const u8,

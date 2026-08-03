@@ -143,6 +143,21 @@ extern class GPUCompute {
     @:native("rayzor_gpu_compute_matmul")
     public function matmul(a:GpuBuffer, b:GpuBuffer, m:Int, k:Int, n:Int):GpuBuffer;
 
+    /**
+     * Matmul against RAW Q4_K_M weight blocks, dequantised inside the shader.
+     *
+     * `C[m,n] = a[m,k] * dequant(bq4)[n,k]^T`. `k` must be a multiple of 256.
+     * Skips the CPU dequant pass entirely and uploads ~7x less than the f32
+     * expansion (33 MB vs 235 MB for a 7B FFN weight).
+     */
+    @:native("rayzor_gpu_compute_matmul_q4k")
+    public function matmulQ4K(a:GpuBuffer, bq4:GpuBuffer, m:Int, k:Int, n:Int):GpuBuffer;
+
+    /** Upload raw bytes with no dtype interpretation — the caller owns the
+        layout. Used to hand Q4_K blocks to the shader unchanged. */
+    @:native("rayzor_gpu_compute_buffer_from_bytes")
+    public function bufferFromBytes(addr:rayzor.Usize, byteSize:Int):GpuBuffer;
+
     /** Batched matrix multiplication: C[b](M×N) = A[b](M×K) × B[b](K×N) for b in 0..batch. */
     @:native("rayzor_gpu_compute_batch_matmul")
     public function batchMatmul(a:GpuBuffer, b:GpuBuffer, batch:Int, m:Int, k:Int, n:Int):GpuBuffer;
