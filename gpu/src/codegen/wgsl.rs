@@ -208,7 +208,11 @@ pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
         return super::wgsl_reduction::emit_reduction(op, dtype);
     }
     if op == KernelOp::Matmul {
-        return super::wgsl_matmul::emit_matmul(dtype);
+        return if super::wgsl_matmul::use_tiled_matmul() {
+            super::wgsl_matmul::emit_matmul_tiled(dtype)
+        } else {
+            super::wgsl_matmul::emit_matmul(dtype)
+        };
     }
     if op == KernelOp::BatchMatmul {
         return super::wgsl_matmul::emit_batch_matmul(dtype);

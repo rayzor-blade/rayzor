@@ -563,12 +563,22 @@ fn matmul_dispatch(
                 unsafe { WgpuBuffer::from_data(wgpu_ctx, dims.as_ptr() as *const u8, 16) }
                     .ok_or("failed to alloc dims")?;
 
-            let threads_per_wg = 16usize;
+            // The tiled kernel covers a 64x64 output tile per workgroup (256
+            // threads x 4x4 outputs each); the simple one covers 16x16. Grid
+            // size must follow whichever kernel was emitted.
+            let (wg_h, wg_w) = if crate::codegen::wgsl_matmul::use_tiled_matmul() {
+                (
+                    crate::codegen::wgsl_matmul::tiled_bm() as usize,
+                    crate::codegen::wgsl_matmul::tiled_bn() as usize,
+                )
+            } else {
+                (16usize, 16usize)
+            };
             dispatch::dispatch_workgroups(
                 wgpu_ctx,
                 kernel,
                 &[a_wgpu, b_wgpu, &result_inner, &dims_buf],
-                (n.div_ceil(threads_per_wg), m.div_ceil(threads_per_wg), 1),
+                (n.div_ceil(wg_w), m.div_ceil(wg_h), 1),
             )?;
 
             Ok(NativeBuffer::Wgpu(result_inner))
