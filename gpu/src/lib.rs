@@ -58,6 +58,12 @@ pub mod wasm_exports;
 #[cfg(feature = "native")]
 use rayzor_plugin::{declare_native_methods, NativeMethodDesc};
 
+// The loader refuses a plugin with no `rayzor_plugin_abi_version` export
+// (treated as ABI v0). This crate predates the handshake, so it failed to load
+// even though its symbols were fine; the other plugins declare it the same way.
+#[cfg(feature = "native")]
+rayzor_plugin::export_abi_version!();
+
 // ============================================================================
 // Method descriptor table (read by compiler at plugin load time)
 // Only compiled for native targets (not wasm-host)

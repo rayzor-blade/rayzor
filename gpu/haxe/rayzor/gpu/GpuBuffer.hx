@@ -12,11 +12,11 @@ package rayzor.gpu;
 @:native("rayzor::gpu::GpuBuffer")
 extern class GpuBuffer {
     /** Get the number of elements in this buffer. */
-    @:native("gpu_buffer_numel")
+    @:native("rayzor_gpu_compute_buffer_numel")
     public function numel():Int;
 
     /** Get the dtype tag of this buffer. */
-    @:native("gpu_buffer_dtype")
+    @:native("rayzor_gpu_compute_buffer_dtype")
     public function dtype():rayzor.ds.DType;
 
     /**
@@ -24,22 +24,22 @@ extern class GpuBuffer {
      * Returns a new lazy GpuBuffer; the underlying kernel runs when the
      * result is read back via `GPUCompute.toTensor` / `.sum` / etc.
      */
-    @:native("gpu_buffer_add")
+    @:native("rayzor_gpu_buffer_add")
     @:op(A + B)
     public function add(other:GpuBuffer):GpuBuffer;
 
     /** Element-wise GPU subtraction (`a - b`). */
-    @:native("gpu_buffer_sub")
+    @:native("rayzor_gpu_buffer_sub")
     @:op(A - B)
     public function sub(other:GpuBuffer):GpuBuffer;
 
     /** Element-wise GPU multiplication (`a * b`). */
-    @:native("gpu_buffer_mul")
+    @:native("rayzor_gpu_buffer_mul")
     @:op(A * B)
     public function mul(other:GpuBuffer):GpuBuffer;
 
     /** Element-wise GPU division (`a / b`). */
-    @:native("gpu_buffer_div")
+    @:native("rayzor_gpu_buffer_div")
     @:op(A / B)
     public function div(other:GpuBuffer):GpuBuffer;
 }

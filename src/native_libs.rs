@@ -83,7 +83,15 @@ pub fn load_manifest_native_lib(
     compiler::rpkg::install::check_plugin_abi(&lib, plugin_name)?;
 
     type DescribeFn = unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
-    let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
+    // Must match the rpkg loader's list (compiler/src/rpkg/install.rs): the
+    // gpu/window plugins export prefixed names, and accepting them only on the
+    // rpkg path meant `--native-lib` silently refused a perfectly good dylib.
+    let describe_names: &[&[u8]] = &[
+        b"plugin_describe",
+        b"rayzor_plugin_describe",
+        b"rayzor_gpu_plugin_describe",
+        b"rayzor_window_plugin_describe",
+    ];
     let mut plugin: Option<compiler::compiler_plugin::NativePlugin> = None;
     for name in describe_names {
         if let Ok(describe_fn) = unsafe { lib.get::<DescribeFn>(name) } {
@@ -111,7 +119,12 @@ pub fn load_manifest_native_lib(
         plugin.unwrap_or_else(|| compiler::compiler_plugin::NativePlugin::empty(plugin_name));
 
     type InitFn = unsafe extern "C" fn(*mut usize) -> *const SymbolEntry;
-    let init_names: &[&[u8]] = &[b"plugin_init", b"rayzor_plugin_init"];
+    let init_names: &[&[u8]] = &[
+        b"plugin_init",
+        b"rayzor_plugin_init",
+        b"rayzor_gpu_plugin_init",
+        b"rayzor_window_plugin_init",
+    ];
     let mut runtime_symbols: Vec<(String, *const u8)> = Vec::new();
     for name in init_names {
         if let Ok(init_fn) = unsafe { lib.get::<InitFn>(name) } {
