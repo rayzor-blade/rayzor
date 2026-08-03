@@ -119,6 +119,15 @@ impl WgpuContext {
         ))
         .ok()?;
 
+        // wgpu's default uncaptured-error handler PANICS. Inside an
+        // `extern "C"` entry point that panic cannot unwind, so it aborts —
+        // surfacing as SIGILL (or a corrupted-looking SIGSEGV) with the actual
+        // error text never printed. Log it instead so a validation failure,
+        // device-lost or OOM is diagnosable rather than fatal-and-silent.
+        device.on_uncaptured_error(Box::new(|e| {
+            eprintln!("[rzg] WGPU UNCAPTURED ERROR: {e}");
+        }));
+
         Some(WgpuContext {
             device,
             queue,
