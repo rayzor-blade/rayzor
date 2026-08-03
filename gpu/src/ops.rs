@@ -508,6 +508,7 @@ pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
     addr: i64,
     byte_size: i64,
 ) -> i64 {
+    gpu_thread_check("buffer_from_bytes");
     if ctx == 0 || addr == 0 || byte_size <= 0 {
         return 0;
     }
@@ -529,6 +530,94 @@ pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
     // u8 elements: the shader reinterprets them as u32 blocks.
     let buf = GpuBuffer::materialized(native, byte_size as usize, buffer::DTYPE_U8);
     Box::into_raw(Box::new(buf)) as i64
+}
+
+// ---------------------------------------------------------------------------
+// Crash backtrace
+// ---------------------------------------------------------------------------
+//
+// The routed prefill segfaults intermittently and NEVER under gdb, so a live
+// debugger cannot catch it, and core dumps are unavailable here (core_pattern
+// is piped to apport, `ulimit -c` is 0, and changing either needs root).
+// `RZG_CRASH_TRACE=1` installs a SIGSEGV/SIGBUS/SIGILL handler that writes a
+// native backtrace to stderr from inside the faulting process.
+#[cfg(all(feature = "native", unix))]
+mod crash_trace {
+    extern "C" {
+        fn backtrace(buf: *mut *mut libc::c_void, size: libc::c_int) -> libc::c_int;
+        fn backtrace_symbols_fd(buf: *const *mut libc::c_void, size: libc::c_int, fd: libc::c_int);
+    }
+
+    unsafe extern "C" fn on_fault(sig: libc::c_int) {
+        // async-signal-safe: write(2) + backtrace_symbols_fd only.
+        let msg = match sig {
+            libc::SIGSEGV => &b"\n[rzg] *** SIGSEGV ***\n"[..],
+            libc::SIGBUS => &b"\n[rzg] *** SIGBUS ***\n"[..],
+            _ => &b"\n[rzg] *** SIGILL ***\n"[..],
+        };
+        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+        let mut frames: [*mut libc::c_void; 64] = [std::ptr::null_mut(); 64];
+        let n = backtrace(frames.as_mut_ptr(), 64);
+        backtrace_symbols_fd(frames.as_ptr(), n, 2);
+        // Restore default and re-raise so the exit status is still the signal.
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+
+    pub fn install() {
+        if std::env::var_os("RZG_CRASH_TRACE").is_none() {
+            return;
+        }
+        unsafe {
+            for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL] {
+                let h = on_fault as unsafe extern "C" fn(libc::c_int);
+                libc::signal(sig, h as usize as libc::sighandler_t);
+            }
+        }
+        eprintln!("[rzg] crash backtrace handler installed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread-identity probe
+// ---------------------------------------------------------------------------
+//
+// `WgpuContext.pending` is a RefCell and `WgpuBuffer` holds raw Device/Queue/
+// Context pointers, both of which assume the GPU is only ever driven from one
+// thread. nue runs a SpinPool, so that assumption is load-bearing and was
+// never checked. Records the first thread to touch the GPU and shouts if any
+// other one does.
+pub fn gpu_thread_check(site: &str) {
+    // Off unless asked for: this takes a lock on every GPU entry point.
+    if std::env::var_os("RZG_GPU_DEBUG").is_none() && std::env::var_os("RZG_CRASH_TRACE").is_none()
+    {
+        return;
+    }
+    use std::sync::Mutex;
+    static FIRST: Mutex<Option<(std::thread::ThreadId, String)>> = Mutex::new(None);
+    let me = std::thread::current().id();
+    let name = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+    let mut g = match FIRST.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    match g.as_ref() {
+        None => {
+            eprintln!("[gpu-thread] first touch at {site} on {me:?} ({name})");
+            #[cfg(all(feature = "native", unix))]
+            crash_trace::install();
+            *g = Some((me, name));
+        }
+        Some((first, fname)) if *first != me => {
+            eprintln!(
+                "[gpu-thread] !!! CROSS-THREAD at {site}: {me:?} ({name}) != first {first:?} ({fname})"
+            );
+        }
+        _ => {}
+    }
 }
 
 /// `rayzor_gpu_compute_write_bytes(ctx, buf, addr, byte_size) -> bool`
@@ -553,6 +642,7 @@ pub unsafe extern "C" fn rayzor_gpu_compute_write_bytes(
     addr: i64,
     byte_size: i64,
 ) -> bool {
+    gpu_thread_check("write_bytes");
     if ctx == 0 || buffer_ptr == 0 || addr == 0 || byte_size <= 0 {
         return false;
     }
@@ -596,6 +686,7 @@ pub unsafe extern "C" fn rayzor_gpu_compute_matmul_q4k(
     k: i64,
     n: i64,
 ) -> i64 {
+    gpu_thread_check("matmul_q4k");
     if ctx == 0 || a == 0 || b == 0 || m <= 0 || k <= 0 || n <= 0 || k % 256 != 0 {
         return 0;
     }

@@ -258,6 +258,7 @@ fn dispatch_fused(
 /// Create a GPU buffer from a RayzorTensor.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_compute_create_buffer(ctx: i64, tensor_ptr: i64) -> i64 {
+    crate::ops::gpu_thread_check("create_buffer");
     if ctx == 0 || tensor_ptr == 0 {
         return 0;
     }
@@ -302,6 +303,7 @@ pub unsafe extern "C" fn rayzor_gpu_compute_alloc_buffer(ctx: i64, numel: i64, d
 /// Copy GPU buffer data back to a new RayzorTensor.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_compute_to_tensor(ctx: i64, buffer_ptr: i64) -> i64 {
+    crate::ops::gpu_thread_check("to_tensor");
     if ctx == 0 || buffer_ptr == 0 {
         return 0;
     }
@@ -320,45 +322,55 @@ pub unsafe extern "C" fn rayzor_gpu_compute_to_tensor(ctx: i64, buffer_ptr: i64)
         None => return 0,
     };
 
-    let data = libc::malloc(byte_size) as *mut u8;
+    // Build the tensor with the TENSOR CRATE'S OWN constructor rather than
+    // hand-rolling its layout.
+    //
+    // This used to malloc 48 bytes and write fields by raw offset. RayzorTensor
+    // is 64: `refcount` sits at offset 48 and `parent` at 56, so BOTH landed
+    // past the end of the allocation. Nothing noticed until a caller actually
+    // FREED the result — `rayzor_tensor_free` then read a garbage refcount,
+    // followed a garbage `parent`, and recursed into free(), segfaulting. The
+    // GPU tests only ever called `sum()`, so a to_tensor result had never been
+    // handed to the runtime's normal lifecycle before.
+    //
+    // Resolved dynamically: rayzor-gpu does not link rayzor-tensors, but the
+    // host exports its symbols. If it is absent we REFUSE (return 0) rather
+    // than fabricate a wrapper the runtime will later free.
+    let uninit = match tensor_uninit_fn() {
+        Some(f) => f,
+        None => return 0,
+    };
+    let shape_arr: [usize; 1] = [buf.numel];
+    let t = uninit(shape_arr.as_ptr() as i64, 1, buf.dtype as i64);
+    if t == 0 {
+        return 0;
+    }
+    // `data` is the first field of the wrapper.
+    let data = *(t as *const *mut u8);
     if data.is_null() {
         return 0;
     }
     std::ptr::copy_nonoverlapping(data_vec.as_ptr(), data, byte_size);
 
-    let shape = libc::malloc(std::mem::size_of::<usize>()) as *mut usize;
-    if shape.is_null() {
-        libc::free(data as *mut libc::c_void);
-        return 0;
-    }
-    *shape = buf.numel;
+    t
+}
 
-    let strides = libc::malloc(std::mem::size_of::<usize>()) as *mut usize;
-    if strides.is_null() {
-        libc::free(data as *mut libc::c_void);
-        libc::free(shape as *mut libc::c_void);
-        return 0;
-    }
-    *strides = 1;
-
-    let tensor_size: usize = 48;
-    let tensor = libc::malloc(tensor_size) as *mut u8;
-    if tensor.is_null() {
-        libc::free(data as *mut libc::c_void);
-        libc::free(shape as *mut libc::c_void);
-        libc::free(strides as *mut libc::c_void);
-        return 0;
-    }
-
-    *(tensor as *mut *mut u8) = data;
-    *(tensor.add(8) as *mut *mut usize) = shape;
-    *(tensor.add(16) as *mut *mut usize) = strides;
-    *(tensor.add(24) as *mut usize) = 1;
-    *(tensor.add(32) as *mut usize) = buf.numel;
-    *tensor.add(40) = buf.dtype;
-    *tensor.add(41) = 1;
-
-    tensor as i64
+/// `rayzor_tensor_uninit`, resolved from the process's global symbols.
+type TensorUninitFn = unsafe extern "C" fn(i64, i64, i64) -> i64;
+fn tensor_uninit_fn() -> Option<TensorUninitFn> {
+    use std::sync::OnceLock;
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    let addr = *F.get_or_init(|| unsafe {
+        let name = b"rayzor_tensor_uninit\0";
+        let p = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr() as *const libc::c_char);
+        if p.is_null() {
+            eprintln!("[rzg] rayzor_tensor_uninit not found; GPU->Tensor conversion disabled");
+            None
+        } else {
+            Some(p as usize)
+        }
+    });
+    addr.map(|a| unsafe { std::mem::transmute::<usize, TensorUninitFn>(a) })
 }
 
 /// Free a GPU buffer.
