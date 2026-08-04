@@ -2134,6 +2134,48 @@ impl TieredBackend {
                         }
                     }
                 }
+                // RAYZOR_DUMP_MACHINE_CODE=<substring>: write the JIT'd bytes of
+                // every matching function to /tmp/rzmc-<name>.bin, so the
+                // generated machine code can actually be DISASSEMBLED
+                // (objdump -b binary -m i386:x86-64 -D). Reading IR or CLIF is
+                // not evidence about what the CPU runs; a JIT has no symbol in
+                // any binary to point objdump at, and attaching a debugger is
+                // unreliable when the code is installed late.
+                if let Ok(want) = std::env::var("RAYZOR_DUMP_MACHINE_CODE") {
+                    let modules = self.modules.read().unwrap();
+                    for module in modules.iter() {
+                        for (func_id, function) in &module.functions {
+                            let name = function
+                                .qualified_name
+                                .as_deref()
+                                .unwrap_or(&function.name)
+                                .to_string();
+                            if want.is_empty() || !name.contains(want.as_str()) {
+                                continue;
+                            }
+                            if let Some(ptr) = all_pointers.get(func_id) {
+                                // Length is unknown, so grab a generous window;
+                                // the disassembler stops making sense past the
+                                // end, which is obvious in the output.
+                                const WINDOW: usize = 64 * 1024;
+                                let bytes = unsafe {
+                                    std::slice::from_raw_parts(*ptr as *const u8, WINDOW)
+                                };
+                                let safe: String = name
+                                    .chars()
+                                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                                    .collect();
+                                let path = format!("/tmp/rzmc-{safe}.bin");
+                                if std::fs::write(&path, bytes).is_ok() {
+                                    eprintln!(
+                                        "[machine-code] {name} -> {path} ({WINDOW} bytes from 0x{:x})",
+                                        ptr
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 {
                     let mut fp_lock = self.function_pointers.write().unwrap();
                     let mut ft_lock = self.function_tiers.write().unwrap();
