@@ -251,6 +251,11 @@ class Main {
         if (!silentStream) Sys.println("");
         trace("");
         var ttft = (firstTokenAt[0] > 0.0) ? (firstTokenAt[0] - startedAt) : elapsed;
+        // NUE_PROFILE_POOL=1: band/quant/dispatch split + per-worker load.
+        // The server example already dumps this; prefill work needs it here.
+        if (truthyEnv("NUE_PROFILE_POOL") || truthyEnv("RAYZOR_PROFILE_POOL")) {
+            if (llama.spinPool != null) trace("[pool] " + llama.spinPool.profReport());
+        }
         trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
             + fmt(nTokens[0] / elapsed) + " tok/s, ttft=" + fmt(ttft) + "s, finish="
             + response.finishReasonName() + ")");
