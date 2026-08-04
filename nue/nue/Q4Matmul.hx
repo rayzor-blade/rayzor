@@ -720,13 +720,24 @@ class Q4Matmul {
     }
 
     /** 4-lane partial dot of one 32-quant sub-block (low or high nibble). */
-    static inline function subDotVec(wBase:Usize, wOff:Int, isHi:Bool, aBase:Usize, aOff:Int):SIMD4i32 {
+    /** One 32-weight sub-block dot, taking ALREADY-64-BIT addresses.
+        `Int` is 32 bits and an address is 64, so every `Usize.fromInt` in a
+        loop emits a `movsxd`; disassembly showed 288 of them and 52% of this
+        kernel in scalar address arithmetic (llama.cpp: 21%). Taking Usize
+        cursors and stepping them keeps the offset arithmetic in 64-bit, so the
+        conversions happen once per block instead of once per access. */
+    static inline function subDotVec(wAddr:Usize, isHi:Bool, aAddr:Usize):SIMD4i32 {
         var acc = SIMD4i32.splat(0);
+        var w = wAddr;
+        var a = aAddr;
+        var step:Usize = Usize.fromInt(16);
         for (half in 0...2) {
-            var wRaw = SIMD16i8.load(Ptr.fromRaw(wBase + Usize.fromInt(wOff + half * 16)));
+            var wRaw = SIMD16i8.load(Ptr.fromRaw(w));
             var wNib = isHi ? SIMD16i8.ushr(wRaw, 4) : SIMD16i8.and(wRaw, SIMD16i8.splat(0x0F));
-            var aVec = SIMD16i8.load(Ptr.fromRaw(aBase + Usize.fromInt(aOff + half * 16)));
+            var aVec = SIMD16i8.load(Ptr.fromRaw(a));
             acc = SIMD4i32.dotI8I7(acc, aVec, wNib);
+            w = w + step;
+            a = a + step;
         }
         return acc;
     }
@@ -773,14 +784,19 @@ class Q4Matmul {
             bsAddr:Usize, bsBase:Int, xd:Float, d:Float, dmin:Float,
             sc0:Int, sc1:Int, sc2:Int, sc3:Int, sc4:Int, sc5:Int, sc6:Int, sc7:Int,
             mn0:Int, mn1:Int, mn2:Int, mn3:Int, mn4:Int, mn5:Int, mn6:Int, mn7:Int):Float {
-        var dv0 = subDotVec(wBase, wBlk + 16 + 0 * 32, false, aBase, aBlk + 0 * 32);
-        var dv1 = subDotVec(wBase, wBlk + 16 + 0 * 32, true,  aBase, aBlk + 1 * 32);
-        var dv2 = subDotVec(wBase, wBlk + 16 + 1 * 32, false, aBase, aBlk + 2 * 32);
-        var dv3 = subDotVec(wBase, wBlk + 16 + 1 * 32, true,  aBase, aBlk + 3 * 32);
-        var dv4 = subDotVec(wBase, wBlk + 16 + 2 * 32, false, aBase, aBlk + 4 * 32);
-        var dv5 = subDotVec(wBase, wBlk + 16 + 2 * 32, true,  aBase, aBlk + 5 * 32);
-        var dv6 = subDotVec(wBase, wBlk + 16 + 3 * 32, false, aBase, aBlk + 6 * 32);
-        var dv7 = subDotVec(wBase, wBlk + 16 + 3 * 32, true,  aBase, aBlk + 7 * 32);
+        // Three i32->i64 conversions for the whole block instead of 32: walk
+        // 64-bit cursors and step by a hoisted Usize stride.
+        var wG:Usize = wBase + Usize.fromInt(wBlk + 16);
+        var aA:Usize = aBase + Usize.fromInt(aBlk);
+        var S32:Usize = Usize.fromInt(32);
+        var dv0 = subDotVec(wG, false, aA); aA = aA + S32;
+        var dv1 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
+        var dv2 = subDotVec(wG, false, aA); aA = aA + S32;
+        var dv3 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
+        var dv4 = subDotVec(wG, false, aA); aA = aA + S32;
+        var dv5 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
+        var dv6 = subDotVec(wG, false, aA); aA = aA + S32;
+        var dv7 = subDotVec(wG, true, aA);
         var i0 = SIMD4i32.splat(sc0) * dv0 + SIMD4i32.splat(sc4) * dv4;
         var i1 = SIMD4i32.splat(sc1) * dv1 + SIMD4i32.splat(sc5) * dv5;
         var i2 = SIMD4i32.splat(sc2) * dv2 + SIMD4i32.splat(sc6) * dv6;
