@@ -30,6 +30,21 @@ import rayzor.concurrent.CpuTopology;
  * quantised to Q8_K here.
  */
 class Q4Matmul {
+    /** Output rows per cache block in the batch path.
+        Sized so one block's weights stay resident while the batch sweeps:
+        NROW_BLOCK x bpr x blockBytes. At bpr=16 / 144B that is 64 x 2.3 KB =
+        147 KB — inside L2 (1.25 MB/core on Alder Lake) with room for the
+        activation tile. `NUE_NROW_BLOCK` overrides for sweeps. */
+    static var _nrowBlock:Int = 0;
+    static function nrowBlock():Int {
+        if (_nrowBlock == 0) {
+            var v = Sys.getEnvOr("NUE_NROW_BLOCK", "RAYZOR_NROW_BLOCK");
+            var k:Int = (v != null) ? Std.int(Std.parseFloat(v)) : 0;
+            _nrowBlock = (k > 0) ? k : 64;
+        }
+        return _nrowBlock;
+    }
+
     static var _useFused:Int = 0;
     static var _dumpFusedGate:Int = 0;
     static var _amx:Int = 0;
@@ -1808,15 +1823,33 @@ class Q4Matmul {
                 return;
             }
             // Batch tiled by 4 with SCALAR accumulators (registers, not a
-            // heap Array). A row's weight blocks (bpr × blockBytes ≤ ~5KB)
-            // stay L1-resident across the ≤ ceil(batch/4) re-walks, and
-            // per-(row,batch) accumulation order over b is unchanged, so
-            // outputs remain bit-identical.
-            for (n in n0...n1) {
-                var rt = 0;
-                while (rt + 4 <= batch) {
-                    var s0 = 0.0; var s1 = 0.0; var s2 = 0.0; var s3 = 0.0;
-                    for (b in 0...bpr) {
+            // heap Array), inside an OUTPUT-ROW BLOCK.
+            //
+            // The row block is the cache-blocking axis, and it matters far more
+            // than the weights do. With `n` outermost, EVERY output row swept the
+            // whole activation matrix (batch x K in Q8 = 2.7 MB at 653x4096),
+            // which does not fit L2 (1.25 MB/core) — so each row re-read it from
+            // L3/DRAM: ~1792 rows x 2.7 MB = ~4.8 GB per worker per matmul.
+            // Measured, this band kernel is 86.6% of prefill.
+            //
+            // Blocking `n` and lifting the batch sweep above it keeps one block's
+            // weights hot while the 4-row activation tile (4 x K bytes = 16 KB at
+            // K=4096) stays L1-resident across the entire block, cutting
+            // activation traffic by ~NROW_BLOCK.
+            //
+            // Accumulation order per (row, batch) over b is untouched: this is a
+            // loop interchange, not a different sum, so output is bit-identical.
+            var NROW_BLOCK = nrowBlock();
+            var nb = n0;
+            while (nb < n1) {
+                var nHi = nb + NROW_BLOCK;
+                if (nHi > n1) nHi = n1;
+                var rtb = 0;
+                while (rtb + 4 <= batch) {
+                    for (n in nb...nHi) {
+                        var rt = rtb;
+                        var s0 = 0.0; var s1 = 0.0; var s2 = 0.0; var s3 = 0.0;
+                        for (b in 0...bpr) {
                         var blkOff = (n * bpr + b) * blockBytes;
                         var a0 = rt * K + b * 256;
                         var i0 = (rt * bpr + b) * 16;
@@ -1825,65 +1858,71 @@ class Q4Matmul {
                         var d2 = Mem.loadF32(dBase + Usize.fromInt(((rt + 2) * bpr + b) << 2));
                         var d3 = Mem.loadF32(dBase + Usize.fromInt(((rt + 3) * bpr + b) << 2));
                         if (isQ6) {
-                            // One weight decode for all four rows (see q6DotMA4x4).
-                            q6DotMA4x4(wBase, blkOff, aBase, a0, K, bsAddr, i0, bpr * 16,
-                                d0, d1, d2, d3, q6Out);
-                            s0 += Mem.loadF64(q6Out);
-                            s1 += Mem.loadF64(q6Out + Usize.fromInt(8));
-                            s2 += Mem.loadF64(q6Out + Usize.fromInt(16));
-                            s3 += Mem.loadF64(q6Out + Usize.fromInt(24));
+                        // One weight decode for all four rows (see q6DotMA4x4).
+                        q6DotMA4x4(wBase, blkOff, aBase, a0, K, bsAddr, i0, bpr * 16,
+                        d0, d1, d2, d3, q6Out);
+                        s0 += Mem.loadF64(q6Out);
+                        s1 += Mem.loadF64(q6Out + Usize.fromInt(8));
+                        s2 += Mem.loadF64(q6Out + Usize.fromInt(16));
+                        s3 += Mem.loadF64(q6Out + Usize.fromInt(24));
                         } else {
-                            // Decode this block's header ONCE for all four rows: the
-                            // scales/mins belong to the WEIGHT block, only the activation
-                            // offset varies across the tile. Raw-pointer loads defeat LLVM's
-                            // alias analysis, so it cannot CSE these across the four inlined
-                            // bodies on its own.
-                            var hw0 = Mem.loadI32(wBase + Usize.fromInt(blkOff));
-                            var hu0 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 4));
-                            var hu1 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 8));
-                            var hu2 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 12));
-                            var hd = f16ToF32(hw0 & 0xFFFF);
-                            var hdm = f16ToF32((hw0 >>> 16) & 0xFFFF);
-                            var e0 = hu0 & 63; var e1 = (hu0 >>> 8) & 63;
-                            var e2 = (hu0 >>> 16) & 63; var e3 = (hu0 >>> 24) & 63;
-                            var g0 = hu1 & 63; var g1 = (hu1 >>> 8) & 63;
-                            var g2 = (hu1 >>> 16) & 63; var g3 = (hu1 >>> 24) & 63;
-                            var e4 = (hu2 & 0x0F) | (((hu0 >>> 6) & 3) << 4);
-                            var g4 = ((hu2 >>> 4) & 0x0F) | (((hu1 >>> 6) & 3) << 4);
-                            var e5 = ((hu2 >>> 8) & 0x0F) | (((hu0 >>> 14) & 3) << 4);
-                            var g5 = ((hu2 >>> 12) & 0x0F) | (((hu1 >>> 14) & 3) << 4);
-                            var e6 = ((hu2 >>> 16) & 0x0F) | (((hu0 >>> 22) & 3) << 4);
-                            var g6 = ((hu2 >>> 20) & 0x0F) | (((hu1 >>> 22) & 3) << 4);
-                            var e7 = ((hu2 >>> 24) & 0x0F) | (((hu0 >>> 30) & 3) << 4);
-                            var g7 = ((hu2 >>> 28) & 0x0F) | (((hu1 >>> 30) & 3) << 4);
-                            s0 += q4DotBody(wBase, blkOff, aBase, a0, bsAddr, i0, d0, hd, hdm,
-                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
-                            s1 += q4DotBody(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1, hd, hdm,
-                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
-                            s2 += q4DotBody(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2, hd, hdm,
-                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
-                            s3 += q4DotBody(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3, hd, hdm,
-                                e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                        // Decode this block's header ONCE for all four rows: the
+                        // scales/mins belong to the WEIGHT block, only the activation
+                        // offset varies across the tile. Raw-pointer loads defeat LLVM's
+                        // alias analysis, so it cannot CSE these across the four inlined
+                        // bodies on its own.
+                        var hw0 = Mem.loadI32(wBase + Usize.fromInt(blkOff));
+                        var hu0 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 4));
+                        var hu1 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 8));
+                        var hu2 = Mem.loadI32(wBase + Usize.fromInt(blkOff + 12));
+                        var hd = f16ToF32(hw0 & 0xFFFF);
+                        var hdm = f16ToF32((hw0 >>> 16) & 0xFFFF);
+                        var e0 = hu0 & 63; var e1 = (hu0 >>> 8) & 63;
+                        var e2 = (hu0 >>> 16) & 63; var e3 = (hu0 >>> 24) & 63;
+                        var g0 = hu1 & 63; var g1 = (hu1 >>> 8) & 63;
+                        var g2 = (hu1 >>> 16) & 63; var g3 = (hu1 >>> 24) & 63;
+                        var e4 = (hu2 & 0x0F) | (((hu0 >>> 6) & 3) << 4);
+                        var g4 = ((hu2 >>> 4) & 0x0F) | (((hu1 >>> 6) & 3) << 4);
+                        var e5 = ((hu2 >>> 8) & 0x0F) | (((hu0 >>> 14) & 3) << 4);
+                        var g5 = ((hu2 >>> 12) & 0x0F) | (((hu1 >>> 14) & 3) << 4);
+                        var e6 = ((hu2 >>> 16) & 0x0F) | (((hu0 >>> 22) & 3) << 4);
+                        var g6 = ((hu2 >>> 20) & 0x0F) | (((hu1 >>> 22) & 3) << 4);
+                        var e7 = ((hu2 >>> 24) & 0x0F) | (((hu0 >>> 30) & 3) << 4);
+                        var g7 = ((hu2 >>> 28) & 0x0F) | (((hu1 >>> 30) & 3) << 4);
+                        s0 += q4DotBody(wBase, blkOff, aBase, a0, bsAddr, i0, d0, hd, hdm,
+                        e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                        s1 += q4DotBody(wBase, blkOff, aBase, a0 + K, bsAddr, i0 + bpr * 16, d1, hd, hdm,
+                        e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                        s2 += q4DotBody(wBase, blkOff, aBase, a0 + 2 * K, bsAddr, i0 + 2 * bpr * 16, d2, hd, hdm,
+                        e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
+                        s3 += q4DotBody(wBase, blkOff, aBase, a0 + 3 * K, bsAddr, i0 + 3 * bpr * 16, d3, hd, hdm,
+                        e0, e1, e2, e3, e4, e5, e6, e7, g0, g1, g2, g3, g4, g5, g6, g7);
                         }
+                        }
+                        Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
+                        Mem.storeF32(yBase + Usize.fromInt(((rt + 1) * rows + n) << 2), s1);
+                        Mem.storeF32(yBase + Usize.fromInt(((rt + 2) * rows + n) << 2), s2);
+                        Mem.storeF32(yBase + Usize.fromInt(((rt + 3) * rows + n) << 2), s3);
                     }
-                    Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), s0);
-                    Mem.storeF32(yBase + Usize.fromInt(((rt + 1) * rows + n) << 2), s1);
-                    Mem.storeF32(yBase + Usize.fromInt(((rt + 2) * rows + n) << 2), s2);
-                    Mem.storeF32(yBase + Usize.fromInt(((rt + 3) * rows + n) << 2), s3);
-                    rt += 4;
+                    rtb += 4;
                 }
-                while (rt < batch) {
+                // Batch tail: rows past the last full group of 4.
+                for (n in nb...nHi) {
+                    var rt = rtb;
+                    while (rt < batch) {
                     var sum = 0.0;
                     for (b in 0...bpr) {
-                        var blkOff = (n * bpr + b) * blockBytes;
-                        var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
-                        sum += isQ6
-                            ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb)
-                            : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb);
+                    var blkOff = (n * bpr + b) * blockBytes;
+                    var xdb = Mem.loadF32(dBase + Usize.fromInt((rt * bpr + b) << 2));
+                    sum += isQ6
+                    ? q6DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb)
+                    : q4DotMA4(wBase, blkOff, aBase, rt * K + b * 256, bsAddr, (rt * bpr + b) * 16, xdb);
                     }
                     Mem.storeF32(yBase + Usize.fromInt((rt * rows + n) << 2), sum);
                     rt++;
+                    }
                 }
+                nb = nHi;
             }
         };
         // Persistent pool when the caller provides one (a spawn-per-call
