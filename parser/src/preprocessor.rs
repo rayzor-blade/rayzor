@@ -424,87 +424,120 @@ fn tokenize_condition(condition: &str) -> Vec<CondToken> {
 }
 
 fn evaluate_tokens(tokens: &[CondToken], config: &PreprocessorConfig) -> bool {
-    // Simple evaluation: check each identifier, combine with operators
-    // For MVP, we'll use a basic approach
-
-    if tokens.is_empty() {
+    // Recursive descent with real precedence: or -> and -> unary -> primary.
+    //
+    // The previous version tested for `||`/`&&` BEFORE stripping parentheses and
+    // split on them without tracking nesting, so `(a && b)` split into
+    // `[LParen, a]` and `[b, RParen]`; the first fragment began with `(`, matched
+    // no arm, and evaluated false. Every parenthesized condition satisfied by its
+    // FIRST term was wrong — `#if (cpp || java)` was false on cpp. It only ever
+    // appeared to work when the satisfying term happened to be last.
+    let mut pos = 0usize;
+    let value = parse_or(tokens, &mut pos, config);
+    // Trailing junk means we failed to consume the condition; treat as false
+    // rather than silently accepting a partial parse.
+    if pos != tokens.len() {
         return false;
     }
-
-    // Handle single identifier case
-    if tokens.len() == 1 {
-        if let CondToken::Ident(ref name) = tokens[0] {
-            return config.defines.contains(name);
-        }
-        return false;
-    }
-
-    // Handle negation
-    if tokens[0] == CondToken::Not {
-        return !evaluate_tokens(&tokens[1..], config);
-    }
-
-    // Handle OR - if any part is true, return true
-    if tokens.contains(&CondToken::Or) {
-        // Split by OR and evaluate each part
-        let parts = split_by_token(tokens, &CondToken::Or);
-        for part in parts {
-            if evaluate_tokens(&part, config) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // Handle AND - all parts must be true
-    if tokens.contains(&CondToken::And) {
-        let parts = split_by_token(tokens, &CondToken::And);
-        for part in parts {
-            if !evaluate_tokens(&part, config) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // Handle parentheses (simplified - just remove them for now)
-    if tokens[0] == CondToken::LParen && tokens[tokens.len() - 1] == CondToken::RParen {
-        return evaluate_tokens(&tokens[1..tokens.len() - 1], config);
-    }
-
-    // Single identifier
-    if let CondToken::Ident(ref name) = tokens[0] {
-        return config.defines.contains(name);
-    }
-
-    false
+    value
 }
 
-fn split_by_token(tokens: &[CondToken], separator: &CondToken) -> Vec<Vec<CondToken>> {
-    let mut parts = Vec::new();
-    let mut current = Vec::new();
+fn parse_or(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
+    let mut acc = parse_and(tokens, pos, config);
+    while matches!(tokens.get(*pos), Some(CondToken::Or)) {
+        *pos += 1;
+        let rhs = parse_and(tokens, pos, config);
+        acc = acc || rhs;
+    }
+    acc
+}
 
-    for token in tokens {
-        if token == separator {
-            if !current.is_empty() {
-                parts.push(current);
-                current = Vec::new();
-            }
-        } else {
-            current.push(token.clone());
+fn parse_and(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
+    let mut acc = parse_unary(tokens, pos, config);
+    while matches!(tokens.get(*pos), Some(CondToken::And)) {
+        *pos += 1;
+        let rhs = parse_unary(tokens, pos, config);
+        acc = acc && rhs;
+    }
+    acc
+}
+
+fn parse_unary(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
+    if matches!(tokens.get(*pos), Some(CondToken::Not)) {
+        *pos += 1;
+        return !parse_unary(tokens, pos, config);
+    }
+    parse_primary(tokens, pos, config)
+}
+
+fn parse_primary(tokens: &[CondToken], pos: &mut usize, config: &PreprocessorConfig) -> bool {
+    match tokens.get(*pos) {
+        Some(CondToken::Ident(name)) => {
+            *pos += 1;
+            config.defines.contains(name)
         }
+        Some(CondToken::LParen) => {
+            *pos += 1;
+            let inner = parse_or(tokens, pos, config);
+            if matches!(tokens.get(*pos), Some(CondToken::RParen)) {
+                *pos += 1;
+            }
+            inner
+        }
+        _ => false,
     }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    parts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg(defines: &[&str]) -> PreprocessorConfig {
+        let mut c = PreprocessorConfig::default();
+        for d in defines {
+            c.defines.insert((*d).to_string());
+        }
+        c
+    }
+
+    /// Parenthesized conditions used to be split on `||`/`&&` BEFORE the parens
+    /// were stripped, so the first fragment began with `(` and evaluated false.
+    /// Anything satisfied by its FIRST term was wrong; it only looked correct
+    /// when the satisfying term happened to be last.
+    #[test]
+    fn paren_condition_satisfied_by_first_term() {
+        let c = cfg(&["cpp"]);
+        assert!(evaluate_condition("(cpp || java)", &c));
+        assert!(evaluate_condition("(java || cpp)", &c));
+        assert!(evaluate_condition("(java || cs || hl || cpp)", &c));
+        assert!(!evaluate_condition("(java || cs || hl)", &c));
+    }
+
+    #[test]
+    fn paren_and_and_negation() {
+        let c = cfg(&["rayzor", "llvm"]);
+        assert!(evaluate_condition("(rayzor && llvm)", &c));
+        assert!(evaluate_condition("(rayzor && !nosuch)", &c));
+        assert!(!evaluate_condition("(rayzor && nosuch)", &c));
+        assert!(evaluate_condition("(rayzor || nosuch)", &c));
+    }
+
+    /// `&&` binds tighter than `||`.
+    #[test]
+    fn operator_precedence() {
+        let c = cfg(&["a", "c"]);
+        // a || (b && d) == true, and must not parse as (a || b) && d == false
+        assert!(evaluate_condition("a || b && d", &c));
+        assert!(evaluate_condition("(a || b) && c", &c));
+        assert!(!evaluate_condition("(a && b) || d", &c));
+    }
+
+    #[test]
+    fn nested_parens() {
+        let c = cfg(&["sys", "cpp"]);
+        assert!(evaluate_condition("((cpp || java) && sys)", &c));
+        assert!(!evaluate_condition("((java || cs) && sys)", &c));
+    }
 
     #[test]
     fn test_simple_condition_true() {
