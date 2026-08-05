@@ -23734,6 +23734,15 @@ impl<'a> HirToMirContext<'a> {
                 if matches!(name_str, "Usize" | "Ptr" | "Ref" | "Box") {
                     return IrType::I64;
                 }
+                // `Single` is the f32 scalar: `@:coreType abstract Single to
+                // Float from Float`. Its `to`/`from Float` are CAST
+                // compatibility, not identity — the representation is 32-bit.
+                // Decided here with the other representation-bearing coreTypes,
+                // before the underlying/opaque fallback, which would otherwise
+                // hand it an opaque 8-byte slot and silently keep f64 bits.
+                if name_str == "Single" {
+                    return IrType::F32;
+                }
 
                 if let Some(underlying_type) = underlying {
                     // If underlying type is specified, use it
@@ -24552,11 +24561,19 @@ impl<'a> HirToMirContext<'a> {
         // float_to_string takes F64, bool_to_string takes Bool.
         // The Cranelift backend's C ABI auto-cast handles any I32↔I64 promotion
         // at the call site, so no manual casting is needed here.
-        let func_id = self.register_stdlib_mir_forward_ref(
-            mir_wrapper,
-            vec![from_type.clone()],
-            IrType::String,
-        );
+        // Declare each wrapper with ITS OWN signature, never the caller's type.
+        // These are registered by name, so the first caller used to pin the
+        // parameter: one `Single` (f32) argument made `float_to_string` an
+        // f32-taking function, and every later `Float` then truncated f64 -> f32
+        // on the way in. The arg-side coercion widens/narrows to these.
+        let param_ty = match mir_wrapper {
+            "int_to_string" => IrType::I64,
+            "float_to_string" => IrType::F64,
+            "bool_to_string" => IrType::Bool,
+            _ => from_type.clone(),
+        };
+        let func_id =
+            self.register_stdlib_mir_forward_ref(mir_wrapper, vec![param_ty], IrType::String);
 
         self.builder
             .build_call_direct(func_id, vec![value], IrType::String)
@@ -24863,8 +24880,18 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(func_id, vec![value], result_type)
         } else {
-            // No conversion function — keyword from, value passes through
-            None
+            // Keyword `from` with no conversion function. The value passes
+            // through ONLY when both sides share a representation — `from Float`
+            // on `Single` is cast compatibility, not identity, and letting f64
+            // bits ride into an f32 slot is a wrong answer, not a slow one.
+            let src = self.convert_type(source_type);
+            let dst = self.convert_type(target_type);
+            let numeric = |t: &IrType| t.is_float() || t.is_integer();
+            if src != dst && numeric(&src) && numeric(&dst) {
+                self.builder.build_cast(value, src, dst)
+            } else {
+                None
+            }
         }
     }
 

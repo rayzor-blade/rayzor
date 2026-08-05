@@ -448,6 +448,12 @@ impl IrBuilder {
                             // i64-typed callee reads rdi — value lost.
                             | (IrType::F64, IrType::Any)
                             | (IrType::Any, IrType::F64)
+                            // f64 <-> f32 (Float vs Single): a real narrowing /
+                            // widening conversion, not a reinterpretation. Passing
+                            // an f64 constant straight into an f32 slot lands the
+                            // double's bit pattern in a float register.
+                            | (IrType::F64, IrType::F32)
+                            | (IrType::F32, IrType::F64)
                     );
                     if needs_cast {
                         // I32→F64/F32: value conversion (Haxe Int→Float coercion).

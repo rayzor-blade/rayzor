@@ -13272,6 +13272,18 @@ impl<'a> AstLowering<'a> {
                 // `var t = a + b` would type `t` as Float, then `t.sum()` dispatches on
                 // the wrong type. This handles the symmetric-typed ops; asymmetric ops
                 // are a future extension if needed.
+                // String concatenation wins over the @:op rules below: `"x" + v`
+                // is a String no matter what `v` is. Without this the abstract
+                // arms claim it — `"s=" + aSingle` typed as Single, so the MIR
+                // called the concat (returning a String pointer) and then tried
+                // to cast that pointer float→float.
+                if matches!(operator, BinaryOperator::Add) {
+                    let string_type = type_table.string_type();
+                    if left.expr_type == string_type || right.expr_type == string_type {
+                        return Ok(string_type);
+                    }
+                }
+
                 if matches!(
                     operator,
                     BinaryOperator::Add
