@@ -2127,20 +2127,16 @@ impl<'a> HirToMirContext<'a> {
                 .class_alloc_sizes
                 .get(&parent_type)
                 .copied()
-                .or_else(|| {
-                    parent_sym.and_then(|ps| {
-                        // SymbolId-as-TypeId pun into a merged, TypeId-keyed
-                        // map — same collision class as bab87ce0. Accept only
-                        // when the punned id is not positively attributed to a
-                        // DIFFERENT class; a wrong hit here under-allocates
-                        // the subclass and corrupts the heap silently.
-                        let pun = TypeId::from_raw(ps.as_raw());
-                        match self.class_type_to_symbol.get(&pun) {
-                            Some(&owner) if owner != ps => None,
-                            _ => self.class_alloc_sizes.get(&pun).copied(),
-                        }
-                    })
-                })
+                // NOTE: a SymbolId-as-TypeId pun used to sit here as a middle
+                // fallback. Its guard only rejected ids positively attributed to
+                // a DIFFERENT class, so when the punned id was absent from
+                // `class_type_to_symbol` it blindly trusted `class_alloc_sizes`
+                // — and TypeIds are context-local, so merely declaring one more
+                // type (`Single`) shifted them onto a wrong entry. That
+                // under-allocated the subclass and corrupted the heap silently:
+                // the llama example SIGSEGV'd during lm_head requantisation with
+                // no diagnostic. Resolve by exact TypeId, else by NAME, which is
+                // stable across the shift. Never by raw-bit coincidence.
                 .or_else(|| {
                     parent_sym
                         .and_then(|ps| self.symbol_table.get_symbol(ps))
