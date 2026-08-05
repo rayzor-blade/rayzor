@@ -68,6 +68,10 @@ pub enum IrTypeDescriptor {
     VecI32x4,
     /// SIMD vector: 16 × i8 (128-bit)
     VecI8x16,
+    /// SIMD vector: 8 × i32 (256-bit, LLVM backend only)
+    VecI32x8,
+    /// SIMD vector: 32 × i8 (256-bit, LLVM backend only)
+    VecI8x32,
 }
 
 impl IrTypeDescriptor {
@@ -91,6 +95,8 @@ impl IrTypeDescriptor {
             IrTypeDescriptor::VecF32x4 => IrType::vector(IrType::F32, 4),
             IrTypeDescriptor::VecI32x4 => IrType::vector(IrType::I32, 4),
             IrTypeDescriptor::VecI8x16 => IrType::vector(IrType::I8, 16),
+            IrTypeDescriptor::VecI32x8 => IrType::vector(IrType::I32, 8),
+            IrTypeDescriptor::VecI8x32 => IrType::vector(IrType::I8, 32),
         }
     }
 }
@@ -269,6 +275,8 @@ impl StdlibMapping {
         mapping.register_simd4f_methods();
         mapping.register_simd4i32_methods();
         mapping.register_simd16i8_methods();
+        mapping.register_simd8i32_methods();
+        mapping.register_simd32i8_methods();
         mapping.register_atomic_methods();
         mapping.register_tensor_methods();
         mapping.register_qtensor_methods();
@@ -3511,6 +3519,65 @@ impl StdlibMapping {
             // term to recover signed*signed math while still unlocking VNNI.
             map_method!(static "rayzor_SIMD4i32", "dotI8U8" => "SIMD4i32_dot16_i8_u8", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SIMD8i32 Methods (rayzor.SIMD8i32 — 256-bit accumulator, LLVM only)
+    // ============================================================================
+    // The 256-bit twin of SIMD4i32: 32 i8 lanes per dot instead of 16. wasm and
+    // Cranelift have no 256-bit vector and refuse these types outright, so Haxe
+    // callers must gate on `#if llvm`.
+    fn register_simd8i32_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "rayzor_SIMD8i32", "splat" => "SIMD8i32_splat", params: 1, mir_wrapper,
+                types: &[I32] => VecI32x8),
+            map_method!(instance "rayzor_SIMD8i32", "get" => "SIMD8i32_extract", params: 1, mir_wrapper,
+                types: &[VecI32x8, I32] => I32),
+            map_method!(instance "rayzor_SIMD8i32", "set" => "SIMD8i32_insert", params: 2, mir_wrapper,
+                types: &[VecI32x8, I32, I32] => VecI32x8),
+            map_method!(instance "rayzor_SIMD8i32", "sum" => "SIMD8i32_sum", params: 0, mir_wrapper,
+                types: &[VecI32x8] => I32),
+            map_method!(static "rayzor_SIMD8i32", "dot" => "SIMD8i32_dot32", params: 3, mir_wrapper,
+                types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
+            map_method!(static "rayzor_SIMD8i32", "dotI8I7" => "SIMD8i32_dot32_i8_i7", params: 3, mir_wrapper,
+                types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
+            map_method!(static "rayzor_SIMD8i32", "dotI8U8" => "SIMD8i32_dot32_i8_u8", params: 3, mir_wrapper,
+                types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SIMD32i8 Methods (rayzor.SIMD32i8 — 32×i8 dot operands, LLVM only)
+    // ============================================================================
+    fn register_simd32i8_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "rayzor_SIMD32i8", "splat" => "SIMD32i8_splat", params: 1, mir_wrapper,
+                types: &[I32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "load" => "SIMD32i8_load", params: 1, mir_wrapper,
+                types: &[I64] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "and" => "SIMD32i8_and", params: 2, mir_wrapper,
+                types: &[VecI8x32, VecI8x32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "or" => "SIMD32i8_or", params: 2, mir_wrapper,
+                types: &[VecI8x32, VecI8x32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "xor" => "SIMD32i8_xor", params: 2, mir_wrapper,
+                types: &[VecI8x32, VecI8x32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "shl" => "SIMD32i8_shl", params: 2, mir_wrapper,
+                types: &[VecI8x32, I32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "shr" => "SIMD32i8_shr", params: 2, mir_wrapper,
+                types: &[VecI8x32, I32] => VecI8x32),
+            map_method!(static "rayzor_SIMD32i8", "ushr" => "SIMD32i8_ushr", params: 2, mir_wrapper,
+                types: &[VecI8x32, I32] => VecI8x32),
+            map_method!(instance "rayzor_SIMD32i8", "get" => "SIMD32i8_extract", params: 1, mir_wrapper,
+                types: &[VecI8x32, I32] => I32),
         ];
 
         self.register_from_tuples(mappings);

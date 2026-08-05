@@ -23774,6 +23774,12 @@ impl<'a> HirToMirContext<'a> {
                         if is("SIMD16i8") {
                             return IrType::vector(IrType::I8, 16);
                         }
+                        if is("SIMD8i32") {
+                            return IrType::vector(IrType::I32, 8);
+                        }
+                        if is("SIMD32i8") {
+                            return IrType::vector(IrType::I8, 32);
+                        }
                         if native == "rayzor::Atomic" {
                             return IrType::Ptr(Box::new(IrType::I32));
                         }
@@ -25457,6 +25463,8 @@ impl<'a> HirToMirContext<'a> {
                             | "SIMD4f"
                             | "SIMD4i32"
                             | "SIMD16i8"
+                            | "SIMD8i32"
+                            | "SIMD32i8"
                             | "Atomic"
                     ) {
                         return false;
@@ -42012,18 +42020,29 @@ enum MirBinaryOp {
 }
 
 /// Map a SIMD vector IrType to its stdlib class name, so instance-method
-/// dispatch picks the right wrapper set: i32x4 → SIMD4i32, i8x16 → SIMD16i8,
-/// everything else (f32x4) → SIMD4f. All are 128-bit vectors but their
-/// `sum`/`get`/`set` methods map to different MIR wrappers.
+/// dispatch picks the right wrapper set: i32x4 → SIMD4i32, i32x8 → SIMD8i32,
+/// i8x16 → SIMD16i8, i8x32 → SIMD32i8, everything else (f32x4) → SIMD4f.
+/// Both element type AND lane count matter — the 128- and 256-bit twins have
+/// identical method names bound to different-width MIR wrappers.
 fn simd_vector_class(ty: &IrType) -> &'static str {
     match ty {
-        IrType::Vector { element, .. } if matches!(element.as_ref(), IrType::I32 | IrType::U32) => {
-            "rayzor_SIMD4i32"
+        IrType::Vector { element, count }
+            if matches!(element.as_ref(), IrType::I32 | IrType::U32) =>
+        {
+            if *count == 8 {
+                "rayzor_SIMD8i32"
+            } else {
+                "rayzor_SIMD4i32"
+            }
         }
         IrType::Vector { element, count }
-            if *count == 16 && matches!(element.as_ref(), IrType::I8 | IrType::U8) =>
+            if matches!(element.as_ref(), IrType::I8 | IrType::U8) =>
         {
-            "rayzor_SIMD16i8"
+            if *count == 32 {
+                "rayzor_SIMD32i8"
+            } else {
+                "rayzor_SIMD16i8"
+            }
         }
         _ => "rayzor_SIMD4f",
     }

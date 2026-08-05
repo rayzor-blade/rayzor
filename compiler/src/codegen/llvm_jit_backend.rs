@@ -651,9 +651,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // non-experimental name -> smull). Not yet de-experimentalized in 21.1.
         let intrinsic = Intrinsic::find("llvm.experimental.vector.partial.reduce.add")
             .ok_or("llvm.experimental.vector.partial.reduce.add intrinsic not found")?;
-        let i32_ty = self.context.i32_type();
-        let acc_ty = i32_ty.vec_type(4);
-        let vec_ty = i32_ty.vec_type(16);
+        // Overloaded on both operand types — take them from the actual values
+        // so a 256-bit dot (8×i32 acc, 32×i32 products) declares correctly.
+        let acc_ty = acc.get_type();
+        let vec_ty = vec.get_type();
         let func = intrinsic
             .get_declaration(&self.module, &[acc_ty.into(), vec_ty.into()])
             .ok_or("Failed to get llvm.vector.partial.reduce.add declaration")?;
@@ -686,10 +687,50 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         b: inkwell::values::VectorValue<'ctx>,
     ) -> Option<inkwell::values::VectorValue<'ctx>> {
         use inkwell::intrinsics::Intrinsic;
+        use inkwell::types::VectorType;
         let intrinsic = Intrinsic::find("llvm.aarch64.neon.sdot")?;
-        let i32x4 = self.context.i32_type().vec_type(4);
+        let i32_ty = self.context.i32_type();
+        let i32x4 = i32_ty.vec_type(4);
         let i8x16 = self.context.i8_type().vec_type(16);
         let func = intrinsic.get_declaration(&self.module, &[i32x4.into(), i8x16.into()])?;
+        let acc_lanes = acc.get_type().get_size();
+        // NEON tops out at 128 bits. A 256-bit dot is two sdots over the
+        // halves — the same work the pair of registers holds after
+        // legalization, and far cheaper than dropping to the widening chain.
+        if acc_lanes > 4 {
+            let half = acc_lanes / 2;
+            let idx = |base: u32, n: u32| {
+                VectorType::const_vector(
+                    &(0..n)
+                        .map(|i| i32_ty.const_int((base + i) as u64, false))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let mut halves = Vec::with_capacity(2);
+            for h in 0..2u32 {
+                let acc_h = self
+                    .builder
+                    .build_shuffle_vector(acc, acc, idx(h * half, half), "sdot_acc_h")
+                    .ok()?;
+                let a_h = self
+                    .builder
+                    .build_shuffle_vector(a, a, idx(h * half * 4, half * 4), "sdot_a_h")
+                    .ok()?;
+                let b_h = self
+                    .builder
+                    .build_shuffle_vector(b, b, idx(h * half * 4, half * 4), "sdot_b_h")
+                    .ok()?;
+                let call = self
+                    .builder
+                    .build_call(func, &[acc_h.into(), a_h.into(), b_h.into()], "sdot")
+                    .ok()?;
+                halves.push(call.try_as_basic_value().basic()?.into_vector_value());
+            }
+            return self
+                .builder
+                .build_shuffle_vector(halves[0], halves[1], idx(0, acc_lanes), "sdot_join")
+                .ok();
+        }
         let call = self
             .builder
             .build_call(func, &[acc.into(), a.into(), b.into()], "sdot")
@@ -699,8 +740,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .map(|v| v.into_vector_value())
     }
 
-    /// Build `llvm.x86.avx512.vpdpbusd.128(acc<4xi32>, u<4xi32>, s<4xi32>)`
-    /// directly — the u8×i8 dot-accumulate. LLVM emits the VEX (AVX-VNNI)
+    /// Build `llvm.x86.avx512.vpdpbusd.{128,256}` directly — the u8×i8
+    /// dot-accumulate — picking the width from the accumulator's lane count
+    /// (4 lanes → xmm, 8 lanes → ymm). LLVM emits the VEX (AVX-VNNI)
     /// encoding on cores with avxvnni-but-not-avx512vnni, EVEX where present.
     /// Emitted directly for the same reason as the ARM sdot: the x86 backend
     /// does not fold the portable partial.reduce.add pattern to vpdpbusd, so
@@ -728,30 +770,43 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
             return None;
         }
-        let intrinsic = match Intrinsic::find("llvm.x86.avx512.vpdpbusd.128") {
+        // Width follows the accumulator: 4×i32 = xmm, 8×i32 = ymm. The 256-bit
+        // VEX form is covered by the same `avxvnni` feature bit checked above.
+        let acc_lanes = acc.get_type().get_size();
+        let name = match acc_lanes {
+            4 => "llvm.x86.avx512.vpdpbusd.128",
+            8 => "llvm.x86.avx512.vpdpbusd.256",
+            n => {
+                if dbg {
+                    eprintln!("[vnni] no vpdpbusd for {}-lane accumulator", n);
+                }
+                return None;
+            }
+        };
+        let intrinsic = match Intrinsic::find(name) {
             Some(i) => i,
             None => {
                 if dbg {
-                    eprintln!("[vnni] intrinsic llvm.x86.avx512.vpdpbusd.128 NOT FOUND");
+                    eprintln!("[vnni] intrinsic {} NOT FOUND", name);
                 }
                 return None;
             }
         };
         if dbg {
-            eprintln!("[vnni] emitting vpdpbusd");
+            eprintln!("[vnni] emitting {}", name);
         }
-        // Fixed <4 x i32> operands (not overloaded), so no type args.
+        // Fixed-width operands (not overloaded), so no type args.
         let func = intrinsic.get_declaration(&self.module, &[])?;
-        let i32x4 = self.context.i32_type().vec_type(4);
-        // i8x16 and i32x4 are both 128 bits: bitcast is free (no data move).
+        let i32xn = self.context.i32_type().vec_type(acc_lanes);
+        // i8xN and i32x(N/4) are the same register width: bitcast is free.
         let b_u = self
             .builder
-            .build_bit_cast(b, i32x4, "vnni_u")
+            .build_bit_cast(b, i32xn, "vnni_u")
             .ok()?
             .into_vector_value();
         let a_s = self
             .builder
-            .build_bit_cast(a, i32x4, "vnni_s")
+            .build_bit_cast(a, i32xn, "vnni_s")
             .ok()?
             .into_vector_value();
         // vpdpbusd(acc, unsigned = b, signed = a).
@@ -4689,18 +4744,21 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     }
                 }
                 let i32_ty = self.context.i32_type();
-                let i32x16 = i32_ty.vec_type(16);
+                // Widths follow the operands: 16 bytes → 4 i32 lanes, 32 → 8.
+                let byte_lanes = a_v.get_type().get_size();
+                let acc_lanes = byte_lanes / 4;
+                let i32xn = i32_ty.vec_type(byte_lanes);
                 let a32 = self
                     .builder
-                    .build_int_s_extend(a_v, i32x16, "dot_a32")
+                    .build_int_s_extend(a_v, i32xn, "dot_a32")
                     .map_err(|e| format!("VectorDot sext a failed: {}", e))?;
                 let b32 = if *rhs_unsigned {
                     self.builder
-                        .build_int_z_extend(b_v, i32x16, "dot_b32u")
+                        .build_int_z_extend(b_v, i32xn, "dot_b32u")
                         .map_err(|e| format!("VectorDot zext b failed: {}", e))?
                 } else {
                     self.builder
-                        .build_int_s_extend(b_v, i32x16, "dot_b32")
+                        .build_int_s_extend(b_v, i32xn, "dot_b32")
                         .map_err(|e| format!("VectorDot sext b failed: {}", e))?
                 };
                 let mul = self
@@ -4721,17 +4779,18 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             );
                         }
                         let c = |n: u64| i32_ty.const_int(n, false);
-                        let masks = [
-                            VectorType::const_vector(&[c(0), c(4), c(8), c(12)]),
-                            VectorType::const_vector(&[c(1), c(5), c(9), c(13)]),
-                            VectorType::const_vector(&[c(2), c(6), c(10), c(14)]),
-                            VectorType::const_vector(&[c(3), c(7), c(11), c(15)]),
-                        ];
+                        // Accumulator lane j sums products 4j..4j+3, so mask i
+                        // gathers every 4j+i — one mask per position in a group.
                         let mut groups = Vec::with_capacity(4);
-                        for (i, m) in masks.iter().enumerate() {
+                        for i in 0..4u32 {
+                            let m = VectorType::const_vector(
+                                &(0..acc_lanes)
+                                    .map(|j| c((4 * j + i) as u64))
+                                    .collect::<Vec<_>>(),
+                            );
                             groups.push(
                                 self.builder
-                                    .build_shuffle_vector(mul, mul, *m, &format!("dot_s{}", i))
+                                    .build_shuffle_vector(mul, mul, m, &format!("dot_s{}", i))
                                     .map_err(|e| format!("VectorDot shuffle failed: {}", e))?,
                             );
                         }

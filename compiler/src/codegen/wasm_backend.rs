@@ -71,6 +71,78 @@ impl WasmBackend {
     /// Compile with a qualified method name → native name map for stub resolution.
     /// Maps e.g. "rayzor.gpu.Surface.getFormat" → "rayzor_gpu_gfx_surface_get_format"
     /// so the WASM backend can generate proper forwarder functions instead of unreachable stubs.
+    /// Drop functions that use vectors wider than `v128`, erroring if any
+    /// retained function actually calls one.
+    ///
+    /// The stdlib's 256-bit MIR wrappers (`SIMD32i8_load`, `SIMD8i32_dot32`, …)
+    /// are emitted for every program and this build path does not tree-shake,
+    /// so they would otherwise reach codegen and abort a build that never uses
+    /// them. Removing unreferenced ones is safe; a real call is a genuine
+    /// portability error and is reported as one.
+    pub fn strip_wide_vector_functions(module: &mut IrModule) -> Result<(), String> {
+        use crate::ir::IrInstruction;
+        let wide: std::collections::BTreeSet<IrFunctionId> = module
+            .functions
+            .iter()
+            .filter(|(_, f)| f.uses_wide_vectors())
+            .map(|(id, _)| *id)
+            .collect();
+        if wide.is_empty() {
+            return Ok(());
+        }
+        let describe = |id: &IrFunctionId| -> String {
+            module
+                .functions
+                .get(id)
+                .map(|c| c.qualified_name.as_deref().unwrap_or(&c.name).to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        };
+        let unsupported = |what: String| -> String {
+            format!(
+                "{} uses a 256-bit SIMD vector, which wasm cannot represent — wasm SIMD is v128 \
+                 (128-bit) only, and there is no wider register. Gate it behind `#if !wasm` and \
+                 provide a SIMD16i8/SIMD4i32 path for this target.",
+                what
+            )
+        };
+        // An entry point cannot be dropped: stripping it would produce a wasm
+        // module that builds and then does nothing.
+        for id in &wide {
+            let f = &module.functions[id];
+            if f.name == "main" || f.name.ends_with("_main") {
+                return Err(unsupported(format!("`{}`", describe(id))));
+            }
+        }
+        // Nor can one that surviving code still reaches, by call or by reference.
+        for (id, f) in &module.functions {
+            if wide.contains(id) {
+                continue;
+            }
+            for block in f.cfg.blocks.values() {
+                for inst in &block.instructions {
+                    let referenced = match inst {
+                        IrInstruction::CallDirect { func_id, .. }
+                        | IrInstruction::FunctionRef { func_id, .. }
+                        | IrInstruction::MakeClosure { func_id, .. } => Some(func_id),
+                        _ => None,
+                    };
+                    if let Some(target) = referenced {
+                        if wide.contains(target) {
+                            return Err(unsupported(format!(
+                                "`{}`, referenced from `{}`,",
+                                describe(target),
+                                f.qualified_name.as_deref().unwrap_or(&f.name)
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        // What remains is unreachable stdlib wrappers — safe to drop.
+        module.functions.retain(|id, _| !wide.contains(id));
+        Ok(())
+    }
+
     pub fn compile_with_method_map(
         modules: &[&IrModule],
         entry_function: Option<&str>,
@@ -5921,10 +5993,25 @@ fn ir_type_to_wasm(ty: &IrType) -> ValType {
     match ty {
         IrType::F32 => ValType::F32,
         IrType::F64 => ValType::F64,
-        // SIMD vectors map to WASM v128. Currently only f32x4 (16 bytes) is
-        // exercised by SIMD4f, but the same lowering applies to any 16-byte
-        // vector type (i32x4, i16x8, i8x16, f64x2).
-        IrType::Vector { .. } => ValType::V128,
+        // SIMD vectors map to WASM v128 — which is 128 bits, full stop. wasm
+        // has no wider vector (relaxed-SIMD did not widen it), so a 256-bit
+        // type like SIMD32i8 has no representation here. REFUSE it rather than
+        // narrow it: mapping vec<i8;32> to v128 would drop the high half and
+        // silently compute a wrong dot product.
+        IrType::Vector { element, count } => {
+            let bytes = element.size() * count;
+            if bytes != 16 {
+                panic!(
+                    "wasm has no {}-bit vector register (vec<{}; {}>): wasm SIMD is \
+                     v128 only. Gate the wider type behind `#if !wasm` and provide \
+                     a 128-bit path for this target.",
+                    bytes * 8,
+                    element,
+                    count
+                );
+            }
+            ValType::V128
+        }
         // Everything else is i32 in WASM32: integers, pointers, booleans,
         // strings, arrays, structs, unions, opaques, function refs.
         _ => ValType::I32,

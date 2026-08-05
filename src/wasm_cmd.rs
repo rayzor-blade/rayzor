@@ -341,7 +341,7 @@ pub fn cmd_run_wasm(
     // Compile Haxe → MIR → WASM. `--no-cache` disables the BLADE MIR cache;
     // the cache dir is also target-discriminated (see CompilationConfig::
     // cache_discriminator) so native and wasm artifacts never collide.
-    let mir_result = compile_haxe_to_mir_with_defines_and_cache(
+    let mut mir_result = compile_haxe_to_mir_with_defines_and_cache(
         &source,
         file.to_str().unwrap_or("unknown"),
         compile_inputs.compiler_plugins,
@@ -355,6 +355,9 @@ pub fn cmd_run_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
+    compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
+        &mut mir_result.module,
+    )?;
     let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile_with_method_map(
         &[&mir_result.module],
         Some("main"),
@@ -432,7 +435,7 @@ pub fn cmd_build_wasm(
     let define_refs: Vec<&str> = define_strings.iter().map(String::as_str).collect();
 
     // Use the full compile pipeline with "wasm" define for conditional compilation
-    let mir_result = compile_haxe_to_mir_with_defines(
+    let mut mir_result = compile_haxe_to_mir_with_defines(
         &source,
         file.to_str().unwrap_or("unknown"),
         compile_inputs.compiler_plugins,
@@ -444,6 +447,9 @@ pub fn cmd_build_wasm(
     let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
     let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
+    compiler::codegen::wasm_backend::WasmBackend::strip_wide_vector_functions(
+        &mut mir_result.module,
+    )?;
     let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile_with_method_map(
         &[&mir_result.module],
         Some("main"),
