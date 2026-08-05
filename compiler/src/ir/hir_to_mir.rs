@@ -39779,6 +39779,19 @@ impl<'a> HirToMirContext<'a> {
         let mut current = start;
         while let Some(&parent) = self.class_parent_map.get(&current) {
             if !seen.insert(parent) {
+                // Should be unreachable now that the parent symbol is recorded
+                // directly (see `extends_symbol`); kept because an unbounded
+                // walk must never be able to hang the compiler. Say so rather
+                // than looping or exiting silently.
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "\x1b[33mWarning:\x1b[0m [W0021] class parent chain from {:?} \
+                         revisits {:?}; truncating the walk.",
+                        start, parent
+                    );
+                }
                 break;
             }
             chain.push(parent);
@@ -40600,43 +40613,32 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Record parent class relationship.
+        // Record parent class relationship from the SymbolId resolved at
+        // TAST->HIR time (`HirClass::extends_symbol`).
         //
-        // `class.extends` may be one of two flavors of `TypeId`:
-        //  (a) a TAST type_id that resolves through `type_table`, or
-        //  (b) a *canonicalised* symbol-derived id produced in
-        //      `tast_to_hir.rs` as `TypeId::from_raw(parent_sym.as_raw())`
-        //      for cross-context stability.
-        // Form (b) doesn't lookup in `type_table` — we must convert it
-        // back to a `SymbolId` and consult the symbol table directly.
-        // Without the (b) fallback, `class MyException extends Exception`
-        // failed at super-call lowering because the registration here
-        // silently skipped the `class_parent_map.insert` (parent_symbol
-        // resolved to None), and the constructor body's name-based
-        // lookup also bottomed out.
-        if let Some(extends_type_id) = class.extends {
-            let parent_symbol = {
-                let type_table = self.type_table;
-                type_table
-                    .get(extends_type_id)
-                    .and_then(|t| match &t.kind {
-                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        // Form (b): treat raw bits as a SymbolId.
-                        let candidate = SymbolId::from_raw(extends_type_id.as_raw());
-                        self.symbol_table.get_symbol(candidate).and_then(|sym| {
-                            use crate::tast::SymbolKind;
-                            if matches!(sym.kind, SymbolKind::Class) {
-                                Some(candidate)
-                            } else {
-                                None
-                            }
-                        })
-                    })
-            };
-            if let Some(parent_sym) = parent_symbol {
+        // This used to be recovered from `class.extends`, which carries EITHER
+        // a TAST `TypeId` or a symbol-derived `TypeId::from_raw(sym)`, by
+        // trying `type_table` and otherwise reinterpreting the raw bits as a
+        // `SymbolId`. Those two id spaces share one integer range, so a
+        // symbol-derived value could collide with a real, unrelated TypeId and
+        // silently yield the WRONG parent — `PosException` resolved as its own
+        // parent, and the vtable parent-chain walk spun forever. TypeIds are
+        // context-local; SymbolIds are the stable identity, so take the parent
+        // symbol directly and never guess.
+        let parent_symbol = class.extends_symbol.or_else(|| {
+            // HIR not produced by tast_to_hir (older/bundled modules): fall back
+            // to the type_table lookup ONLY. No raw-bit reinterpretation.
+            class.extends.and_then(|tid| {
+                self.type_table.get(tid).and_then(|t| match &t.kind {
+                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                })
+            })
+        });
+        if let Some(parent_sym) = parent_symbol {
+            // A class is never its own parent; recording that would rebuild the
+            // cycle the walks now defend against.
+            if parent_sym != class.symbol_id {
                 self.class_parent_map.insert(class.symbol_id, parent_sym);
             }
         }

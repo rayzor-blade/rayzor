@@ -50,6 +50,19 @@ pub struct HirClass {
     pub name: InternedString,
     pub type_params: Vec<HirTypeParam>,
     pub extends: Option<TypeId>,
+    /// The parent class's `SymbolId`, resolved once at TAST->HIR time.
+    ///
+    /// `extends` above is ambiguous by construction: it holds EITHER a TAST
+    /// `TypeId` that resolves through `type_table`, OR a symbol-derived
+    /// `TypeId::from_raw(parent_sym.as_raw())` used for cross-context
+    /// stability. Consumers had to guess — try `type_table`, else reinterpret
+    /// the raw bits as a `SymbolId` — and those two id spaces share one integer
+    /// range, so a symbol-derived value could land on an unrelated real TypeId.
+    /// Declaring one more type shifts TypeIds and flips such a collision on:
+    /// that is how `PosException` resolved as its own parent and spun the
+    /// vtable walk forever. SymbolIds are the stable cross-context identity,
+    /// so record the parent symbol directly instead of recovering it by luck.
+    pub extends_symbol: Option<SymbolId>,
     pub implements: Vec<TypeId>,
     pub fields: Vec<HirClassField>,
     pub methods: Vec<HirMethod>,

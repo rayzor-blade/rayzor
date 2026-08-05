@@ -600,15 +600,18 @@ impl<'a> TastToHirContext<'a> {
         // breaks `Type.getSuperClass` -> `Type.getClassName` (the
         // runtime registry is keyed on the symbol-derived id, so
         // the un-canonicalised super id is a lookup miss).
-        let extends_canonical = class.super_class.and_then(|super_ty| {
+        // Resolve the parent SYMBOL once, here, where the type_table lookup is
+        // unambiguous. `extends` below stays a TypeId for consumers that index
+        // HIR types by it, but the parent identity travels as a SymbolId so no
+        // downstream pass has to recover it by reinterpreting raw bits.
+        let extends_symbol = class.super_class.and_then(|super_ty| {
             let type_table = self.type_table.borrow();
             type_table.get(super_ty).and_then(|ti| match &ti.kind {
-                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
-                    Some(TypeId::from_raw(symbol_id.as_raw()))
-                }
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                 _ => None,
             })
         });
+        let extends_canonical = extends_symbol.map(|sym| TypeId::from_raw(sym.as_raw()));
 
         // Forward selected TAST memory annotations as HIR metadata attributes
         // so downstream passes (notably MIR lowering for `@:move` strict-move
@@ -636,6 +639,7 @@ impl<'a> TastToHirContext<'a> {
             name: class.name.clone(),
             type_params: self.lower_type_params(&class.type_parameters),
             extends: extends_canonical.or(class.super_class),
+            extends_symbol,
             implements: class.interfaces.clone(),
             fields: hir_fields,
             methods: hir_methods,
