@@ -40052,13 +40052,14 @@ impl<'a> HirToMirContext<'a> {
         child_type: TypeId,
         fields: &mut Vec<IrField>,
         field_index: &mut u32,
+        walk: &mut Vec<SymbolId>,
     ) {
         if let Some(parent_type_id) = parent_type {
             // Try direct lookup first
             if let Some(HirTypeDecl::Class(parent_class)) =
                 self.current_hir_types.get(&parent_type_id)
             {
-                self.add_parent_fields(parent_class, child_type, fields, field_index);
+                self.add_parent_fields(parent_class, child_type, fields, field_index, walk);
             } else {
                 // TypeId mismatch - the extends field might use instance type while
                 // hir_module.types uses declaration type. Search by matching class type.
@@ -40074,7 +40075,13 @@ impl<'a> HirToMirContext<'a> {
                         for (decl_type_id, type_decl) in self.current_hir_types.iter() {
                             if let HirTypeDecl::Class(class) = type_decl {
                                 if class.symbol_id == *parent_symbol {
-                                    self.add_parent_fields(class, child_type, fields, field_index);
+                                    self.add_parent_fields(
+                                        class,
+                                        child_type,
+                                        fields,
+                                        field_index,
+                                        walk,
+                                    );
                                     return;
                                 }
                             }
@@ -40162,9 +40169,20 @@ impl<'a> HirToMirContext<'a> {
         child_type: TypeId,
         fields: &mut Vec<IrField>,
         field_index: &mut u32,
+        walk: &mut Vec<SymbolId>,
     ) {
+        // A class cannot be its own ancestor. `extends` is followed by TypeId,
+        // and TypeIds are context-local — merely DECLARING a new type shifts
+        // them, which made `PosException` resolve as its own parent and recurse
+        // until the stack died, with no diagnostic and no output. Key the guard
+        // on SymbolId, which is stable across those shifts.
+        if walk.contains(&parent_class.symbol_id) {
+            return;
+        }
+        walk.push(parent_class.symbol_id);
+
         // First, recursively collect grandparent fields
-        self.collect_inherited_fields(parent_class.extends, child_type, fields, field_index);
+        self.collect_inherited_fields(parent_class.extends, child_type, fields, field_index, walk);
 
         // Then add parent's own fields
         let parent_class_name = self
@@ -40233,7 +40251,14 @@ impl<'a> HirToMirContext<'a> {
         let mut field_index = 1u32; // User fields start at index 1
 
         // Collect all inherited fields from parent classes (recursively)
-        self.collect_inherited_fields(class.extends, type_id, &mut fields, &mut field_index);
+        let mut walk = vec![class.symbol_id];
+        self.collect_inherited_fields(
+            class.extends,
+            type_id,
+            &mut fields,
+            &mut field_index,
+            &mut walk,
+        );
 
         // Then add this class's own fields
 
