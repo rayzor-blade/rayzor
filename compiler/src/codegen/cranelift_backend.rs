@@ -581,6 +581,10 @@ impl CraneliftBackend {
             if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
                 continue;
             }
+            // 256-bit vectors have no Cranelift type — leave these to LLVM.
+            if function.uses_wide_vectors() {
+                continue;
+            }
             self.declare_function(*func_id, function)?;
         }
 
@@ -682,11 +686,19 @@ impl CraneliftBackend {
             if !function.signature.type_params.is_empty() {
                 failed_funcs.insert(*func_id);
             }
+            // Never declared (no 128-bit-only representation) — treat as failed
+            // so callers cascade to trap stubs rather than calling nothing.
+            if function.uses_wide_vectors() {
+                failed_funcs.insert(*func_id);
+            }
         }
         for (func_id, function) in &mir_module.functions {
             // Skip extern functions (empty CFG means extern declaration)
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
+                continue;
+            }
+            if function.uses_wide_vectors() {
                 continue;
             }
             // Skip forward-reference stubs (1 block, 0 instructions, Unreachable).
@@ -866,6 +878,10 @@ impl CraneliftBackend {
             if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
                 continue;
             }
+            // 256-bit vectors have no Cranelift type — leave these to LLVM.
+            if function.uses_wide_vectors() {
+                continue;
+            }
             self.declare_function(*func_id, function)?;
         }
 
@@ -946,10 +962,18 @@ impl CraneliftBackend {
             if !function.signature.type_params.is_empty() {
                 failed_funcs.insert(*func_id);
             }
+            // Never declared (no 128-bit-only representation) — treat as failed
+            // so callers cascade to trap stubs rather than calling nothing.
+            if function.uses_wide_vectors() {
+                failed_funcs.insert(*func_id);
+            }
         }
         for (func_id, function) in &mir_module.functions {
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
+                continue;
+            }
+            if function.uses_wide_vectors() {
                 continue;
             }
             // Forward-reference stub skip (see compile_module for the rationale).
@@ -1247,6 +1271,10 @@ impl CraneliftBackend {
         // Declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
             if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
+                continue;
+            }
+            // 256-bit vectors have no Cranelift type — leave these to LLVM.
+            if function.uses_wide_vectors() {
                 continue;
             }
             self.declare_function(*func_id, function)?;

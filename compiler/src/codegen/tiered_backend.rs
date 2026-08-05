@@ -3024,10 +3024,24 @@ impl TieredBackend {
         //
         // We only resolve pointers for functions that already exist in our function_pointers
         // map (i.e., functions that Cranelift compiled and the tiered backend calls externally).
-        let needed_func_ids: Vec<IrFunctionId> = {
+        let mut needed_func_ids: Vec<IrFunctionId> = {
             let fp_lock = self.function_pointers.read().unwrap();
             fp_lock.keys().cloned().collect()
         };
+        // Functions using 256-bit vectors have no Cranelift pointer to inherit
+        // — Cranelift cannot represent the type and skipped them entirely. LLVM
+        // is their only backend, so add them explicitly or they resolve to
+        // nothing and execution dies with "not found in function_pointers".
+        for module in &modules {
+            for (func_id, function) in &module.functions {
+                if !function.cfg.blocks.is_empty()
+                    && function.uses_wide_vectors()
+                    && !needed_func_ids.contains(func_id)
+                {
+                    needed_func_ids.push(*func_id);
+                }
+            }
+        }
 
         let mut resolved_pointers = BTreeMap::new();
         for func_id in &needed_func_ids {

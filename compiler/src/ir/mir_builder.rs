@@ -678,7 +678,13 @@ impl MirBuilder {
         rhs_i7: bool,
         rhs_unsigned: bool,
     ) -> IrId {
-        let dest = self.alloc_reg_typed(IrType::vector(IrType::I32, 4));
+        // The dot returns the accumulator's own shape — 4 i32 lanes for a
+        // 128-bit dot, 8 for a 256-bit one. Deriving it from `acc` keeps the
+        // width in one place instead of pinning it here.
+        let dest_ty = self
+            .get_register_type(acc)
+            .unwrap_or_else(|| IrType::vector(IrType::I32, 4));
+        let dest = self.alloc_reg_typed(dest_ty);
         self.insert_inst(IrInstruction::VectorDot {
             dest,
             acc,

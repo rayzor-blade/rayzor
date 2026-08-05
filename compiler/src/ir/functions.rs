@@ -235,6 +235,22 @@ impl Default for FunctionAttributes {
 }
 
 impl IrFunction {
+    /// True if any signature or register type is a vector wider than 128 bits.
+    ///
+    /// Only the LLVM backend has 256-bit vectors (`SIMD32i8`/`SIMD8i32`).
+    /// Cranelift models 128-bit vector types only, and wasm's `v128` is 128
+    /// bits by definition, so both must skip these functions rather than
+    /// narrow them — a silently halved vector is a wrong answer, not a slow one.
+    pub fn uses_wide_vectors(&self) -> bool {
+        let wide = |ty: &crate::ir::IrType| {
+            matches!(ty, crate::ir::IrType::Vector { element, count }
+                if element.size() * count > 16)
+        };
+        self.signature.parameters.iter().any(|p| wide(&p.ty))
+            || wide(&self.signature.return_type)
+            || self.register_types.values().any(wide)
+    }
+
     /// Create a new HIR function
     pub fn new(
         id: IrFunctionId,

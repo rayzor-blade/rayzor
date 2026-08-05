@@ -1097,13 +1097,18 @@ fn build_simd4f_sum(builder: &mut MirBuilder) {
 // non-operator helpers need MIR wrappers.
 // ============================================================================
 
-/// SIMD4i32_splat(scalar: i32) -> vec<i32; 4>
 fn build_simd4i32_splat(builder: &mut MirBuilder) {
+    build_simd_i32_splat(builder, "SIMD4i32_splat", 4);
+    build_simd_i32_splat(builder, "SIMD8i32_splat", 8);
+}
+
+/// SIMD{4,8}i32_splat(scalar: i32) -> vec<i32; N>
+fn build_simd_i32_splat(builder: &mut MirBuilder, name: &str, lanes: usize) {
     let i32_ty = IrType::I32;
-    let vec_ty = IrType::vector(IrType::I32, 4);
+    let vec_ty = IrType::vector(IrType::I32, lanes);
 
     let func_id = builder
-        .begin_function("SIMD4i32_splat")
+        .begin_function(name)
         .param("scalar", i32_ty)
         .returns(vec_ty.clone())
         .calling_convention(CallingConvention::C)
@@ -1149,14 +1154,19 @@ fn build_simd4i32_make(builder: &mut MirBuilder) {
     builder.ret(Some(v3));
 }
 
-/// SIMD4i32_extract(self: vec<i32; 4>, lane: i32) -> i32
-/// Runtime lane via a branchless select chain (same approach as SIMD4f_extract).
 fn build_simd4i32_extract(builder: &mut MirBuilder) {
-    let vec_ty = IrType::vector(IrType::I32, 4);
+    build_simd_i32_extract(builder, "SIMD4i32_extract", 4);
+    build_simd_i32_extract(builder, "SIMD8i32_extract", 8);
+}
+
+/// SIMD{4,8}i32_extract(self: vec<i32; N>, lane: i32) -> i32
+/// Runtime lane via a branchless select chain (same approach as SIMD4f_extract).
+fn build_simd_i32_extract(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I32, lanes);
     let i32_ty = IrType::I32;
 
     let func_id = builder
-        .begin_function("SIMD4i32_extract")
+        .begin_function(name)
         .param("self_val", vec_ty)
         .param("lane", i32_ty.clone())
         .returns(i32_ty.clone())
@@ -1170,32 +1180,30 @@ fn build_simd4i32_extract(builder: &mut MirBuilder) {
     let self_val = builder.get_param(0);
     let lane = builder.get_param(1);
 
-    let e0 = builder.vector_extract(self_val, 0, i32_ty.clone());
-    let e1 = builder.vector_extract(self_val, 1, i32_ty.clone());
-    let e2 = builder.vector_extract(self_val, 2, i32_ty.clone());
-    let e3 = builder.vector_extract(self_val, 3, i32_ty.clone());
+    let mut selected = builder.vector_extract(self_val, 0, i32_ty.clone());
+    for lane_idx in 1..lanes {
+        let extracted = builder.vector_extract(self_val, lane_idx as u8, i32_ty.clone());
+        let lane_const = builder.const_i32(lane_idx as i32);
+        let is_lane = builder.icmp(CompareOp::Eq, lane, lane_const, IrType::Bool);
+        selected = builder.select(is_lane, extracted, selected, i32_ty.clone());
+    }
 
-    let c1 = builder.const_i32(1);
-    let c2 = builder.const_i32(2);
-    let c3 = builder.const_i32(3);
-    let is1 = builder.icmp(CompareOp::Eq, lane, c1, IrType::Bool);
-    let r1 = builder.select(is1, e1, e0, i32_ty.clone());
-    let is2 = builder.icmp(CompareOp::Eq, lane, c2, IrType::Bool);
-    let r2 = builder.select(is2, e2, r1, i32_ty.clone());
-    let is3 = builder.icmp(CompareOp::Eq, lane, c3, IrType::Bool);
-    let r3 = builder.select(is3, e3, r2, i32_ty.clone());
-
-    builder.ret(Some(r3));
+    builder.ret(Some(selected));
 }
 
-/// SIMD4i32_insert(self: vec<i32; 4>, lane: i32, value: i32) -> vec<i32; 4>
-/// Static lane 0 for now (same limitation as SIMD4f_insert).
 fn build_simd4i32_insert(builder: &mut MirBuilder) {
-    let vec_ty = IrType::vector(IrType::I32, 4);
+    build_simd_i32_insert(builder, "SIMD4i32_insert", 4);
+    build_simd_i32_insert(builder, "SIMD8i32_insert", 8);
+}
+
+/// SIMD{4,8}i32_insert(self: vec<i32; N>, lane: i32, value: i32) -> vec<i32; N>
+/// Static lane 0 for now (same limitation as SIMD4f_insert).
+fn build_simd_i32_insert(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I32, lanes);
     let i32_ty = IrType::I32;
 
     let func_id = builder
-        .begin_function("SIMD4i32_insert")
+        .begin_function(name)
         .param("self_val", vec_ty.clone())
         .param("lane", i32_ty.clone())
         .param("value", i32_ty)
@@ -1213,13 +1221,18 @@ fn build_simd4i32_insert(builder: &mut MirBuilder) {
     builder.ret(Some(result));
 }
 
-/// SIMD4i32_sum(self: vec<i32; 4>) -> i32  — horizontal add
 fn build_simd4i32_sum(builder: &mut MirBuilder) {
-    let vec_ty = IrType::vector(IrType::I32, 4);
+    build_simd_i32_sum(builder, "SIMD4i32_sum", 4);
+    build_simd_i32_sum(builder, "SIMD8i32_sum", 8);
+}
+
+/// SIMD{4,8}i32_sum(self: vec<i32; N>) -> i32  — horizontal add
+fn build_simd_i32_sum(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I32, lanes);
     let i32_ty = IrType::I32;
 
     let func_id = builder
-        .begin_function("SIMD4i32_sum")
+        .begin_function(name)
         .param("self_val", vec_ty)
         .returns(i32_ty.clone())
         .calling_convention(CallingConvention::C)
@@ -1238,11 +1251,29 @@ fn build_simd4i32_sum(builder: &mut MirBuilder) {
 /// Fused widening dot-accumulate (the quant-matmul primitive): acc + the 16
 /// i8×i8 products summed in groups of 4 → 4 i32 lanes. Lowers to SDOT.
 fn build_simd4i32_dot16(builder: &mut MirBuilder) {
-    let vec_i32 = IrType::vector(IrType::I32, 4);
-    let vec_i8 = IrType::vector(IrType::I8, 16);
+    build_simd_dot(builder, "SIMD4i32_dot16", 16, DotMode::Signed);
+    build_simd_dot(builder, "SIMD8i32_dot32", 32, DotMode::Signed);
+}
+
+/// RHS interpretation for the widening dot wrappers.
+enum DotMode {
+    /// signed i8 x signed i8
+    Signed,
+    /// rhs promised in i7 range — lets x86 select VPDPBUSD
+    I7,
+    /// rhs read as u8 (Q8 attention's shifted-query path)
+    U8,
+}
+
+/// SIMD{4,8}i32_dot{16,32}(acc: vec<i32;N/4>, a, b: vec<i8;N>) -> vec<i32;N/4>
+/// Fused widening dot-accumulate (the quant-matmul primitive): acc + the N
+/// i8xi8 products summed in groups of 4. Lowers to SDOT / VPDPBUSD.
+fn build_simd_dot(builder: &mut MirBuilder, name: &str, byte_lanes: usize, mode: DotMode) {
+    let vec_i32 = IrType::vector(IrType::I32, byte_lanes / 4);
+    let vec_i8 = IrType::vector(IrType::I8, byte_lanes);
 
     let func_id = builder
-        .begin_function("SIMD4i32_dot16")
+        .begin_function(name)
         .param("acc", vec_i32.clone())
         .param("a", vec_i8.clone())
         .param("b", vec_i8.clone())
@@ -1257,76 +1288,45 @@ fn build_simd4i32_dot16(builder: &mut MirBuilder) {
     let acc = builder.get_param(0);
     let a = builder.get_param(1);
     let b = builder.get_param(2);
-    let result = builder.vector_dot(acc, a, b);
+    let result = match mode {
+        DotMode::Signed => builder.vector_dot(acc, a, b),
+        DotMode::I7 => builder.vector_dot_i8_i7(acc, a, b),
+        DotMode::U8 => builder.vector_dot_i8_u8(acc, a, b),
+    };
     builder.ret(Some(result));
 }
 
-/// SIMD4i32_dot16_i8_i7(acc, a, b) -> vec<i32;4>
-/// Same value as signed i8×signed i8 dot when `b` is in i7 range, but lets
-/// x86 LLVM select VPDPBUSD for quantized-weight kernels.
+/// Same value as the signed dot when `b` is in i7 range, but lets x86 LLVM
+/// select VPDPBUSD for quantized-weight kernels.
 fn build_simd4i32_dot16_i8_i7(builder: &mut MirBuilder) {
-    let vec_i32 = IrType::vector(IrType::I32, 4);
-    let vec_i8 = IrType::vector(IrType::I8, 16);
-
-    let func_id = builder
-        .begin_function("SIMD4i32_dot16_i8_i7")
-        .param("acc", vec_i32.clone())
-        .param("a", vec_i8.clone())
-        .param("b", vec_i8.clone())
-        .returns(vec_i32)
-        .calling_convention(CallingConvention::C)
-        .build();
-
-    builder.set_current_function(func_id);
-    let entry = builder.create_block("entry");
-    builder.set_insert_point(entry);
-
-    let acc = builder.get_param(0);
-    let a = builder.get_param(1);
-    let b = builder.get_param(2);
-    let result = builder.vector_dot_i8_i7(acc, a, b);
-    builder.ret(Some(result));
+    build_simd_dot(builder, "SIMD4i32_dot16_i8_i7", 16, DotMode::I7);
+    build_simd_dot(builder, "SIMD8i32_dot32_i8_i7", 32, DotMode::I7);
 }
 
-/// SIMD4i32_dot16_i8_u8(acc, a, b) -> vec<i32;4>
 /// Signed lhs x unsigned rhs dot. Used by Q8 attention's shifted-query VNNI
 /// path; callers apply the correction term outside the dot.
 fn build_simd4i32_dot16_i8_u8(builder: &mut MirBuilder) {
-    let vec_i32 = IrType::vector(IrType::I32, 4);
-    let vec_i8 = IrType::vector(IrType::I8, 16);
-
-    let func_id = builder
-        .begin_function("SIMD4i32_dot16_i8_u8")
-        .param("acc", vec_i32.clone())
-        .param("a", vec_i8.clone())
-        .param("b", vec_i8.clone())
-        .returns(vec_i32)
-        .calling_convention(CallingConvention::C)
-        .build();
-
-    builder.set_current_function(func_id);
-    let entry = builder.create_block("entry");
-    builder.set_insert_point(entry);
-
-    let acc = builder.get_param(0);
-    let a = builder.get_param(1);
-    let b = builder.get_param(2);
-    let result = builder.vector_dot_i8_u8(acc, a, b);
-    builder.ret(Some(result));
+    build_simd_dot(builder, "SIMD4i32_dot16_i8_u8", 16, DotMode::U8);
+    build_simd_dot(builder, "SIMD8i32_dot32_i8_u8", 32, DotMode::U8);
 }
 
 // ============================================================================
 // SIMD16i8 — 128-bit vector of 16×i8 (the integer dot operands)
 // ============================================================================
 
-/// SIMD16i8_splat(scalar: i32) -> vec<i8; 16>  (broadcast low byte to all lanes)
 fn build_simd16i8_splat(builder: &mut MirBuilder) {
+    build_simd_i8_splat(builder, "SIMD16i8_splat", 16);
+    build_simd_i8_splat(builder, "SIMD32i8_splat", 32);
+}
+
+/// SIMD{16,32}i8_splat(scalar: i32) -> vec<i8; N>  (broadcast low byte to all lanes)
+fn build_simd_i8_splat(builder: &mut MirBuilder, name: &str, lanes: usize) {
     let i32_ty = IrType::I32;
     let i8_ty = IrType::I8;
-    let vec_ty = IrType::vector(IrType::I8, 16);
+    let vec_ty = IrType::vector(IrType::I8, lanes);
 
     let func_id = builder
-        .begin_function("SIMD16i8_splat")
+        .begin_function(name)
         .param("scalar", i32_ty.clone())
         .returns(vec_ty.clone())
         .calling_convention(CallingConvention::C)
@@ -1344,13 +1344,18 @@ fn build_simd16i8_splat(builder: &mut MirBuilder) {
     builder.ret(Some(result));
 }
 
-/// SIMD16i8_load(ptr: i64) -> vec<i8; 16>  (load 16 contiguous bytes)
 fn build_simd16i8_load(builder: &mut MirBuilder) {
+    build_simd_i8_load(builder, "SIMD16i8_load", 16);
+    build_simd_i8_load(builder, "SIMD32i8_load", 32);
+}
+
+/// SIMD{16,32}i8_load(ptr: i64) -> vec<i8; N>  (load N contiguous bytes)
+fn build_simd_i8_load(builder: &mut MirBuilder, name: &str, lanes: usize) {
     let i64_ty = IrType::I64;
-    let vec_ty = IrType::vector(IrType::I8, 16);
+    let vec_ty = IrType::vector(IrType::I8, lanes);
 
     let func_id = builder
-        .begin_function("SIMD16i8_load")
+        .begin_function(name)
         .param("ptr", i64_ty)
         .returns(vec_ty.clone())
         .calling_convention(CallingConvention::C)
@@ -1365,10 +1370,10 @@ fn build_simd16i8_load(builder: &mut MirBuilder) {
     builder.ret(Some(result));
 }
 
-/// Shared body for the lane-wise i8x16 bitwise wrappers
-/// `SIMD16i8_and/or/xor(a, b: vec<i8;16>) -> vec<i8;16>`.
-fn build_simd16i8_bitwise(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
-    let vec_ty = IrType::vector(IrType::I8, 16);
+/// Shared body for the lane-wise i8 bitwise wrappers
+/// `SIMD{16,32}i8_and/or/xor(a, b: vec<i8;N>) -> vec<i8;N>`.
+fn build_simd16i8_bitwise(builder: &mut MirBuilder, name: &str, op: BinaryOp, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I8, lanes);
 
     let func_id = builder
         .begin_function(name)
@@ -1389,21 +1394,24 @@ fn build_simd16i8_bitwise(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
 }
 
 fn build_simd16i8_and(builder: &mut MirBuilder) {
-    build_simd16i8_bitwise(builder, "SIMD16i8_and", BinaryOp::And);
+    build_simd16i8_bitwise(builder, "SIMD16i8_and", BinaryOp::And, 16);
+    build_simd16i8_bitwise(builder, "SIMD32i8_and", BinaryOp::And, 32);
 }
 fn build_simd16i8_or(builder: &mut MirBuilder) {
-    build_simd16i8_bitwise(builder, "SIMD16i8_or", BinaryOp::Or);
+    build_simd16i8_bitwise(builder, "SIMD16i8_or", BinaryOp::Or, 16);
+    build_simd16i8_bitwise(builder, "SIMD32i8_or", BinaryOp::Or, 32);
 }
 fn build_simd16i8_xor(builder: &mut MirBuilder) {
-    build_simd16i8_bitwise(builder, "SIMD16i8_xor", BinaryOp::Xor);
+    build_simd16i8_bitwise(builder, "SIMD16i8_xor", BinaryOp::Xor, 16);
+    build_simd16i8_bitwise(builder, "SIMD32i8_xor", BinaryOp::Xor, 32);
 }
 
 /// Shared body for the i8x16 shift wrappers
 /// `SIMD16i8_shl/shr/ushr(a: vec<i8;16>, n: i32) -> vec<i8;16>`.
 /// `n` is a scalar shift amount applied to every lane (vector-by-scalar),
 /// matching the wasm I8x16Shl/ShrS/ShrU and cranelift ishl/sshr/ushr shape.
-fn build_simd16i8_shift(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
-    let vec_ty = IrType::vector(IrType::I8, 16);
+fn build_simd16i8_shift(builder: &mut MirBuilder, name: &str, op: BinaryOp, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I8, lanes);
     let i32_ty = IrType::I32;
 
     let func_id = builder
@@ -1425,13 +1433,16 @@ fn build_simd16i8_shift(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
 }
 
 fn build_simd16i8_shl(builder: &mut MirBuilder) {
-    build_simd16i8_shift(builder, "SIMD16i8_shl", BinaryOp::Shl);
+    build_simd16i8_shift(builder, "SIMD16i8_shl", BinaryOp::Shl, 16);
+    build_simd16i8_shift(builder, "SIMD32i8_shl", BinaryOp::Shl, 32);
 }
 fn build_simd16i8_shr(builder: &mut MirBuilder) {
-    build_simd16i8_shift(builder, "SIMD16i8_shr", BinaryOp::Shr);
+    build_simd16i8_shift(builder, "SIMD16i8_shr", BinaryOp::Shr, 16);
+    build_simd16i8_shift(builder, "SIMD32i8_shr", BinaryOp::Shr, 32);
 }
 fn build_simd16i8_ushr(builder: &mut MirBuilder) {
-    build_simd16i8_shift(builder, "SIMD16i8_ushr", BinaryOp::Ushr);
+    build_simd16i8_shift(builder, "SIMD16i8_ushr", BinaryOp::Ushr, 16);
+    build_simd16i8_shift(builder, "SIMD32i8_ushr", BinaryOp::Ushr, 32);
 }
 
 /// SIMD16i8_extract(self: vec<i8;16>, lane: i32) -> i32
@@ -1441,12 +1452,17 @@ fn build_simd16i8_ushr(builder: &mut MirBuilder) {
 /// avoiding the broken Ptr<Int>.deref and per-byte Bytes FFI crossings on wasm.
 /// Bytes are signed i8; mask `& 0xFF` in Haxe for unsigned 0..255.
 fn build_simd16i8_extract(builder: &mut MirBuilder) {
-    let vec_ty = IrType::vector(IrType::I8, 16);
+    build_simd_i8_extract(builder, "SIMD16i8_extract", 16);
+    build_simd_i8_extract(builder, "SIMD32i8_extract", 32);
+}
+
+fn build_simd_i8_extract(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I8, lanes);
     let i8_ty = IrType::I8;
     let i32_ty = IrType::I32;
 
     let func_id = builder
-        .begin_function("SIMD16i8_extract")
+        .begin_function(name)
         .param("self_val", vec_ty)
         .param("lane", i32_ty.clone())
         .returns(i32_ty.clone())
@@ -1464,8 +1480,8 @@ fn build_simd16i8_extract(builder: &mut MirBuilder) {
     // all lanes and select the requested one. LLVM/Cranelift then fold the
     // chain away when Haxe passes a constant lane such as `hdr.get(0)`.
     let mut selected = builder.vector_extract(self_val, 0, i8_ty.clone());
-    for lane_idx in 1..16 {
-        let extracted = builder.vector_extract(self_val, lane_idx, i8_ty.clone());
+    for lane_idx in 1..lanes {
+        let extracted = builder.vector_extract(self_val, lane_idx as u8, i8_ty.clone());
         let lane_const = builder.const_i32(lane_idx as i32);
         let is_lane = builder.icmp(CompareOp::Eq, lane, lane_const, IrType::Bool);
         selected = builder.select(is_lane, extracted, selected, i8_ty.clone());
