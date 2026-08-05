@@ -60,7 +60,7 @@
 **/
 @:coreType @:notNull @:runtimeValue abstract Int to Float {}
 
-#if (java || cs || hl || cpp || rayzor)
+#if (java || cs || hl || cpp)
 /**
 	Single-precision IEEE 32bit float (4-byte).
 **/
