@@ -41,10 +41,21 @@ pub fn dump_function(func: &IrFunction) -> String {
         .map(|p| format!("{}: {}", p.reg, dump_type(&p.ty)))
         .collect();
 
+    // Print the FULLY-QUALIFIED name when the function carries one. The dump
+    // used to print only `func.name`, so a stdlib method and a user method of
+    // the same short name were indistinguishable — a MIR diff then looked like
+    // it named an "unqualified" function and invited the wrong conclusion about
+    // which registration path produced it. Show the FQN, and append the short
+    // name when they differ so both identities are visible.
+    let display_name = match func.qualified_name.as_deref() {
+        Some(q) if q != func.name => format!("{} [name={}]", q, func.name),
+        Some(q) => q.to_string(),
+        None => format!("{} [no-fqn]", func.name),
+    };
     writeln!(
         out,
         "fn @{}({}) -> {} {{",
-        func.name,
+        display_name,
         params.join(", "),
         dump_type(&func.signature.return_type)
     )
