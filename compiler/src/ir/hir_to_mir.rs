@@ -39764,6 +39764,29 @@ impl<'a> HirToMirContext<'a> {
 
     /// Build class vtables by analyzing override relationships.
     /// Called after all type metadata is registered but before function body lowering.
+    /// Walk the class parent chain from `start`, stopping if it revisits a class.
+    ///
+    /// `class_parent_map` is built from `extends` links resolved partly by
+    /// TypeId, and TypeIds are context-local — declaring one more type shifts
+    /// them and can make a class its own ancestor. Every walk of this map used
+    /// to be a bare `while let` whose only exit was reaching a root, so a cycle
+    /// spun forever inside `build_class_vtables` with no diagnostic and no
+    /// output. Returns ancestors nearest-first, excluding `start`.
+    fn parent_chain(&self, start: SymbolId) -> Vec<SymbolId> {
+        let mut chain = Vec::new();
+        let mut seen: BTreeSet<SymbolId> = BTreeSet::new();
+        seen.insert(start);
+        let mut current = start;
+        while let Some(&parent) = self.class_parent_map.get(&current) {
+            if !seen.insert(parent) {
+                break;
+            }
+            chain.push(parent);
+            current = parent;
+        }
+        chain
+    }
+
     fn build_class_vtables(&mut self) {
         if self.override_methods.is_empty() {
             return;
@@ -39783,15 +39806,13 @@ impl<'a> HirToMirContext<'a> {
             let child_sym = *child_sym;
             // Walk up the parent chain to find the topmost class defining this method
             let mut defining_class = None;
-            let mut current = child_sym;
-            while let Some(&parent) = self.class_parent_map.get(&current) {
+            for parent in self.parent_chain(child_sym) {
                 if self
                     .class_method_by_name
                     .contains_key(&(parent, method_name))
                 {
                     defining_class = Some(parent);
                 }
-                current = parent;
             }
             if let Some(base) = defining_class {
                 base_virtual_methods.insert((base, method_name));
@@ -39819,10 +39840,8 @@ impl<'a> HirToMirContext<'a> {
         }
         // Also include intermediate classes in the hierarchy
         for &(child, _) in &override_methods_snapshot {
-            let mut current = child;
-            while let Some(&parent) = self.class_parent_map.get(&current) {
+            for parent in self.parent_chain(child) {
                 classes_to_process.insert(parent);
-                current = parent;
             }
         }
         // Include ALL subclasses of classes with vtables — leaf classes that
@@ -39926,14 +39945,11 @@ impl<'a> HirToMirContext<'a> {
                 .copied()
                 .or_else(|| {
                     // Walk parent chain to find inherited implementation
-                    let mut current = class_sym;
-                    while let Some(&parent) = self.class_parent_map.get(&current) {
-                        if let Some(&sym) = self.class_method_by_name.get(&(parent, *method_name)) {
-                            return Some(sym);
-                        }
-                        current = parent;
-                    }
-                    None
+                    self.parent_chain(class_sym).into_iter().find_map(|parent| {
+                        self.class_method_by_name
+                            .get(&(parent, *method_name))
+                            .copied()
+                    })
                 });
 
             if let Some(sym) = method_sym {
