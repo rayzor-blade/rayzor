@@ -408,7 +408,13 @@ fn tokenize_condition(condition: &str) -> Vec<CondToken> {
                 let mut ident = String::new();
                 ident.push(ch);
                 while let Some(&next_ch) = chars.peek() {
-                    if next_ch.is_alphanumeric() || next_ch == '_' {
+                    // Haxe define names contain dots: `target.threaded`,
+                    // `target.atomics`, `target.unicode`. Splitting on the dot
+                    // left a stray identifier that the old evaluator silently
+                    // ignored and a strict parse rejects, flipping
+                    // `#if (!target.threaded)` from true to false and changing
+                    // the shape of every `sys/thread/*` class.
+                    if next_ch.is_alphanumeric() || next_ch == '_' || next_ch == '.' {
                         ident.push(chars.next().unwrap());
                     } else {
                         break;
@@ -530,6 +536,23 @@ mod tests {
         assert!(evaluate_condition("a || b && d", &c));
         assert!(evaluate_condition("(a || b) && c", &c));
         assert!(!evaluate_condition("(a && b) || d", &c));
+    }
+
+    /// Haxe define names contain dots (`target.threaded`, `target.atomics`).
+    /// Splitting on the dot left a stray identifier: the loose evaluator
+    /// ignored it, a strict parse rejected the whole condition, and
+    /// `#if (!target.threaded)` flipped true -> false — silently changing the
+    /// shape of every `sys/thread/*` class.
+    #[test]
+    fn dotted_define_names() {
+        let c = cfg(&["eval", "rayzor"]);
+        assert!(evaluate_condition("(!target.threaded)", &c));
+        assert!(evaluate_condition("!(target.atomics)", &c));
+        assert!(!evaluate_condition("target.threaded", &c));
+        let t = cfg(&["target.threaded"]);
+        assert!(evaluate_condition("target.threaded", &t));
+        assert!(!evaluate_condition("(!target.threaded)", &t));
+        assert!(evaluate_condition("(target.threaded && !cppia)", &t));
     }
 
     #[test]
