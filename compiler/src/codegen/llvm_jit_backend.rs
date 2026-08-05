@@ -615,12 +615,34 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         name: &str,
     ) -> Result<inkwell::values::FloatValue<'ctx>, String> {
         use inkwell::intrinsics::Intrinsic;
+        // Width follows the operands. Hardcoding f64 here silently produced
+        // `call double @llvm.fma.f64(float, float, float)` for `Single` math,
+        // which poisons every downstream type and fails the LLVM verifier.
+        let float_ty = a.get_type();
+        // Mixed widths cannot fuse — emit the unfused form rather than an
+        // ill-typed intrinsic call.
+        if b.get_type() != float_ty || c.get_type() != float_ty {
+            let m = self
+                .builder
+                .build_float_mul(a, b, &format!("{}_mul", name))
+                .map_err(|e| format!("Failed to build fmul: {}", e))?;
+            let r = self
+                .builder
+                .build_float_add(m, c, name)
+                .map_err(|e| format!("Failed to build fadd: {}", e))?;
+            self.apply_fast_math(r);
+            return Ok(r);
+        }
+        let name_f = if float_ty == self.context.f32_type() {
+            "llvm.fma.f32"
+        } else {
+            "llvm.fma.f64"
+        };
         let fma_intrinsic =
-            Intrinsic::find("llvm.fma.f64").ok_or("llvm.fma.f64 intrinsic not found")?;
-        let f64_type = self.context.f64_type();
+            Intrinsic::find(name_f).ok_or_else(|| format!("{} intrinsic not found", name_f))?;
         let fma_func = fma_intrinsic
-            .get_declaration(&self.module, &[f64_type.into()])
-            .ok_or("Failed to get llvm.fma.f64 declaration")?;
+            .get_declaration(&self.module, &[float_ty.into()])
+            .ok_or_else(|| format!("Failed to get {} declaration", name_f))?;
         let result = self
             .builder
             .build_call(fma_func, &[a.into(), b.into(), c.into()], name)
@@ -2741,7 +2763,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let cast_name = format!("phi_cast_{}", value_id.as_u32());
 
                 // Handle int<->float conversions
-                if llvm_value.is_float_value() && expected_ty.is_int_type() {
+                if llvm_value.is_float_value() && expected_ty.is_float_type() {
+                    // f32<->f64: Single vs Float. Without the width cast the
+                    // verifier rejects the use and the whole program silently
+                    // drops to the Cranelift tier.
+                    self.builder
+                        .build_float_cast(
+                            llvm_value.into_float_value(),
+                            expected_ty.into_float_type(),
+                            &cast_name,
+                        )
+                        .map_err(|e| format!("Failed to cast phi float width: {}", e))?
+                        .into()
+                } else if llvm_value.is_float_value() && expected_ty.is_int_type() {
                     // Float to int: fptosi
                     self.builder
                         .build_float_to_signed_int(
@@ -5754,16 +5788,41 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             None => left.is_float_value() || right.is_float_value(),
         };
 
-        // Helper function to convert int to float if needed
+        // The width both operands must agree on. `Single` arithmetic mixes an
+        // f32 value with an f64 literal (`s + 1.0`), and LLVM rejects
+        // `fadd float, double` — so normalise to the result type rather than
+        // assuming f64.
+        let target_float_ty = match result_ty {
+            Some(IrType::F32) => self.context.f32_type(),
+            Some(IrType::F64) => self.context.f64_type(),
+            _ => {
+                if left.is_float_value() {
+                    left.into_float_value().get_type()
+                } else if right.is_float_value() {
+                    right.into_float_value().get_type()
+                } else {
+                    self.context.f64_type()
+                }
+            }
+        };
+        // Convert to `target_float_ty`: sitofp for ints, fpext/fptrunc for a
+        // float of the other width.
         let to_float = |val: BasicValueEnum<'ctx>,
                         builder: &inkwell::builder::Builder<'ctx>,
                         name: &str|
          -> Result<inkwell::values::FloatValue<'ctx>, String> {
             if val.is_float_value() {
-                Ok(val.into_float_value())
+                let f = val.into_float_value();
+                if f.get_type() == target_float_ty {
+                    Ok(f)
+                } else {
+                    builder
+                        .build_float_cast(f, target_float_ty, name)
+                        .map_err(|e| format!("Failed to cast float width: {}", e))
+                }
             } else {
                 builder
-                    .build_signed_int_to_float(val.into_int_value(), self.context.f64_type(), name)
+                    .build_signed_int_to_float(val.into_int_value(), target_float_ty, name)
                     .map_err(|e| format!("Failed to convert int to float: {}", e))
             }
         };
@@ -6804,6 +6863,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             .map_err(|e| format!("Failed to wrap ptr in struct: {}", e))?
                             .into_struct_value();
                         s2.into()
+                    } else if val.is_float_value() && expected_ty.is_float_type() {
+                        // f32<->f64 width (Single vs Float) at a call boundary.
+                        self.builder
+                            .build_float_cast(
+                                val.into_float_value(),
+                                expected_ty.into_float_type(),
+                                &cast_name,
+                            )
+                            .map_err(|e| format!("Failed to cast arg float width: {}", e))?
+                            .into()
                     } else if val.is_float_value() && expected_ty.is_int_type() {
                         // Float to int
                         self.builder

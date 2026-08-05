@@ -252,7 +252,7 @@ class SpinPool {
                         // (haxe_box_int_ptr, 48 bytes, never freed). That leaked
                         // ~5M boxes (~240MB) per request here — found with
                         // RAYZOR_BOX_TRACE=1 reporting value=500 on essentially
-                        // every call. See bugs_float_conditional_reassign_boxes.
+                        // every call. Keep these as ternaries.
                         var gap:Int = gapC.load();
                         var tightUs:Int = (gap < 20) ? 20 : ((gap > 500) ? 500 : gap);
                         if ((Sys.time() - tightStart) * 1e6 < tightUs) tightDone = false;

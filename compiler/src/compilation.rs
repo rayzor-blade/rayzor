@@ -611,6 +611,12 @@ impl CompilationUnit {
         if std::env::var_os("RAYZOR_NO_EVAL_DEFINE").is_none() {
             config.defines.insert("eval".to_string());
         }
+        // Every Haxe target also defines its own name (`#if js`, `#if cpp`, …).
+        // rayzor is not `eval` — the masquerade above only picks stdlib branches
+        // — so stdlib and user code need a way to say "this is rayzor
+        // specifically", e.g. `Single`, which the shared `#if` guards otherwise
+        // exclude because rayzor is in none of their target lists.
+        config.defines.insert("rayzor".to_string());
         for define in &self.config.extra_defines {
             config.defines.insert(define.clone());
         }
