@@ -5535,11 +5535,19 @@ impl CraneliftBackend {
                         })
                         .collect();
 
-                    register_enum_from_mir(typedef.type_id.0, &typedef.name, &variant_data);
+                    // Key by the stable name-hash id, as classes do. The
+                    // context-local TypeId drifts between compilation sessions,
+                    // so a cached module would register under one key while
+                    // freshly-lowered call sites baked another.
+                    let rtti_key = typedef
+                        .runtime_type_id
+                        .map(|h| h as u32)
+                        .unwrap_or(typedef.type_id.0);
+                    register_enum_from_mir(rtti_key, &typedef.name, &variant_data);
                     debug!(
                         "Registered enum RTTI '{}' (type_id={}) with {} variants",
                         typedef.name,
-                        typedef.type_id.0,
+                        rtti_key,
                         variants.len()
                     );
                 }

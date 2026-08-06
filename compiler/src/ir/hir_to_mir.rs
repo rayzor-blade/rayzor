@@ -8274,13 +8274,28 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Extract the runtime type_id (as u32) from an expression that represents an enum value.
+    /// Stable runtime id for an enum, from its declaration symbol. Mirrors the
+    /// `TypeKind::Enum` arm of `runtime_type_id` so a value boxed by type and a
+    /// lookup keyed by symbol land on the SAME key. Enum RTTI registration uses
+    /// this id too; keeping one key space is what makes reflection on a
+    /// Dynamic-typed enum work.
+    fn enum_runtime_id(&self, enum_symbol: SymbolId) -> u32 {
+        self.deterministic_iface_or_enum_type_id(enum_symbol, "enum")
+            .unwrap_or_else(|| {
+                self.symbol_table
+                    .get_symbol(enum_symbol)
+                    .map(|s| s.type_id.0 + 1000)
+                    .unwrap_or(0)
+            })
+    }
+
     /// Inspects the expression to find the enum variant symbol, then looks up the parent enum.
     fn extract_enum_type_id_from_expr(&self, expr: &HirExpr) -> Option<u32> {
         // First, try to resolve from the expression's type
         let enum_sym = self.resolve_enum_symbol(expr.ty);
         if let Some(sym_id) = enum_sym {
-            if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                return Some(sym.type_id.0);
+            if self.symbol_table.get_symbol(sym_id).is_some() {
+                return Some(self.enum_runtime_id(sym_id));
             }
         }
 
@@ -8293,8 +8308,8 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(parent) =
                             self.symbol_table.find_parent_enum_for_constructor(*symbol)
                         {
-                            if let Some(parent_sym) = self.symbol_table.get_symbol(parent) {
-                                return Some(parent_sym.type_id.0);
+                            if self.symbol_table.get_symbol(parent).is_some() {
+                                return Some(self.enum_runtime_id(parent));
                             }
                         }
                     }
@@ -8306,8 +8321,8 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(parent) =
                             self.symbol_table.find_parent_enum_for_constructor(*field)
                         {
-                            if let Some(parent_sym) = self.symbol_table.get_symbol(parent) {
-                                return Some(parent_sym.type_id.0);
+                            if self.symbol_table.get_symbol(parent).is_some() {
+                                return Some(self.enum_runtime_id(parent));
                             }
                         }
                     }
@@ -9068,11 +9083,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Gather compile-time enum metadata
         let is_boxed = self.enum_is_boxed(enum_sym_id);
-        let enum_type_id = self
-            .symbol_table
-            .get_symbol(enum_sym_id)
-            .map(|s| s.type_id.0 as i32)
-            .unwrap_or(0);
+        let enum_type_id = self.enum_runtime_id(enum_sym_id) as i32;
 
         // Lower the receiver (the enum value)
         let receiver_reg = self.lower_expression(receiver)?;
@@ -9183,8 +9194,7 @@ impl<'a> HirToMirContext<'a> {
                         return self.builder.build_const(IrValue::I64(runtime_type_id));
                     }
                     if sym.kind == SymbolKind::Enum {
-                        // Enum runtime type_id = sym.type_id (matches register_enum_metadata)
-                        let runtime_type_id = sym.type_id.0 as i64;
+                        let runtime_type_id = self.enum_runtime_id(sym.id) as i64;
                         return self.builder.build_const(IrValue::I64(runtime_type_id));
                     }
                 }
@@ -14665,14 +14675,13 @@ impl<'a> HirToMirContext<'a> {
                             ref type_args,
                         }) = hir_type_kind
                         {
-                            // Get the enum's TypeId from its symbol
-                            if let Some(enum_sym) = self.symbol_table.get_symbol(symbol_id) {
-                                let enum_type_id = enum_sym.type_id;
+                            if self.symbol_table.get_symbol(symbol_id).is_some() {
+                                let enum_type_id = self.enum_runtime_id(symbol_id);
 
                                 // Build type_id constant (u32)
                                 let type_id_const = self
                                     .builder
-                                    .build_const(IrValue::I32(enum_type_id.0 as i32))?;
+                                    .build_const(IrValue::I32(enum_type_id as i32))?;
 
                                 // Check if enum is boxed (has parameterized variants)
                                 // Boxed enums store a pointer to heap-allocated struct
@@ -25014,8 +25023,15 @@ impl<'a> HirToMirContext<'a> {
                     value_kind_cloned
                 );
 
-                // Get TypeId as u32
-                let type_id_u32 = value_ty.as_raw();
+                // Tag with the stable runtime id where one exists (class /
+                // interface / enum), so the box agrees with RTTI registration
+                // and with the ids baked at `is` and reflection sites. The
+                // context-local TypeId only stands in for kinds that have no
+                // stable id (anonymous, array).
+                let type_id_u32 = match self.runtime_type_id(value_ty) {
+                    0 => value_ty.as_raw(),
+                    stable => stable,
+                };
 
                 // Create constant for type_id
                 let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
@@ -25096,7 +25112,11 @@ impl<'a> HirToMirContext<'a> {
             | Some(TypeKind::Interface { .. })
             | Some(TypeKind::Anonymous { .. })
             | Some(TypeKind::Array { .. }) => {
-                let type_id_const = self.builder.build_const(IrValue::U32(value_ty.as_raw()))?;
+                let stable_id = match self.runtime_type_id(value_ty) {
+                    0 => value_ty.as_raw(),
+                    stable => stable,
+                };
+                let type_id_const = self.builder.build_const(IrValue::U32(stable_id))?;
                 let box_func_id = self.get_or_register_extern_function(
                     "haxe_box_reference_ptr",
                     vec![ptr_u8.clone(), IrType::U32],
@@ -38545,9 +38565,11 @@ impl<'a> HirToMirContext<'a> {
             )
         };
 
-        // Enum values need haxe_box_reference_ptr to preserve the enum's type_id
+        // Enum values need haxe_box_reference_ptr to preserve the enum's type_id.
+        // Tag with the STABLE runtime id, not the context-local TypeId, so the
+        // box agrees with RTTI registration and with `is`/reflection lookups.
         if is_enum {
-            let type_id_u32 = concrete_type_id.as_raw();
+            let type_id_u32 = self.runtime_type_id(concrete_type_id);
             let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
             // Cast the raw i64 discriminant (or boxed enum ptr) to *u8

@@ -2738,7 +2738,13 @@ impl TieredBackend {
                     })
                     .collect();
 
-                register_enum_from_mir(typedef.type_id.0, &typedef.name, &variant_data);
+                // Key by the stable name-hash id, matching the class path and
+                // the ids baked at `is`/reflection/box sites.
+                let rtti_key = typedef
+                    .runtime_type_id
+                    .map(|h| h as u32)
+                    .unwrap_or(typedef.type_id.0);
+                register_enum_from_mir(rtti_key, &typedef.name, &variant_data);
             }
         }
     }

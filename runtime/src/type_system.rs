@@ -680,13 +680,16 @@ pub extern "C" fn haxe_type_resolve_enum(name_ptr: *mut u8) -> i64 {
 /// The compiler injects `type_id` as a hidden argument because enum values can be
 /// unboxed discriminants and don't carry runtime type metadata by themselves.
 #[no_mangle]
-pub extern "C" fn haxe_type_get_enum(_value: i64, type_id: i32) -> i64 {
-    if type_id <= 0 {
+pub extern "C" fn haxe_type_get_enum(value: i64, type_id: i32) -> i64 {
+    // A `Dynamic` receiver carries its enum identity in the box, not in a
+    // compiler-injected constant.
+    let (_, type_id) = resolve_dynamic_enum(value, type_id);
+    if type_id == 0 {
         return -1;
     }
     let guard = TYPE_REGISTRY.read().unwrap();
     if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+        if let Some(type_info) = registry.get(&TypeId(type_id)) {
             if type_info.enum_info.is_some() {
                 return type_id as i64;
             }
@@ -1520,6 +1523,37 @@ fn enum_is_boxed(type_id: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Recover `(value, type_id)` for a Type-API enum call whose receiver was
+/// statically `Dynamic`: the compiler has no enum type to inject, so it passes
+/// `type_id == 0` and the boxed `DynamicValue*` as the value. Rewrites ONLY
+/// when the box's own type_id resolves to a registered enum, so a genuine raw
+/// discriminant is never misread as a pointer.
+fn resolve_dynamic_enum(value: i64, type_id: i32) -> (i64, u32) {
+    if type_id != 0 {
+        return (value, type_id as u32);
+    }
+    let addr = value as usize;
+    if addr < 0x1000 || (addr & 7) != 0 {
+        return (value, 0);
+    }
+    let (boxed_type_id, boxed_value) = unsafe {
+        let dynamic = *(value as *const DynamicValue);
+        (dynamic.type_id.0, dynamic.value_ptr as i64)
+    };
+    let is_enum = TYPE_REGISTRY
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|r| r.get(&TypeId(boxed_type_id)))
+        .map(|ti| ti.enum_info.is_some())
+        .unwrap_or(false);
+    if is_enum {
+        (boxed_value, boxed_type_id)
+    } else {
+        (value, 0)
+    }
+}
+
 /// Type.enumIndex(e:EnumValue):Int — get enum index.
 ///
 /// The compiler injects `type_id` at the call site (matching the
@@ -1528,7 +1562,8 @@ fn enum_is_boxed(type_id: u32) -> bool {
 /// discriminant or a heap-pointer to a `[tag:i32, ...]` box.
 #[no_mangle]
 pub extern "C" fn haxe_type_enum_index(value: i64, type_id: i32) -> i64 {
-    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
+    let (value, type_id) = resolve_dynamic_enum(value, type_id);
+    let is_boxed = if enum_is_boxed(type_id) { 1 } else { 0 };
     haxe_enum_get_index(value, is_boxed)
 }
 
@@ -1539,8 +1574,9 @@ pub extern "C" fn haxe_type_enum_constructor(
     value: i64,
     type_id: i32,
 ) -> *mut crate::haxe_string::HaxeString {
-    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
-    haxe_enum_get_name(type_id as u32, value, is_boxed)
+    let (value, type_id) = resolve_dynamic_enum(value, type_id);
+    let is_boxed = if enum_is_boxed(type_id) { 1 } else { 0 };
+    haxe_enum_get_name(type_id, value, is_boxed)
 }
 
 /// Type.enumParameters(e:EnumValue):Array<Dynamic> — get parameters.
@@ -1550,8 +1586,9 @@ pub extern "C" fn haxe_type_enum_parameters(
     value: i64,
     type_id: i32,
 ) -> *mut crate::haxe_array::HaxeArray {
-    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
-    haxe_enum_get_parameters(type_id as u32, value, is_boxed)
+    let (value, type_id) = resolve_dynamic_enum(value, type_id);
+    let is_boxed = if enum_is_boxed(type_id) { 1 } else { 0 };
+    haxe_enum_get_parameters(type_id, value, is_boxed)
 }
 
 /// Trace an enum value by type_id and discriminant
