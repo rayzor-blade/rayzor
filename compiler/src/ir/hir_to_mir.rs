@@ -41890,9 +41890,24 @@ impl<'a> HirToMirContext<'a> {
         // Register constructor closure pointers for Type.createInstance.
         let ctor_wrappers = self.constructor_reflect_wrappers.clone();
         for (class_type_id, wrapper_func_id) in ctor_wrappers {
-            let type_id_reg = self
-                .builder
-                .build_const(IrValue::I64(class_type_id.as_raw() as i64));
+            // Key the ctor by the SAME deterministic id the class metadata is
+            // registered under. `register_class_rtti_from_module` populates
+            // TYPE_REGISTRY with `runtime_type_id` (an FNV-1a hash of the
+            // qualified name, stable across contexts), while this call used the
+            // RAW context-local TypeId — so CONSTRUCTOR_REGISTRY lived in a
+            // different key space. `haxe_type_create_instance` passes ONE id to
+            // both (empty-instance via TYPE_REGISTRY, then the ctor lookup), so
+            // the two only agreed by coincidence. Adding one type to StdTypes
+            // shifts every TypeId and re-rolls those coincidences, which is how
+            // a bare `@:coreType abstract` turned into a wrong/missing
+            // constructor and a garbage object.
+            let stable_id = self
+                .class_type_to_symbol
+                .get(&class_type_id)
+                .and_then(|sym| self.deterministic_class_type_id(*sym))
+                .map(|v| v as i64)
+                .unwrap_or(class_type_id.as_raw() as i64);
+            let type_id_reg = self.builder.build_const(IrValue::I64(stable_id));
             let closure_ptr = self.builder.build_function_ref(wrapper_func_id);
             if let (Some(tid), Some(cptr)) = (type_id_reg, closure_ptr) {
                 self.builder
