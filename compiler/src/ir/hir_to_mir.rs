@@ -9809,20 +9809,7 @@ impl<'a> HirToMirContext<'a> {
                             }
                         });
                     from_symbol
-                        .or_else(|| {
-                            let hint = hint_name.as_deref()?;
-                            let bare = hint.rsplit(':').next().unwrap_or(hint);
-                            let bare = bare.rsplit('.').next().unwrap_or(bare);
-                            self.class_type_to_symbol
-                                .iter()
-                                .find(|(_ty, sym)| {
-                                    self.symbol_table
-                                        .get_symbol(**sym)
-                                        .and_then(|s| self.string_interner.get(s.name))
-                                        .map_or(false, |n| n == hint || n == bare)
-                                })
-                                .map(|(ty, _)| *ty)
-                        })
+                        .or_else(|| self.find_class_type_by_name(hint_name.as_deref()?))
                         .unwrap_or(receiver_ty)
                 } else {
                     receiver_ty
@@ -9838,18 +9825,9 @@ impl<'a> HirToMirContext<'a> {
                             .map_or(false, |t| matches!(t.kind, TypeKind::Dynamic))
                     };
                     if is_dynamic {
-                        if let Some(class_hint) = self.register_class_hints.get(&obj_reg) {
+                        if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
                             // Find the class type by name
-                            let class_type = self
-                                .class_type_to_symbol
-                                .iter()
-                                .find(|(_ty, sym)| {
-                                    self.symbol_table
-                                        .get_symbol(**sym)
-                                        .and_then(|s| self.string_interner.get(s.name))
-                                        == Some(class_hint.as_str())
-                                })
-                                .map(|(ty, _)| *ty);
+                            let class_type = self.find_class_type_by_name(&class_hint);
                             class_type.unwrap_or(receiver_ty)
                         } else {
                             receiver_ty
@@ -25889,14 +25867,26 @@ impl<'a> HirToMirContext<'a> {
             let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
             // Fast path: lookup by TypeId via reverse index
             let mut fields = self.fields_for_type(resolved_source);
-            // Fallback: also try matching by class symbol_id
+            // Fallback: also try matching by class symbol_id. The map is keyed by
+            // context-local TypeIds, so confirm with the field's declaring class
+            // NAME where recorded — otherwise another class's fields enter this
+            // map and, being keyed by field name, silently overwrite the right
+            // indices.
             if fields.is_empty() {
+                let expected = self.class_qualified_name(class_symbol);
                 for (field_sym, (class_ty, idx)) in &self.field_index_map {
                     if self
                         .class_type_to_symbol
                         .get(class_ty)
                         .map_or(false, |s| *s == class_symbol)
                     {
+                        if let (Some(owner), Some(expected)) =
+                            (self.field_class_names.get(field_sym), expected.as_deref())
+                        {
+                            if !Self::class_names_match(owner, expected) {
+                                continue;
+                            }
+                        }
                         fields.push((*field_sym, *idx));
                     }
                 }
@@ -26657,8 +26647,12 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        // Build field_map from field_index_map (same approach as try_register_anon_view)
+        // Build field_map from field_index_map (same approach as try_register_anon_view).
+        // Both id tests are context-local, so confirm with the field's declaring
+        // class NAME where recorded: entries are keyed by field name here, so a
+        // foreign class's same-named field would overwrite the correct index.
         let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
+        let expected_owner = self.class_qualified_name(class_symbol);
         for (field_sym, (fclass_ty, idx)) in &self.field_index_map {
             let matches = *fclass_ty == class_type || {
                 self.class_type_to_symbol
@@ -26666,6 +26660,14 @@ impl<'a> HirToMirContext<'a> {
                     .map_or(false, |s| *s == class_symbol)
             };
             if matches {
+                if let (Some(owner), Some(expected)) = (
+                    self.field_class_names.get(field_sym),
+                    expected_owner.as_deref(),
+                ) {
+                    if !Self::class_names_match(owner, expected) {
+                        continue;
+                    }
+                }
                 if let Some(sym) = self.symbol_table.get_symbol(*field_sym) {
                     if let Some(name) = self.string_interner.get(sym.name) {
                         class_field_by_name.insert(name.to_string(), (*idx, sym.type_id));
@@ -29838,29 +29840,29 @@ impl<'a> HirToMirContext<'a> {
         // TypeId comparison. Positive selection only: with zero or several
         // owner matches (inherited fields carry the PARENT's owner name and
         // must keep resolving through the type chain), fall through unchanged.
-        {
-            let recv_bare = {
-                let type_table = self.type_table;
-                let mut resolved = self.resolve_through_aliases(receiver_ty);
-                let mut visited = BTreeSet::new();
-                loop {
-                    if !visited.insert(resolved) {
-                        break;
-                    }
-                    match type_table.get(resolved).map(|ti| &ti.kind) {
-                        Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
-                        _ => break,
-                    }
+        let recv_bare = {
+            let type_table = self.type_table;
+            let mut resolved = self.resolve_through_aliases(receiver_ty);
+            let mut visited = BTreeSet::new();
+            loop {
+                if !visited.insert(resolved) {
+                    break;
                 }
-                type_table
-                    .get(resolved)
-                    .and_then(|ti| match &ti.kind {
-                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                        _ => None,
-                    })
-                    .and_then(|sym| self.symbol_table.get_symbol(sym))
-                    .and_then(|si| self.string_interner.get(si.name))
-            };
+                match type_table.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                    _ => break,
+                }
+            }
+            type_table
+                .get(resolved)
+                .and_then(|ti| match &ti.kind {
+                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                })
+                .and_then(|sym| self.symbol_table.get_symbol(sym))
+                .and_then(|si| self.string_interner.get(si.name))
+        };
+        {
             if let Some(recv_bare) = recv_bare {
                 let mut owned: Vec<(TypeId, u32)> = all_matches
                     .iter()
@@ -29914,15 +29916,27 @@ impl<'a> HirToMirContext<'a> {
                 _ => None,
             });
 
-            // Match by class symbol_id using the class_type_to_symbol mapping
-            // This survives type_table overwrites where class TypeIds get reused
+            // Match by class symbol_id using the class_type_to_symbol mapping.
+            // This survives type_table overwrites where class TypeIds get reused —
+            // but the map is keyed by context-local TypeIds and also holds entries
+            // punned from SymbolIds, so a hit can be a raw-id coincidence. Where
+            // the candidate records its declaring class, require that NAME to
+            // agree; a disagreement means we hit another class's entry, and
+            // returning here would preempt the name-based Strategy 2 below with a
+            // wrong GEP index.
             if let Some(recv_sym) = receiver_symbol {
-                for &(class_ty, idx) in &all_matches {
+                for (&(class_ty, idx), owner) in all_matches.iter().zip(match_owners.iter()) {
                     let candidate_sym = self.class_type_to_symbol.get(&class_ty);
                     if let Some(&csym) = candidate_sym {
-                        if csym == recv_sym {
-                            return FieldIndexResolution::Unique(class_ty, idx);
+                        if csym != recv_sym {
+                            continue;
                         }
+                        if let (Some(owner), Some(recv_name)) = (owner, recv_bare) {
+                            if !Self::class_names_match(owner, recv_name) {
+                                continue;
+                            }
+                        }
+                        return FieldIndexResolution::Unique(class_ty, idx);
                     }
                 }
             }
@@ -40101,6 +40115,44 @@ impl<'a> HirToMirContext<'a> {
         self.builder.module.add_type(typedef);
     }
 
+    /// Find the class TypeId whose symbol carries `hint` as its name.
+    /// Qualified match first; a bare name resolves ONLY when exactly one class
+    /// answers to it. Several same-named classes in different packages are
+    /// ambiguous, and picking the numerically-first entry would silently select
+    /// a foreign class's layout for field access.
+    fn find_class_type_by_name(&self, hint: &str) -> Option<TypeId> {
+        let bare = {
+            let h = hint.rsplit(':').next().unwrap_or(hint);
+            h.rsplit('.').next().unwrap_or(h)
+        };
+        let mut bare_hits: Vec<TypeId> = Vec::new();
+        for (ty, sym) in &self.class_type_to_symbol {
+            let Some(symbol) = self.symbol_table.get_symbol(*sym) else {
+                continue;
+            };
+            if let Some(qname) = symbol
+                .qualified_name
+                .and_then(|n| self.string_interner.get(n))
+            {
+                if qname == hint {
+                    return Some(*ty);
+                }
+            }
+            if self
+                .string_interner
+                .get(symbol.name)
+                .is_some_and(|n| n == hint || n == bare)
+            {
+                bare_hits.push(*ty);
+            }
+        }
+        bare_hits.dedup();
+        match bare_hits.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
     /// Qualified name of a class symbol, the only identity stable across
     /// compilation contexts.
     fn class_qualified_name(&self, symbol: SymbolId) -> Option<String> {
@@ -41914,27 +41966,41 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         for ((class_sym, iface_sym), _methods) in interface_vtables {
+            // Register exactly the ids the runtime will look up: the object
+            // header's class id and the id baked at the `is`/cast site, both
+            // produced by the deterministic name hash. Registering extra
+            // aliases (the symbol-id form, or that form + 1000) can only make a
+            // check that should FAIL succeed — one class's shifted alias can
+            // equal another class's real id, handing it interfaces it does not
+            // implement. The lookup side matches exactly.
             let mut class_ids: BTreeSet<i64> = BTreeSet::new();
-            if let Some(h) = self.deterministic_class_type_id(class_sym) {
-                class_ids.insert(h as i64);
-            }
-            // Keep legacy aliases as fallback so any code that still emits
-            // the symbol-id form (or that the runtime might query via
-            // symbol-id during reflection) keeps resolving.
-            class_ids.insert(class_sym.as_raw() as i64);
-            class_ids.insert(class_sym.as_raw() as i64 + 1000);
-            if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
-                class_ids.insert(sym.type_id.as_raw() as i64);
+            match self.deterministic_class_type_id(class_sym) {
+                Some(h) => {
+                    class_ids.insert(h as i64);
+                }
+                // Unnamed class: mirror `runtime_type_id`'s fallback, which is
+                // what the object header will carry.
+                None => {
+                    if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
+                        class_ids.insert(
+                            self.resolve_runtime_class_type_id(sym.type_id, class_sym)
+                                .as_raw() as i64
+                                + 1000,
+                        );
+                    }
+                }
             }
 
             let mut iface_ids: BTreeSet<i64> = BTreeSet::new();
-            if let Some(h) = self.deterministic_iface_or_enum_type_id(iface_sym, "iface") {
-                iface_ids.insert(h as i64);
-            }
-            iface_ids.insert(iface_sym.as_raw() as i64);
-            iface_ids.insert(iface_sym.as_raw() as i64 + 1000);
-            if let Some(sym) = self.symbol_table.get_symbol(iface_sym) {
-                iface_ids.insert(sym.type_id.as_raw() as i64);
+            match self.deterministic_iface_or_enum_type_id(iface_sym, "iface") {
+                Some(h) => {
+                    iface_ids.insert(h as i64);
+                }
+                None => {
+                    if let Some(sym) = self.symbol_table.get_symbol(iface_sym) {
+                        iface_ids.insert(sym.type_id.as_raw() as i64);
+                    }
+                }
             }
 
             for class_type_id in &class_ids {
