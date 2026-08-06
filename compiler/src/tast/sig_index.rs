@@ -28,8 +28,14 @@ struct ClassSigs {
     statics: BTreeMap<String, StaticMethodSig>,
     instances: BTreeMap<String, StaticMethodSig>,
     /// Declared non-static `var`/`final`/`property` count — the object's
-    /// field-slot count for allocating a `new` that lowers before the class.
+    /// OWN field-slot count. Inherited slots are added by walking `extends`;
+    /// see `instance_field_count`.
     instance_field_count: usize,
+    /// Parent class name from `extends`, exactly as written. Needed because a
+    /// subclass's object layout is parent slots followed by own slots.
+    extends: Option<String>,
+    /// Package that declared this class, used to qualify a bare `extends`.
+    package: String,
 }
 
 impl ClassSigs {
@@ -80,21 +86,26 @@ impl StaticSigIndex {
         use parser::TypeDeclaration;
         match decl {
             TypeDeclaration::Class(c) => {
-                self.index_fields(package, &c.name, &c.fields);
+                let parent = c.extends.as_ref().and_then(Self::type_path_name);
+                self.index_fields(package, &c.name, &c.fields, parent);
             }
             TypeDeclaration::Abstract(a) => {
-                self.index_fields(package, &a.name, &a.fields);
+                self.index_fields(package, &a.name, &a.fields, None);
             }
             TypeDeclaration::Typedef(t) => {
                 // Only straight `typedef A = pkg.B` renames participate in
                 // class lookup (e.g. `haxe.io.Bytes = rayzor.Bytes`).
                 if let parser::Type::Path { path, .. } = &t.type_def {
                     let alias = Self::qualify(package, &t.name);
-                    let mut target = path.package.join(".");
-                    if !target.is_empty() {
-                        target.push('.');
-                    }
-                    target.push_str(&path.name);
+                    // An unqualified target names a type in the SAME package
+                    // (`private typedef __Int64 = ___Int64` inside `haxe`).
+                    // Classes are indexed under qualified names, so a bare
+                    // target would never match one.
+                    let target = if path.package.is_empty() {
+                        Self::qualify(package, &path.name)
+                    } else {
+                        format!("{}.{}", path.package.join("."), path.name)
+                    };
                     if alias != target {
                         self.aliases.insert(alias, target);
                     }
@@ -106,10 +117,33 @@ impl StaticSigIndex {
         }
     }
 
-    fn index_fields(&mut self, package: &str, class_name: &str, fields: &[parser::ClassField]) {
+    /// Qualified name written in a `Type::Path` (`pk.Base` / `Base`).
+    fn type_path_name(ty: &parser::Type) -> Option<String> {
+        let parser::Type::Path { path, .. } = ty else {
+            return None;
+        };
+        let mut name = path.package.join(".");
+        if !name.is_empty() {
+            name.push('.');
+        }
+        name.push_str(&path.name);
+        Some(name)
+    }
+
+    fn index_fields(
+        &mut self,
+        package: &str,
+        class_name: &str,
+        fields: &[parser::ClassField],
+        extends: Option<String>,
+    ) {
         let qname = Self::qualify(package, class_name);
         let fresh = !self.classes.contains_key(&qname);
         let entry = self.classes.entry(qname.clone()).or_default();
+        if fresh {
+            entry.extends = extends;
+            entry.package = package.to_string();
+        }
         for field in fields {
             let is_static = field
                 .modifiers
@@ -240,16 +274,59 @@ impl StaticSigIndex {
     /// bare name; follows typedef aliases; parses the declaring file on
     /// demand). Used for object allocation when a `new` lowers before the
     /// class does.
+    /// Total instance slots for `class_name`: its own declared fields plus
+    /// every ancestor's, since a subclass object is parent slots followed by
+    /// own slots. Returns None only when the class itself is unknown; an
+    /// unresolvable ANCESTOR yields None too, because a partial count would
+    /// under-allocate the object and silently corrupt the heap.
     pub fn instance_field_count(
         &mut self,
         class_name: &str,
         resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
     ) -> Option<usize> {
+        let mut total = 0usize;
+        let mut next = Some(class_name.to_string());
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(name) = next {
+            if !seen.insert(name.clone()) {
+                break; // cyclic `extends` — stop rather than spin
+            }
+            let (own, parent, pkg) = self.resolve_class_entry(&name, resolve_file)?;
+            total += own;
+            // A bare `extends Base` names a type in the subclass's own
+            // package first; fall back to the name as written so an imported
+            // parent still resolves through the unambiguous bare form.
+            next = parent.map(|p| {
+                if p.contains('.') || pkg.is_empty() {
+                    return p;
+                }
+                let qualified = format!("{}.{}", pkg, p);
+                if self.classes.contains_key(&qualified) {
+                    qualified
+                } else {
+                    p
+                }
+            });
+        }
+        Some(total)
+    }
+
+    /// (own field count, parent name, declaring package) for a class,
+    /// following typedef aliases and the unambiguous bare-name form.
+    fn resolve_class_entry(
+        &mut self,
+        class_name: &str,
+        resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+    ) -> Option<(usize, Option<String>, String)> {
         let mut name = class_name.to_string();
         for _ in 0..4 {
             self.ensure_indexed(&name, resolve_file);
             if let Some(class) = self.classes.get(&name) {
-                return Some(class.instance_field_count);
+                return Some((
+                    class.instance_field_count,
+                    class.extends.clone(),
+                    class.package.clone(),
+                ));
             }
             match self.aliases.get(&name) {
                 Some(target) => name = target.clone(),
@@ -263,7 +340,10 @@ impl StaticSigIndex {
                 .map(|set| set.iter().collect())
                 .unwrap_or_default();
             if let [only] = candidates.as_slice() {
-                return self.classes.get(*only).map(|c| c.instance_field_count);
+                return self
+                    .classes
+                    .get(*only)
+                    .map(|c| (c.instance_field_count, c.extends.clone(), c.package.clone()));
             }
         }
         None
