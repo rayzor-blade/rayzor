@@ -3381,6 +3381,20 @@ impl<'a> HirToMirContext<'a> {
                     _ => false, // Classes, interfaces, etc. always use pointer
                 }
             };
+            // TypeIds are context-local. When the id drifts — adding ONE type to
+            // StdTypes shifts every TypeId while SymbolIds stay put — a class's
+            // id can land on an abstract-over-Int, and the check above then
+            // types `this` BY VALUE. That truncates the 64-bit receiver to i32
+            // and every field read off it faults (StringBuf.add/addSub/... ->
+            // SIGSEGV in haxe_bytes_data_address). The HIR module we are
+            // lowering is authoritative about what it declares, so let it veto:
+            // if HIR says this id is a CLASS, it is a class, whatever the
+            // (possibly stale) type_table entry says.
+            let hir_says_class = matches!(
+                self.current_hir_types.get(&type_id),
+                Some(HirTypeDecl::Class(_))
+            );
+            let is_abstract_value_type = is_abstract_value_type && !hir_says_class;
             let this_ir_type = if is_abstract_value_type {
                 self.convert_type(type_id) // Raw value type for abstract underlying types
             } else {
