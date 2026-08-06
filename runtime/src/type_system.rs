@@ -1408,39 +1408,18 @@ fn class_implements_interface(class_type_id: u32, interface_type_id: u32) -> boo
     false
 }
 
-fn class_implements_interface_with_normalization(
-    class_type_id: i64,
-    interface_type_id: i64,
-) -> bool {
+/// Exact `class implements interface` test for ids arriving as i64 from
+/// generated code. Both sides now carry the same stable name-hash id, so the
+/// match is exact: no id-space guessing. (This used to also try each id ±1000
+/// to bridge a legacy `symbol_id + 1000` space. Those extra candidates could
+/// only ever make a check succeed that should have failed — a wrong-type cast
+/// — and are no longer reachable now that classes, interfaces and enums all
+/// register under the name-hash id.)
+fn class_implements_interface_id(class_type_id: i64, interface_type_id: i64) -> bool {
     if class_type_id <= 0 || interface_type_id <= 0 {
         return false;
     }
-
-    let class_raw = class_type_id as u32;
-    let iface_raw = interface_type_id as u32;
-
-    let mut class_candidates = vec![class_raw];
-    if class_raw >= 1000 {
-        class_candidates.push(class_raw - 1000);
-    } else {
-        class_candidates.push(class_raw + 1000);
-    }
-
-    let mut iface_candidates = vec![iface_raw];
-    if iface_raw >= 1000 {
-        iface_candidates.push(iface_raw - 1000);
-    } else {
-        iface_candidates.push(iface_raw + 1000);
-    }
-
-    for cid in class_candidates {
-        for iid in &iface_candidates {
-            if class_implements_interface(cid, *iid) {
-                return true;
-            }
-        }
-    }
-    false
+    class_implements_interface(class_type_id as u32, interface_type_id as u32)
 }
 
 /// Register that a class implements an interface.
@@ -1472,7 +1451,7 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
     if type_id_matches_with_hierarchy(actual_type_id, expected_type_id) {
         return true;
     }
-    if class_implements_interface_with_normalization(actual_type_id, expected_type_id) {
+    if class_implements_interface_id(actual_type_id, expected_type_id) {
         return true;
     }
     false
@@ -3017,7 +2996,7 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
             }
         }
     }
-    if class_implements_interface_with_normalization(actual_type_id, target_type_id) {
+    if class_implements_interface_id(actual_type_id, target_type_id) {
         return 1;
     }
 
