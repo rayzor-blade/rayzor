@@ -86,6 +86,34 @@ for hx_file in "$TESTS_DIR"/*.hx; do
     } >> "$RESULTS_FILE"
 done
 
+# nue end-to-end smoke: compile AND run the llama-chat example against a
+# small local model when one is present. The unit tests above never touch
+# nue, so a compiler regression can pass 170/170 while inference is broken.
+NUE_SMOKE_MODEL="${NUE_SMOKE_MODEL:-$HOME/models/qwen/Qwen2.5-0.5B-Instruct-Q6_K.gguf}"
+if [ -f "$NUE_SMOKE_MODEL" ]; then
+    TOTAL=$((TOTAL + 1))
+    printf "%-50s" "nue_smoke_llama_chat"
+    find . -name .rayzor -type d -exec rm -rf {} + 2>/dev/null
+    smoke_out=$(cd nue/examples/llama-chat && RAYZOR_KV_Q8=1 timeout 300 \
+        "$RAYZOR" run Main.hx --llvm --release --no-cache -- \
+        "$NUE_SMOKE_MODEL" "Explain how a compiler works" 8 2048 0.0 2>&1)
+    smoke_rc=$?
+    if [ $smoke_rc -eq 0 ] && printf '%s' "$smoke_out" | grep -q "\[done\]"; then
+        PASSED=$((PASSED + 1))
+        printf "\033[32mPASS\033[0m\n"
+        smoke_status="PASS"
+    else
+        CRASHED=$((CRASHED + 1))
+        printf "\033[31mCRASH(exit=%d)\033[0m\n" "$smoke_rc"
+        smoke_status="CRASH(exit=$smoke_rc)"
+    fi
+    {
+        echo "--- nue_smoke_llama_chat [$smoke_status] ---"
+        echo "$smoke_out" | tail -20
+        echo ""
+    } >> "$RESULTS_FILE"
+fi
+
 SUMMARY="
 =========================================
   TOTAL:        $TOTAL

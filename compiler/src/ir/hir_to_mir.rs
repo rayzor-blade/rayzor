@@ -413,9 +413,11 @@ pub struct HirToMirContext<'a> {
     raw_anon_symbols: BTreeSet<SymbolId>,
 
     /// Allocation sizes for class instances (in bytes).
-    /// Maps class TypeId → allocation size. Populated during register_class_metadata.
-    /// Used by the New handler to allocate the correct size for objects.
-    class_alloc_sizes: BTreeMap<TypeId, u64>,
+    /// Keyed by the class declaration's SymbolId — the only id space that is
+    /// stable across compilation contexts. TypeIds are context-local and must
+    /// never key this map: a punned or shifted TypeId silently returns another
+    /// class's size and under-allocates.
+    class_alloc_sizes: BTreeMap<SymbolId, u64>,
 
     /// Name-keyed class allocation sizes (qualified_name → bytes).
     /// TypeIds are unstable across compilation contexts. This map provides a stable
@@ -1615,7 +1617,6 @@ impl<'a> HirToMirContext<'a> {
             return tast_type_id;
         }
 
-        let symbol_type_id = TypeId::from_raw(class_symbol.as_raw());
         let mut best: Option<(u8, TypeId)> = None;
         for (candidate_type_id, sym) in &self.class_type_to_symbol {
             if *sym != class_symbol {
@@ -1624,16 +1625,13 @@ impl<'a> HirToMirContext<'a> {
 
             // Prefer TypeIds that are known canonical class IDs:
             // 1) Present as a typedef in the current MIR module
-            // 2) Present in class_alloc_sizes (seeded from imported class metadata)
-            // 3) Not just the SymbolId-derived synthetic fallback.
+            // 2) Registered via register_class_metadata (every entry in
+            //    class_type_to_symbol is — this loop iterates that map, so the
+            //    check is constant; kept as a distinct tier for the tie-break).
             let score = if has_mir_type(*candidate_type_id) {
                 3
-            } else if self.class_alloc_sizes.contains_key(candidate_type_id) {
-                2
-            } else if *candidate_type_id != symbol_type_id {
-                1
             } else {
-                0
+                2
             };
 
             match best {
@@ -2094,49 +2092,47 @@ impl<'a> HirToMirContext<'a> {
         visited.insert(cur_type);
         loop {
             // Find the parent (`extends`) of the current class via its HIR decl,
-            // by type id first, then by symbol id.
-            let extends: Option<TypeId> = self
+            // by type id first, then by symbol id. Carry the declaration's
+            // `extends_symbol` alongside — it names the parent directly.
+            let extends: Option<(Option<TypeId>, Option<SymbolId>)> = self
                 .current_hir_types
                 .get(&cur_type)
                 .and_then(|d| match d {
-                    HirTypeDecl::Class(c) => c.extends,
+                    HirTypeDecl::Class(c) => Some((c.extends, c.extends_symbol)),
                     _ => None,
                 })
                 .or_else(|| {
                     cur_sym.and_then(|s| {
                         self.current_hir_types.values().find_map(|d| match d {
-                            HirTypeDecl::Class(c) if c.symbol_id == s => c.extends,
+                            HirTypeDecl::Class(c) if c.symbol_id == s => {
+                                Some((c.extends, c.extends_symbol))
+                            }
                             _ => None,
                         })
                     })
                 });
-            let Some(parent_type) = extends else { break };
+            let Some((parent_type_opt, extends_symbol)) = extends else {
+                break;
+            };
+            let Some(parent_type) = parent_type_opt else {
+                break;
+            };
             if !visited.insert(parent_type) {
                 break;
             }
-            let parent_sym = self
-                .type_table
-                .get(parent_type)
-                .and_then(|t| match &t.kind {
-                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                    _ => None,
-                });
-            // Parent's registered alloc size: by type id, by symbol-derived id,
-            // then by qualified/simple name.
-            let parent_size = self
-                .class_alloc_sizes
-                .get(&parent_type)
-                .copied()
-                // NOTE: a SymbolId-as-TypeId pun used to sit here as a middle
-                // fallback. Its guard only rejected ids positively attributed to
-                // a DIFFERENT class, so when the punned id was absent from
-                // `class_type_to_symbol` it blindly trusted `class_alloc_sizes`
-                // — and TypeIds are context-local, so merely declaring one more
-                // type (`Single`) shifted them onto a wrong entry. That
-                // under-allocated the subclass and corrupted the heap silently:
-                // the llama example SIGSEGV'd during lm_head requantisation with
-                // no diagnostic. Resolve by exact TypeId, else by NAME, which is
-                // stable across the shift. Never by raw-bit coincidence.
+            let parent_sym = extends_symbol.or_else(|| {
+                self.type_table
+                    .get(parent_type)
+                    .and_then(|t| match &t.kind {
+                        crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+            });
+            // Parent's registered alloc size: by declaring SymbolId, then by
+            // qualified/simple name. Both are stable across compilation
+            // contexts; context-local TypeIds must never key this lookup.
+            let parent_size = parent_sym
+                .and_then(|ps| self.class_alloc_sizes.get(&ps).copied())
                 .or_else(|| {
                     parent_sym
                         .and_then(|ps| self.symbol_table.get_symbol(ps))
@@ -20143,63 +20139,41 @@ impl<'a> HirToMirContext<'a> {
                 let _class_mir_type = self.convert_type(*class_type);
 
                 // Look up pre-computed allocation size from register_class_metadata.
-                // The HIR type registry uses TypeId::from_raw(symbol_id), so convert
-                // the TAST class_type via its symbol_id for the lookup.
-                let registry_type_id = actual_symbol_id.map(|sid| TypeId::from_raw(sid.as_raw()));
-                let obj_size: u64 = registry_type_id
-                    .and_then(|tid| self.class_alloc_sizes.get(&tid).copied())
-                    // Also try the TAST class_type directly — the hir_module.types key may differ
-                    // from TypeId::from_raw(symbol_id) for stdlib classes (e.g., Exception).
-                    .or_else(|| self.class_alloc_sizes.get(class_type).copied())
-                    // Fallback: derive from field_index_map, since class_alloc_sizes TypeIds
-                    // differ across compilation contexts but field_index_map uses SymbolIds.
-                    // alloc_size = (max_slot + 1) * 8 (header at slot 0, user fields at 1+).
+                // Key order: same-context SymbolId, then QUALIFIED NAME — the only
+                // key stable across compilation contexts. Context-local TypeIds
+                // (including accumulated cross-context TypeId→SymbolId maps) must
+                // never be consulted: a shifted id resolves to another class's
+                // size and silently under-allocates.
+                let alloc_dbg = std::env::var_os("RAYZOR_ALLOC_DEBUG").is_some();
+                let stage = std::cell::Cell::new("sym");
+                let class_sym_for_name = actual_symbol_id.or_else(|| {
+                    self.type_table
+                        .get(*class_type)
+                        .and_then(|t| match &t.kind {
+                            crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                            _ => None,
+                        })
+                });
+                let class_qname: Option<&str> = class_sym_for_name
+                    .and_then(|sid| self.symbol_table.get_symbol(sid))
+                    .and_then(|sym| {
+                        sym.qualified_name
+                            .and_then(|n| self.string_interner.get(n))
+                            .or_else(|| self.string_interner.get(sym.name))
+                    });
+                let obj_size: u64 = actual_symbol_id
+                    .and_then(|sid| self.class_alloc_sizes.get(&sid).copied())
                     .or_else(|| {
-                        let target_sym = actual_symbol_id?;
-                        let mut max_idx = 0u32;
-                        let mut found = false;
-                        for &(class_ty, idx) in self.field_index_map.values() {
-                            let owner =
-                                self.class_type_to_symbol
-                                    .get(&class_ty)
-                                    .copied()
-                                    .or_else(|| {
-                                        if class_ty == *class_type {
-                                            actual_symbol_id
-                                        } else {
-                                            None
-                                        }
-                                    });
-                            if owner == Some(target_sym) {
-                                if idx > max_idx {
-                                    max_idx = idx;
-                                }
-                                found = true;
-                            }
-                        }
-                        if found {
-                            Some((max_idx as u64 + 1) * 8)
-                        } else {
-                            None
-                        }
-                    })
-                    // Fallback: look up by class name (stable across compilation contexts)
-                    .or_else(|| {
-                        let sym_id = actual_symbol_id?;
-                        let class_name = self.symbol_table.get_symbol(sym_id).and_then(|sym| {
-                            sym.qualified_name
-                                .and_then(|n| self.string_interner.get(n))
-                                .or_else(|| self.string_interner.get(sym.name))
-                        })?;
-                        self.class_alloc_sizes_by_name.get(class_name).copied()
+                        stage.set("name");
+                        class_qname.and_then(|n| self.class_alloc_sizes_by_name.get(n).copied())
                     })
                     // Fallback: declared instance-field count from the parsed
                     // AST (class compiles later than this module — no layout
                     // registered anywhere yet).
                     .or_else(|| {
+                        stage.set("ast");
                         let index = self.static_sig_index.as_ref()?.clone();
-                        let sym_id = actual_symbol_id?;
-                        let sym = self.symbol_table.get_symbol(sym_id)?;
+                        let sym = self.symbol_table.get_symbol(class_sym_for_name?)?;
                         let qname = sym.qualified_name.and_then(|n| self.string_interner.get(n));
                         let bare = self.string_interner.get(sym.name);
                         let mut index = index.borrow_mut();
@@ -20212,7 +20186,28 @@ impl<'a> HirToMirContext<'a> {
                             })?;
                         Some((count as u64 + 1) * 8)
                     })
-                    .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
+                    .unwrap_or_else(|| {
+                        stage.set("argcount");
+                        ((args.len() as u64 + 1) * 8).max(16)
+                    });
+                if alloc_dbg {
+                    let cname = actual_symbol_id
+                        .and_then(|sid| self.symbol_table.get_symbol(sid))
+                        .and_then(|sym| {
+                            sym.qualified_name
+                                .and_then(|n| self.string_interner.get(n))
+                                .or_else(|| self.string_interner.get(sym.name))
+                        })
+                        .unwrap_or("<?>");
+                    eprintln!(
+                        "[alloc-size] class={} sym={:?} type={:?} stage={} size={}",
+                        cname,
+                        actual_symbol_id,
+                        class_type,
+                        stage.get(),
+                        obj_size
+                    );
+                }
                 // Ensure the allocation covers inherited fields: a subclass of an
                 // imported class (e.g. MyException extends haxe.Exception) can be
                 // registered with an undersized `obj_size` because the parent's
@@ -40454,7 +40449,7 @@ impl<'a> HirToMirContext<'a> {
         // Record allocation size: field_index is the next available index,
         // so total slots = field_index (includes header at index 0).
         let alloc_size = (field_index as u64 * 8).max(16);
-        self.class_alloc_sizes.insert(type_id, alloc_size);
+        self.class_alloc_sizes.insert(class.symbol_id, alloc_size);
         // Also store by qualified class name for cross-compilation-context lookups.
         // TypeIds are unstable across compilation units, but class names are stable.
         let class_name_for_alloc = self
@@ -42206,7 +42201,7 @@ pub struct MirLoweringResult {
     pub constructor_name_map: BTreeMap<String, IrFunctionId>,
     /// Class allocation sizes (TypeId -> byte size)
     /// Exported so importing modules know how much memory to allocate for `new ClassName()`
-    pub class_alloc_sizes: BTreeMap<TypeId, u64>,
+    pub class_alloc_sizes: BTreeMap<SymbolId, u64>,
     /// Name-keyed class allocation sizes (class_name → bytes).
     /// Stable across compilation contexts where TypeIds differ.
     pub class_alloc_sizes_by_name: BTreeMap<String, u64>,
@@ -42254,7 +42249,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_field_index_map: BTreeMap<SymbolId, (TypeId, u32)>,
     external_property_access_map: BTreeMap<SymbolId, crate::tast::PropertyAccessInfo>,
     external_constructor_name_map: BTreeMap<String, IrFunctionId>,
-    external_class_alloc_sizes: BTreeMap<TypeId, u64>,
+    external_class_alloc_sizes: BTreeMap<SymbolId, u64>,
     external_class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
     external_class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
     external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
@@ -42333,43 +42328,17 @@ pub fn lower_hir_to_mir_with_function_map(
     // `Bytes.length` must not resolve to `StringBuf.get_length`).
     context.field_class_names = external_field_class_names;
 
-    // Also populate from the TypeId-keyed map + symbol table.
-    for (&type_id, &size) in &context.class_alloc_sizes {
-        if let Some(&sym_id) = context.class_type_to_symbol.get(&type_id) {
-            if let Some(sym) = symbol_table.get_symbol(sym_id) {
-                let name = sym
-                    .qualified_name
-                    .and_then(|n| string_interner.get(n))
-                    .or_else(|| string_interner.get(sym.name));
-                if let Some(name) = name {
-                    context
-                        .class_alloc_sizes_by_name
-                        .insert(name.to_string(), size);
-                }
-            }
-        }
-    }
-    // Also try to resolve names directly from the type_table for entries not in class_type_to_symbol
-    {
-        let tt = type_table.borrow();
-        for (&type_id, &size) in &context.class_alloc_sizes {
-            if context.class_type_to_symbol.contains_key(&type_id) {
-                continue; // Already handled above
-            }
-            if let Some(info) = tt.get(type_id) {
-                if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &info.kind {
-                    if let Some(sym) = symbol_table.get_symbol(*symbol_id) {
-                        let name = sym
-                            .qualified_name
-                            .and_then(|n| string_interner.get(n))
-                            .or_else(|| string_interner.get(sym.name));
-                        if let Some(name) = name {
-                            context
-                                .class_alloc_sizes_by_name
-                                .insert(name.to_string(), size);
-                        }
-                    }
-                }
+    // Also populate the name-keyed map from the SymbolId-keyed one.
+    for (&sym_id, &size) in &context.class_alloc_sizes {
+        if let Some(sym) = symbol_table.get_symbol(sym_id) {
+            let name = sym
+                .qualified_name
+                .and_then(|n| string_interner.get(n))
+                .or_else(|| string_interner.get(sym.name));
+            if let Some(name) = name {
+                context
+                    .class_alloc_sizes_by_name
+                    .insert(name.to_string(), size);
             }
         }
     }

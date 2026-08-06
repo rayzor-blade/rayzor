@@ -183,9 +183,11 @@ pub struct CompilationUnit {
     /// class/interface (primitive, anonymous, etc.).
     import_function_param_iface_names: BTreeMap<crate::ir::IrFunctionId, Vec<Option<String>>>,
 
-    /// Accumulated class allocation sizes from imported files (TypeId -> byte size)
-    /// Passed to user file's MIR lowering so it knows how much memory to allocate for imported classes
-    import_class_alloc_sizes: BTreeMap<crate::tast::TypeId, u64>,
+    /// Accumulated class allocation sizes from imported files (SymbolId -> byte size).
+    /// Keyed by the class declaration's SymbolId — stable across module contexts,
+    /// unlike TypeIds. Passed to user file's MIR lowering so it knows how much
+    /// memory to allocate for imported classes.
+    import_class_alloc_sizes: BTreeMap<crate::tast::SymbolId, u64>,
 
     /// Name-keyed class allocation sizes (class_name → bytes).
     /// Stable across compilation contexts where TypeIds differ.
@@ -974,7 +976,7 @@ impl CompilationUnit {
         function_map: &BTreeMap<crate::tast::SymbolId, crate::ir::IrFunctionId>,
         field_index_map: &BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
         constructor_name_map: &BTreeMap<String, crate::ir::IrFunctionId>,
-        class_alloc_sizes: &BTreeMap<crate::tast::TypeId, u64>,
+        class_alloc_sizes: &BTreeMap<crate::tast::SymbolId, u64>,
         field_class_names: &BTreeMap<crate::tast::SymbolId, String>,
         property_access_map: &BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
         function_param_hir_types: &BTreeMap<crate::ir::IrFunctionId, Vec<crate::tast::TypeId>>,
@@ -1088,21 +1090,16 @@ impl CompilationUnit {
             }
         }
 
-        // Convert class_alloc_sizes: TypeId → u64 to (class_name, size)
-        for (type_id, size) in class_alloc_sizes {
-            let type_table = self.type_table.borrow();
-            if let Some(ty) = type_table.get(*type_id) {
-                if let crate::tast::TypeKind::Class { symbol_id, .. } = &ty.kind {
-                    if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
-                        let name = sym
-                            .qualified_name
-                            .and_then(|n| self.string_interner.get(n))
-                            .or_else(|| self.string_interner.get(sym.name))
-                            .unwrap_or("<unknown>")
-                            .to_string();
-                        class_sizes.push((name, *size));
-                    }
-                }
+        // Convert class_alloc_sizes: SymbolId → u64 to (class_name, size)
+        for (symbol_id, size) in class_alloc_sizes {
+            if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                let name = sym
+                    .qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(sym.name))
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                class_sizes.push((name, *size));
             }
         }
 
@@ -3600,9 +3597,9 @@ impl CompilationUnit {
             // Name-based (stable across contexts)
             self.import_class_alloc_sizes_by_name
                 .insert(class_name.clone(), *size);
-            // TypeId-based (may be unstable)
-            if let Some((_class_sym, class_type, _)) = registered.get(class_name) {
-                self.import_class_alloc_sizes.insert(*class_type, *size);
+            // SymbolId-based (stable across contexts)
+            if let Some((class_sym, _class_type, _)) = registered.get(class_name) {
+                self.import_class_alloc_sizes.insert(*class_sym, *size);
             }
         }
 
@@ -3626,8 +3623,8 @@ impl CompilationUnit {
                     let size = ((*max_idx as u64) + 1) * 8;
                     self.import_class_alloc_sizes_by_name
                         .insert(class_name.to_string(), size);
-                    if let Some((_class_sym, class_type, _)) = registered.get(*class_name) {
-                        self.import_class_alloc_sizes.insert(*class_type, size);
+                    if let Some((class_sym, _class_type, _)) = registered.get(*class_name) {
+                        self.import_class_alloc_sizes.insert(*class_sym, size);
                     }
                 }
             }
