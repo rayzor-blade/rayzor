@@ -40101,15 +40101,44 @@ impl<'a> HirToMirContext<'a> {
         self.builder.module.add_type(typedef);
     }
 
-    /// Recursively collect fields from parent classes
+    /// Qualified name of a class symbol, the only identity stable across
+    /// compilation contexts.
+    fn class_qualified_name(&self, symbol: SymbolId) -> Option<String> {
+        self.symbol_table.get_symbol(symbol).and_then(|s| {
+            s.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(s.name))
+                .map(|s| s.to_string())
+        })
+    }
+
+    /// Recursively collect fields from parent classes.
+    ///
+    /// `parent_symbol` is the declaration's `extends_symbol` where known. Prefer
+    /// it over anything derived from `parent_type`: `HirClass::extends` is a
+    /// SymbolId punned into a TypeId, so resolving the parent through the type
+    /// table can land on an unrelated class. The parent set decided here becomes
+    /// the child's field indices AND its allocation size, so a wrong parent
+    /// silently corrupts the heap.
     fn collect_inherited_fields(
         &mut self,
         parent_type: Option<TypeId>,
+        parent_symbol_hint: Option<SymbolId>,
         child_type: TypeId,
         fields: &mut Vec<IrField>,
         field_index: &mut u32,
         walk: &mut Vec<SymbolId>,
     ) {
+        // A declaration-named parent wins over a punned-TypeId lookup.
+        if let Some(hint) = parent_symbol_hint {
+            if let Some(parent_class) = self.current_hir_types.values().find_map(|d| match d {
+                HirTypeDecl::Class(c) if c.symbol_id == hint => Some(c),
+                _ => None,
+            }) {
+                self.add_parent_fields(parent_class, child_type, fields, field_index, walk);
+                return;
+            }
+        }
         if let Some(parent_type_id) = parent_type {
             // Try direct lookup first
             if let Some(HirTypeDecl::Class(parent_class)) =
@@ -40121,68 +40150,82 @@ impl<'a> HirToMirContext<'a> {
                 // hir_module.types uses declaration type. Search by matching class type.
 
                 // Get the type definition to find the class symbol
-                if let Some(parent_type_def) = self.type_table.get(parent_type_id) {
-                    if let crate::tast::TypeKind::Class {
-                        symbol_id: parent_symbol,
-                        ..
-                    } = &parent_type_def.kind
-                    {
-                        // Find the HIR class by symbol_id
-                        for (decl_type_id, type_decl) in self.current_hir_types.iter() {
-                            if let HirTypeDecl::Class(class) = type_decl {
-                                if class.symbol_id == *parent_symbol {
-                                    self.add_parent_fields(
-                                        class,
-                                        child_type,
-                                        fields,
-                                        field_index,
-                                        walk,
-                                    );
-                                    return;
-                                }
+                let type_table_symbol = self.type_table.get(parent_type_id).and_then(|t| match &t
+                    .kind
+                {
+                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                });
+                if let Some(parent_symbol) = parent_symbol_hint.or(type_table_symbol).as_ref() {
+                    // Find the HIR class by symbol_id
+                    for (decl_type_id, type_decl) in self.current_hir_types.iter() {
+                        if let HirTypeDecl::Class(class) = type_decl {
+                            if class.symbol_id == *parent_symbol {
+                                self.add_parent_fields(
+                                    class,
+                                    child_type,
+                                    fields,
+                                    field_index,
+                                    walk,
+                                );
+                                return;
                             }
                         }
+                    }
 
-                        // Cross-module parent class fallback:
-                        // Collect parent fields from field_index_map (seeded from external modules).
-                        // These already include inherited fields from grandparent classes.
-                        let parent_sym = *parent_symbol;
-                        let mut parent_fields: Vec<(SymbolId, u32)> = Vec::new();
-                        for (field_sym, (class_ty, idx)) in &self.field_index_map {
-                            if *class_ty == parent_type_id
-                                || self.class_type_to_symbol.get(class_ty) == Some(&parent_sym)
-                            {
-                                parent_fields.push((*field_sym, *idx));
+                    // Cross-module parent class fallback:
+                    // Collect parent fields from field_index_map (seeded from external modules).
+                    // These already include inherited fields from grandparent classes.
+                    let parent_sym = *parent_symbol;
+                    let parent_name = self.class_qualified_name(parent_sym);
+                    let mut parent_fields: Vec<(SymbolId, u32)> = Vec::new();
+                    for (field_sym, (class_ty, idx)) in &self.field_index_map {
+                        let id_match = *class_ty == parent_type_id
+                            || self.class_type_to_symbol.get(class_ty) == Some(&parent_sym);
+                        if !id_match {
+                            continue;
+                        }
+                        // Both id tests above are raw-id coincidences across
+                        // context-local spaces. Where the field records its
+                        // declaring class, that NAME is the stable identity —
+                        // use it to reject another class's fields, which would
+                        // otherwise land in this object's layout and size.
+                        if let (Some(owner), Some(expected)) = (
+                            self.field_class_names.get(field_sym),
+                            parent_name.as_deref(),
+                        ) {
+                            if !Self::class_names_match(owner, expected) {
+                                continue;
                             }
                         }
-                        parent_fields.sort_by_key(|(_, idx)| *idx);
+                        parent_fields.push((*field_sym, *idx));
+                    }
+                    parent_fields.sort_by_key(|(_, idx)| *idx);
 
-                        for (field_sym, _orig_idx) in &parent_fields {
-                            let field_name = self
-                                .symbol_table
-                                .get_symbol(*field_sym)
-                                .and_then(|s| self.string_interner.get(s.name))
-                                .unwrap_or("<unknown>")
-                                .to_string();
-                            let field_ir_type = self
-                                .symbol_table
-                                .get_symbol(*field_sym)
-                                .map(|s| self.convert_type(s.type_id))
-                                .unwrap_or(IrType::I64);
+                    for (field_sym, _orig_idx) in &parent_fields {
+                        let field_name = self
+                            .symbol_table
+                            .get_symbol(*field_sym)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .unwrap_or("<unknown>")
+                            .to_string();
+                        let field_ir_type = self
+                            .symbol_table
+                            .get_symbol(*field_sym)
+                            .map(|s| self.convert_type(s.type_id))
+                            .unwrap_or(IrType::I64);
 
-                            // Re-map this field to the child class with correct index
-                            self.field_index_map
-                                .insert(*field_sym, (child_type, *field_index));
+                        // Re-map this field to the child class with correct index
+                        self.field_index_map
+                            .insert(*field_sym, (child_type, *field_index));
 
-                            fields.push(IrField {
-                                name: field_name,
-                                ty: field_ir_type,
-                                offset: None,
-                            });
+                        fields.push(IrField {
+                            name: field_name,
+                            ty: field_ir_type,
+                            offset: None,
+                        });
 
-                            *field_index += 1;
-                        }
-                        return;
+                        *field_index += 1;
                     }
                 }
             }
@@ -40238,7 +40281,14 @@ impl<'a> HirToMirContext<'a> {
         walk.push(parent_class.symbol_id);
 
         // First, recursively collect grandparent fields
-        self.collect_inherited_fields(parent_class.extends, child_type, fields, field_index, walk);
+        self.collect_inherited_fields(
+            parent_class.extends,
+            parent_class.extends_symbol,
+            child_type,
+            fields,
+            field_index,
+            walk,
+        );
 
         // Then add parent's own fields
         let parent_class_name = self
@@ -40310,6 +40360,7 @@ impl<'a> HirToMirContext<'a> {
         let mut walk = vec![class.symbol_id];
         self.collect_inherited_fields(
             class.extends,
+            class.extends_symbol,
             type_id,
             &mut fields,
             &mut field_index,
