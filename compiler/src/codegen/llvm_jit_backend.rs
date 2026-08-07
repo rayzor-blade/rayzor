@@ -776,6 +776,36 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// non-negative; for Q8 flash attention the caller stores `q + 128` and
     /// applies a block-sum correction. Gated on the host having AVX-VNNI so
     /// the JIT never bakes an instruction the running CPU cannot decode.
+    /// Narrow/widen an integer scalar to a vector's lane type before an
+    /// insert. The MIR vector type declares the lane width; a Haxe `Int` is
+    /// always i32, so building an i8x16 or i16x8 vector needs a truncation.
+    /// Non-integer lanes (f32/f64) pass through — those already match.
+    fn coerce_scalar_to_lane(
+        builder: &inkwell::builder::Builder<'ctx>,
+        scalar: inkwell::values::BasicValueEnum<'ctx>,
+        lane_ty: inkwell::types::BasicTypeEnum<'ctx>,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, String> {
+        use inkwell::types::BasicTypeEnum;
+        let (BasicTypeEnum::IntType(want), true) = (lane_ty, scalar.is_int_value()) else {
+            return Ok(scalar);
+        };
+        let have = scalar.into_int_value();
+        let (hw, ww) = (have.get_type().get_bit_width(), want.get_bit_width());
+        if hw == ww {
+            return Ok(scalar);
+        }
+        let out = if hw > ww {
+            builder
+                .build_int_truncate(have, want, "lane_trunc")
+                .map_err(|e| format!("lane truncate failed: {}", e))?
+        } else {
+            builder
+                .build_int_s_extend(have, want, "lane_sext")
+                .map_err(|e| format!("lane extend failed: {}", e))?
+        };
+        Ok(out.into())
+    }
+
     /// Dynamic byte shuffle via `pshufb`. Errors (never silently degrades) when
     /// the host lacks SSSE3/AVX2 — a scalar emulation would cost far more than
     /// the instruction this exists to emit.
@@ -4645,6 +4675,15 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let vec_llvm_ty = self.translate_type(vec_ty)?;
                 let vec_type = vec_llvm_ty.into_vector_type();
                 let lane_count = vec_type.get_size();
+                // The MIR vector type is authoritative for the lane width. A
+                // Haxe Int arriving for an i8x16 lane must narrow first, or
+                // insert_element would build a <16 x i32> and every later use
+                // fails verification.
+                let scalar_val = Self::coerce_scalar_to_lane(
+                    &self.builder,
+                    scalar_val,
+                    vec_type.get_element_type(),
+                )?;
 
                 // Build splat by inserting scalar into all lanes
                 let undef = vec_type.get_undef();
@@ -4690,6 +4729,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             } => {
                 let vec_val = self.get_value(*vector)?.into_vector_value();
                 let scalar_val = self.get_value(*scalar)?;
+                let scalar_val = Self::coerce_scalar_to_lane(
+                    &self.builder,
+                    scalar_val,
+                    vec_val.get_type().get_element_type(),
+                )?;
                 let idx = self.context.i32_type().const_int(*index as u64, false);
                 let result = self
                     .builder
