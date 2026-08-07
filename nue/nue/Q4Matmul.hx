@@ -802,15 +802,29 @@ class Q4Matmul {
         var i2 = SIMD4i32.splat(sc2) * dv2 + SIMD4i32.splat(sc6) * dv6;
         var i3 = SIMD4i32.splat(sc3) * dv3 + SIMD4i32.splat(sc7) * dv7;
         var isum = (i0 + i1) + (i2 + i3);
-        var b4 = bsBase * 4;
-        var imin = mn0 * (Mem.loadI32(bsAddr + Usize.fromInt(b4)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 4)))
-                 + mn1 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 8)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 12)))
-                 + mn2 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 16)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 20)))
-                 + mn3 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 24)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 28)))
-                 + mn4 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 32)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 36)))
-                 + mn5 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 40)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 44)))
-                 + mn6 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 48)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 52)))
-                 + mn7 * (Mem.loadI32(bsAddr + Usize.fromInt(b4 + 56)) + Mem.loadI32(bsAddr + Usize.fromInt(b4 + 60)));
+        // ONE i32->i64 conversion for the whole bsums walk instead of 16. The
+        // eight pairs sit at a fixed 8-byte stride, so derive 64-bit cursors by
+        // addition — same shape as the wG/aA walk above, and this block is
+        // inlined once per super-block per row, so the conversions were the
+        // bulk of the kernel's sign-extends.
+        var bs0:Usize = bsAddr + Usize.fromInt(bsBase * 4);
+        var S4:Usize = Usize.fromInt(4);
+        var S8:Usize = Usize.fromInt(8);
+        var bs1:Usize = bs0 + S8;
+        var bs2:Usize = bs1 + S8;
+        var bs3:Usize = bs2 + S8;
+        var bs4:Usize = bs3 + S8;
+        var bs5:Usize = bs4 + S8;
+        var bs6:Usize = bs5 + S8;
+        var bs7:Usize = bs6 + S8;
+        var imin = mn0 * (Mem.loadI32(bs0) + Mem.loadI32(bs0 + S4))
+                 + mn1 * (Mem.loadI32(bs1) + Mem.loadI32(bs1 + S4))
+                 + mn2 * (Mem.loadI32(bs2) + Mem.loadI32(bs2 + S4))
+                 + mn3 * (Mem.loadI32(bs3) + Mem.loadI32(bs3 + S4))
+                 + mn4 * (Mem.loadI32(bs4) + Mem.loadI32(bs4 + S4))
+                 + mn5 * (Mem.loadI32(bs5) + Mem.loadI32(bs5 + S4))
+                 + mn6 * (Mem.loadI32(bs6) + Mem.loadI32(bs6 + S4))
+                 + mn7 * (Mem.loadI32(bs7) + Mem.loadI32(bs7 + S4));
         return xd * (d * isum.sum() - dmin * imin);
     }
 
