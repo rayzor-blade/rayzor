@@ -3519,6 +3519,11 @@ impl StdlibMapping {
             // term to recover signed*signed math while still unlocking VNNI.
             map_method!(static "rayzor_SIMD4i32", "dotI8U8" => "SIMD4i32_dot16_i8_u8", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
+            // Byte-shuffle, result reinterpreted as i32x4 — the scale broadcast.
+            map_method!(static "rayzor_SIMD4i32", "shuffleBytes" => "SIMD4i32_shuffle_bytes", params: 2, mir_wrapper,
+                types: &[VecI8x16, VecI8x16] => VecI32x4),
+            map_method!(static "rayzor_SIMD4i32", "load" => "SIMD4i32_load", params: 1, mir_wrapper,
+                types: &[I64] => VecI32x4),
         ];
 
         self.register_from_tuples(mappings);
@@ -3610,6 +3615,14 @@ impl StdlibMapping {
                 types: &[VecI8x16, I32] => VecI8x16),
             map_method!(static "rayzor_SIMD16i8", "ushr" => "SIMD16i8_ushr", params: 2, mir_wrapper,
                 types: &[VecI8x16, I32] => VecI8x16),
+            // Byte-lane shuffle (pshufb / tbl1 / i8x16.swizzle). Index contract
+            // is on IrInstruction::VectorShuffle: 0..15 selects, bit 7 yields 0.
+            map_method!(static "rayzor_SIMD16i8", "shuffle" => "SIMD16i8_shuffle", params: 2, mir_wrapper,
+                types: &[VecI8x16, VecI8x16] => VecI8x16),
+            // 16 literals -> a constant byte vector, for shuffle masks.
+            map_method!(static "rayzor_SIMD16i8", "make16" => "SIMD16i8_make16", params: 16, mir_wrapper,
+                types: &[I32, I32, I32, I32, I32, I32, I32, I32,
+                         I32, I32, I32, I32, I32, I32, I32, I32] => VecI8x16),
             // v.get(lane): Int — read one i8 lane (sign-extended). In-guest byte
             // extraction for the Q4 block header (d/dmin/scales); mask &0xFF for unsigned.
             map_method!(instance "rayzor_SIMD16i8", "get" => "SIMD16i8_extract", params: 1, mir_wrapper,

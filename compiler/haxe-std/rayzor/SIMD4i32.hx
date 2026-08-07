@@ -32,6 +32,21 @@ extern abstract SIMD4i32 {
     @:native("make")
     public static function make(x:Int, y:Int, z:Int, w:Int):SIMD4i32;
 
+    /**
+     * Byte-shuffle `a` (see `SIMD16i8.shuffle` for the index contract) and
+     * reinterpret the 16 result bytes as 4 i32 lanes.
+     *
+     * A mask of `{j, 0x80, 0x80, 0x80}` repeated four times zero-extends byte
+     * `j` of `a` into all four i32 lanes in ONE instruction — replacing a
+     * general-register round trip (`vmovd` + `vpbroadcastd`) per value.
+     */
+    @:native("shuffleBytes")
+    public static function shuffleBytes(a:SIMD16i8, idx:SIMD16i8):SIMD4i32;
+
+    /** Load 4 contiguous i32 from a pointer. */
+    @:native("load")
+    public static function load(ptr:Ptr<Int>):SIMD4i32;
+
     /** Element-wise addition */
     @:native("add")
     @:op(A + B)

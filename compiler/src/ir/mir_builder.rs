@@ -703,6 +703,27 @@ impl MirBuilder {
         dest
     }
 
+    /// Dynamic byte shuffle. `result_ty` is what the shuffled bytes are
+    /// reinterpreted as — see `IrInstruction::VectorShuffle` for the index
+    /// contract, which callers must respect (0..15 select, bit 7 set yields 0).
+    pub fn vector_shuffle(
+        &mut self,
+        a: IrId,
+        idx: IrId,
+        byte_lanes: usize,
+        result_ty: IrType,
+    ) -> IrId {
+        let dest = self.alloc_reg_typed(result_ty.clone());
+        self.insert_inst(IrInstruction::VectorShuffle {
+            dest,
+            a,
+            idx,
+            byte_lanes,
+            result_ty,
+        });
+        dest
+    }
+
     /// Store SIMD vector to contiguous memory
     pub fn vector_store(&mut self, ptr: IrId, value: IrId, vec_ty: IrType) {
         self.insert_inst(IrInstruction::VectorStore { ptr, value, vec_ty });

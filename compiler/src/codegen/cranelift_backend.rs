@@ -5004,6 +5004,48 @@ impl CraneliftBackend {
                 value_map.insert(*dest, result);
             }
 
+            IrInstruction::VectorShuffle {
+                dest,
+                a,
+                idx,
+                byte_lanes,
+                result_ty,
+            } => {
+                if *byte_lanes != 16 {
+                    return Err(format!(
+                        "VectorShuffle: cranelift models 128-bit vectors only (got {} bytes) — \
+                         gate the caller behind `#if llvm`",
+                        byte_lanes
+                    ));
+                }
+                let a_v = *value_map
+                    .get(a)
+                    .ok_or_else(|| format!("VectorShuffle a {:?} not found", a))?;
+                let i_v = *value_map
+                    .get(idx)
+                    .ok_or_else(|| format!("VectorShuffle idx {:?} not found", idx))?;
+                // `swizzle` is i8x16-only and zeroes any index >= 16, which is
+                // STRICTER than our contract (16..127 unspecified), so it is
+                // always a correct implementation of it.
+                let r = builder.ins().swizzle(a_v, i_v);
+                let want = match result_ty {
+                    IrType::Vector { element, count } => {
+                        Self::mir_vector_to_cranelift(element, *count)?
+                    }
+                    other => {
+                        return Err(format!("VectorShuffle: non-vector result type {:?}", other))
+                    }
+                };
+                let r = if want != builder.func.dfg.value_type(r) {
+                    builder
+                        .ins()
+                        .bitcast(want, cranelift_codegen::ir::MemFlagsData::new(), r)
+                } else {
+                    r
+                };
+                value_map.insert(*dest, r);
+            }
+
             // TODO: Implement remaining instructions
             _ => {
                 return Err(format!("Unsupported instruction: {:?}", instruction));

@@ -856,6 +856,10 @@ impl InstructionExt for IrInstruction {
                 replace(a);
                 replace(b);
             }
+            IrInstruction::VectorShuffle { a, idx, .. } => {
+                replace(a);
+                replace(idx);
+            }
             // Atomic instructions (silent _ => {} below would miscompile these)
             IrInstruction::AtomicLoad { ptr, .. } => replace(ptr),
             IrInstruction::AtomicStore { ptr, value, .. } => {

@@ -5136,6 +5136,30 @@ impl<'a> FunctionLowerer<'a> {
                 self.set_reg(f, *dest);
             }
 
+            IrInstruction::VectorShuffle {
+                dest,
+                a,
+                idx,
+                byte_lanes,
+                ..
+            } => {
+                if *byte_lanes != 16 {
+                    panic!(
+                        "wasm has no {}-byte swizzle: wasm SIMD is v128 only. Gate the caller \
+                         behind `#if !wasm` and provide a SIMD16i8 path.",
+                        byte_lanes
+                    );
+                }
+                self.get_reg(f, *a);
+                self.get_reg(f, *idx);
+                // i8x16.swizzle zeroes any index >= 16 — stricter than our
+                // contract (16..127 unspecified), so it always satisfies it.
+                f.instruction(&Instruction::I8x16Swizzle);
+                self.set_reg(f, *dest);
+                // No result_ty handling: v128 is untyped on wasm, so the
+                // reinterpret is a no-op.
+            }
+
             // Load 16 bytes from memory into a v128
             IrInstruction::VectorLoad { dest, ptr, .. } => {
                 let off = self.emit_addr(f, *ptr);

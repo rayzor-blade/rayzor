@@ -1441,6 +1441,25 @@ impl CBackend {
                 }
             }
 
+            IrInstruction::VectorShuffle {
+                dest,
+                a,
+                idx,
+                byte_lanes,
+                ..
+            } => {
+                // Inherits the pre-existing C-backend limitation that
+                // IrType::Vector maps to i64, so r{} is an 8-byte local — the
+                // same overrun VectorLoad and VectorDot already have here.
+                self.emit_line(&format!(
+                    "{{ unsigned char _t[{n}]; unsigned char *_a=(unsigned char*)&r{a}, *_i=(unsigned char*)&r{i}; for (int _k=0;_k<{n};_k++) _t[_k] = (_i[_k]&0x80) ? 0 : _a[_i[_k]&15]; __builtin_memcpy(&r{d}, _t, {n}); }}",
+                    n = byte_lanes,
+                    a = a.as_u32(),
+                    i = idx.as_u32(),
+                    d = dest.as_u32()
+                ));
+            }
+
             IrInstruction::VectorUnaryOp {
                 dest,
                 op,

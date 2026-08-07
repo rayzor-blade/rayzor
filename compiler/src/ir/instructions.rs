@@ -467,6 +467,26 @@ pub enum IrInstruction {
         rhs_unsigned: bool,
     },
 
+    /// Dynamic byte-lane shuffle: byte `i` of `dest` is byte `idx[i]` of `a`.
+    /// Lowers to x86 `pshufb`, AArch64 `tbl1`, wasm `i8x16.swizzle`.
+    ///
+    /// CONTRACT — the intersection of those three, so all lower to ONE
+    /// instruction: `idx[i]` in 0..15 selects that lane of `a`; `idx[i]` with
+    /// bit 7 set yields 0. `idx[i]` in 16..127 is UNSPECIFIED (x86 wraps to the
+    /// low 4 bits, NEON/wasm zero). Callers must use 0..15 or 0x80.
+    ///
+    /// `result_ty` is the vector type the shuffled BYTES are reinterpreted as:
+    /// i8x16 for a byte result, i32x4 when the mask lays one byte into the low
+    /// byte of each i32 lane and 0x80 elsewhere. Operands are always byte
+    /// vectors of `byte_lanes`.
+    VectorShuffle {
+        dest: IrId,
+        a: IrId,
+        idx: IrId,
+        byte_lanes: usize,
+        result_ty: IrType,
+    },
+
     // === Atomic memory operations (sequentially consistent) ===
     /// Atomic load. dest = *ptr.
     AtomicLoad { dest: IrId, ptr: IrId, ty: IrType },
@@ -645,6 +665,7 @@ impl IrInstruction {
             IrInstruction::VectorUnaryOp { dest, .. } |
             IrInstruction::VectorMinMax { dest, .. } |
             IrInstruction::VectorDot { dest, .. } |
+            IrInstruction::VectorShuffle { dest, .. } |
             // Atomic instructions (AtomicStore omitted → falls to _ => None)
             IrInstruction::AtomicLoad { dest, .. } |
             IrInstruction::AtomicRmw { dest, .. } |
@@ -703,6 +724,7 @@ impl IrInstruction {
             | IrInstruction::VectorUnaryOp { dest, .. }
             | IrInstruction::VectorMinMax { dest, .. }
             | IrInstruction::VectorDot { dest, .. }
+            | IrInstruction::VectorShuffle { dest, .. }
             | IrInstruction::AtomicLoad { dest, .. }
             | IrInstruction::AtomicRmw { dest, .. }
             | IrInstruction::AtomicCas { dest, .. } => *dest = new_dest,
@@ -774,6 +796,7 @@ impl IrInstruction {
             IrInstruction::VectorUnaryOp { operand, .. } => vec![*operand],
             IrInstruction::VectorMinMax { left, right, .. } => vec![*left, *right],
             IrInstruction::VectorDot { acc, a, b, .. } => vec![*acc, *a, *b],
+            IrInstruction::VectorShuffle { a, idx, .. } => vec![*a, *idx],
             // Atomic instructions
             IrInstruction::AtomicLoad { ptr, .. } => vec![*ptr],
             IrInstruction::AtomicStore { ptr, value, .. } => vec![*ptr, *value],
