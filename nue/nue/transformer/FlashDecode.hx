@@ -8,6 +8,7 @@ import rayzor.SIMD16i8;
 import rayzor.Ptr;
 import rayzor.Usize;
 import rayzor.Mem;
+import rayzor.Bytes;
 import rayzor.concurrent.SpinPool;
 
 /**
@@ -76,14 +77,140 @@ class FlashDecode {
         seqQ>1/shifted-query experiment regressed full-model correctness; keep
         single-token flash live and make any future batch work opt in from a
         fresh, isolated implementation. */
+    /** Longest prompt the batched (prefill) path will take. 0 = disabled.
+        Prefill attention otherwise leaves Haxe entirely: it falls through to
+        `Tensor.bmmThreaded`, which runs on the RUST worker pool — measured at
+        23.5% of prefill, with a further ~18% lost to that pool and the Haxe
+        SpinPool spinning at each other across the handoff. */
+    // 0 = unread; stored as value+1 so a CROSS-MODULE DUPLICATE of this static
+    // (which starts at 0) re-reads the env instead of latching "disabled" —
+    // the same reason `_enabled`/`_pool` above avoid a -1 sentinel.
+    static var _batchMax:Int = 0;
+
     public static function batchMax():Int {
-        return 1;
+        if (_batchMax == 0) {
+            var v = Sys.getEnvOr("NUE_FLASH_BATCH", "RAYZOR_HAXE_FLASH_BATCH");
+            var n = (v != null && v != "") ? Std.int(Std.parseFloat(v)) : 0;
+            if (n < 0) n = 0;
+            _batchMax = n + 1;
+        }
+        return _batchMax - 1;
     }
 
+    // Batched-prefill scratch. Grown on demand and reused; sized per WORKER
+    // for the score/V buffers because rows are banded across the pool.
+    static var _bq:Bytes = null;
+    static var _bqs:Bytes = null;
+    static var _bsc:Bytes = null;
+    static var _bv:Bytes = null;
+
+    static inline function grow(b:Bytes, need:Int):Bytes {
+        if (b != null && b.length >= need) return b;
+        if (b != null) b.free();
+        return Bytes.alloc(need);
+    }
+
+    /**
+     * Batched (prefill) Q8 attention: `q` is [seqQ, numQHeads, headDim] F32
+     * contiguous, and the K/V for these rows are ALREADY in the cache, so
+     * query row `r` attends over keys `[0, baseLen + r]` — the causal mask is
+     * just a per-row cache length, no mask tensor.
+     *
+     * Returns a fresh [seqQ, numQHeads, headDim] F32 tensor, or null to fall
+     * back (shifted-Q form and the no-pool case are not implemented here).
+     */
     public static function decodeBatch(kc:Q8Cache, vc:Q8Cache, q:Tensor,
             baseLen:Int, seqQ:Int, numQHeads:Int, scale:Float,
             sp:Null<SpinPool>):Tensor {
-        return null;
+        if (sp == null || !usePool() || shiftedQ() || seqQ < 1) return null;
+        var numKvHeads = kc.numKvHeads;
+        var headDim = kc.headDim;
+        if (numQHeads % numKvHeads != 0) return null;
+        var group = Std.int(numQHeads / numKvHeads);
+        var bph = headDim >> 5;
+        if (bph < 1) return null;
+        var rowStride = kc.maxSeqLen;
+        if (baseLen + seqQ > rowStride) return null;
+
+        var nw = sp.workers();
+        if (nw < 1) nw = 1;
+        _bq = grow(_bq, seqQ * numQHeads * headDim);
+        _bqs = grow(_bqs, seqQ * numQHeads * bph * 4);
+        _bsc = grow(_bsc, nw * numQHeads * rowStride * 4);
+        _bv = grow(_bv, nw * numKvHeads * 128);
+
+        var qBase:Usize = q.data().raw();
+        var qqB:Usize = _bq.address();
+        var qscB:Usize = _bqs.address();
+
+        // Quantise every query row to per-32-block q8, exactly as `decode`
+        // does for its single row.
+        for (r in 0...seqQ) {
+            for (qh in 0...numQHeads) {
+                for (b in 0...bph) {
+                    var src = qBase + Usize.fromInt(((r * numQHeads + qh) * headDim + b * 32) * 4);
+                    var maxAbs = 0.0;
+                    for (i in 0...32) {
+                        var v = Mem.loadF32(src + Usize.fromInt(i * 4));
+                        var nv = -v;
+                        var av = v > nv ? v : nv;
+                        maxAbs = av > maxAbs ? av : maxAbs;
+                    }
+                    // Identical numerics to `decode`'s quantiser — same scale,
+                    // same rounding, same clamp, same unsigned byte store.
+                    var qs = maxAbs == 0.0 ? 0.0 : maxAbs / 127.0;
+                    var inv = qs == 0.0 ? 0.0 : 1.0 / qs;
+                    Mem.storeF32(qscB + Usize.fromInt(((r * numQHeads + qh) * bph + b) * 4), qs);
+                    var dst = qqB + Usize.fromInt((r * numQHeads + qh) * headDim + b * 32);
+                    for (i in 0...32) {
+                        var x = Mem.loadF32(src + Usize.fromInt(i * 4)) * inv;
+                        var iv = x >= 0 ? Std.int(x + 0.5) : Std.int(x - 0.5);
+                        if (iv > 127) iv = 127;
+                        if (iv < -128) iv = -128;
+                        Mem.storeU8(dst + Usize.fromInt(i), iv & 0xFF);
+                    }
+                }
+            }
+        }
+
+        var out = Tensor.zeros([seqQ, numQHeads, headDim], DType.F32);
+        var outB:Usize = out.data().raw();
+        var kBase:Usize = kc.data.address();
+        var vBase:Usize = vc.data.address();
+        var kScale:Usize = kc.scaleF32.address();
+        var vScale:Usize = vc.scaleF32.address();
+        var headBytes = kc.headBytes;
+        var rowBytes = kc.rowBytes;
+        var blocksPerRow:Int = kc.blocksPerRow;
+        var scBase:Usize = _bsc.address();
+        var vBaseScr:Usize = _bv.address();
+        var qRowBytes = numQHeads * headDim;
+        var qscRowFloats = numQHeads * bph;
+        var outRowFloats = numQHeads * headDim;
+
+        // Band over query ROWS: each row is independent and owns its output
+        // row, so the only shared state is the per-worker score/V scratch.
+        var band = function(lo:Int, hi:Int, w:Int):Void {
+            var scW = scBase + Usize.fromInt(w * numQHeads * rowStride * 4);
+            var vW = vBaseScr + Usize.fromInt(w * numKvHeads * 128);
+            for (r in lo...hi) {
+                var cacheLen = baseLen + r + 1;
+                var qqR = qqB + Usize.fromInt(r * qRowBytes);
+                var qscR = qscB + Usize.fromInt(r * qscRowFloats * 4);
+                var outR = outB + Usize.fromInt(r * outRowFloats * 4);
+                for (h in 0...numKvHeads) {
+                    bandOneSigned(h, group, bph, headBytes, rowBytes, cacheLen,
+                        rowStride, headDim, scale, kBase, vBase, qqR, qscR, scW,
+                        vW, outR, kScale, vScale, blocksPerRow);
+                }
+            }
+        };
+        sp.parallelRows(seqQ, band);
+        if (Sys.getEnvOr("NUE_FLASH_BATCH_DEBUG", "RAYZOR_FLASH_BATCH_DEBUG") != null) {
+            Sys.println("[flash-batch] seqQ=" + seqQ + " baseLen=" + baseLen
+                + " qHeads=" + numQHeads + " kvHeads=" + numKvHeads + " workers=" + nw);
+        }
+        return out;
     }
 
     /**
