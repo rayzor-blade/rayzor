@@ -1010,6 +1010,45 @@ pub fn save_bundle(path: impl AsRef<Path>, bundle: &RayzorBundle) -> Result<(), 
 /// println!("Loaded {} modules", bundle.module_count());
 /// let entry = bundle.entry_module().unwrap();
 /// ```
+/// Magic + version prefix of a bundle. Postcard is a sequential format and
+/// these are the first two fields of `RayzorBundle`, so they can be decoded
+/// from the head of the buffer WITHOUT touching the module payload.
+///
+/// This exists because the version check used to run only after the whole
+/// struct had deserialized — including `modules: Vec<IrModule>`. Any change to
+/// the MIR enums therefore failed during deserialization and the guard never
+/// ran, surfacing as a bare "Serde Deserialization Error" with nothing telling
+/// the user their bundle was simply built by an older compiler.
+#[derive(Deserialize)]
+struct BundleHeader {
+    magic: [u8; 4],
+    version: u32,
+}
+
+/// Validate the header, then deserialize. On a header-valid but payload-broken
+/// bundle, report that it is STALE rather than leaking the serde error.
+fn decode_bundle(bytes: &[u8]) -> Result<RayzorBundle, BladeError> {
+    match postcard::take_from_bytes::<BundleHeader>(bytes) {
+        Ok((hdr, _)) => {
+            if &hdr.magic != BUNDLE_MAGIC {
+                return Err(BladeError::InvalidMagic);
+            }
+            if hdr.version != BUNDLE_VERSION {
+                return Err(BladeError::UnsupportedVersion(hdr.version));
+            }
+        }
+        Err(e) => return Err(BladeError::Serialization(e)),
+    }
+    postcard::from_bytes(bytes).map_err(|_| {
+        BladeError::Compression(
+            "bundle payload does not match this compiler's MIR layout — it was built by a \
+             different rayzor build. Rebuild it (e.g. `rayzor bundle Main.hx -o app.rzb \
+             --no-cache`, after clearing every .rayzor cache dir)."
+                .to_string(),
+        )
+    })
+}
+
 pub fn load_bundle(path: impl AsRef<Path>) -> Result<RayzorBundle, BladeError> {
     let raw = fs::read(path)?;
     // Detect zstd compression via magic bytes (0x28 0xB5 0x2F 0xFD)
@@ -1020,19 +1059,7 @@ pub fn load_bundle(path: impl AsRef<Path>) -> Result<RayzorBundle, BladeError> {
         } else {
             raw
         };
-    let bundle: RayzorBundle = postcard::from_bytes(&bytes)?;
-
-    // Validate magic
-    if &bundle.magic != BUNDLE_MAGIC {
-        return Err(BladeError::InvalidMagic);
-    }
-
-    // Check version
-    if bundle.version != BUNDLE_VERSION {
-        return Err(BladeError::UnsupportedVersion(bundle.version));
-    }
-
-    Ok(bundle)
+    decode_bundle(&bytes)
 }
 
 /// Load a Rayzor Bundle from bytes (for embedded bundles)
@@ -1051,17 +1078,7 @@ pub fn load_bundle_from_bytes(bytes: &[u8]) -> Result<RayzorBundle, BladeError> 
     } else {
         bytes
     };
-    let bundle: RayzorBundle = postcard::from_bytes(data)?;
-
-    if &bundle.magic != BUNDLE_MAGIC {
-        return Err(BladeError::InvalidMagic);
-    }
-
-    if bundle.version != BUNDLE_VERSION {
-        return Err(BladeError::UnsupportedVersion(bundle.version));
-    }
-
-    Ok(bundle)
+    decode_bundle(data)
 }
 
 /// Compute a hash over the **transitive** import set of an entry source.
