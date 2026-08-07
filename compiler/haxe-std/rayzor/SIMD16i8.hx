@@ -63,6 +63,31 @@ extern abstract SIMD16i8 {
     public static function ushr(a:SIMD16i8, n:Int):SIMD16i8;
 
     /**
+     * Byte-lane shuffle: lane `i` of the result is lane `idx[i]` of `a`.
+     *
+     * `idx[i]` must be 0..15 to select a lane, or have bit 7 set (e.g. 0x80) to
+     * yield 0. Values 16..127 are TARGET-DEPENDENT and must not be used: x86
+     * `pshufb` wraps to the low 4 bits while NEON and wasm zero. The contract is
+     * the intersection of `pshufb` / `tbl1` / `i8x16.swizzle` so every backend
+     * lowers to a single instruction; widening it to full wasm semantics would
+     * cost x86 an extra `paddusb` in the hot loop.
+     *
+     * A mask built from `make16` literals folds to a constant, which x86 then
+     * folds into `vpshufb`'s memory operand — costing no live register.
+     */
+    @:native("shuffle")
+    public static function shuffle(a:SIMD16i8, idx:SIMD16i8):SIMD16i8;
+
+    /**
+     * Build a byte vector from 16 lane values (low 8 bits of each). Intended for
+     * shuffle masks: an all-literal call constant-folds into rodata.
+     */
+    @:native("make16")
+    public static function make16(b0:Int, b1:Int, b2:Int, b3:Int, b4:Int, b5:Int,
+        b6:Int, b7:Int, b8:Int, b9:Int, b10:Int, b11:Int, b12:Int, b13:Int,
+        b14:Int, b15:Int):SIMD16i8;
+
+    /**
      * Read lane `i` as an Int (the i8 value, sign-extended). Lets a kernel pull
      * individual bytes out of a loaded vector in-guest — e.g. the Q4 block
      * header `d`/`dmin`/`scales` from the first 16 bytes. Bytes are signed; mask

@@ -92,6 +92,20 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd16i8_shr(builder);
     build_simd16i8_ushr(builder);
     build_simd16i8_extract(builder);
+    build_simd16i8_make16(builder);
+    build_simd_shuffle(
+        builder,
+        "SIMD16i8_shuffle",
+        16,
+        IrType::vector(IrType::I8, 16),
+    );
+    build_simd_shuffle(
+        builder,
+        "SIMD4i32_shuffle_bytes",
+        16,
+        IrType::vector(IrType::I32, 4),
+    );
+    build_simd_i32_load(builder, "SIMD4i32_load", 4);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1368,6 +1382,76 @@ fn build_simd_i8_load(builder: &mut MirBuilder, name: &str, lanes: usize) {
     let ptr = builder.get_param(0);
     let result = builder.vector_load(ptr, vec_ty);
     builder.ret(Some(result));
+}
+
+/// `SIMD4i32_load(ptr) -> vec<i32;4>`.
+fn build_simd_i32_load(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I32, lanes);
+
+    let func_id = builder
+        .begin_function(name)
+        .param("ptr", IrType::I64)
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let ptr = builder.get_param(0);
+    let result = builder.vector_load(ptr, vec_ty);
+    builder.ret(Some(result));
+}
+
+/// Byte-lane shuffle. Both operands are byte vectors; `result_ty` is what the
+/// shuffled bytes are reinterpreted as, so the same MIR op serves both
+/// `SIMD16i8.shuffle` (bytes out) and `SIMD4i32.shuffleBytes` (i32 lanes out).
+fn build_simd_shuffle(builder: &mut MirBuilder, name: &str, lanes: usize, result_ty: IrType) {
+    let vec_i8 = IrType::vector(IrType::I8, lanes);
+
+    let func_id = builder
+        .begin_function(name)
+        .param("a", vec_i8.clone())
+        .param("idx", vec_i8)
+        .returns(result_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let a = builder.get_param(0);
+    let idx = builder.get_param(1);
+    let result = builder.vector_shuffle(a, idx, lanes, result_ty);
+    builder.ret(Some(result));
+}
+
+/// `SIMD16i8_make16(b0..b15) -> vec<i8;16>` — splat lane 0, then insert 1..15.
+fn build_simd16i8_make16(builder: &mut MirBuilder) {
+    let vec_ty = IrType::vector(IrType::I8, 16);
+
+    let mut f = builder.begin_function("SIMD16i8_make16");
+    for i in 0..16 {
+        f = f.param(&format!("b{}", i), IrType::I32);
+    }
+    let func_id = f
+        .returns(vec_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let b0 = builder.get_param(0);
+    let mut acc = builder.vector_splat(b0, vec_ty.clone());
+    for i in 1..16u8 {
+        let bi = builder.get_param(i as usize);
+        acc = builder.vector_insert(acc, bi, i, vec_ty.clone());
+    }
+    builder.ret(Some(acc));
 }
 
 /// Shared body for the lane-wise i8 bitwise wrappers

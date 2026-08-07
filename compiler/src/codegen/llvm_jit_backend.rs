@@ -776,6 +776,91 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// non-negative; for Q8 flash attention the caller stores `q + 128` and
     /// applies a block-sum correction. Gated on the host having AVX-VNNI so
     /// the JIT never bakes an instruction the running CPU cannot decode.
+    /// Dynamic byte shuffle via `pshufb`. Errors (never silently degrades) when
+    /// the host lacks SSSE3/AVX2 — a scalar emulation would cost far more than
+    /// the instruction this exists to emit.
+    #[cfg(target_arch = "x86_64")]
+    fn build_x86_pshufb(
+        &self,
+        a: inkwell::values::VectorValue<'ctx>,
+        idx: inkwell::values::VectorValue<'ctx>,
+        byte_lanes: u32,
+    ) -> Result<inkwell::values::VectorValue<'ctx>, String> {
+        use inkwell::intrinsics::Intrinsic;
+        let dbg = std::env::var("RAYZOR_SHUFFLE_DEBUG").is_ok();
+        let (name, feature_ok) = match byte_lanes {
+            16 => (
+                "llvm.x86.ssse3.pshuf.b.128",
+                std::arch::is_x86_feature_detected!("ssse3"),
+            ),
+            32 => (
+                "llvm.x86.avx2.pshuf.b",
+                std::arch::is_x86_feature_detected!("avx2"),
+            ),
+            n => return Err(format!("VectorShuffle: no pshufb for {}-byte vector", n)),
+        };
+        if !feature_ok {
+            return Err(format!(
+                "VectorShuffle: host lacks the CPU feature for {} ({} bytes)",
+                name, byte_lanes
+            ));
+        }
+        let intrinsic = Intrinsic::find(name)
+            .ok_or_else(|| format!("VectorShuffle: intrinsic {} not found", name))?;
+        let func = intrinsic
+            .get_declaration(&self.module, &[])
+            .ok_or_else(|| format!("VectorShuffle: cannot declare {}", name))?;
+        if dbg {
+            eprintln!("[shuffle] emitting {} ({} bytes)", name, byte_lanes);
+        }
+        let call = self
+            .builder
+            .build_call(func, &[a.into(), idx.into()], "pshufb")
+            .map_err(|e| format!("VectorShuffle call failed: {}", e))?;
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("VectorShuffle: pshufb returned void")?
+            .into_vector_value())
+    }
+
+    /// Dynamic byte shuffle via NEON `tbl1`. Overloaded on the return type, so
+    /// the type argument is required (unlike the fixed-width x86 forms).
+    #[cfg(target_arch = "aarch64")]
+    fn build_neon_tbl1(
+        &self,
+        a: inkwell::values::VectorValue<'ctx>,
+        idx: inkwell::values::VectorValue<'ctx>,
+        byte_lanes: u32,
+    ) -> Result<inkwell::values::VectorValue<'ctx>, String> {
+        use inkwell::intrinsics::Intrinsic;
+        let dbg = std::env::var("RAYZOR_SHUFFLE_DEBUG").is_ok();
+        if byte_lanes != 16 {
+            return Err(format!(
+                "VectorShuffle: NEON tbl1 is 16 bytes only (got {})",
+                byte_lanes
+            ));
+        }
+        let i8x16 = self.context.i8_type().vec_type(16);
+        let intrinsic = Intrinsic::find("llvm.aarch64.neon.tbl1")
+            .ok_or("VectorShuffle: intrinsic llvm.aarch64.neon.tbl1 not found")?;
+        let func = intrinsic
+            .get_declaration(&self.module, &[i8x16.into()])
+            .ok_or("VectorShuffle: cannot declare llvm.aarch64.neon.tbl1")?;
+        if dbg {
+            eprintln!("[shuffle] emitting llvm.aarch64.neon.tbl1");
+        }
+        let call = self
+            .builder
+            .build_call(func, &[a.into(), idx.into()], "tbl1")
+            .map_err(|e| format!("VectorShuffle call failed: {}", e))?;
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("VectorShuffle: tbl1 returned void")?
+            .into_vector_value())
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[allow(dead_code)]
     fn try_build_x86_vpdpbusd(
@@ -4846,6 +4931,84 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     }
                 };
                 self.value_map.insert(*dest, res.into());
+            }
+
+            IrInstruction::VectorShuffle {
+                dest,
+                a,
+                idx,
+                byte_lanes,
+                result_ty,
+            } => {
+                use inkwell::types::VectorType;
+                let a_v = self.get_value(*a)?.into_vector_value();
+                let i_v = self.get_value(*idx)?.into_vector_value();
+                let n = *byte_lanes as u32;
+
+                // A constant mask (make16 of literals, after inlining) becomes an
+                // LLVM shufflevector so ISel picks the best form — a broadcast
+                // mask collapses to vpbroadcastb/d with no rodata load and no
+                // live mask register. "Yield 0" is encoded as a lane of an
+                // all-zero second operand.
+                let shuffled = if i_v.is_const() {
+                    let i32_ty = self.context.i32_type();
+                    let mut lanes = Vec::with_capacity(n as usize);
+                    for l in 0..n {
+                        let b = i_v
+                            .get_element_as_constant(l)
+                            .into_int_value()
+                            .get_zero_extended_constant()
+                            .ok_or("VectorShuffle: non-literal lane in const mask")?
+                            as u32;
+                        let sel = if b & 0x80 != 0 {
+                            n as u64
+                        } else {
+                            ((b & 15) + (l & !15u32)) as u64
+                        };
+                        lanes.push(i32_ty.const_int(sel, false));
+                    }
+                    let zero = a_v.get_type().const_zero();
+                    self.builder
+                        .build_shuffle_vector(
+                            a_v,
+                            zero,
+                            VectorType::const_vector(&lanes),
+                            "vshuf_k",
+                        )
+                        .map_err(|e| format!("VectorShuffle const failed: {}", e))?
+                } else {
+                    // Dynamic mask: one target instruction. There is no portable
+                    // LLVM form — fail loudly rather than emit a scalar fallback
+                    // that would silently cost far more than the op is worth.
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        self.build_x86_pshufb(a_v, i_v, n)?
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        self.build_neon_tbl1(a_v, i_v, n)?
+                    }
+                    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                    {
+                        return Err(
+                            "VectorShuffle: no dynamic byte-shuffle instruction on this \
+                                    host; use a compile-time-constant mask (SIMD16i8.make16 of \
+                                    literals)"
+                                .to_string(),
+                        );
+                    }
+                };
+
+                // Reinterpret the shuffled bytes as the declared result type.
+                let want = self.translate_type(result_ty)?;
+                let res: inkwell::values::BasicValueEnum = if want != shuffled.get_type().into() {
+                    self.builder
+                        .build_bit_cast(shuffled, want, "vshuf_bc")
+                        .map_err(|e| format!("VectorShuffle bitcast failed: {}", e))?
+                } else {
+                    shuffled.into()
+                };
+                self.value_map.insert(*dest, res);
             }
 
             IrInstruction::VectorUnaryOp {
