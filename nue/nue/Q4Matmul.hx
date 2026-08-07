@@ -726,6 +726,39 @@ class Q4Matmul {
         kernel in scalar address arithmetic (llama.cpp: 21%). Taking Usize
         cursors and stepping them keeps the offset arithmetic in 64-bit, so the
         conversions happen once per block instead of once per access. */
+    /** Both nibble halves of one 32-byte weight group, scaled and summed.
+
+        The two `subDotVec` calls this replaces each loaded the SAME 32 weight
+        bytes — one for the low nibbles, one for the high — so the inner loop
+        read every weight byte twice. Loading once and extracting both nibbles
+        from the register halves the loop's weight-load traffic. The kernel is
+        issue-bound (IPC 3.26), so removed instructions are removed time.
+
+        Returns `scLo*dotLo + scHi*dotHi`. Integer adds are exact and
+        associative, so this is bit-identical to scaling the two dots
+        separately and adding them at the call site. */
+    static inline function subDotPair(wAddr:Usize, aLo:Usize, aHi:Usize,
+            scLo:Int, scHi:Int):SIMD4i32 {
+        var accLo = SIMD4i32.splat(0);
+        var accHi = SIMD4i32.splat(0);
+        var w = wAddr;
+        var alo = aLo;
+        var ahi = aHi;
+        var step:Usize = Usize.fromInt(16);
+        var mask = SIMD16i8.splat(0x0F);
+        for (half in 0...2) {
+            var wRaw = SIMD16i8.load(Ptr.fromRaw(w));
+            accLo = SIMD4i32.dotI8I7(accLo, SIMD16i8.load(Ptr.fromRaw(alo)),
+                SIMD16i8.and(wRaw, mask));
+            accHi = SIMD4i32.dotI8I7(accHi, SIMD16i8.load(Ptr.fromRaw(ahi)),
+                SIMD16i8.ushr(wRaw, 4));
+            w = w + step;
+            alo = alo + step;
+            ahi = ahi + step;
+        }
+        return SIMD4i32.splat(scLo) * accLo + SIMD4i32.splat(scHi) * accHi;
+    }
+
     static inline function subDotVec(wAddr:Usize, isHi:Bool, aAddr:Usize):SIMD4i32 {
         var acc = SIMD4i32.splat(0);
         var w = wAddr;
@@ -789,18 +822,14 @@ class Q4Matmul {
         var wG:Usize = wBase + Usize.fromInt(wBlk + 16);
         var aA:Usize = aBase + Usize.fromInt(aBlk);
         var S32:Usize = Usize.fromInt(32);
-        var dv0 = subDotVec(wG, false, aA); aA = aA + S32;
-        var dv1 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
-        var dv2 = subDotVec(wG, false, aA); aA = aA + S32;
-        var dv3 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
-        var dv4 = subDotVec(wG, false, aA); aA = aA + S32;
-        var dv5 = subDotVec(wG, true, aA); aA = aA + S32; wG = wG + S32;
-        var dv6 = subDotVec(wG, false, aA); aA = aA + S32;
-        var dv7 = subDotVec(wG, true, aA);
-        var i0 = SIMD4i32.splat(sc0) * dv0 + SIMD4i32.splat(sc4) * dv4;
-        var i1 = SIMD4i32.splat(sc1) * dv1 + SIMD4i32.splat(sc5) * dv5;
-        var i2 = SIMD4i32.splat(sc2) * dv2 + SIMD4i32.splat(sc6) * dv6;
-        var i3 = SIMD4i32.splat(sc3) * dv3 + SIMD4i32.splat(sc7) * dv7;
+        var S64:Usize = S32 + S32;
+        // Each pair shares ONE weight group across its two nibble halves, so
+        // the group is loaded once rather than once per half. Four independent
+        // pair results keep the ILP of the old (0,4)(1,5)(2,6)(3,7) grouping.
+        var i0 = subDotPair(wG, aA, aA + S32, sc0, sc1); aA = aA + S64; wG = wG + S32;
+        var i1 = subDotPair(wG, aA, aA + S32, sc2, sc3); aA = aA + S64; wG = wG + S32;
+        var i2 = subDotPair(wG, aA, aA + S32, sc4, sc5); aA = aA + S64; wG = wG + S32;
+        var i3 = subDotPair(wG, aA, aA + S32, sc6, sc7);
         var isum = (i0 + i1) + (i2 + i3);
         // ONE i32->i64 conversion for the whole bsums walk instead of 16. The
         // eight pairs sit at a fixed 8-byte stride, so derive 64-bit cursors by
