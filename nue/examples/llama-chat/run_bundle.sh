@@ -124,12 +124,11 @@ maybe_enable_jemalloc
 # Optional rebuild.
 if [[ "${BUILD:-0}" == "1" ]]; then
   echo ">> building $BUNDLE"
-  # Clear every BLADE/MIR cache first. `--no-cache` is NOT sufficient: a stale
-  # .blade holds a serialized IrModule from an older compiler, and the bundle
-  # would embed that. When the MIR enum layout has changed since, loading the
-  # result fails with a bare "Serde Deserialization Error".
-  REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-  find "$REPO_ROOT" -name .rayzor -type d -exec rm -rf {} + 2>/dev/null || true
+  # No cache clear needed: BLADE entries carry the compiler's RAYZOR_BUILD_ID,
+  # build.rs bumps it on any compiler source change, and every load site rejects
+  # a mismatch. A stale .rzb comes from the ARTIFACT being older than the
+  # compiler, not from the cache — rebuild it here and the loader's version
+  # check reports the mismatch if you ever run an older one.
   "$RAYZOR" bundle Main.hx -o "$BUNDLE" --no-cache
 fi
 
