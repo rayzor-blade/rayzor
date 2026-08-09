@@ -138,6 +138,24 @@ start_memory_monitor() {
   if ! memory_profile_enabled; then
     return 1
   fi
+  # macOS has no smaps: sample resident size via ps instead. Same TSV schema so
+  # the peak reader is shared; the columns ps cannot supply stay 0 and
+  # memory_label prints rss alone rather than a row of misleading zeroes.
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local interval_s
+    interval_s="$(awk -v ms="$MEMORY_SAMPLE_MS" 'BEGIN { if (ms < 10) ms = 10; printf "%.3f", ms / 1000 }')"
+    {
+      printf 'ms\trss_kb\tanon_kb\tfile_kb\tprivate_clean_kb\tprivate_dirty_kb\tshared_kb\tprivate_kb\tswap_kb\n'
+      while :; do
+        rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
+        [[ -z "$rss" ]] && break
+        printf '%s\t%s\t0\t0\t0\t0\t0\t0\t0\n' "$(now_ms)" "$rss"
+        sleep "$interval_s"
+      done
+    } > "$out" 2>/dev/null &
+    echo "$!"
+    return 0
+  fi
   if [[ "$(uname -s)" != "Linux" || ! -r "/proc/$pid/smaps_rollup" ]]; then
     return 1
   fi
@@ -209,28 +227,40 @@ stop_memory_monitor() {
   fi
 }
 
+# Timing helpers, in plain shell. Each used to spawn a Python interpreter:
+# measured at 63.7ms per call versus 10.3ms for `date`. now_s() brackets server
+# startup, so the two startups largely cancel in the difference and ready_s was
+# never far wrong -- but it is pure waste in a script whose only job is to
+# measure time.
+
 sleep_ms() {
-  local ms="$1"
-  /usr/bin/python3 - "$ms" <<'PY'
-import sys, time
-time.sleep(int(sys.argv[1]) / 1000.0)
-PY
+  # Both BSD and GNU sleep accept fractional seconds.
+  sleep "$(awk -v ms="$1" 'BEGIN { printf "%.3f", ms / 1000 }')"
 }
 
+# Sub-second wall clock. Darwin 25 and GNU date both support %N; the guard
+# catches an older date that echoes a literal "N", and perl is the last resort.
 now_s() {
-  /usr/bin/python3 - <<'PY'
-import time
-print(f"{time.time():.6f}")
-PY
+  local t
+  t="$(date +%s.%N 2>/dev/null)"
+  case "$t" in
+    ''|*[!0-9.]*) ;;
+    *) printf '%s\n' "$t"; return 0 ;;
+  esac
+  if command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=time -e 'printf "%.6f\n", time'
+    return 0
+  fi
+  date +%s
 }
 
 elapsed_s() {
-  local start="$1"
-  local end="$2"
-  /usr/bin/python3 - "$start" "$end" <<'PY'
-import sys
-print(f"{float(sys.argv[2]) - float(sys.argv[1]):.6f}")
-PY
+  awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f\n", b - a }'
+}
+
+# Epoch milliseconds, for the memory sampler's time axis.
+now_ms() {
+  awk -v t="$(now_s)" 'BEGIN { printf "%d\n", t * 1000 }'
 }
 
 wait_for_server() {
@@ -509,33 +539,56 @@ memory_label() {
   if ! memory_profile_enabled || [[ ! -s "$mem_log" ]]; then
     return 0
   fi
-  /usr/bin/python3 - "$mem_log" <<'PY'
-import csv
-import sys
-
-peaks = {}
-with open(sys.argv[1], errors="replace") as fh:
-    rows = csv.DictReader(fh, delimiter="\t")
-    for row in rows:
-        for key in ("rss_kb", "anon_kb", "file_kb", "swap_kb"):
-            try:
-                value = int(row[key])
-            except (KeyError, ValueError):
-                continue
-            peaks[key] = max(peaks.get(key, 0), value)
-
-if not peaks:
-    raise SystemExit(0)
-
-def mib(key):
-    return peaks.get(key, 0) / 1024.0
-
-print(
-    f"  mem=rss/anon/file/swap="
-    f"{mib('rss_kb'):.0f}/{mib('anon_kb'):.0f}/"
-    f"{mib('file_kb'):.0f}/{mib('swap_kb'):.0f}MiB"
-)
-PY
+  # Peak of each column over the whole sample set. Columns are found by header
+  # name because the two samplers share the schema but not what they can fill:
+  # ps supplies rss and leaves anon/file/swap at 0, and an all-zero breakdown
+  # selects the short label. A field the sampler could not write is skipped
+  # rather than counted as a zero, and a truncated row is an error.
+  # LC_ALL=C keeps awk byte-oriented: a stray non-UTF-8 byte then fails the
+  # integer test like any other garbage instead of aborting the read.
+  LC_ALL=C awk '
+    # Accepts what int() accepts: surrounding blanks, a sign, and underscores
+    # between digits. Anything else leaves VAL alone and reports 0.
+    function pyint(s) {
+      if (length(s) > 1 && s ~ /^".*"$/) s = substr(s, 2, length(s) - 2)
+      sub(/^[ \t\r]+/, "", s)
+      sub(/[ \t\r]+$/, "", s)
+      if (s !~ /^[+-]?[0-9](_?[0-9])*$/) return 0
+      sub(/^[+]/, "", s)
+      gsub(/_/, "", s)
+      VAL = s + 0
+      return 1
+    }
+    BEGIN { FS = "\t"; nk = split("rss_kb anon_kb file_kb swap_kb", want, " ") }
+    { sub(/\r$/, "") }
+    NR == 1 {
+      # Header. A name repeated across columns resolves to the last of them.
+      for (i = 1; i <= NF; i++) col[$i] = i
+      next
+    }
+    $0 == "" { next }
+    {
+      for (j = 1; j <= nk; j++) {
+        k = want[j]
+        i = col[k]
+        if (!i) continue
+        if (i > NF) { truncated = 1; exit 1 }
+        if (!pyint($i)) continue
+        if (!seen[k]) { seen[k] = 1; peak[k] = 0; found = 1 }
+        if (VAL > peak[k]) peak[k] = VAL
+      }
+    }
+    END {
+      if (truncated) exit 1
+      if (!found) exit 0
+      if (peak["anon_kb"] > 0 || peak["file_kb"] > 0 || peak["swap_kb"] > 0)
+        printf "  mem=rss/anon/file/swap=%.0f/%.0f/%.0f/%.0fMiB\n", \
+          peak["rss_kb"] / 1024, peak["anon_kb"] / 1024, \
+          peak["file_kb"] / 1024, peak["swap_kb"] / 1024
+      else
+        printf "  mem=peak_rss=%.0fMiB\n", peak["rss_kb"] / 1024
+    }
+  ' < "$mem_log" || return 1
 }
 
 extract_cold_metrics() {
@@ -837,7 +890,7 @@ if [[ -n "$REQUANT_LM_HEAD" ]]; then
 fi
 echo "request: per-request profile=$REQUEST_PROFILE"
 if memory_profile_enabled; then
-  echo "memory: smaps_rollup sample=${MEMORY_SAMPLE_MS}ms"
+  echo "memory: $([[ "$(uname -s)" == "Darwin" ]] && echo "ps rss" || echo "smaps_rollup") sample=${MEMORY_SAMPLE_MS}ms"
 fi
 if [[ "${NUE_PROFILE_POOL:-}" != "" && "${NUE_PROFILE_POOL:-}" != "0" ]]; then
   echo "pool:   profile=true"
