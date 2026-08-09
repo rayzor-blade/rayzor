@@ -112,7 +112,7 @@ prefill_tps="$(awk -v n="$PROMPT_TOKENS" -v t="$ttft_med" 'BEGIN{ if(t>0) printf
 bench_history_append "$HISTORY" "$HEADER" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
   "$(date +%Y-%m-%d)" "$BENCH_COMMIT$BENCH_DIRTY" "$ttft_med" "$dtps_med" "$etps_med" "$prefill_tps" \
   "$MAX_TOKENS" "$PROMPT_TOKENS" "$REPS" "$ttft_spread" "$BENCH_QUIET" \
-  "${NUE_FLASH_BATCH:-off}" "$(basename "$MODEL")" "$BENCH_SUBJECT")"
+  "${NUE_FLASH_BATCH:-default(on)}" "$(basename "$MODEL")" "$BENCH_SUBJECT")"
 
 echo
 echo "  $BENCH_COMMIT$BENCH_DIRTY"
@@ -120,7 +120,7 @@ echo "    prefill    ttft=${ttft_med}s  (~${prefill_tps} prompt tok/s over ${PRO
 echo "    decode     ${dtps_med} tok/s over $MAX_TOKENS tokens (prefill excluded)"
 echo "    end-to-end ${etps_med} tok/s including prefill -- falls with prompt length by design"
 echo "    stability  ttft spread across $REPS reps = ${ttft_spread}%"
-echo "    config     NUE_FLASH_BATCH=${NUE_FLASH_BATCH:-off}"
+echo "    config     NUE_FLASH_BATCH=${NUE_FLASH_BATCH:-default(on)}"
 echo "    machine    quiet=$BENCH_QUIET  (peak foreign ${BENCH_PEAK_CPU}% of one core)"
 bench_report "$BENCH_QUIET" ""
 echo "  history: $HISTORY"

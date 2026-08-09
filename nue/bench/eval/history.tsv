@@ -1,0 +1,3 @@
+date	commit	ppl	nll	positions	chunk	agreement_pct	ab_var	ab_ppl	quiet	model	subject
+2026-08-09	20f6b1f2+dirty	26.82312067923122	3.289264227506395	1530	256	NA	none	NA	yes	qwen2.5-0.5b-instruct-q5_k_m.gguf	bench(nue): a bench/ tree with gated harnesses and a quality
+2026-08-09	20f6b1f2+dirty	26.82312067923122	3.289264227506395	1530	256	89.93	NUE_FLASH_BATCH=0	27.238359527051934	yes	qwen2.5-0.5b-instruct-q5_k_m.gguf	bench(nue): a bench/ tree with gated harnesses and a quality
