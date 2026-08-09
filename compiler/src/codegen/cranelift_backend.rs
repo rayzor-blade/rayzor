@@ -578,7 +578,15 @@ impl CraneliftBackend {
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
             // Skip libc memory management functions - we'll declare them separately and map MIR IDs to libc
-            if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
+            // Only the EXTERN declarations are the libc intrinsics; a class with a
+            // `free()` method shares the name by coincidence and still needs
+            // declaring, or compile_function fails with "Function not declared"
+            // and installs a SIGILL trap stub over a method that has a real body.
+            if function.cfg.blocks.is_empty()
+                && (function.name == "malloc"
+                    || function.name == "realloc"
+                    || function.name == "free")
+            {
                 continue;
             }
             // 256-bit vectors have no Cranelift type — leave these to LLVM.
@@ -618,7 +626,14 @@ impl CraneliftBackend {
         // This ensures that when MIR code calls these functions, they resolve to tracked versions
         // Check both functions and extern_functions since malloc may be in either location
         for (func_id, function) in &mir_module.functions {
-            if function.name == "malloc" {
+            if !function.cfg.blocks.is_empty() {
+                // A BODIED function only shares these names by coincidence: a user
+                // class with a `free()`/`malloc()` method is not the libc symbol.
+                // Binding it here sends compile_function on to define a body over an
+                // Import declaration, which fails and installs a SIGILL trap stub, so
+                // the method silently never runs. Only an EXTERN (empty CFG) MIR
+                // function is the real intrinsic.
+            } else if function.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
                 debug!(
                     ": Mapping MIR malloc {:?} -> Cranelift {:?}",
@@ -875,7 +890,15 @@ impl CraneliftBackend {
 
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
-            if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
+            // Only the EXTERN declarations are the libc intrinsics; a class with a
+            // `free()` method shares the name by coincidence and still needs
+            // declaring, or compile_function fails with "Function not declared"
+            // and installs a SIGILL trap stub over a method that has a real body.
+            if function.cfg.blocks.is_empty()
+                && (function.name == "malloc"
+                    || function.name == "realloc"
+                    || function.name == "free")
+            {
                 continue;
             }
             // 256-bit vectors have no Cranelift type — leave these to LLVM.
@@ -912,7 +935,14 @@ impl CraneliftBackend {
 
         // Map MIR function IDs for malloc/realloc/free to their libc Cranelift IDs
         for (func_id, function) in &mir_module.functions {
-            if function.name == "malloc" {
+            if !function.cfg.blocks.is_empty() {
+                // A BODIED function only shares these names by coincidence: a user
+                // class with a `free()`/`malloc()` method is not the libc symbol.
+                // Binding it here sends compile_function on to define a body over an
+                // Import declaration, which fails and installs a SIGILL trap stub, so
+                // the method silently never runs. Only an EXTERN (empty CFG) MIR
+                // function is the real intrinsic.
+            } else if function.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
                 self.function_map.insert(*func_id, libc_id);
             } else if function.name == "realloc" {
@@ -1270,7 +1300,15 @@ impl CraneliftBackend {
     pub fn declare_module_functions(&mut self, mir_module: &IrModule) -> Result<(), String> {
         // Declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
-            if function.name == "malloc" || function.name == "realloc" || function.name == "free" {
+            // Only the EXTERN declarations are the libc intrinsics; a class with a
+            // `free()` method shares the name by coincidence and still needs
+            // declaring, or compile_function fails with "Function not declared"
+            // and installs a SIGILL trap stub over a method that has a real body.
+            if function.cfg.blocks.is_empty()
+                && (function.name == "malloc"
+                    || function.name == "realloc"
+                    || function.name == "free")
+            {
                 continue;
             }
             // 256-bit vectors have no Cranelift type — leave these to LLVM.
@@ -1293,7 +1331,14 @@ impl CraneliftBackend {
 
         // Map MIR function IDs for malloc/realloc/free to their libc Cranelift IDs
         for (func_id, function) in &mir_module.functions {
-            if function.name == "malloc" {
+            if !function.cfg.blocks.is_empty() {
+                // A BODIED function only shares these names by coincidence: a user
+                // class with a `free()`/`malloc()` method is not the libc symbol.
+                // Binding it here sends compile_function on to define a body over an
+                // Import declaration, which fails and installs a SIGILL trap stub, so
+                // the method silently never runs. Only an EXTERN (empty CFG) MIR
+                // function is the real intrinsic.
+            } else if function.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
                 self.function_map.insert(*func_id, libc_id);
             } else if function.name == "realloc" {
