@@ -39,7 +39,7 @@ design — force `amx`/`haxe` when a bit-class baseline is needed.
    per model:
 
    ```
-   mlvenv/bin/python rayzor-tensors/examples/bert_graph_author.py \
+   mlvenv/bin/python nue-plugins/examples/bert_graph_author.py \
        <model.gguf> <outdir> 128 256 512
    xcrun coremlc compile <outdir>/<stem>.encoder_s{S}.mlpackage <outdir>
    # place the .mlmodelc bundles next to the gguf

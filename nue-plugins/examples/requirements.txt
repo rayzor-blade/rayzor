@@ -1,0 +1,24 @@
+# Python environment for the CoreML/BNNS graph authors in this directory
+# (bert_graph_author.py, llama_prefill_author.py, llama_prefill_probe.py).
+# Apple's graph tooling is Python-only at the vendor level, which is why these
+# three scripts are Python at all; nothing else in the build or the runtime
+# needs an interpreter.
+#
+# Recreate:
+#   python3 -m venv mlvenv && ./mlvenv/bin/pip install -r requirements.txt
+#
+# The venv itself is gitignored -- it is ~315 MB and belongs to your machine,
+# not to the repository.
+coremltools==9.0
+gguf==0.19.0
+numpy
+
+# Optional. bert_graph_author.np_gelu uses scipy.special.erf for an exact GELU
+# and falls back to the tanh approximation when scipy is absent, so the two
+# produce slightly different reference activations. Install it when the graph
+# is being checked against the engine's numerics; skip it otherwise.
+# scipy
+
+# Deliberately NOT listed: scikit-learn (and its joblib/threadpoolctl chain).
+# It was hand-installed, is not a coremltools dependency, and no script here
+# imports it -- it accounted for ~150 MB of the old venv.
