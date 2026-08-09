@@ -32,27 +32,28 @@ class Main {
         return Std.string(Math.round(v * m) / m);
     }
 
-    // log(sum(exp(x))) over one logit row, in a numerically safe form: the max
-    // is factored out so exp() never sees a large positive argument.
-    static function logSumExp(t:Tensor, base:Int, vocab:Int):Float {
+    // Scores one logit row in TWO passes, not three: the max pass also picks
+    // the argmax, and exp() needs the max before it can run safely, so two is
+    // the floor. Over a 151936-entry vocab and hundreds of positions per
+    // chunk this loop dominates wall time -- it is scalar and single threaded,
+    // while the model's own matmuls are pooled, which is why the process sits
+    // near one core during scoring rather than saturating the machine.
+    //
+    // Returns nll for `target`; writes the argmax into `outArgmax[0]`.
+    static function scoreRow(t:Tensor, base:Int, vocab:Int, target:Int,
+            outArgmax:Array<Int>):Float {
         var mx = -1e30;
+        var best = 0;
         for (v in 0...vocab) {
             var x = t.getFlat(base + v);
-            if (x > mx) mx = x;
+            if (x > mx) { mx = x; best = v; }
         }
         var acc = 0.0;
         for (v in 0...vocab) acc += Math.exp(t.getFlat(base + v) - mx);
-        return mx + Math.log(acc);
-    }
-
-    static function argmax(t:Tensor, base:Int, vocab:Int):Int {
-        var best = 0;
-        var bv = -1e30;
-        for (v in 0...vocab) {
-            var x = t.getFlat(base + v);
-            if (x > bv) { bv = x; best = v; }
-        }
-        return best;
+        outArgmax[0] = best;
+        // logsumexp - logit[target], with the max factored out so exp() never
+        // sees a large positive argument.
+        return (mx + Math.log(acc)) - t.getFlat(base + target);
     }
 
     static function usage():Void {
@@ -107,6 +108,7 @@ class Main {
         // silently produce nothing to diff.
         var dumpLines:Array<String> = dumpPath != null ? [] : null;
 
+        var amx = [0];
         var totalNll = 0.0;
         var counted = 0;
         var chunks = 0;
@@ -136,15 +138,12 @@ class Main {
             }
 
             for (r in 0...(n - 1)) {
-                var target = window[r + 1];
                 var base = r * vocab;
-                var lse = logSumExp(logits, base, vocab);
-                var nll = lse - logits.getFlat(base + target);
+                var nll = scoreRow(logits, base, vocab, window[r + 1], amx);
                 totalNll += nll;
                 counted++;
                 if (dumpLines != null) {
-                    dumpLines.push((pos + r) + "\t" + argmax(logits, base, vocab)
-                        + "\t" + fmt(nll, 6));
+                    dumpLines.push((pos + r) + "\t" + amx[0] + "\t" + fmt(nll, 6));
                 }
             }
             logits.free();

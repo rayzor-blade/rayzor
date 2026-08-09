@@ -87,10 +87,29 @@ class FlashDecode {
     // the same reason `_enabled`/`_pool` above avoid a -1 sentinel.
     static var _batchMax:Int = 0;
 
+    /** Largest `seqQ` the batched prefill path will take.
+     *
+     *  ON by default and effectively uncapped: the real bound is enforced
+     *  inside `decodeBatch`, which declines when `baseLen + seqQ` exceeds the
+     *  cache's `maxSeqLen`. A fixed number here is worse than no number,
+     *  because the caller gates on `seqQ <= batchMax()` — so a cap smaller
+     *  than the prompt silently routes the whole prefill back to the F32 path
+     *  and looks identical to having the feature turned off.
+     *
+     *  `NUE_FLASH_BATCH=0` disables it; any other value is an explicit cap,
+     *  which is only useful for bisecting.
+     *
+     *  Defaulted on once the numerics were settled rather than assumed:
+     *  `nue/tests/flashbatch` shows row `r` is BIT-IDENTICAL to `decode` at
+     *  `cacheLen = baseLen + r + 1` (46976 lanes, MHA and GQA, 1/4/8 workers),
+     *  and `nue/bench/eval` scores it at PPL 26.82 against 27.24 for the F32
+     *  route on qwen2.5-0.5b — not worse — while ttft drops 3.8x. */
+    static inline var BATCH_MAX_UNCAPPED:Int = 1 << 30;
+
     public static function batchMax():Int {
         if (_batchMax == 0) {
             var v = Sys.getEnvOr("NUE_FLASH_BATCH", "RAYZOR_HAXE_FLASH_BATCH");
-            var n = (v != null && v != "") ? Std.int(Std.parseFloat(v)) : 0;
+            var n = (v != null && v != "") ? Std.int(Std.parseFloat(v)) : BATCH_MAX_UNCAPPED;
             if (n < 0) n = 0;
             _batchMax = n + 1;
         }
