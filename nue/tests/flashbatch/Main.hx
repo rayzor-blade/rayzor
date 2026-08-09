@@ -111,10 +111,8 @@ class Main {
         q.free();
         kv.free();
         vv.free();
-        // Q8Cache.free() is deliberately not called: the compiler cannot emit
-        // it ("Invalid to define identifier declared as an import: free") and
-        // installs a trap stub, so calling it would SIGILL. The caches are
-        // reclaimed at process exit; this oracle is about attention numerics.
+        kc.free();
+        vc.free();
         sp.shutdown();
     }
 
