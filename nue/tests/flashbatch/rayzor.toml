@@ -1,0 +1,12 @@
+[project]
+name = "nue-flashbatch-oracle"
+type = "application"
+
+[build]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
+# Q8 cache + flash kernels need the tensor runtime; nue-plugins carries the
+# KV/flash engine symbols.
+native-libs = [
+    "../../../target/release/librayzor_tensors.dylib",
+    "../../../target/release/libnue_plugins.dylib",
+]
