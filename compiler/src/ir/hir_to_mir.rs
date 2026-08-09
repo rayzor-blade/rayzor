@@ -20967,6 +20967,13 @@ impl<'a> HirToMirContext<'a> {
                                 )
                             };
 
+                            let is_concrete = |reg| {
+                                self.builder
+                                    .get_register_type(reg)
+                                    .as_ref()
+                                    .map(|t| is_concrete_ir_type(t))
+                                    .unwrap_or(false)
+                            };
                             let lhs_boxed = match &lhs.kind {
                                 HirExprKind::Variable { symbol, .. } => {
                                     self.boxed_dynamic_symbols.contains(symbol)
@@ -20985,6 +20992,34 @@ impl<'a> HirToMirContext<'a> {
                                     !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false)
                                 }
                             };
+                            // Eq/Ne on two pointer-shaped Dynamic operands cannot be decided
+                            // from the register type: a boxed value and a lambda parameter
+                            // holding a raw i64 are BOTH Ptr(Void) here, and neither is
+                            // tracked. Comparing them as pointers is wrong for boxes, and
+                            // unboxing is wrong for raw values -- so hand both to the runtime,
+                            // which validates each side before dereferencing it and falls back
+                            // to the raw value when it is not a box.
+                            if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+                                && !is_concrete(lhs_reg)
+                                && !is_concrete(rhs_reg)
+                            {
+                                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                                let eq_func = self.get_or_register_extern_function(
+                                    "haxe_dynamic_equals",
+                                    vec![ptr_void.clone(), ptr_void],
+                                    IrType::Bool,
+                                );
+                                let eq = self.builder.build_call_direct(
+                                    eq_func,
+                                    vec![lhs_reg, rhs_reg],
+                                    IrType::Bool,
+                                )?;
+                                if matches!(op, HirBinaryOp::Eq) {
+                                    return Some(eq);
+                                }
+                                let f = self.builder.build_const(IrValue::Bool(false))?;
+                                return self.builder.build_cmp(CompareOp::Eq, eq, f);
+                            }
 
                             if lhs_boxed && rhs_boxed {
                                 // Both are actually boxed DynamicValue pointers.
@@ -21017,9 +21052,30 @@ impl<'a> HirToMirContext<'a> {
                                 );
 
                                 if is_comparison {
+                                    // Eq/Ne go through the runtime, which dispatches on the
+                                    // box tag: numeric across Int/Float, by value for Bool
+                                    // and String, by reference otherwise. Unboxing to f64
+                                    // would equate 1 and "1" and read a string as a double.
+                                    // Ordering comparisons stay numeric.
+                                    if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+                                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                                        let eq_func = self.get_or_register_extern_function(
+                                            "haxe_dynamic_equals",
+                                            vec![ptr_void.clone(), ptr_void],
+                                            IrType::Bool,
+                                        );
+                                        let eq = self.builder.build_call_direct(
+                                            eq_func,
+                                            vec![lhs_reg, rhs_reg],
+                                            IrType::Bool,
+                                        )?;
+                                        if matches!(op, HirBinaryOp::Eq) {
+                                            return Some(eq);
+                                        }
+                                        let f = self.builder.build_const(IrValue::Bool(false))?;
+                                        return self.builder.build_cmp(CompareOp::Eq, eq, f);
+                                    }
                                     let cmp_op = match op {
-                                        HirBinaryOp::Eq => CompareOp::Eq,
-                                        HirBinaryOp::Ne => CompareOp::Ne,
                                         HirBinaryOp::Lt => CompareOp::Lt,
                                         HirBinaryOp::Le => CompareOp::Le,
                                         HirBinaryOp::Gt => CompareOp::Gt,
