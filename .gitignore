@@ -72,3 +72,14 @@ examples/**/.rayzor/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+
+# CoreML/BNNS artifacts the graph authors emit. `nue author` writes a
+# .mlpackage per sequence bucket and `xcrun coremlc compile` turns each into a
+# .mlmodelc; both are build outputs measured in hundreds of MB. The goldens
+# under nue/tests/bert/goldens ARE tracked -- they are inputs to the test, not
+# outputs of a build -- so nothing here matches .json or .bin.
+*.mlpackage/
+*.mlmodelc/
+*.mlmodel
+*.npy
+*.npz
