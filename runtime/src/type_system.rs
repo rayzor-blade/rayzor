@@ -2633,6 +2633,85 @@ pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
     }
 }
 
+/// Structural equality for two boxed Dynamic values.
+///
+/// `Dynamic == Dynamic` used to compile to a comparison of the BOX ADDRESSES,
+/// so two separate boxes holding 42 were unequal while `a == a` was true. The
+/// fallback that did exist unboxed both sides to f64, which is wrong for
+/// strings and cannot distinguish `1` from `"1"`.
+///
+/// Haxe semantics: numbers compare numerically across Int/Float, Bool and
+/// String compare by value, everything else compares by reference. Two nulls
+/// are equal; null is equal to nothing else.
+#[no_mangle]
+pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+
+    // The caller cannot always tell a boxed DynamicValue from a raw i64 that
+    // merely has Dynamic type -- an untyped lambda parameter holds the latter,
+    // and both arrive here as a pointer-shaped register. Validate before
+    // dereferencing: a real box is aligned, above the first page, and carries a
+    // known type tag. Anything else is compared as the raw value it is.
+    let looks_boxed = |p: *mut u8| -> Option<DynamicValue> {
+        let addr = p as usize;
+        if addr < 0x1000 || (addr & 7) != 0 {
+            return None;
+        }
+        let d = unsafe { *(p as *const DynamicValue) };
+        let tid = d.type_id.0;
+        // Tag-plausibility window: the builtin scalars at the bottom, then
+        // everything above 100 for user/object types and the function tag at
+        // the very top. The gap between is not a valid tag.
+        let known = tid <= TYPE_ARRAY.0 || tid > 100;
+        if known {
+            Some(d)
+        } else {
+            None
+        }
+    };
+
+    let (da, db) = match (looks_boxed(a), looks_boxed(b)) {
+        (Some(x), Some(y)) => (x, y),
+        // At least one side is a raw value: pointer identity is the only
+        // meaningful answer, and it was already checked above.
+        _ => return false,
+    };
+
+    let is_null = |d: &DynamicValue| d.type_id == TYPE_NULL || d.value_ptr.is_null();
+    if is_null(&da) || is_null(&db) {
+        return is_null(&da) && is_null(&db);
+    }
+
+    let numeric = |t: TypeId| t == TYPE_INT || t == TYPE_FLOAT;
+    if numeric(da.type_id) && numeric(db.type_id) {
+        // Int and Float compare numerically, matching `1 == 1.0`.
+        return haxe_unbox_float(da) == haxe_unbox_float(db);
+    }
+
+    if da.type_id != db.type_id {
+        return false;
+    }
+
+    if da.type_id == TYPE_BOOL {
+        return unsafe { *(da.value_ptr as *const bool) == *(db.value_ptr as *const bool) };
+    }
+
+    if da.type_id == TYPE_STRING {
+        return crate::haxe_string::haxe_string_compare(
+            da.value_ptr as *const crate::haxe_string::HaxeString,
+            db.value_ptr as *const crate::haxe_string::HaxeString,
+        ) == 0;
+    }
+
+    // Objects, arrays, enums, functions: reference identity.
+    da.value_ptr == db.value_ptr
+}
+
 /// Unbox a Bool from Dynamic (takes opaque pointer to DynamicValue)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
