@@ -60,3 +60,15 @@ examples/**/.rayzor/
 
 # rayzor-numa rpkg artifact (rebuilt by examples/numa-pool/build.sh)
 /numa/*.rpkg
+
+# Python: virtualenvs and caches. Nothing in the build or the runtime needs an
+# interpreter -- Python is confined to the Apple CoreML/BNNS graph authors and
+# the golden generators, whose environment is recreated from
+# nue-plugins/examples/requirements.txt and never committed.
+**/mlvenv/
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

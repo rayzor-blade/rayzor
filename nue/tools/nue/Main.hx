@@ -191,7 +191,7 @@ class Main {
         if (!FileSystem.exists(venv)) {
             Sys.println("nue: CoreML toolchain missing (" + venv + ")");
             Sys.println("     python3 -m venv " + repo + "/nue-plugins/examples/mlvenv");
-            Sys.println("     " + venv + " -m pip install coremltools gguf numpy");
+            Sys.println("     " + venv + " -m pip install -r " + repo + "/nue-plugins/examples/requirements.txt");
             return 2;
         }
         var cmd = q(venv) + " " + q(script) + " " + q(path) + " " + q(dir);
