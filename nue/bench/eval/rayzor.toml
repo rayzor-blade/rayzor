@@ -1,0 +1,7 @@
+[project]
+name = "nue-eval"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../", "../../../rayzor-tensors/haxe"]
+native-libs = ["../../../target/release/librayzor_tensors.dylib", "../../../target/release/libnue_plugins.dylib"]

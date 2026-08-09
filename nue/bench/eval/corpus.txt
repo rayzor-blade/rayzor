@@ -1,0 +1,191 @@
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.
+
+A B-tree is a self-balancing tree data structure that keeps data sorted and allows searches, sequential access, insertions and deletions in logarithmic time.
+
+Unlike a binary search tree, a B-tree node may have many children. High fanout reduces the height of the tree and therefore the number of disk pages a lookup must touch.
+
+A write-ahead log records an intended change before the change is applied to the main data structure, so a crash can be recovered by replaying the log.
+
+Multiversion concurrency control lets readers observe a consistent snapshot without blocking writers, at the cost of retaining older row versions until no snapshot needs them.
+
+A hash index answers equality predicates in expected constant time but cannot serve range scans, because hashing destroys the ordering of the key space.
+
+Query planners estimate the cost of alternative execution strategies using statistics about table sizes and value distributions, then choose the cheapest plan.
+
+A bloom filter is a probabilistic structure that answers set membership with no false negatives and a tunable false positive rate, using far less space than the set itself.
+
+Log-structured merge trees buffer writes in memory and flush them as sorted runs, trading read amplification for a large gain in write throughput.

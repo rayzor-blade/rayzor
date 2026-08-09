@@ -1,0 +1,11 @@
+date	commit	tok_s	stddev	min	max	ttft_s	ready_s	cold_ttft_s	peak_rss_mib	quiet	runs	req	ctx	max_tok	model	subject
+2026-08-08	5413b1ad+dirty	138.87	0.62	NA	NA	NA	NA	NA	1976	yes	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	112.52	12.61	NA	NA	NA	NA	NA	1613	unknown(sd=12.61)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	63.39	14.09	NA	NA	NA	NA	NA	1572	NO(625%)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	94.81	7.98	NA	NA	NA	NA	NA	1792	NO(754%)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	81.07	24.90	NA	NA	NA	NA	NA	1746	NO(701%)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	123.17	4.16	NA	NA	NA	NA	NA	1611	NO(493%)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	67.74	6.80	NA	NA	NA	NA	NA	1461	NO(751%)	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	131.69	5.08	NA	NA	NA	NA	NA	1602	yes	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	130.07	5.66	NA	NA	NA	NA	NA	1536	yes	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
+2026-08-09	5413b1ad+dirty	133.98	1.65	NA	NA	NA	NA	NA	1610	yes	3	3	4096	808	qwen2.5-0.5b-instruct-q5_k_m.gguf	revert(bench): drop the cache clear from run_bundle.sh — pre
