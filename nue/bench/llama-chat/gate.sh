@@ -24,7 +24,7 @@ REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APP_DIR="$REPO/nue/examples/llama-chat"
 HISTORY="${HISTORY:-$SCRIPT_DIR/history.tsv}"
 
-HEADER=$'date\tcommit\tttft_s\tdecode_tok_s\te2e_tok_s\tprefill_tok_s\tgen_tokens\tprompt_tokens\treps\tttft_spread_pct\tquiet\tflash_batch\tmodel\tsubject'
+HEADER=$'date\tcommit\tttft_s\tdecode_tok_s\te2e_tok_s\tprefill_tok_s\tgen_tokens\tprompt_tokens\treps\tttft_spread_pct\tdecode_spread_pct\tquiet\tflash_batch\tmodel\tsubject'
 
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 while [[ $# -gt 0 ]]; do
@@ -106,12 +106,18 @@ ttft_med="$(med "${ttfts[@]}")"
 dtps_med="$(med "${dtps[@]}")"
 etps_med="$(med "${etps[@]}")"
 ttft_spread="$(spread "${ttfts[@]}")"
+# Reported separately because the two move independently: a 500-token prefill
+# is ~1.4s of steady work while 64 decode tokens are ~0.6s, so decode is far
+# more sensitive to a passing background task or a warm/cold cache. A large
+# decode spread with a tight ttft spread is a short-sample artefact, not a
+# kernel problem -- raise MAX_TOKENS before reading anything into it.
+decode_spread="$(spread "${dtps[@]}")"
 # Prompt tokens are what prefill scales with; report the rate it achieved.
 prefill_tps="$(awk -v n="$PROMPT_TOKENS" -v t="$ttft_med" 'BEGIN{ if(t>0) printf "%.1f", n/t; else print "NA" }')"
 
-bench_history_append "$HISTORY" "$HEADER" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+bench_history_append "$HISTORY" "$HEADER" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
   "$(date +%Y-%m-%d)" "$BENCH_COMMIT$BENCH_DIRTY" "$ttft_med" "$dtps_med" "$etps_med" "$prefill_tps" \
-  "$MAX_TOKENS" "$PROMPT_TOKENS" "$REPS" "$ttft_spread" "$BENCH_QUIET" \
+  "$MAX_TOKENS" "$PROMPT_TOKENS" "$REPS" "$ttft_spread" "$decode_spread" "$BENCH_QUIET" \
   "${NUE_FLASH_BATCH:-default(on)}" "$(basename "$MODEL")" "$BENCH_SUBJECT")"
 
 echo
@@ -119,7 +125,7 @@ echo "  $BENCH_COMMIT$BENCH_DIRTY"
 echo "    prefill    ttft=${ttft_med}s  (~${prefill_tps} prompt tok/s over ${PROMPT_TOKENS} tokens)"
 echo "    decode     ${dtps_med} tok/s over $MAX_TOKENS tokens (prefill excluded)"
 echo "    end-to-end ${etps_med} tok/s including prefill -- falls with prompt length by design"
-echo "    stability  ttft spread across $REPS reps = ${ttft_spread}%"
+echo "    stability  ttft spread ${ttft_spread}%  |  decode spread ${decode_spread}%  (across $REPS reps)"
 echo "    config     NUE_FLASH_BATCH=${NUE_FLASH_BATCH:-default(on)}"
 echo "    machine    quiet=$BENCH_QUIET  (peak foreign ${BENCH_PEAK_CPU}% of one core)"
 bench_report "$BENCH_QUIET" ""
