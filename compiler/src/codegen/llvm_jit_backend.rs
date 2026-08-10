@@ -1021,6 +1021,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .get_function_address(&func_name)
             .map_err(|e| format!("Failed to get function address for {}: {}", func_name, e))?;
 
+        // Symbolication for external profilers. JIT'd code registers no symbols
+        // with the OS, so `sample`, `malloc_history` and friends render every
+        // Haxe frame as `??? (in <unknown binary>)`. Only the Cranelift backend
+        // dumped its pointers, which covered 640 of ~1638 functions -- enough to
+        // resolve an address to the WRONG function (a caller 107 KB past the
+        // nearest known start still "matched"). Dumping the LLVM side too makes
+        // address -> name attribution trustworthy.
+        if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
+            eprintln!("[fn-ptr] {:?} {} -> {:#x}", func_id, func_name, fn_ptr);
+        }
+
         // Cache for future calls
         self.function_pointers.insert(func_id, fn_ptr as usize);
 
@@ -1039,6 +1050,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         let func_name = llvm_func.get_name().to_string_lossy().to_string();
         if let Ok(fn_ptr) = engine.get_function_address(&func_name) {
             if fn_ptr != 0 {
+                if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
+                    eprintln!("[fn-ptr] {:?} {} -> {:#x}", func_id, func_name, fn_ptr);
+                }
                 self.function_pointers.insert(func_id, fn_ptr as usize);
                 return Some(fn_ptr as usize);
             }
@@ -1059,6 +1073,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let func_name = llvm_func.get_name().to_string_lossy().to_string();
                 if let Ok(fn_ptr) = engine.get_function_address(&func_name) {
                     if fn_ptr != 0 {
+                        if std::env::var_os("RAYZOR_DUMP_FN_PTRS").is_some() {
+                            eprintln!("[fn-ptr] {:?} {} -> {:#x}", func_id, func_name, fn_ptr);
+                        }
                         self.function_pointers.insert(func_id, fn_ptr as usize);
                     } else {
                         null_ptrs.push(format!("{} ({:?})", func_name, func_id));
