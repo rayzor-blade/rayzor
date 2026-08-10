@@ -30,10 +30,17 @@ BENCH_SETTLE_S="${BENCH_SETTLE_S:-30}"
 # CPU burned by everything that is not the program under test.
 # $NF, not $2: a process name can contain spaces ("Google Chrome Helper"),
 # which puts the cpu figure in the last field and part of the name in $2.
+# "Foreign" means CPU this benchmark did not cause. A head-to-head gate runs
+# BOTH engines, so the llama.cpp baseline is as much under test as rayzor is --
+# counting it made every comparison row flag itself as contaminated (measured:
+# 879% foreign while llama-bench alone held 766%, against a ~150% idle floor).
+# The phases are sequential, so neither engine is ever running during the
+# other's measurement window.
 bench_foreign_cpu() {
   { ps -Ao ucomm=,pcpu= 2>/dev/null || ps -Ao comm=,pcpu= 2>/dev/null; } | awk '
     { name = $1; sub(/.*\//, "", name)
       if (name == "rayzor" || name == "ps" || name == "awk") next
+      if (name == "llama-bench" || name == "llama-cli" || name == "llama-server") next
       total += $NF }
     END { printf "%d\n", total + 0 }'
 }
@@ -73,7 +80,36 @@ bench_quiet_wait() {
 # Waiting beforehand is not enough: a sibling build can start midway, and did.
 BENCH_WATCH_PID=""
 BENCH_PEAK_FILE=""
+# Peak memory of one engine, in MB. On macOS RSS understates badly -- it
+# excludes the compressor, which is exactly where a pressured box puts a model
+# -- so prefer phys_footprint via footprint(1), which needs no privileges.
+# Largest single matching process, not the newest -- an engine can have more
+# than one, and summing would double-count the shared model mapping.
+bench_proc_mem_mb() {
+  local pids pid mb best=0
+  pids="$(pgrep -x "$1" 2>/dev/null)"
+  [[ -z "$pids" ]] && { echo 0; return 0; }
+  for pid in $pids; do
+    mb=""
+    if command -v footprint >/dev/null 2>&1; then
+      mb="$(footprint -p "$pid" 2>/dev/null | awk '
+        /Footprint:/ { for (i = 1; i <= NF; i++) if ($i == "Footprint:") {
+            v = $(i+1) + 0; u = $(i+2)
+            if (u ~ /^GB/) printf "%d", v * 1024
+            else if (u ~ /^MB/) printf "%d", v
+            else if (u ~ /^KB/) printf "%d", v / 1024
+            exit } }')"
+    fi
+    [[ -z "$mb" ]] && mb="$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%d", $1/1024}')"
+    [[ -n "$mb" && "$mb" -gt "$best" ]] && best="$mb"
+  done
+  echo "$best"
+}
+
 bench_watch_start() {
+  # Pressure BEFORE this run starts, so a level the run causes itself can be
+  # told apart from a box that was already stressed.
+  BENCH_START_PRESSURE="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)"
   BENCH_PEAK_FILE="${TMPDIR:-/tmp}/nue_bench_peak.$$"
   : > "$BENCH_PEAK_FILE"
   # Also watch MEMORY, not just CPU. A run can pass the pre-flight checks and
@@ -83,15 +119,25 @@ bench_watch_start() {
   # thrashed for 10 minutes. Worst pressure level seen is recorded alongside the
   # CPU peak so the row says WHY it is untrustworthy.
   : > "$BENCH_PEAK_FILE.mem"
+  : > "$BENCH_PEAK_FILE.ours"
+  : > "$BENCH_PEAK_FILE.cpp"
   (
     peak=0
     worst=1
+    mours=0
+    mcpp=0
     while :; do
       c="$(bench_foreign_cpu)"
       [[ "$c" -gt "$peak" ]] && { peak="$c"; printf '%s\n' "$peak" > "$BENCH_PEAK_FILE"; }
       p="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)"
       [[ "$p" -gt "$worst" ]] && { worst="$p"; printf '%s\n' "$worst" > "$BENCH_PEAK_FILE.mem"; }
-      sleep 5
+      # Each engine's own peak, so the row says what the model actually cost
+      # rather than only what the box was doing around it.
+      m="$(bench_proc_mem_mb rayzor)"
+      [[ "$m" -gt "$mours" ]] && { mours="$m"; printf '%s\n' "$mours" > "$BENCH_PEAK_FILE.ours"; }
+      m="$(bench_proc_mem_mb llama-bench)"
+      [[ "$m" -gt "$mcpp" ]] && { mcpp="$m"; printf '%s\n' "$mcpp" > "$BENCH_PEAK_FILE.cpp"; }
+      sleep 2
     done
   ) &
   BENCH_WATCH_PID=$!
@@ -106,11 +152,23 @@ bench_watch_stop() {
   BENCH_WORST_PRESSURE="$(cat "$BENCH_PEAK_FILE.mem" 2>/dev/null || echo 1)"
   [[ -z "$BENCH_WORST_PRESSURE" ]] && BENCH_WORST_PRESSURE=1
   rm -f "$BENCH_PEAK_FILE.mem"
+  BENCH_PEAK_MEM_OURS="$(cat "$BENCH_PEAK_FILE.ours" 2>/dev/null || echo 0)"
+  BENCH_PEAK_MEM_CPP="$(cat "$BENCH_PEAK_FILE.cpp" 2>/dev/null || echo 0)"
+  [[ -z "$BENCH_PEAK_MEM_OURS" ]] && BENCH_PEAK_MEM_OURS=0
+  [[ -z "$BENCH_PEAK_MEM_CPP" ]] && BENCH_PEAK_MEM_CPP=0
+  rm -f "$BENCH_PEAK_FILE.ours" "$BENCH_PEAK_FILE.cpp"
   BENCH_QUIET="yes"
   [[ "$BENCH_PEAK_CPU" -ge "$BENCH_FOREIGN_BUSY" ]] && BENCH_QUIET="NO(${BENCH_PEAK_CPU}%)"
   # Memory degradation invalidates a throughput row just as surely as CPU
-  # contention -- a model that cannot stay resident measures the SSD.
-  if [[ "$BENCH_WORST_PRESSURE" -gt 1 ]]; then
+  # contention -- a model that cannot stay resident measures the SSD. But the
+  # run causes some of it: a 7B wires ~4GB, which drives a 16GB box to WARN by
+  # itself, and flagging that would mark every 7B row contaminated. So flag
+  # WARN only when the box was ALREADY stressed before the run (the pressure is
+  # then not ours), and flag CRITICAL unconditionally.
+  local mem_bad=0
+  [[ "$BENCH_WORST_PRESSURE" -ge 4 ]] && mem_bad=1
+  [[ "${BENCH_START_PRESSURE:-1}" -gt 1 ]] && mem_bad=1
+  if [[ "$mem_bad" -eq 1 ]]; then
     if [[ "$BENCH_QUIET" == "yes" ]]; then
       BENCH_QUIET="NO(mem-pressure-${BENCH_WORST_PRESSURE})"
     else
@@ -233,8 +291,17 @@ bench_history_append() {
 bench_report() {
   local quiet="$1" sd="${2:-}"
   if [[ "$quiet" != "yes" ]]; then
-    echo "  CONTAMINATED: other processes hit ${BENCH_PEAK_CPU}% of a core DURING this run."
-    echo "                Not comparable to a quiet-machine result."
+    # Name the condition that actually fired -- reporting a CPU peak that is
+    # under the threshold sends people hunting a process that was never there.
+    if [[ "$quiet" == *mem* ]]; then
+      echo "  CONTAMINATED: memory pressure reached level ${BENCH_WORST_PRESSURE} during this run"
+      echo "                (started at ${BENCH_START_PRESSURE:-1}; foreign CPU peaked ${BENCH_PEAK_CPU}%)."
+      echo "                A model that cannot stay resident measures the SSD."
+    fi
+    if [[ "$BENCH_PEAK_CPU" -ge "$BENCH_FOREIGN_BUSY" ]]; then
+      echo "  CONTAMINATED: other processes hit ${BENCH_PEAK_CPU}% of a core DURING this run."
+      echo "                Not comparable to a quiet-machine result."
+    fi
   elif [[ -n "$sd" ]] && awk "BEGIN{exit !($sd > 1.0)}"; then
     echo "  WARNING: stddev $sd > 1.0 with the machine apparently quiet. Check whether"
     echo "           it had just come off a heavy build -- load takes time to settle."

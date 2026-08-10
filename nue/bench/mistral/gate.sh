@@ -36,7 +36,7 @@ REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 APP_DIR="$REPO/nue/examples/llama-chat"
 HISTORY="${HISTORY:-$SCRIPT_DIR/history.tsv}"
 
-HEADER=$'date\tcommit\tprompt_tok\tttft_s\tprefill_tok_s\tdecode_tok_s\tcpp_pp\tcpp_tg\tprefill_ratio\tdecode_ratio\tfree_pct\tquiet\tmodel\tsubject'
+HEADER=$'date\tcommit\tprompt_tok\tttft_s\tprefill_tok_s\tdecode_tok_s\tcpp_pp\tcpp_tg\tprefill_ratio\tdecode_ratio\tfree_pct\tquiet\tmem_ours_mb\tmem_cpp_mb\tmodel\tsubject'
 
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 OURS_ONLY=0
@@ -138,9 +138,10 @@ ratio() { awk -v a="$1" -v b="$2" 'BEGIN { if (a+0>0 && b+0>0) printf "%.2f", b/
 pre_ratio="$(ratio "$prefill_tps" "$cpp_pp")"   # >1 = they are faster
 dec_ratio="$(ratio "$decode_tps" "$cpp_tg")"
 
-bench_history_append "$HISTORY" "$HEADER" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+bench_history_append "$HISTORY" "$HEADER" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
   "$(date +%Y-%m-%d)" "$BENCH_COMMIT$BENCH_DIRTY" "$PROMPT_TOK" "${ttft:-NA}" "$prefill_tps" \
   "$decode_tps" "$cpp_pp" "$cpp_tg" "$pre_ratio" "$dec_ratio" "${fp:-NA}" "$BENCH_QUIET" \
+  "$BENCH_PEAK_MEM_OURS" "$BENCH_PEAK_MEM_CPP" \
   "$(basename "$MODEL")" "$BENCH_SUBJECT")"
 
 echo
@@ -148,6 +149,7 @@ echo "  $BENCH_COMMIT$BENCH_DIRTY   $(basename "$MODEL")"
 echo "    prefill    ttft=${ttft:-NA}s over ${PROMPT_TOK} tok = ${prefill_tps} tok/s   llama.cpp pp512=${cpp_pp}"
 echo "    decode     ${decode_tps} tok/s over ${DECODE_TOKENS} tok, short ctx        llama.cpp tg128=${cpp_tg}"
 echo "    ratios     prefill ${pre_ratio}x, decode ${dec_ratio}x  (>1 = llama.cpp ahead)"
+echo "    memory     rayzor peak ${BENCH_PEAK_MEM_OURS} MB   llama.cpp peak ${BENCH_PEAK_MEM_CPP} MB   (phys_footprint, model is $(awk -v b="$(stat -f%z "$MODEL" 2>/dev/null || stat -c%s "$MODEL" 2>/dev/null)" 'BEGIN{printf "%d", b/1048576}') MB)"
 echo "    machine    quiet=$BENCH_QUIET  free=${fp:-?}%"
 bench_report "$BENCH_QUIET" ""
 echo "  history: $HISTORY"
