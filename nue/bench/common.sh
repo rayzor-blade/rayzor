@@ -97,6 +97,43 @@ bench_watch_stop() {
   [[ "$BENCH_PEAK_CPU" -ge "$BENCH_FOREIGN_BUSY" ]] && BENCH_QUIET="NO(${BENCH_PEAK_CPU}%)"
 }
 
+# --- memory pressure --------------------------------------------------------
+#
+# CPU quiet is NOT enough. macOS charges phys_footprint (not RSS), COMPRESSES
+# anonymous pages before swapping, and evicts off a pressure LEVEL. A box can
+# report "45% free" while sitting at WARN with 6 GB of RAM held by the
+# compressor and 12 GB in swap -- which is exactly the state every measurement
+# in this session was taken under, because the gate only watched CPU.
+#
+#   kern.memorystatus_vm_pressure_level: 1 = normal, 2 = warn, 4 = critical
+BENCH_REQUIRE_PRESSURE="${BENCH_REQUIRE_PRESSURE:-1}"   # max acceptable level
+
+bench_pressure_level() {
+  sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1
+}
+
+# RAM held by the compressor, in MB. Invisible to RSS and to "free percentage".
+bench_compressor_mb() {
+  local pages psz
+  pages="$(vm_stat 2>/dev/null | awk '/Pages occupied by compressor/ {gsub(/\./,"",$NF); print $NF}')"
+  psz="$(pagesize 2>/dev/null || echo 4096)"
+  [[ -z "$pages" ]] && { echo 0; return; }
+  awk -v p="$pages" -v s="$psz" 'BEGIN { printf "%d", p * s / 1048576 }'
+}
+
+bench_swap_used_mb() {
+  sysctl -n vm.swapusage 2>/dev/null | awk '{ for (i=1;i<=NF;i++) if ($i=="used") { gsub(/M/,"",$(i+2)); printf "%d", $(i+2); exit } }'
+}
+
+# Sets BENCH_PRESSURE, BENCH_COMPRESSOR_MB, BENCH_SWAP_MB and returns non-zero
+# when the machine is above the acceptable pressure level.
+bench_memory_state() {
+  BENCH_PRESSURE="$(bench_pressure_level)"
+  BENCH_COMPRESSOR_MB="$(bench_compressor_mb)"
+  BENCH_SWAP_MB="$(bench_swap_used_mb)"
+  [[ "${BENCH_PRESSURE:-1}" -le "$BENCH_REQUIRE_PRESSURE" ]]
+}
+
 # --- artifact staleness -----------------------------------------------------
 #
 # True when any source is newer than the artifact, or the artifact is missing.
