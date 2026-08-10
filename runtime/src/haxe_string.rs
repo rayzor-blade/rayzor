@@ -643,12 +643,41 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 
 /// Print string to stdout
 #[no_mangle]
+/// `Sys.print`/`Sys.println` are declared `(v:Dynamic)`, so the compiler boxes
+/// a non-String argument (`haxe_box_int_ptr` etc.) but passes a String RAW as a
+/// `*HaxeString`. Both then arrive here. Reading a boxed `DynamicValue` as a
+/// `HaxeString` dereferences its type tag as a data pointer, which is why
+/// `Sys.println(42)` segfaulted while `Sys.println("x=" + 42)` worked.
+///
+/// Discriminating is safe because the two layouts differ in their first eight
+/// bytes: `DynamicValue` starts with a small `type_id` (0..=7 for the builtin
+/// scalars), while `HaxeString` starts with a heap pointer whose low 32 bits
+/// are never that small. A tag outside that window is left alone and treated as
+/// a string, so boxed user objects behave exactly as before.
+///
+/// Returns an owned HaxeString when `s` was a boxed scalar, else None.
+unsafe fn dynamic_box_to_string(s: *const HaxeString) -> Option<*mut HaxeString> {
+    use crate::type_system::{DynamicValue, TYPE_ARRAY};
+    if (s as usize) < 0x1000 || (s as usize) & 7 != 0 {
+        return None;
+    }
+    let d = *(s as *const DynamicValue);
+    if d.type_id.0 > TYPE_ARRAY.0 {
+        return None;
+    }
+    Some(crate::type_system::haxe_std_string_ptr(s as *mut u8))
+}
+
 pub extern "C" fn haxe_string_print(s: *const HaxeString) {
     if s.is_null() {
         return;
     }
 
     unsafe {
+        if let Some(boxed) = dynamic_box_to_string(s) {
+            haxe_string_print(boxed);
+            return;
+        }
         let s_ref = &*s;
         if s_ref.len > 0 {
             let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
