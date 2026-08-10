@@ -1835,11 +1835,23 @@ class Q4Matmul {
         // that store lands 8 bytes at an 8-byte stride and corrupts F32.
         var yBase = y.data().raw();
 
+        // One buffer for the whole dispatch, sliced per worker, instead of a
+        // `Bytes.alloc` inside the closure. That ran once per band per call —
+        // ~1300 allocations per token on a 24-layer model, none of them ever
+        // freed, because the compiler only inserts a Free for allocations it
+        // can see and skips non-string/non-array allocations made in a loop
+        // body (insert_free.rs). A 585-token run made 2.0M haxe_bytes_alloc
+        // calls. Freed explicitly after the dispatch below, which is
+        // synchronous.
+        var q6Workers = (sp != null ? sp.workers() : 1);
+        if (q6Workers < 1) q6Workers = 1;
+        var q6Scratch = Bytes.alloc(q6Workers * 32);
+        var q6Base = q6Scratch.address();
+
         var band = function(n0:Int, n1:Int, node:Int):Void {
-            // Per-band, so pool workers never share it: q6DotMA4x4 returns its
-            // four row results here (Haxe has no out-params).
-            var q6Scratch = Bytes.alloc(32);
-            var q6Out = q6Scratch.address();
+            // q6DotMA4x4 returns its four row results here (Haxe has no
+            // out-params). Per-worker slice, so bands never share it.
+            var q6Out = q6Base + Usize.fromInt(node * 32);
             if (batch == 1) {
                 // Decode fast path: scalar accumulator, no batch indexing.
                 // No software prefetch here: this model's active weight set
@@ -1991,6 +2003,7 @@ class Q4Matmul {
         // modules; see bugs_import_xmodule_member_resolution).
         if (sp != null) sp.parallelRows(rows, band);
         else band(0, rows, 0);
+        q6Scratch.free();
         return y;
     }
 
@@ -2206,11 +2219,23 @@ class Q4Matmul {
         var yb1 = y1.data().raw();
         var yb2 = (w2 != null) ? y2.data().raw() : yb0;
 
+        // One buffer for the whole dispatch, sliced per worker, instead of a
+        // `Bytes.alloc` inside the closure. That ran once per band per call —
+        // ~1300 allocations per token on a 24-layer model, none of them ever
+        // freed, because the compiler only inserts a Free for allocations it
+        // can see and skips non-string/non-array allocations made in a loop
+        // body (insert_free.rs). A 585-token run made 2.0M haxe_bytes_alloc
+        // calls. Freed explicitly after the dispatch below, which is
+        // synchronous.
+        var q6Workers = (sp != null ? sp.workers() : 1);
+        if (q6Workers < 1) q6Workers = 1;
+        var q6Scratch = Bytes.alloc(q6Workers * 32);
+        var q6Base = q6Scratch.address();
+
         var band = function(n0:Int, n1:Int, node:Int):Void {
-            // Per-band, so pool workers never share it: q6DotMA4x4 returns its
-            // four row results here (Haxe has no out-params).
-            var q6Scratch = Bytes.alloc(32);
-            var q6Out = q6Scratch.address();
+            // q6DotMA4x4 returns its four row results here (Haxe has no
+            // out-params). Per-worker slice, so bands never share it.
+            var q6Out = q6Base + Usize.fromInt(node * 32);
             for (g in n0...n1) {
                 var wBase:Usize; var isQ6:Bool; var n:Int; var yb:Usize; var outRows:Int;
                 if (g < e0) {
@@ -2281,6 +2306,7 @@ class Q4Matmul {
         };
         if (sp != null) sp.parallelRows(total, band);
         else band(0, total, 0);
+        q6Scratch.free();
 
         var outs = [y0, y1];
         if (w2 != null) outs.push(y2);
