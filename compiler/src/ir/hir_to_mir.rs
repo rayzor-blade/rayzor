@@ -27006,11 +27006,29 @@ impl<'a> HirToMirContext<'a> {
         // Clone TypeKind to avoid borrow checker issues
         let (value_is_dynamic, target_kind_cloned) = {
             let type_table = self.type_table;
-            let value_is_dyn = matches!(
-                type_table.get(value_ty).map(|t| &t.kind),
-                Some(TypeKind::Dynamic)
-            );
+            let value_kind = type_table.get(value_ty).map(|t| &t.kind);
             let target_kind = type_table.get(target_ty).map(|t| t.kind.clone());
+
+            // `Null<T>` is boxed exactly like Dynamic, but its TypeKind is
+            // Optional, so it used to fall straight past the unboxing check:
+            // `var y:Int = x` on a Null<Int> emitted `bitcast ptr -> i64` and
+            // handed the BOX ADDRESS to an Int slot (printed 37000714080 for a
+            // value of 9), while `if (x == null) return 0; return x;` segfaulted.
+            // Treat it as boxed when the target is the scalar it wraps.
+            let value_is_optional_scalar = match value_kind {
+                Some(TypeKind::Optional { inner_type }) => type_table
+                    .get(*inner_type)
+                    .map(|t| matches!(t.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            let target_is_scalar = matches!(
+                target_kind,
+                Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+            );
+
+            let value_is_dyn = matches!(value_kind, Some(TypeKind::Dynamic))
+                || (value_is_optional_scalar && target_is_scalar);
             (value_is_dyn, target_kind)
         };
 
