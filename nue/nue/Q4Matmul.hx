@@ -434,12 +434,20 @@ class Q4Matmul {
         var wBase = w.dataPtr();
         var oBase = out.address();
 
+        // Per-WORKER bitcast scratch, allocated once per call: `f32ToF16` goes
+        // through memory, so a shared buffer would race across pool workers.
+        // Each slice holds a 4-byte bitcast slot plus the 16-entry per-sub-block
+        // value LUT (64 bytes); the stride pads that to a cache line so
+        // neighbouring workers do not write into one another's line. Allocating
+        // inside the band instead costs one malloc per CLAIMED CHUNK, and the
+        // `.address()` below makes it escape, so insert_free never releases it.
+        var scratchWorkers = (sp != null ? sp.workers() : 1);
+        if (scratchWorkers < 1) scratchWorkers = 1;
+        var scratchBuf = Bytes.alloc(scratchWorkers * 128);
+        var scratchBase = scratchBuf.address();
+
         var rowFn = function(lo:Int, hi:Int, node:Int):Void {
-            // Per-band bitcast scratch: `f32ToF16` goes through memory, so a
-            // shared buffer would race across pool workers. The following 64
-            // bytes hold the 16-entry per-sub-block value LUT.
-            var scratch = Bytes.alloc(68);
-            var sAddr = scratch.address();
+            var sAddr = scratchBase + Usize.fromInt(node * 128);
             var lut = sAddr + Usize.fromInt(4);
             for (r in lo...hi) {
                 for (b in 0...bpr) {
@@ -504,6 +512,7 @@ class Q4Matmul {
         };
         if (sp != null && rows >= sp.workers() * 2) sp.parallelRows(rows, rowFn);
         else rowFn(0, rows, 0);
+        scratchBuf.free();
         return true;
     }
 
@@ -511,9 +520,15 @@ class Q4Matmul {
         `Mem.storeI32`; `k` is a multiple of 256 so the pairing never has a
         tail. */
     static function narrowToF16(xBase:Usize, dst:Usize, rows:Int, k:Int, ?sp:SpinPool):Void {
+        // Same shape as dequantQ4KToF16: one per-worker slice per call, not one
+        // malloc per claimed chunk. Cache-line stride for a 4-byte slot that is
+        // written on every single conversion.
+        var scratchWorkers = (sp != null ? sp.workers() : 1);
+        if (scratchWorkers < 1) scratchWorkers = 1;
+        var scratchBuf = Bytes.alloc(scratchWorkers * 128);
+        var scratchBase = scratchBuf.address();
         var rowFn = function(lo:Int, hi:Int, node:Int):Void {
-            var scratch = Bytes.alloc(4);
-            var sAddr = scratch.address();
+            var sAddr = scratchBase + Usize.fromInt(node * 128);
             for (r in lo...hi) {
                 var s = xBase + Usize.fromInt(r * k * 4);
                 var d = dst + Usize.fromInt(r * k * 2);
@@ -528,6 +543,7 @@ class Q4Matmul {
         };
         if (sp != null && rows >= sp.workers() * 2) sp.parallelRows(rows, rowFn);
         else rowFn(0, rows, 0);
+        scratchBuf.free();
     }
 
     // Reused across calls: within one prefill each weight is touched once, so
