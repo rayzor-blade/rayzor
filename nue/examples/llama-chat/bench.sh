@@ -91,10 +91,10 @@ maybe_enable_jemalloc() {
   fi
 }
 
+# The runtime gates preload on the variable's PRESENCE, like the rest of the
+# RAYZOR_NO_* family: any value turns preload off. "On" means leaving it unset.
 if [[ -z "${RAYZOR_NO_PRELOAD_MMAP:-}" ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    export RAYZOR_NO_PRELOAD_MMAP=0
-  else
+  if [[ "$(uname -s)" != "Darwin" ]]; then
     export RAYZOR_NO_PRELOAD_MMAP=1
   fi
 else
@@ -133,7 +133,7 @@ echo "target: $BENCH_FILE"
 if [[ "$IS_BUNDLE" == "1" ]]; then
   echo "native lib: $NATIVE_LIB"
 fi
-echo "mmap preload: $([[ "${RAYZOR_NO_PRELOAD_MMAP:-}" == "1" ]] && echo off || echo on)"
+echo "mmap preload: $([[ -n "${RAYZOR_NO_PRELOAD_MMAP:-}" ]] && echo off || echo on)"
 echo "preset: $PRESET"
 echo "engine: $BENCH_ENGINE"
 echo "release: $RELEASE"

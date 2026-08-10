@@ -3061,16 +3061,25 @@ fn mem_facts() -> Option<MemFacts> {
 ///   - Never wire more than half the effective budget. Pinning that much
 ///     starves everything else (including this process's own activations),
 ///     and on Linux it may simply fail against RLIMIT_MEMLOCK.
-///   - macOS: never auto-wire, because no cheap signal here reports PRESENT
-///     pressure. `vm.swapusage.xsu_used` counts every compressor swap-out
-///     since boot and is effectively monotonic (macOS does not proactively
-///     swap back in), so it is history, not distress; `vm.page_free_count`
+///   - macOS: no HOST signal here reports PRESENT pressure.
+///     `vm.swapusage.xsu_used` counts every compressor swap-out since boot and
+///     is effectively monotonic (macOS does not proactively swap back in), so
+///     it is history, not distress — measured 89% used on an idle green box,
+///     which would fire `leaning_on_swap` permanently. `vm.page_free_count`
 ///     sits near zero by design (~59MB free with 5.7GB compressed on a
 ///     healthy 16GB box), so any "available < X" rule fires permanently; and
-///     `kern.memorystatus_vm_pressure_level` reads WARN on an idle machine.
-///     Measured on this 16GB box at 85% swap used, wiring changed throughput
-///     not at all (median 86.7 vs 87.2 tok/s, interleaved A/B) while costing
-///     ~900MB of footprint.
+///     `kern.memorystatus_vm_pressure_level` is unreliable at load time —
+///     it reads NORMAL right up to the run that then stalls.
+///     So gate on the MAPPING instead, which is a signal we do trust. The
+///     earlier A/B that found wiring pointless (median 86.7 vs 87.2 tok/s,
+///     ~900MB footprint) was a 770MB Llama-1B — 4.8% of RAM, which the host
+///     absorbs either way. A model that is a large fraction of RAM is the
+///     opposite case: it is the cheapest reclaim target the kernel has, and
+///     losing it mid-run costs a re-fault on every decode step. Measured on a
+///     16GB box against a churning 7GB working set, Mistral-7B Q4_K_M
+///     (4.07GB, 25% of RAM): unwired never finished a 24-token run (2/2, 120s
+///     timeout), wired completed both at 11.0 / 11.6 tok/s. On a quiet box
+///     wiring is free (10.22 vs 10.17 tok/s, stddev 3.8/3.3, n=6 each).
 ///   - Linux: wire only under real distress — little left to allocate, or the
 ///     box already leaning on swap. That is the regime the win was measured in.
 ///
@@ -3113,9 +3122,12 @@ fn decide_mlock(len: u64, f: &MemFacts, is_macos: bool) -> bool {
     if f.total == 0 || len > f.total / 2 {
         return false;
     }
-    // macOS: no cheap signal here means distress (see `should_mlock_mapping`).
+    // macOS: no host signal is usable, so gate on the mapping's share of RAM
+    // (see `should_mlock_mapping`). Wiring band is [total/8, total/2] — the
+    // upper bound is the check above. Below it the host absorbs a re-fault
+    // storm; above it, losing the mapping stalls every decode step.
     if is_macos {
-        return false;
+        return len >= f.total / 8;
     }
     // Under a hard cgroup ceiling, unreclaimable pages are an OOM-KILL hazard,
     // not a latency win: the kernel cannot fall back to eviction, so pinning
@@ -4399,6 +4411,7 @@ mod mlock_policy_tests {
 
     const GB: u64 = 1024 * 1024 * 1024;
     const MODEL: u64 = 770 * 1024 * 1024; // Llama-1B Q4_K_M
+    const MISTRAL_7B: u64 = 4168 * 1024 * 1024; // Mistral-7B Q4_K_M
 
     fn meminfo(total_kb: u64, avail_kb: u64, swap_total_kb: u64, swap_free_kb: u64) -> String {
         format!(
@@ -4427,14 +4440,34 @@ mod mlock_policy_tests {
     }
 
     #[test]
-    fn macos_never_auto_wires() {
-        // Same distress numbers, but macOS's compressor makes them normal.
+    fn macos_small_mapping_does_not_wire() {
+        // Distress numbers mean nothing on macOS (the compressor makes them
+        // normal), and a 770MB mapping is 4.8% of RAM — the host absorbs a
+        // re-fault storm, so wiring buys nothing. This is the case the
+        // original interleaved A/B measured at 86.7 vs 87.2 tok/s.
         let f = linux_mem_facts_from(
             &meminfo(16 * 1024 * 1024, 900 * 1024, 8 * 1024 * 1024, 600 * 1024),
             None,
         )
         .unwrap();
         assert!(!decide_mlock(MODEL, &f, true));
+    }
+
+    #[test]
+    fn macos_large_mapping_wires() {
+        // Mistral-7B Q4_K_M at 25% of a 16GB box: the kernel's cheapest
+        // reclaim target, and losing it re-faults on every decode step.
+        // Measured against a churning 7GB working set, unwired never finished
+        // a 24-token run (2/2) while wired completed at 11.0 / 11.6 tok/s.
+        let f = linux_mem_facts_from(&meminfo(16 * 1024 * 1024, 900 * 1024, 0, 0), None).unwrap();
+        assert!(decide_mlock(MISTRAL_7B, &f, true));
+    }
+
+    #[test]
+    fn macos_still_refuses_more_than_half_of_ram() {
+        // The share-of-RAM rule must not outrank the half-budget cap.
+        let f = linux_mem_facts_from(&meminfo(16 * 1024 * 1024, 900 * 1024, 0, 0), None).unwrap();
+        assert!(!decide_mlock(12 * GB, &f, true));
     }
 
     #[test]
