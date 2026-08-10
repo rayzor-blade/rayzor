@@ -1981,32 +1981,26 @@ unsafe fn amx_gemm_f16(
     Some(out_tensor)
 }
 
-/// f16 copy of a plain-F32 weight, cached by data pointer and reused across
-/// forwards. Encoder/Linear weights are load-once and fixed, so f32 -> f16 is a
-/// one-time narrowing (vImage, correct rounding); the f16 buffer is leaked,
-/// bounded by the model's weight set. The cached
-/// length guards against a freed+reused buffer of a different shape colliding on
-/// the same address.
-#[cfg(target_os = "macos")]
-fn cached_f16_weight_f32(w_ptr: usize, len: usize) -> *const u16 {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static CACHE: Mutex<Option<HashMap<usize, (usize, usize)>>> = Mutex::new(None);
-    let mut g = CACHE.lock().unwrap();
-    let map = g.get_or_insert_with(HashMap::new);
-    if let Some(&(p, cached_len)) = map.get(&w_ptr) {
-        if cached_len == len {
-            return p as *const u16;
-        }
-    }
+/// Narrow a plain-F32 weight to f16 in a reusable per-thread scratch.
+///
+/// This replaces a cache keyed by the weight's RAW ADDRESS, whose entries were
+/// `Box::leak`ed and never released. That had two defects:
+///
+///   * unbounded growth — one permanent f16 copy per distinct weight; and
+///   * a correctness hazard — a freed weight whose address was later reused by
+///     an allocation of the SAME length returned the previous weight's f16
+///     data. The cached length was the only guard, and it does not detect
+///     reuse.
+///
+/// The same trade was already made for the sibling Q4 path in 13f29f4e, which
+/// deleted its f16 weight cache in favour of a reusable scratch: on a 16 GB Mac
+/// the second copy is what stopped the model being resident (peak RSS 4930 vs
+/// 6382 MB), and within one prefill each weight is used exactly once, so the
+/// cache bought nothing for the case that matters.
+fn narrow_f16_weight_f32(w_ptr: usize, len: usize, out: &mut Vec<u16>) -> bool {
     let src = unsafe { std::slice::from_raw_parts(w_ptr as *const f32, len) };
-    let mut buf = vec![0u16; len];
-    if !crate::apple_accel::f32_to_f16(src, &mut buf) {
-        return std::ptr::null();
-    }
-    let p = Box::leak(buf.into_boxed_slice()).as_ptr();
-    map.insert(w_ptr, (p as usize, len));
-    p
+    out.resize(len, 0);
+    crate::apple_accel::f32_to_f16(src, out)
 }
 
 /// AMX f16 fast path for a plain-F32 `matmul_t` (`X[m,k] · W[n,k]^T -> [m,n]`),
@@ -2036,23 +2030,28 @@ pub(crate) unsafe fn amx_matmul_t_f32(
     if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
         return false;
     }
-    let fw16 = cached_f16_weight_f32(b as usize, n * k);
-    if fw16.is_null() {
-        return false;
-    }
     let x = std::slice::from_raw_parts(a, m * k);
+    // Both narrowings go into per-thread scratch that is reused across calls:
+    // no permanent second copy of the weights, and nothing keyed by an address
+    // that can be freed and reused underneath us.
     thread_local! {
         static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        static W16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    X16.with(|cell| {
-        let mut x16 = cell.borrow_mut();
-        x16.resize(m * k, 0);
-        if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+    W16.with(|wcell| {
+        let mut w16 = wcell.borrow_mut();
+        if !narrow_f16_weight_f32(b as usize, n * k, &mut w16) {
             return false;
         }
-        let fw = std::slice::from_raw_parts(fw16, n * k);
-        let out_slice = std::slice::from_raw_parts_mut(out, m * n);
-        crate::apple_accel::matmul_f16f32_nt(m, k, n, &x16, fw, out_slice)
+        X16.with(|cell| {
+            let mut x16 = cell.borrow_mut();
+            x16.resize(m * k, 0);
+            if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+                return false;
+            }
+            let out_slice = std::slice::from_raw_parts_mut(out, m * n);
+            crate::apple_accel::matmul_f16f32_nt(m, k, n, &x16, &w16, out_slice)
+        })
     })
 }
 
