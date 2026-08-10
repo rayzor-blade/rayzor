@@ -313,6 +313,130 @@ pub fn vec_dot_q4_K_q8_K(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
 // Allocator helpers
 // ============================================================================
 
+/// File-backed storage for QTensor weight data.
+///
+/// The requantised weights are a SECOND copy of the model: the original GGUF
+/// stays mmap'd and file-backed, while this copy was `malloc`'d. That
+/// asymmetry decides whether a large model stays resident. Measured with
+/// `vmmap` on a 7B run: the mapped file was 4.1G virtual / 2.8G resident /
+/// **0K swapped** — the kernel drops and re-reads those pages for free —
+/// while anonymous regions were 49% swapped out. Anonymous pages cannot be
+/// dropped; macOS compresses them and then swaps, which is why the process
+/// stalls at ~147% CPU with the model only partly resident.
+///
+/// Backing this allocation with a real (immediately unlinked) file puts it in
+/// the same category as the model itself. Pages are written once during
+/// requantisation and read-only afterwards, so under pressure the kernel can
+/// evict them without a compressor round-trip.
+///
+/// `RZT_QTENSOR_MMAP=0` restores plain malloc. Blocks below
+/// `QT_MMAP_MIN_BYTES` always use malloc — a page-granular mapping is pure
+/// overhead for small tensors.
+const QT_MMAP_MIN_BYTES: usize = 1 << 20;
+
+fn qt_mmap_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            crate::env_var("RZT_QTENSOR_MMAP", "RAYZOR_QTENSOR_MMAP").as_deref(),
+            Ok("0") | Ok("false")
+        )
+    })
+}
+
+/// ptr -> mapped length, so the release path can tell a mapping from a malloc.
+/// Only large weight blocks land here (145 of them on a 0.5B model), so the
+/// lock is uncontended and the map stays tiny.
+fn qt_mmap_registry() -> &'static parking_lot::Mutex<std::collections::HashMap<usize, usize>> {
+    use std::sync::OnceLock;
+    static REG: OnceLock<parking_lot::Mutex<std::collections::HashMap<usize, usize>>> =
+        OnceLock::new();
+    REG.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Allocate `bytes` of zeroed storage, file-backed when it is worth it.
+/// Falls back to malloc on any failure — this is an optimisation, never a
+/// correctness requirement.
+unsafe fn qt_alloc_data(bytes: usize) -> *mut u8 {
+    let n = if bytes > 0 { bytes } else { 1 };
+    if !qt_mmap_enabled() || n < QT_MMAP_MIN_BYTES {
+        let p = malloc(n);
+        if !p.is_null() {
+            std::ptr::write_bytes(p, 0, n);
+        }
+        return p;
+    }
+
+    // An unlinked temp file: the mapping keeps it alive, and nothing is left
+    // on disk if we crash.
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = format!(
+        "{}/rzq.{}.{}\0",
+        dir.trim_end_matches('/'),
+        std::process::id(),
+        seq
+    );
+    let fd = libc::open(
+        path.as_ptr() as *const libc::c_char,
+        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    );
+    if fd < 0 {
+        let p = malloc(n);
+        if !p.is_null() {
+            std::ptr::write_bytes(p, 0, n);
+        }
+        return p;
+    }
+    libc::unlink(path.as_ptr() as *const libc::c_char);
+    if libc::ftruncate(fd, n as libc::off_t) != 0 {
+        libc::close(fd);
+        let p = malloc(n);
+        if !p.is_null() {
+            std::ptr::write_bytes(p, 0, n);
+        }
+        return p;
+    }
+    let addr = libc::mmap(
+        std::ptr::null_mut(),
+        n,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_SHARED,
+        fd,
+        0,
+    );
+    // The mapping holds its own reference; the descriptor is not needed after.
+    libc::close(fd);
+    if addr == libc::MAP_FAILED {
+        let p = malloc(n);
+        if !p.is_null() {
+            std::ptr::write_bytes(p, 0, n);
+        }
+        return p;
+    }
+    // ftruncate already guarantees zero-filled pages.
+    qt_mmap_registry().lock().insert(addr as usize, n);
+    addr as *mut u8
+}
+
+/// Release storage from `qt_alloc_data`. Checks the registry so a mapping is
+/// never handed to `free`, and a malloc is never handed to `munmap`.
+unsafe fn qt_free_data(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    let mapped = qt_mmap_registry().lock().remove(&(ptr as usize));
+    match mapped {
+        Some(len) => {
+            libc::munmap(ptr as *mut libc::c_void, len);
+        }
+        None => free(ptr),
+    }
+}
+
 unsafe fn alloc_qtensor(
     scheme: u8,
     rows: usize,
@@ -355,11 +479,10 @@ unsafe fn alloc_qtensor(
         return popped;
     }
 
-    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+    let data = qt_alloc_data(data_bytes);
     if data.is_null() {
         return std::ptr::null_mut();
     }
-    std::ptr::write_bytes(data, 0, data_bytes);
 
     // INT8 needs a per-row (or per-group) scale array. Q4_K_M embeds scales
     // in the data blocks so meta is null.
@@ -368,7 +491,7 @@ unsafe fn alloc_qtensor(
         let scale_bytes = n_groups * std::mem::size_of::<f32>();
         let s = malloc(scale_bytes.max(4)) as *mut f32;
         if s.is_null() {
-            free(data);
+            qt_free_data(data);
             return std::ptr::null_mut();
         }
         s
@@ -378,7 +501,7 @@ unsafe fn alloc_qtensor(
 
     let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
     if qt.is_null() {
-        free(data);
+        qt_free_data(data);
         if !meta.is_null() {
             free(meta as *mut u8);
         }
@@ -3372,7 +3495,7 @@ unsafe fn qtensor_pool_freer(entry: PooledEntry) {
     }
     let qt = &*(entry.ptr as *const RayzorQTensor);
     if qt.owns_data && !qt.data.is_null() {
-        free(qt.data);
+        qt_free_data(qt.data);
     }
     if !qt.meta.is_null() {
         free(qt.meta as *mut u8);
@@ -3432,7 +3555,7 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
     // pool freer would do, without the bookkeeping churn.
     if qt.scheme != QSCHEME_INT8 {
         if !qt.data.is_null() {
-            free(qt.data);
+            qt_free_data(qt.data);
         }
         if !qt.meta.is_null() {
             free(qt.meta as *mut u8);
