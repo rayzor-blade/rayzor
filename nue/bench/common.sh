@@ -76,11 +76,21 @@ BENCH_PEAK_FILE=""
 bench_watch_start() {
   BENCH_PEAK_FILE="${TMPDIR:-/tmp}/nue_bench_peak.$$"
   : > "$BENCH_PEAK_FILE"
+  # Also watch MEMORY, not just CPU. A run can pass the pre-flight checks and
+  # then degrade underneath itself: observed the compressor growing 5.7 -> 7.6 GB
+  # and pressure flipping 1 -> 2 while the process under test was still idle at
+  # 0.02 GB RSS, after which a 4 GB model never became resident and the run
+  # thrashed for 10 minutes. Worst pressure level seen is recorded alongside the
+  # CPU peak so the row says WHY it is untrustworthy.
+  : > "$BENCH_PEAK_FILE.mem"
   (
     peak=0
+    worst=1
     while :; do
       c="$(bench_foreign_cpu)"
       [[ "$c" -gt "$peak" ]] && { peak="$c"; printf '%s\n' "$peak" > "$BENCH_PEAK_FILE"; }
+      p="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)"
+      [[ "$p" -gt "$worst" ]] && { worst="$p"; printf '%s\n' "$worst" > "$BENCH_PEAK_FILE.mem"; }
       sleep 5
     done
   ) &
@@ -93,8 +103,20 @@ bench_watch_stop() {
   BENCH_PEAK_CPU="$(cat "$BENCH_PEAK_FILE" 2>/dev/null || echo 0)"
   [[ -z "$BENCH_PEAK_CPU" ]] && BENCH_PEAK_CPU=0
   rm -f "$BENCH_PEAK_FILE"
+  BENCH_WORST_PRESSURE="$(cat "$BENCH_PEAK_FILE.mem" 2>/dev/null || echo 1)"
+  [[ -z "$BENCH_WORST_PRESSURE" ]] && BENCH_WORST_PRESSURE=1
+  rm -f "$BENCH_PEAK_FILE.mem"
   BENCH_QUIET="yes"
   [[ "$BENCH_PEAK_CPU" -ge "$BENCH_FOREIGN_BUSY" ]] && BENCH_QUIET="NO(${BENCH_PEAK_CPU}%)"
+  # Memory degradation invalidates a throughput row just as surely as CPU
+  # contention -- a model that cannot stay resident measures the SSD.
+  if [[ "$BENCH_WORST_PRESSURE" -gt 1 ]]; then
+    if [[ "$BENCH_QUIET" == "yes" ]]; then
+      BENCH_QUIET="NO(mem-pressure-${BENCH_WORST_PRESSURE})"
+    else
+      BENCH_QUIET="${BENCH_QUIET}+mem${BENCH_WORST_PRESSURE}"
+    fi
+  fi
 }
 
 # --- memory pressure --------------------------------------------------------
