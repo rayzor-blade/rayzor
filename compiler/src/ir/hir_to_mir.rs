@@ -24973,11 +24973,22 @@ impl<'a> HirToMirContext<'a> {
         // Clone TypeKind to avoid borrow checker issues
         let (target_is_dynamic, value_kind_cloned) = {
             let type_table = self.type_table;
+            let value_kind = type_table.get(value_ty).map(|t| t.kind.clone());
+            let target_is_optional_scalar = match type_table.get(target_ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => type_table
+                    .get(*inner_type)
+                    .map(|t| matches!(t.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            let value_is_scalar = matches!(
+                value_kind,
+                Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+            );
             let target_is_dyn = matches!(
                 type_table.get(target_ty).map(|t| &t.kind),
                 Some(TypeKind::Dynamic)
-            );
-            let value_kind = type_table.get(value_ty).map(|t| t.kind.clone());
+            ) || (target_is_optional_scalar && value_is_scalar);
             (target_is_dyn, value_kind)
         };
 
@@ -26221,10 +26232,33 @@ impl<'a> HirToMirContext<'a> {
                     // boxing and the Cast→Dynamic path.
                     let param_is_dynamic = {
                         let type_table = self.type_table;
+                        // `Null<scalar>` is represented as a boxed DynamicValue*
+                        // (see convert_type), so an argument for such a
+                        // parameter must be boxed here too. Gating only on
+                        // Dynamic let a raw scalar travel into a Ptr(U8) slot:
+                        // the callee then unboxed it and dereferenced the value
+                        // itself (`nc(9)` dereferenced address 9), and at -O the
+                        // register typed Ptr(U8) actually held a float, which
+                        // crashed codegen comparing it against null.
+                        let param_is_optional_scalar = match type_table
+                            .get(resolved_param)
+                            .map(|t| &t.kind)
+                        {
+                            Some(TypeKind::Optional { inner_type }) => type_table
+                                .get(*inner_type)
+                                .map(|t| {
+                                    matches!(
+                                        t.kind,
+                                        TypeKind::Int | TypeKind::Float | TypeKind::Bool
+                                    )
+                                })
+                                .unwrap_or(false),
+                            _ => false,
+                        };
                         matches!(
                             type_table.get(resolved_param).map(|t| &t.kind),
                             Some(TypeKind::Dynamic)
-                        )
+                        ) || param_is_optional_scalar
                     };
                     if param_is_dynamic {
                         if let Some(boxed) =
