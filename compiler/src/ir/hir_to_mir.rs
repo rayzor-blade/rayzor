@@ -25311,6 +25311,20 @@ impl<'a> HirToMirContext<'a> {
 
     /// Box a primitive MIR value to a DynamicValue pointer.
     /// Used for type harmonization in conditional expressions (e.g., null vs i64 in phi).
+    /// Zero constant matching a scalar IR type, used to harmonise a
+    /// conditional whose other branch is a synthesised null placeholder.
+    fn zero_of_ir_type(&mut self, ty: &IrType) -> Option<IrId> {
+        let v = match ty {
+            IrType::F64 => IrValue::F64(0.0),
+            IrType::F32 => IrValue::F32(0.0),
+            IrType::I64 => IrValue::I64(0),
+            IrType::I32 => IrValue::I32(0),
+            IrType::Bool => IrValue::Bool(false),
+            _ => return None,
+        };
+        self.builder.build_const(v)
+    }
+
     fn box_primitive_to_dynamic(&mut self, value: IrId, reg_ty: IrType) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         match reg_ty {
@@ -32581,7 +32595,57 @@ impl<'a> HirToMirContext<'a> {
                     Some(IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool)
                 );
 
-                if then_is_ptr && else_is_prim {
+                // When the conditional's own result type is a concrete scalar,
+                // harmonise DOWN to that scalar instead of boxing the live
+                // branch up to a pointer. The pointer side is a synthesised
+                // null for a missing else (tast_to_hir::make_null_literal) and
+                // is never the value the expression yields; replacing it with a
+                // zero of the scalar type keeps the phi well-typed at no cost.
+                //
+                // Boxing instead produced a SECOND, dead phi fed by
+                // haxe_box_float_ptr, allocating on every execution:
+                // Int8Matmul.quantizeActRow does this three times per row, per
+                // matmul, per token -- 1,876,152 boxes in one generation, none
+                // freed (haxe_box_* is invisible to insert_free.rs).
+                //
+                // Simply SKIPPING the harmonisation is not an option: the phi
+                // then merges f64 with Ptr and segfaults.
+                //
+                // Null<T> cases such as `if (x == null) null else x.field` have
+                // a Dynamic/Null result type, so they keep the boxing path.
+                let result_is_scalar = result_ty
+                    .and_then(|t| self.type_table.get(t))
+                    .map(|t| matches!(t.kind, TypeKind::Float | TypeKind::Int | TypeKind::Bool))
+                    .unwrap_or(false);
+
+                // ...and ONLY when the pointer side is literally `null`. A
+                // pointer branch carrying a REAL value (e.g. `x` in
+                // `(x == null) ? 0 : x` where x is Null<Int>) must still be
+                // boxed/unboxed by the existing path: zeroing it there turned a
+                // crash into `nc(9) == 0`, a silent wrong answer, which is worse
+                // than the crash it replaced.
+                let then_is_null_lit = matches!(then_expr.kind, HirExprKind::Null);
+                let else_is_null_lit = matches!(else_expr.kind, HirExprKind::Null);
+
+                if result_is_scalar && then_is_ptr && else_is_prim && then_is_null_lit {
+                    let cur = self.builder.current_block();
+                    self.builder.switch_to_block(then_end_block);
+                    if let Some(z) = self.zero_of_ir_type(&else_rty.clone().unwrap()) {
+                        then_val = Some(z);
+                    }
+                    if let Some(c) = cur {
+                        self.builder.switch_to_block(c);
+                    }
+                } else if result_is_scalar && else_is_ptr && then_is_prim && else_is_null_lit {
+                    let cur = self.builder.current_block();
+                    self.builder.switch_to_block(else_end_block);
+                    if let Some(z) = self.zero_of_ir_type(&then_rty.clone().unwrap()) {
+                        else_val = Some(z);
+                    }
+                    if let Some(c) = cur {
+                        self.builder.switch_to_block(c);
+                    }
+                } else if then_is_ptr && else_is_prim {
                     // Box the else value (primitive) to match the then pointer
                     self.builder.switch_to_block(else_end_block);
                     let boxed = self.box_primitive_to_dynamic(ev, else_rty.unwrap());
