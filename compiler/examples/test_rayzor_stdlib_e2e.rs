@@ -569,6 +569,146 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 3b: Thread closure whose DEFINING FRAME HAS RETURNED
+    // ============================================================================
+    // The capture is allocated in makeTask, which returns before the thread ever
+    // runs it. Free the capture at the end of that frame and the thread reads
+    // freed memory. Every other thread test here keeps the defining frame alive
+    // for the whole run, so none of them reach this.
+    suite.add_test(
+        E2ETestCase::new(
+            "thread_closure_escaped_capture",
+            "Thread spawned inside a helper; its captured heap value is used after that helper returned",
+            r#"
+package test;
+
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class Cell {
+    public var v: Int;
+    public function new(x: Int) { this.v = x; }
+}
+
+class Main {
+    static function spawnTask(seed: Int): Thread<Int> {
+        var cell = new Cell(seed);
+        return Thread.spawn(() -> { cell.v = cell.v + 1; return cell.v; });
+    }
+
+    static function main() {
+        // Both helper frames have returned by here; the threads still hold
+        // their captures.
+        var h1 = spawnTask(10);
+        var h2 = spawnTask(100);
+
+        var r1 = h1.join();
+        var r2 = h2.join();
+
+        trace("r1=" + r1);
+        trace("r2=" + r2);
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["rayzor_thread_spawn", "rayzor_thread_join"])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
+    // TEST 3c: Capture mutated on the thread, observed by the parent
+    // ============================================================================
+    // A capture is shared, not copied: the write the thread makes has to be
+    // visible through the parent's own handle on the same object once joined.
+    suite.add_test(
+        E2ETestCase::new(
+            "thread_closure_shared_capture",
+            "Thread mutates a captured object; parent observes the write after join",
+            r#"
+package test;
+
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class Cell {
+    public var v: Int;
+    public function new(x: Int) { this.v = x; }
+}
+
+class Main {
+    static function main() {
+        var cell = new Cell(5);
+
+        var h = Thread.spawn(() -> {
+            cell.v = cell.v + 37;
+            return cell.v;
+        });
+
+        var r = h.join();
+        trace("returned=" + r);
+        trace("observed=" + cell.v);
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["rayzor_thread_spawn", "rayzor_thread_join"])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
+    // TEST 3d: Many escaped closures, each owning its own capture
+    // ============================================================================
+    // Built in a loop so the captures are separate allocations made in frames
+    // that have all returned. Catches both a premature free and any aliasing
+    // between the per-iteration environments.
+    suite.add_test(
+        E2ETestCase::new(
+            "thread_closure_many_captures",
+            "Four threads spawned from a helper, each holding a capture from a frame that already returned",
+            r#"
+package test;
+
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class Cell {
+    public var v: Int;
+    public function new(x: Int) { this.v = x; }
+}
+
+class Main {
+    static function spawnTask(seed: Int): Thread<Int> {
+        var cell = new Cell(seed);
+        return Thread.spawn(() -> { cell.v = cell.v + 1; return cell.v; });
+    }
+
+    static function main() {
+        var handles = new Array<Thread<Int>>();
+
+        var i = 0;
+        while (i < 4) {
+            handles.push(spawnTask(i * 10));
+            i++;
+        }
+
+        var sum = 0;
+        var j = 0;
+        while (j < handles.length) {
+            sum += handles[j].join();
+            j++;
+        }
+
+        // seeds 0,10,20,30 -> each +1 -> 1 + 11 + 21 + 31
+        trace("sum=" + sum);
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["rayzor_thread_spawn", "rayzor_thread_join"])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 4: Channel Send/Receive
     // ============================================================================
     suite.add_test(
