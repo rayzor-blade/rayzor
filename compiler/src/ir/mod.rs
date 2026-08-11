@@ -10,7 +10,8 @@
 
 pub mod drop_analysis;
 pub mod hir; // High-level IR (close to source syntax)
-pub mod hir_to_mir; // HIR to MIR lowering
+pub mod mir; // HIR to MIR lowering
+pub use mir as hir_to_mir; // keeps the established path working
 pub mod tast_to_hir; // TAST to HIR lowering // Drop point analysis for automatic memory deallocation
 
 // MIR modules (the existing IR serves as MIR)
