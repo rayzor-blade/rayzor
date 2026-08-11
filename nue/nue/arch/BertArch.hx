@@ -150,7 +150,7 @@ class BertArch implements ArchBuilder {
         var oProj = makeLinear(weights, prefix + "attn_output");
         var attn = new MultiHeadAttention(qProj, kProj, vProj, oProj, meta.numHeads, meta.headDim);
 
-        // Post-attention LayerNorm. GGUF (llama.cpp) names it
+        // Post-attention LayerNorm. GGUF names it
         // `attn_output_norm`; the SafetensorsLoader normalizes to
         // `attn_norm`. Accept either so both load paths resolve.
         var attnNorm = takeNormAny(weights, [prefix + "attn_norm", prefix + "attn_output_norm"], meta.normEps);
@@ -196,7 +196,7 @@ class BertArch implements ArchBuilder {
 
     /**
      * Resolve a LayerNorm from the first candidate base-name that exists.
-     * BERT norms carry different names across loaders — GGUF (llama.cpp)
+     * BERT norms carry different names across loaders — GGUF
      * uses `attn_output_norm` / `layer_output_norm`, the SafetensorsLoader
      * normalizes to `attn_norm` / `ffn_norm` — so both must resolve. Throws
      * if none match (these norms are mandatory for a correct encoder).
