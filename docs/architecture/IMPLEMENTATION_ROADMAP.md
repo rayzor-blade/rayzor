@@ -99,7 +99,6 @@
      - Return type correctly extracted from function type signature
      - Nested function context management working
      - Tests passing: [test_lambda_execution.rs](examples/test_lambda_execution.rs), [test_simple_indirect_call.rs](examples/test_simple_indirect_call.rs)
-     - Docs: [FUNCTION_POINTERS.md](FUNCTION_POINTERS.md)
    - [x] ~~Implement closure environment allocation~~ ✅ **COMPLETED 2025-01-13**
      - Capture analysis implemented: detects free variables in lambda bodies
      - Environment allocation on stack via Cranelift stack slots
