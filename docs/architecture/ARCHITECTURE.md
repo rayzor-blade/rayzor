@@ -17,12 +17,12 @@ immediately, and only what proves hot pays compilation cost.
 ```mermaid
 flowchart TD
     SRC["Haxe source"] --> PRE["Preprocessor<br/>conditional compilation"]
-    PRE --> RD["Recursive-descent parser<br/>parser/src/rd"]
+    PRE --> RD["Recursive-descent parser"]
     RD -.->|"on parse error"| NOM["Legacy nom parser<br/>recovery"]
     RD --> AST["AST · HaxeFile"]
     NOM --> AST
-    AST --> MACRO["Macro expansion<br/>macro_system"]
-    MACRO --> LOWER["AST lowering + type checking<br/>tast/ast_lowering.rs"]
+    AST --> MACRO["Macro expansion"]
+    MACRO --> LOWER["AST lowering<br/>type checking folded in"]
     LOWER --> TAST["TAST · TypedFile<br/>types and symbols resolved"]
 
     TAST -.->|"gated on enable_semantic_analysis"| SG["Semantic graphs<br/>CFG · DFG · call · ownership"]
@@ -30,8 +30,8 @@ flowchart TD
 
     TAST --> HIR["HIR · HirModule<br/>desugared, still structured"]
     HIR --> MIR["MIR · IrModule<br/>SSA over basic blocks"]
-    MIR --> MONO["Monomorphize<br/>ir/monomorphize.rs"]
-    MONO --> OPT["PassManager for_level<br/>O0 to O3, default O2"]
+    MIR --> MONO["Monomorphize"]
+    MONO --> OPT["Optimization passes<br/>O0 to O3, default O2"]
     OPT --> BE{"Backends"}
 
     BE --> INTERP["MIR interpreter"]
@@ -60,21 +60,19 @@ the cheapest way to see what each IR actually holds.
 
 ### Two pipeline drivers — know which one you are reading
 
-`compiler/src/pipeline.rs` (`Pipeline::compile_file`) has tidy numbered stages
-and reads like the reference implementation. **It is not what the CLI runs.**
-Every command drives `compiler/src/compilation.rs` (`CompilationUnit`) via
-`src/compile_helpers.rs`.
+`Pipeline` has tidy numbered stages and reads like the reference
+implementation. **It is not what the CLI runs.** Every command drives
+`CompilationUnit` instead.
 
 Three consequences that will otherwise cost you an afternoon:
 
-- **Type checking is inline in `tast/ast_lowering.rs`**, not a separate phase.
-  `tast/type_checking_pipeline.rs` has no caller outside `pipeline.rs` and tests.
-- **Semantic graphs are not built on the production path.** `compilation.rs`
-  passes `None /* No semantic graphs for now */` into HIR lowering. The layer is
-  reached through `Pipeline::build_semantic_graphs` and the ownership check.
-- Every CLI entry calls `PipelineConfig::skip_analysis()`, which disables
-  lifetime, ownership, borrow checking, semantic analysis, HIR validation and
-  flow analysis. Macro expansion is deliberately **not** disabled — it is a
+- **Type checking is inline in AST lowering**, not a separate phase. The
+  standalone `TypeCheckingPhase` has no caller outside `Pipeline` and its tests.
+- **Semantic graphs are not built on the production path.** `CompilationUnit`
+  passes `None` into HIR lowering. The layer is reached only through `Pipeline`
+  and the ownership check.
+- Every CLI entry calls `skip_analysis()`, which disables lifetime, ownership,
+  borrow checking, semantic analysis, HIR validation and flow analysis. Macro expansion is deliberately **not** disabled — it is a
   correctness feature, not analysis.
 
 ---
@@ -85,18 +83,18 @@ User-facing diagnostics and compiler-internal analysis are different
 subsystems, so error quality does not depend on optimizer internals or vice
 versa.
 
-- `tast/type_flow_guard.rs` — `TypeFlowGuard` orchestrates the CFG analyzer plus
+- `TypeFlowGuard` orchestrates the CFG analyzer plus
   the lifetime and ownership analyzers, producing `FlowSafetyError`s
   (uninitialized variable, null dereference, dead code) that become user-visible
   warnings or errors.
-- `semantic_graph/` — compiler-internal. TAST → CFG → DFG, plus a call graph and
+- The semantic-graph layer is compiler-internal: TAST → CFG → DFG, plus a call graph and
   an ownership graph. The DFG is textbook SSA: dominance tree, phi placement from
   dominance frontiers, renaming, then phi-operand completion with type
   unification. Consumers gate on `is_valid_ssa()` before reading anything.
 
-Two corrections to older documentation. MIR's SSA does **not** come from
-`semantic_graph` — MIR builds its own with `IrInstruction::Phi`, and
-`semantic_graph` never appears under `ir/mir/`. And the SSA optimization-hint
+Two corrections to older documentation. MIR's SSA does **not** come from the
+semantic-graph layer — MIR builds its own with `IrInstruction::Phi`, and the
+analysis layer is never consulted during lowering. And the SSA optimization-hint
 channel (HIR attributes → `SsaOptimizationHints`) exists end to end but is
 inert: its only reader is a lowering entry point that is itself dead code. Treat
 it as scaffolding.
@@ -115,8 +113,9 @@ an `OwnershipGraph`, calls `check_use_after_move()`, then filters through
 | otherwise | warning (E0382) with a "consider cloning" help |
 
 MIR declares ownership vocabulary — `Move`, `BorrowImmutable`, `BorrowMutable`,
-`Clone`, and an `OwnershipMode` per call argument — but nothing under `ir/mir/`
-emits `Move` or either borrow, and nothing populates `arg_ownership`. It is
+`Clone`, and an `OwnershipMode` per call argument — but nothing in lowering
+emits `Move` or either borrow, and nothing populates the per-argument ownership
+mode. It is
 reserved vocabulary, not a live encoding.
 
 ---
@@ -139,7 +138,7 @@ addressing is `GetElementPtr`/`PtrAdd`, aggregates are
 `MakeClosure`/`ClosureFunc`/`ClosureEnv`, enums are
 `CreateUnion`/`ExtractDiscriminant`/`ExtractUnionValue`.
 
-`ir/dump.rs` prints MIR in an LLVM-like textual form — registers `$N`, blocks
+MIR prints in an LLVM-like textual form — registers `$N`, blocks
 `bbN`, functions `fnN`, sorted by id so dumps diff cleanly. Note that
 `RAYZOR_DUMP_MIR=1` fires **before** the optimization passes, so it is not what
 the backend sees; use `rayzor dump --diff` for that.
@@ -149,14 +148,14 @@ the backend sees; use `rayzor dump --diff` for that.
 HIR → MIR does three things at once, which is why it is the largest stage: it
 flattens structured control flow into basic blocks, resolves HIR names to MIR
 ids, and materialises what the source leaves implicit — boxing, drops, dispatch.
-State lives in one `HirToMirContext` implemented across `ir/mir/`:
+State lives in one `HirToMirContext`, implemented across these submodules:
 
 | Submodule | Role |
 |---|---|
-| `decl/` | what must exist before any body lowers: signatures, metadata, vtables |
-| `stmt/`, `expr/`, `field/` | the lowering proper |
-| `resolve/` | HIR names and symbols → MIR ids |
-| `helpers/` | boxing, drops, allocation, type ids |
+| `decl` | what must exist before any body lowers: signatures, metadata, vtables |
+| `stmt`, `expr`, `field` | the lowering proper |
+| `resolve` | HIR names and symbols → MIR ids |
+| `helpers` | boxing, drops, allocation, type ids |
 
 Call targets resolve by `SymbolId` in the local then external function map, then
 fall back to matching the **fully-qualified name**. Bare-name matching is not
@@ -170,8 +169,7 @@ generic specialisation sees SSA, and a bug in it presents as a MIR-level problem
 
 ## Optimization
 
-`PassManager::for_level` in `ir/optimization.rs` builds the pipeline; default is
-O2. `InsertFreePass` is added **before the level match, at every level** — it is
+`PassManager::for_level` builds the pipeline; the default is O2. `InsertFreePass` is added **before the level match, at every level** — it is
 a correctness pass, not an optimization.
 
 | Level | Passes, in order (after InsertFree) |
@@ -212,7 +210,7 @@ SRA is function-local, so constructor bodies must be inlined first. LICM's
 to the loop preheader with its `Free` sunk past the loop, reusing one buffer
 across iterations.
 
-`ir/escape_analysis.rs` is exactly that intra-loop question — it is **not**
+The escape analysis answers exactly that intra-loop question — it is **not**
 general stack promotion. Object field decomposition belongs to SRA.
 
 ### InsertFree — the correctness backstop
@@ -238,14 +236,14 @@ get a runtime release call rather than an `IrInstruction::Free`.
 
 ## Backends
 
-| Backend | Module | Role |
-|---|---|---|
-| MIR interpreter | `codegen/mir_interpreter.rs` | Register-based (MIR is already SSA, so `IrId` maps straight to a register). Instant startup, tier 0 |
-| Cranelift | `codegen/cranelift_backend.rs` | JIT tiers 1–3. Fast compile |
-| LLVM | `codegen/llvm_jit_backend.rs`, `llvm_aot_backend.rs` | Default AOT path; also the top JIT tier and a whole-module upgrade |
-| WASM | `codegen/wasm_backend.rs` + linker, component | MIR → core WASM → WASI P2 component. Linear memory, SIMD128 |
-| C | `codegen/c_backend.rs` | MIR → C99 → gcc/g++ -O2. An LLVM-free AOT route |
-| WGSL | `codegen/wgsl_transpiler.rs` | `@:shader` classes → WGSL at compile time. Not a general target |
+| Backend | Role |
+|---|---|
+| MIR interpreter | Register-based — MIR is already SSA, so a value id maps straight to a register. Instant startup, tier 0 |
+| Cranelift | JIT tiers 1–3. Fast compile |
+| LLVM | Default AOT path; also the top JIT tier and a whole-module upgrade |
+| WASM | MIR → core WASM → WASI P2 component. Linear memory, SIMD128 |
+| C | MIR → C99 → gcc/g++ -O2. An LLVM-free AOT route |
+| WGSL | `@:shader` classes → WGSL at compile time. Not a general target |
 
 AOT defaults to LLVM (`llvm-backend` is a default cargo feature); without it
 `rayzor aot` errors rather than silently degrading. LLVM AOT prefers **system**
@@ -419,7 +417,7 @@ widening), and `register_symbol!` it so the JIT can resolve it.
 
 ## On-disk formats
 
-Three magics, all postcard-encoded, all in `ir/blade.rs`:
+Three magics, all postcard-encoded:
 
 | Format | Magic | Holds |
 |---|---|---|
@@ -438,7 +436,7 @@ caches whose layout it no longer understands. **Cached maps are keyed by name,
 never by `SymbolId`/`TypeId`**, because ids are reassigned per compilation; this
 is the same invariant that governs cross-module resolution generally.
 
-`ir/tree_shake.rs` walks the call graph from the entry point and drops
+The tree shaker walks the call graph from the entry point and drops
 unreachable functions, externs and globals before bundling, so stdlib the program
 never calls does not ship. It runs outside the pass pipeline.
 
