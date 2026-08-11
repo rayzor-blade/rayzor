@@ -4,12 +4,12 @@
 
 ## Quick Links
 
-- **[RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md)** - Detailed compiler architecture
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - General architecture overview
-- **[SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md)** - SSA integration strategy (advanced)
-- **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** - Development roadmap
-- **[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)** - Production checklist
-- **[../MEMORY_MANAGEMENT.md](../MEMORY_MANAGEMENT.md)** - Memory management strategy
+- **[Architecture](../docs/architecture/ARCHITECTURE.md)** - Detailed compiler architecture
+- **[ARCHITECTURE.md](../docs/architecture/ARCHITECTURE.md)** - General architecture overview
+- **[Architecture](../docs/architecture/ARCHITECTURE.md)** - SSA integration strategy (advanced)
+- **[IMPLEMENTATION_ROADMAP.md](../docs/architecture/IMPLEMENTATION_ROADMAP.md)** - Development roadmap
+- **PRODUCTION_READINESS.md** - Production checklist
+- **[../MEMORY_MANAGEMENT.md](../docs/architecture/MEMORY_MANAGEMENT.md)** - Memory management strategy
 
 ## What is Rayzor?
 
@@ -82,7 +82,7 @@ Code Generation
 Target Output (JIT execution, native .o files)
 ```
 
-See [RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md) for detailed pipeline diagrams.
+See [Architecture](../docs/architecture/ARCHITECTURE.md) for detailed pipeline diagrams.
 
 ## Key Innovations
 
@@ -96,7 +96,7 @@ DFG (SSA form) -> TypeFlowGuard -> HIR hints -> MIR attributes -> Optimizations
 Single Source of Truth
 ```
 
-See [SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md) for the complete strategy.
+See [Architecture](../docs/architecture/ARCHITECTURE.md) for the complete strategy.
 
 ### 2. Layered IR Design
 
@@ -122,7 +122,7 @@ class Resource {
 
 The compiler performs ownership analysis, lifetime analysis (constraint-based solver), borrow checking, drop analysis (automatic Free insertion), and escape analysis (stack allocation optimization). GC is only used for `Dynamic` types or objects with unknown sizes at compile time.
 
-See [../MEMORY_MANAGEMENT.md](../MEMORY_MANAGEMENT.md) for the full strategy.
+See [../MEMORY_MANAGEMENT.md](../docs/architecture/MEMORY_MANAGEMENT.md) for the full strategy.
 
 ### 4. 5-Tier JIT Compilation
 
@@ -199,8 +199,6 @@ rayzor/
 |   |   +-- rayzor_bundle.rs    # .rzb bundle format
 |   |
 |   +-- examples/               # Test programs
-|   +-- RAYZOR_ARCHITECTURE.md  # Architecture details
-|   +-- SSA_ARCHITECTURE.md     # SSA details
 |   +-- Cargo.toml
 |
 +-- runtime/             # Native runtime library (rayzor-runtime)
@@ -215,22 +213,22 @@ rayzor/
 ### For New Contributors
 
 Start here:
-1. **[RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md)** - Understand the overall design
-2. **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** - See what's being built
+1. **[Architecture](../docs/architecture/ARCHITECTURE.md)** - Understand the overall design
+2. **[IMPLEMENTATION_ROADMAP.md](../docs/architecture/IMPLEMENTATION_ROADMAP.md)** - See what's being built
 3. Look at `examples/` for working code
 
 ### For Compiler Developers
 
 Deep dives:
-1. **[SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md)** - SSA integration pattern
+1. **[Architecture](../docs/architecture/ARCHITECTURE.md)** - SSA integration pattern
 2. **[src/ir/README.md](src/ir/README.md)** - IR design details
-3. **[../MEMORY_MANAGEMENT.md](../MEMORY_MANAGEMENT.md)** - Memory management strategy
-4. **[../RUNTIME_ARCHITECTURE.md](../RUNTIME_ARCHITECTURE.md)** - Runtime library and extern functions
+3. **[../MEMORY_MANAGEMENT.md](../docs/architecture/MEMORY_MANAGEMENT.md)** - Memory management strategy
+4. **[Architecture](../docs/architecture/ARCHITECTURE.md)** - Runtime library and extern functions
 
 ### For Users
 
 - **[../resource/strategy.md](../resource/strategy.md)** - Development workflow
-- **[../resource/plan.md](../resource/plan.md)** - Project goals
+- **../resource/plan.md** - Project goals
 
 ## Development
 
@@ -272,7 +270,7 @@ cargo run --example test_hir_pipeline
 5. Lower to MIR (compiler/src/ir/hir_to_mir.rs)
 6. Generate code (compiler/src/codegen/)
 
-See [RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md#implementation-guide) for details.
+See [Architecture](../docs/architecture/ARCHITECTURE.md) for details.
 
 ## Current Status
 
@@ -324,8 +322,8 @@ See [RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md#implementation-guide) for de
 
 We welcome contributions! Please:
 
-1. Read [RAYZOR_ARCHITECTURE.md](RAYZOR_ARCHITECTURE.md) to understand the design
-2. Check [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for planned work
+1. Read [Architecture](../docs/architecture/ARCHITECTURE.md) to understand the design
+2. Check [IMPLEMENTATION_ROADMAP.md](../docs/architecture/IMPLEMENTATION_ROADMAP.md) for planned work
 3. Look at existing code for style guidelines
 4. Add tests for new features
 5. Update documentation

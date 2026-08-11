@@ -1,1460 +1,457 @@
-# Rayzor Compiler Architecture
+# Rayzor Architecture
 
-> **A modern, multi-tier compilation infrastructure for the Haxe programming language**
+Rayzor compiles Haxe to native code. It is a native code generator, not a
+source-to-source backend: every backend emits machine code, WASM bytecode, or C
+used as an assembler. **Language transpilation is an explicit non-goal** — the
+official Haxe compiler already does that well, and there is no JavaScript target
+and none planned.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Design Philosophy](#design-philosophy)
-- [High-Level Architecture](#high-level-architecture)
-- [Compilation Phases](#compilation-phases)
-- [Core Components](#core-components)
-- [Type System](#type-system)
-- [Memory Management Model](#memory-management-model)
-- [Error Handling](#error-handling)
-- [Optimization Strategy](#optimization-strategy)
-- [Development Workflow](#development-workflow)
-- [Related Documentation](#related-documentation)
+What Rayzor adds over the official compiler is a tiered runtime and a single
+optimization pipeline shared by every backend: code starts executing
+immediately, and only what proves hot pays compilation cost.
 
 ---
 
-## Overview
+## The pipeline
 
-The Rayzor compiler is a complete reimplementation of a Haxe compiler in Rust, designed for:
+```mermaid
+flowchart TD
+    SRC["Haxe source"] --> PRE["Preprocessor<br/>conditional compilation"]
+    PRE --> RD["Recursive-descent parser<br/>parser/src/rd"]
+    RD -.->|"on parse error"| NOM["Legacy nom parser<br/>recovery"]
+    RD --> AST["AST · HaxeFile"]
+    NOM --> AST
+    AST --> MACRO["Macro expansion<br/>macro_system"]
+    MACRO --> LOWER["AST lowering + type checking<br/>tast/ast_lowering.rs"]
+    LOWER --> TAST["TAST · TypedFile<br/>types and symbols resolved"]
 
-- **High Performance**: Native compilation speeds, incremental builds
-- **Memory Safety**: Compile-time memory safety checking (inspired by Rust)
-- **Developer Experience**: Fast hot-reload, excellent error messages
-- **Production Ready**: AOT compilation to native code with maximum optimization
+    TAST -.->|"gated on enable_semantic_analysis"| SG["Semantic graphs<br/>CFG · DFG · call · ownership"]
+    SG --> DIAG["Diagnostics"]
 
-### Project Goals
+    TAST --> HIR["HIR · HirModule<br/>desugared, still structured"]
+    HIR --> MIR["MIR · IrModule<br/>SSA over basic blocks"]
+    MIR --> MONO["Monomorphize<br/>ir/monomorphize.rs"]
+    MONO --> OPT["PassManager for_level<br/>O0 to O3, default O2"]
+    OPT --> BE{"Backends"}
 
-1. **Compatibility**: Support core Haxe language features
-2. **Safety**: Add optional memory safety features (ownership, lifetimes)
-3. **Performance**: Fast compilation, fast generated code
-4. **Tooling**: IDE support, debugging, profiling
+    BE --> INTERP["MIR interpreter"]
+    BE --> CL["Cranelift JIT"]
+    BE --> LLVM["LLVM<br/>JIT + AOT"]
+    BE --> WASM["WASM"]
+    BE --> CBE["C99 then gcc"]
+    BE -.->|"@:shader only"| WGSL["WGSL transpiler"]
+```
 
-### Key Features
+Each stage earns its place:
 
-- ✅ Incremental parsing with error recovery
-- ✅ Sophisticated type inference and checking
-- ✅ Flow-sensitive safety analysis
-- ✅ Multi-tier IR design (HIR, MIR)
-- ✅ Semantic graph-based optimization
-- 🚧 Multiple backends (JS, LLVM, Interpreter)
-- 🚧 Hot-reload support for rapid development
+| Level | Preserves | Loses |
+|---|---|---|
+| AST | Source syntax verbatim | — |
+| TAST | Syntax plus resolved types, symbol table, type table | — |
+| HIR | Resolved types, ownership info, metadata as hints. Still structured: `ForIn`, `TryCatch`, `Switch`, labelled blocks, lambdas, interpolation | raw syntax |
+| MIR | SSA over basic blocks with real phi nodes; type metadata carried down, not erased | structured control flow, names |
+
+HIR still knows what the user wrote, so diagnostics and ownership analysis read
+naturally there. MIR is flat and typed, so **one** optimization pipeline serves
+every backend — that is the whole reason for the split.
+
+`rayzor compile --stage {ast,tast,hir,mir,native}` stops at any level, which is
+the cheapest way to see what each IR actually holds.
+
+### Two pipeline drivers — know which one you are reading
+
+`compiler/src/pipeline.rs` (`Pipeline::compile_file`) has tidy numbered stages
+and reads like the reference implementation. **It is not what the CLI runs.**
+Every command drives `compiler/src/compilation.rs` (`CompilationUnit`) via
+`src/compile_helpers.rs`.
+
+Three consequences that will otherwise cost you an afternoon:
+
+- **Type checking is inline in `tast/ast_lowering.rs`**, not a separate phase.
+  `tast/type_checking_pipeline.rs` has no caller outside `pipeline.rs` and tests.
+- **Semantic graphs are not built on the production path.** `compilation.rs`
+  passes `None /* No semantic graphs for now */` into HIR lowering. The layer is
+  reached through `Pipeline::build_semantic_graphs` and the ownership check.
+- Every CLI entry calls `PipelineConfig::skip_analysis()`, which disables
+  lifetime, ownership, borrow checking, semantic analysis, HIR validation and
+  flow analysis. Macro expansion is deliberately **not** disabled — it is a
+  correctness feature, not analysis.
 
 ---
 
-## Design Philosophy
+## Analysis: two systems, deliberately separate
 
-### 1. **Correctness First, Performance Second**
+User-facing diagnostics and compiler-internal analysis are different
+subsystems, so error quality does not depend on optimizer internals or vice
+versa.
 
-The compiler prioritizes generating correct code. Performance optimizations come after correctness is proven.
+- `tast/type_flow_guard.rs` — `TypeFlowGuard` orchestrates the CFG analyzer plus
+  the lifetime and ownership analyzers, producing `FlowSafetyError`s
+  (uninitialized variable, null dereference, dead code) that become user-visible
+  warnings or errors.
+- `semantic_graph/` — compiler-internal. TAST → CFG → DFG, plus a call graph and
+  an ownership graph. The DFG is textbook SSA: dominance tree, phi placement from
+  dominance frontiers, renaming, then phi-operand completion with type
+  unification. Consumers gate on `is_valid_ssa()` before reading anything.
 
-```
-Correctness → Safety → Clarity → Performance
-```
+Two corrections to older documentation. MIR's SSA does **not** come from
+`semantic_graph` — MIR builds its own with `IrInstruction::Phi`, and
+`semantic_graph` never appears under `ir/mir/`. And the SSA optimization-hint
+channel (HIR attributes → `SsaOptimizationHints`) exists end to end but is
+inert: its only reader is a lowering entry point that is itself dead code. Treat
+it as scaffolding.
 
-### 2. **Layered Architecture**
+### What actually rejects unsafe code
 
-Each layer has a single, well-defined responsibility:
+`CompilationUnit::check_ownership_violations` runs at the TAST stage: it builds
+an `OwnershipGraph`, calls `check_use_after_move()`, then filters through
+`TraitChecker`.
 
-```
-Parsing → Type Checking → Analysis → Lowering → Optimization → Generation
-```
+| Condition | Outcome |
+|---|---|
+| Type is `@:shared` (refcounted) | dropped — aliasing after `.clone()` is a refcount bump, not a move |
+| Type is `@:move` | hard **error**, fails compilation; takes precedence over Copy |
+| Type is Copy and not `@:move` | dropped — the graph records every reference as a move, so this removes false positives |
+| otherwise | warning (E0382) with a "consider cloning" help |
 
-No layer should know about layers above it. Information flows forward through explicit interfaces.
-
-### 3. **Fail-Fast with Excellent Diagnostics**
-
-When errors occur:
-- Catch them as early as possible (parser → type checker → analysis)
-- Provide precise location information
-- Offer helpful suggestions for fixes
-- Continue processing to find multiple errors
-
-### 4. **Incremental Everything**
-
-Support incremental operations at every level:
-- Incremental parsing (re-parse only changed regions)
-- Incremental type checking (re-check only affected code)
-- Incremental analysis (re-analyze only dependencies)
-- Incremental codegen (re-generate only changed functions)
-
-### 5. **Analysis as Infrastructure**
-
-Complex analyses (SSA, CFG, DFG, lifetimes, ownership) are built once and queried by multiple passes. See [SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md) for details.
-
----
-
-## High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          Source Files (.hx)                         │
-│                     Haxe programming language                       │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Parser Crate                                │
-│  • Nom-based parser combinators                                     │
-│  • Incremental parsing with change tracking                         │
-│  • Error recovery and diagnostics                                   │
-│  • Produces: AST (Abstract Syntax Tree)                             │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ↓
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Compiler Crate                               │
-│                                                                      │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Frontend (TAST Layer)                                        │ │
-│  │  • Type checking and inference                                │ │
-│  │  • Symbol resolution                                          │ │
-│  │  • Constraint solving                                         │ │
-│  │  • Produces: TAST (Typed AST)                                 │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-│                             │                                        │
-│                             ↓                                        │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Analysis Layer (SemanticGraphs)                              │ │
-│  │  • Control Flow Graphs (CFG)                                  │ │
-│  │  • Data Flow Graphs (DFG) in SSA form                         │ │
-│  │  • Call Graph (inter-procedural)                              │ │
-│  │  • Ownership & Lifetime tracking                              │ │
-│  │  • TypeFlowGuard (flow-sensitive checking)                    │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-│                             │                                        │
-│                             ↓                                        │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Middleend (IR Layers)                                        │ │
-│  │  • HIR: High-level IR (preserves semantics)                   │ │
-│  │  • MIR: Mid-level IR (optimization target)                    │ │
-│  │  • Optimization passes                                        │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-│                             │                                        │
-│                             ↓                                        │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Backend (Code Generation)                                    │ │
-│  │  • JavaScript backend                                         │ │
-│  │  • LLVM backend (future)                                      │ │
-│  │  • Interpreter (for hot-reload)                               │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-│                                                                      │
-└─────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ↓
-                    Target Output Files
-```
-
-### Crate Structure
-
-```
-rayzor/
-├── parser/              # Parsing infrastructure
-│   ├── src/
-│   │   ├── haxe_parser.rs           # Main parser entry
-│   │   ├── haxe_parser_expr.rs      # Expression parsing
-│   │   ├── haxe_parser_decls.rs     # Declaration parsing
-│   │   ├── haxe_parser_types.rs     # Type parsing
-│   │   ├── incremental_parser_enhanced.rs
-│   │   └── haxe_ast.rs              # AST definitions
-│   └── Cargo.toml
-│
-├── compiler/            # Main compiler crate
-│   ├── src/
-│   │   ├── tast/                    # Type-checked AST
-│   │   │   ├── mod.rs
-│   │   │   ├── type_checker.rs
-│   │   │   ├── symbols.rs
-│   │   │   ├── core.rs              # Type system core
-│   │   │   └── type_flow_guard.rs   # Flow-sensitive checking
-│   │   │
-│   │   ├── semantic_graph/          # Analysis infrastructure
-│   │   │   ├── cfg.rs               # Control Flow Graph
-│   │   │   ├── dfg.rs               # Data Flow Graph (SSA)
-│   │   │   ├── dfg_builder.rs
-│   │   │   ├── call_graph.rs
-│   │   │   ├── ownership_graph.rs
-│   │   │   └── analysis/
-│   │   │       ├── lifetime_analyzer.rs
-│   │   │       └── ownership_analyzer.rs
-│   │   │
-│   │   ├── ir/                      # Intermediate Representations
-│   │   │   ├── hir.rs               # High-level IR
-│   │   │   ├── tast_to_hir.rs       # TAST → HIR lowering
-│   │   │   ├── hir_to_mir.rs        # HIR → MIR lowering
-│   │   │   ├── mod.rs               # MIR definitions
-│   │   │   ├── builder.rs           # IR builder
-│   │   │   ├── optimization.rs      # Optimization passes
-│   │   │   └── validation.rs        # IR validation
-│   │   │
-│   │   ├── pipeline.rs              # Compilation pipeline
-│   │   └── lib.rs
-│   │
-│   ├── ARCHITECTURE.md              # This file
-│   ├── SSA_ARCHITECTURE.md          # SSA-specific details
-│   ├── IMPLEMENTATION_ROADMAP.md
-│   └── PRODUCTION_READINESS.md
-│
-├── diagnostics/         # Error reporting
-├── source_map/          # Source location tracking
-└── Cargo.toml
-```
+MIR declares ownership vocabulary — `Move`, `BorrowImmutable`, `BorrowMutable`,
+`Clone`, and an `OwnershipMode` per call argument — but nothing under `ir/mir/`
+emits `Move` or either borrow, and nothing populates `arg_ownership`. It is
+reserved vocabulary, not a live encoding.
 
 ---
 
-## Compilation Phases
-
-### Phase 1: Parsing
-
-**Input**: Source code (`.hx` files)
-**Output**: AST (Abstract Syntax Tree)
-**Location**: `parser/` crate
-
-```rust
-pub struct HaxeFile {
-    pub package: Option<String>,
-    pub imports: Vec<Import>,
-    pub declarations: Vec<Declaration>,
-}
-```
-
-**Features**:
-- **Parser Combinators**: Built with `nom` for composability
-- **Incremental Parsing**: Re-parse only changed regions
-- **Error Recovery**: Continue parsing after errors
-- **Position Tracking**: Precise source locations for all nodes
-- **Comment Preservation**: For documentation generation
-
-**Key Files**:
-- `haxe_parser.rs` - Main parser entry point
-- `haxe_parser_expr.rs` - Expression parsing
-- `haxe_parser_decls.rs` - Class, function, field declarations
-- `haxe_parser_types.rs` - Type syntax parsing
-
-### Phase 2: Type Checking
-
-**Input**: AST
-**Output**: TAST (Typed AST)
-**Location**: `compiler/src/tast/`
-
-```rust
-pub struct TypedFile {
-    pub package: Option<String>,
-    pub imports: Vec<TypedImport>,
-    pub classes: Vec<TypedClass>,
-    pub functions: Vec<TypedFunction>,
-    pub enums: Vec<TypedEnum>,
-    // ...
-}
-```
-
-**Process**:
-
-1. **Symbol Resolution**
-   - Build symbol table
-   - Resolve identifiers to symbols
-   - Handle imports and scoping
-
-2. **Type Inference**
-   - Bottom-up type inference
-   - Constraint generation
-   - Unification algorithm
-
-3. **Type Checking**
-   - Check type compatibility
-   - Validate method overrides
-   - Ensure interface implementation
-
-4. **Constraint Solving**
-   - Solve type constraints
-   - Handle polymorphism
-   - Infer missing type annotations
-
-**Key Structures**:
-```rust
-// Symbol table: tracks all identifiers
-pub struct SymbolTable {
-    symbols: HashMap<SymbolId, Symbol>,
-    scopes: HashMap<ScopeId, Scope>,
-}
-
-// Type table: tracks all types
-pub struct TypeTable {
-    types: HashMap<TypeId, Type>,
-    // Type inference state
-}
-
-// Type representation
-pub enum TypeKind {
-    Int, Float, Bool, String, Void,
-    Class(ClassType),
-    Function(FunctionType),
-    Array(TypeId),
-    Nullable(TypeId),
-    TypeParameter(TypeParam),
-    // ...
-}
-```
-
-**Key Files**:
-- `type_checker.rs` - Main type checking logic
-- `core.rs` - Type system definitions
-- `symbols.rs` - Symbol table management
-- `constraint_solver.rs` - Type inference
-
-### Phase 3: Semantic Analysis
-
-**Input**: TAST
-**Output**: SemanticGraphs
-**Location**: `compiler/src/semantic_graph/`
-
-This phase builds analysis graphs for advanced checking and optimization:
-
-#### 3a. Control Flow Graph (CFG)
-
-Represents the control flow structure of each function.
-
-```rust
-pub struct ControlFlowGraph {
-    pub blocks: HashMap<BlockId, BasicBlock>,
-    pub entry_block: BlockId,
-    pub exit_blocks: Vec<BlockId>,
-}
-
-pub struct BasicBlock {
-    pub id: BlockId,
-    pub statements: Vec<StatementId>,
-    pub terminator: Terminator,
-    pub predecessors: Vec<BlockId>,
-    pub successors: Vec<BlockId>,
-}
-```
-
-**Uses**:
-- Dead code detection
-- Reachability analysis
-- Loop detection
-- Dominance computation
-
-#### 3b. Data Flow Graph (DFG) in SSA Form
-
-Represents value flow through the program. Built in SSA form for precise analysis.
-
-```rust
-pub struct DataFlowGraph {
-    pub nodes: HashMap<DataFlowNodeId, DataFlowNode>,
-    pub ssa_variables: HashMap<SsaVariableId, SsaVariable>,
-    pub def_use_chains: DefUseChains,
-    pub value_numbering: ValueNumbering,
-}
-```
-
-**Uses**:
-- Initialization analysis
-- Null safety checking
-- Dead code elimination
-- Common subexpression elimination
-- Constant propagation
-
-See [SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md) for detailed SSA integration strategy.
-
-#### 3c. Call Graph
-
-Tracks function call relationships for interprocedural analysis.
-
-```rust
-pub struct CallGraph {
-    pub nodes: HashMap<SymbolId, CallGraphNode>,
-    pub edges: Vec<CallEdge>,
-}
-```
-
-**Uses**:
-- Inline decision making
-- Dead function elimination
-- Effect analysis
-- Recursion detection
-
-#### 3d. Ownership & Lifetime Graphs
-
-Tracks memory ownership and lifetime regions (Rust-inspired).
-
-```rust
-pub struct OwnershipGraph {
-    pub ownership_edges: Vec<OwnershipEdge>,
-    pub borrows: Vec<BorrowInfo>,
-}
-```
-
-**Uses**:
-- Use-after-free detection
-- Use-after-move detection
-- Borrow checking
-- Memory leak detection
-
-#### 3e. TypeFlowGuard
-
-Orchestrates flow-sensitive type checking using the analysis graphs.
-
-```rust
-pub struct TypeFlowGuard {
-    // Uses CFG, DFG, ownership graph
-    pub results: FlowSafetyResults,
-}
-```
-
-**Checks**:
-- Initialization before use
-- Null safety (flow-sensitive)
-- Dead code warnings
-- Effect violations
-- Memory safety violations
-
-**Key Files**:
-- `cfg.rs` - Control flow graph
-- `dfg.rs`, `dfg_builder.rs` - Data flow graph (SSA)
-- `call_graph.rs` - Call graph
-- `ownership_graph.rs` - Ownership tracking
-- `type_flow_guard.rs` - Flow-sensitive checking
-
-### Phase 4: HIR Lowering
-
-**Input**: TAST + SemanticGraphs
-**Output**: HIR (High-level Intermediate Representation)
-**Location**: `compiler/src/ir/hir.rs`, `tast_to_hir.rs`
-
-HIR preserves high-level language features while adding resolution and hints.
-
-```rust
-pub struct HirModule {
-    pub name: String,
-    pub functions: HashMap<SymbolId, HirFunction>,
-    pub types: HashMap<TypeId, HirTypeDecl>,
-    pub globals: HashMap<SymbolId, HirGlobal>,
-}
-
-pub struct HirFunction {
-    pub symbol_id: SymbolId,
-    pub params: Vec<HirParam>,
-    pub return_type: TypeId,
-    pub body: Option<HirBlock>,
-    pub metadata: Vec<HirAttribute>,  // Optimization hints
-}
-```
-
-**Transformations**:
-- Desugar complex constructs (for-in → iterators)
-- Resolve all symbols to IDs
-- Attach lifetime/ownership information
-- Extract optimization hints from SemanticGraphs
-
-**Purpose**:
-- Enable hot-reload (preserves source structure)
-- Source-level debugging
-- IDE integration
-- Optimization hint propagation
-
-**Key Files**:
-- `hir.rs` - HIR definitions
-- `tast_to_hir.rs` - TAST → HIR lowering
-
-### Phase 5: MIR Lowering
-
-**Input**: HIR
-**Output**: MIR (Mid-level Intermediate Representation)
-**Location**: `compiler/src/ir/mod.rs`, `hir_to_mir.rs`
-
-MIR is a lower-level, platform-independent IR suitable for optimization.
-
-```rust
-pub struct IrModule {
-    pub functions: HashMap<IrFunctionId, IrFunction>,
-    pub globals: Vec<IrGlobal>,
-}
-
-pub struct IrFunction {
-    pub signature: IrFunctionSignature,
-    pub cfg: IrControlFlowGraph,
-    pub locals: HashMap<IrId, IrLocal>,
-    pub attributes: FunctionAttributes,  // From HIR hints
-}
-```
-
-**Characteristics**:
-- Standard IR instructions (add, mul, load, store, call, etc.)
-- Explicit control flow (branches, jumps)
-- Not required to be in SSA form
-- Function attributes guide optimization
-
-**Transformations**:
-- Lower high-level constructs to simple operations
-- Explicit memory operations
-- Apply optimization hints from HIR
-
-**Key Files**:
-- `mod.rs` - MIR definitions
-- `hir_to_mir.rs` - HIR → MIR lowering
-- `builder.rs` - IR construction API
-
-### Phase 6: Optimization
-
-**Input**: MIR
-**Output**: Optimized MIR
-**Location**: `compiler/src/ir/optimization.rs`
-
-```rust
-pub trait OptimizationPass {
-    fn run(&mut self, module: &mut IrModule) -> OptimizationResult;
-}
-
-pub struct PassManager {
-    passes: Vec<Box<dyn OptimizationPass>>,
-}
-```
-
-**Optimization Passes**:
-
-1. **Dead Code Elimination**
-   - Remove unreachable code
-   - Remove unused values
-   - Guided by DFG liveness analysis
-
-2. **Common Subexpression Elimination (CSE)**
-   - Identify duplicate computations
-   - Reuse computed values
-   - Guided by value numbering from DFG
-
-3. **Constant Propagation & Folding**
-   - Evaluate constants at compile time
-   - Propagate known values
-   - Simplify expressions
-
-4. **Inlining**
-   - Inline small functions
-   - Guided by inline hints from SSA analysis
-
-5. **Loop Optimization**
-   - Loop invariant code motion
-   - Loop unrolling
-   - Strength reduction
-
-**Key Files**:
-- `optimization.rs` - Pass infrastructure
-- Individual pass implementations
-
-### Phase 7: Code Generation
-
-**Input**: Optimized MIR
-**Output**: Target code (WASM modules, native binaries, bytecode)
-**Location**: `compiler/src/codegen/` (in development)
-
-Rayzor uses a **multi-backend compilation strategy** optimized for different execution contexts:
-
-#### Compilation Strategy Overview
+## MIR
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                  Compilation Strategies                      │
-└─────────────────────────────────────────────────────────────┘
-
-JIT Runtime (Development & Testing):
-  MIR → Cranelift (cold paths) + LLVM (hot paths after profiling)
-
-AOT Compilation (Native):
-  MIR → LLVM → Native binary (maximum optimization)
-
-AOT Compilation (Cross-platform):
-  MIR → WASM → .wasm module (WASI, Browser, Edge)
+IrModule   { functions, globals, types, string_pool, extern_functions }
+IrFunction { signature, cfg, locals, register_types }
+IrBasicBlock { instructions, terminator, phi_nodes, predecessors }
 ```
 
-#### Backend: Cranelift - JIT Runtime (Cold Paths)
-
-**Target**: Native code via Cranelift JIT
-**Status**: Planned
-**Purpose**: Fast compilation for JIT runtime
-
-**Features**:
-
-- **Extremely fast compilation**: ~10x faster than LLVM
-- Good code quality (15-25x faster than interpreter)
-- Low memory footprint
-- Streaming compilation
-- Tier-up to LLVM after profiling
-
-**Use Cases**:
-
-- JIT runtime cold paths (first execution)
-- Development mode (fast iteration)
-- Interactive execution (REPL)
-- Functions executed rarely
-
-**JIT Strategy**:
-
-```rust
-pub struct JitRuntime {
-    cranelift: CraneliftJit,  // Fast compilation
-    llvm_cache: LlvmCache,     // Optimized hot code
-    profiler: Profiler,
-}
-
-impl JitRuntime {
-    fn execute_function(&mut self, func: &MirFunction) {
-        if self.profiler.is_hot(func) {
-            // Recompile with LLVM for maximum performance
-            let optimized = self.llvm_cache.compile_hot_path(func);
-            optimized.execute()
-        } else {
-            // Use Cranelift for fast compilation
-            let jit_code = self.cranelift.compile(func);
-            jit_code.execute()
-        }
-    }
-}
-```
-
-**Performance**: 50-200ms compile time, 15-25x runtime speed
-
-#### Backend: LLVM - Hot Path Optimization & AOT
-
-**Target**: LLVM IR → Native code
-**Status**: Planned
-
-**Use Cases**:
-
-**1. JIT Runtime - Hot Paths**
-
-- Functions executed frequently (>5% runtime)
-- Profile-guided recompilation
-- Maximum optimization for critical code
-- Replaces Cranelift-compiled code when hot
-
-**2. AOT Compilation - Native Binaries**
-
-- Production builds
-- Shipping applications
-- Maximum performance for all code
-- Platform-specific optimizations
-
-**Features**:
-
-- **Maximum optimization**: -O3, PGO, LTO
-- Advanced vectorization (SIMD)
-- Link-time optimization
-- Platform-specific tuning
-
-**AOT Compilation**:
-
-```bash
-# AOT compile for production
-rayzor build --aot --optimize=aggressive --target=native
-
-# Output: single optimized native binary
-# All functions compiled with LLVM -O3
-```
-
-**Performance**:
-
-- Compilation: 1-30s depending on optimization level
-- Runtime: 45-50x speed (maximum performance)
-
-#### Backend: WebAssembly (WASM) - AOT for Cross-Platform
-
-**Target**: WASM binary modules
-**Status**: In development
-**Purpose**: AOT compilation for universal deployment
-
-**Use Cases**:
-
-**1. Browser Environments**
-
-- Web applications
-- Progressive Web Apps (PWA)
-- Client-side computation
-
-**2. WASI (WebAssembly System Interface)**
-
-- Server-side applications
-- CLI tools
-- Serverless functions
-- Edge computing
-
-**3. Embedded & IoT**
-
-- Resource-constrained devices
-- Sandboxed execution
-- Cross-platform deployment
-
-**Features**:
-
-- Universal deployment (write once, run anywhere)
-- Near-native performance (30-40x interpreter)
-- Sandboxed execution (security)
-- Compact binary format
-- Streaming compilation
-
-**WASM Compilation**:
-
-```bash
-# Compile to WASM for browser
-rayzor build --target=wasm --optimize=size
-
-# Compile to WASM for WASI
-rayzor build --target=wasi --optimize=speed
-
-# Output: .wasm module
-```
-
-**Performance**: 100-500ms compile time, 30-40x runtime speed
-
-#### Backend: Interpreter - Development Mode
-
-**Target**: Bytecode for custom VM
-**Status**: Planned
-**Features**:
-- **Instant startup**: No compilation delay
-- Hot-reload support
-- Step-by-step debugging
-- Live code editing
-
-**Use Cases**:
-- Rapid prototyping
-- Development mode
-- Interactive REPL
-- Teaching/learning
-
-**Architecture**:
-```rust
-pub struct Interpreter {
-    bytecode: Vec<BytecodeInstruction>,
-    stack: Vec<Value>,
-    globals: HashMap<SymbolId, Value>,
-}
-```
-
-#### Tiered Compilation Strategy
-
-Rayzor implements a **multi-backend compilation system** optimized for different deployment scenarios:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Compilation Modes                         │
-└─────────────────────────────────────────────────────────────┘
-
-Development Mode (JIT Runtime):
-  Source → TAST → MIR → Interpreter
-                           ↓ (optional JIT)
-                         Cranelift (cold paths)
-                           ↓ (tier-up hot paths)
-                         LLVM (hot functions >5% runtime)
-
-Testing Mode (JIT Runtime):
-  Source → TAST → MIR → Cranelift (all functions)
-                           ↓ (profile + tier-up)
-                         LLVM (hot paths)
-
-Production AOT (Native Binary):
-  Source → TAST → MIR → Optimize → LLVM → Native binary
-  (All code compiled with maximum optimization)
-
-Production AOT (Cross-Platform):
-  Source → TAST → MIR → Optimize → WASM → .wasm module
-  (Universal deployment: browser, WASI, edge)
-```
-
-**Performance Comparison**:
-
-| Backend | Compilation Time | Runtime Speed | Use Case |
-|---------|------------------|---------------|----------|
-| Interpreter | 0ms (instant) | 1x (baseline) | Development, hot-reload |
-| Cranelift JIT | 50-200ms | 15-25x | JIT cold paths, dev mode |
-| LLVM JIT (hot) | 1-5s | 45-50x | JIT hot paths (tier-up) |
-| LLVM AOT | 10-30s | 45-50x | Production native binary |
-| WASM AOT | 100-500ms | 30-40x | Cross-platform deployment |
-
-**Compilation Mode Selection**:
-
-```rust
-pub enum CompilationMode {
-    /// Development: Interpreter + optional Cranelift JIT
-    Dev {
-        hot_reload: bool,
-        jit_enabled: bool,
-    },
-
-    /// JIT Runtime: Cranelift cold + LLVM hot paths
-    Jit {
-        hot_threshold: f64,      // e.g., 0.05 = 5% runtime
-        max_tier_up: usize,      // Max functions to LLVM-compile
-    },
-
-    /// AOT Native: LLVM for all functions
-    AotNative {
-        optimization: OptLevel,  // -O0 to -O3
-        pgo: bool,               // Profile-guided optimization
-        lto: bool,               // Link-time optimization
-    },
-
-    /// AOT WebAssembly: WASM output
-    AotWasm {
-        target: WasmTarget,      // Browser, WASI, Edge
-        optimization: WasmOpt,   // Size or speed
-    },
-}
-```
-
-**Tiered JIT Execution Flow**:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    JIT Runtime Flow                          │
-└─────────────────────────────────────────────────────────────┘
-
-Function First Call:
-  1. Check if function is compiled
-  2. If not: Compile with Cranelift (fast)
-  3. Execute Cranelift-compiled code
-  4. Update execution counter
-
-Function Hot Threshold Reached (e.g., 1000 calls or 5% runtime):
-  1. Mark function as hot
-  2. Compile with LLVM in background (optimized)
-  3. Continue executing Cranelift version
-  4. Replace with LLVM version when ready
-
-Subsequent Calls:
-  1. Execute LLVM-optimized version (maximum performance)
-```
-
-**Code Generation Pipeline**:
-
-```
-MIR (optimized)
-    ↓
-┌────────────────────────────────────┐
-│   Compilation Mode Selection       │
-└────────────────────────────────────┘
-    ↓
-    ├─→ JIT Mode
-    │   ├─→ Interpreter (instant)
-    │   ├─→ Cranelift (cold paths, fast compile)
-    │   └─→ LLVM (hot paths, tier-up)
-    │
-    ├─→ AOT Native Mode
-    │   └─→ LLVM → Native binary (all functions optimized)
-    │
-    └─→ AOT WASM Mode
-        └─→ WASM backend → .wasm module (universal)
-```
-
-**Example Usage**:
-
-```bash
-# Development: interpreter + hot-reload
-rayzor dev --hot-reload
-
-# Testing: JIT with tier-up
-rayzor test --jit --profile
-
-# Production native binary (AOT)
-rayzor build --aot --optimize=3 --target=native
-
-# Production WASM for browser (AOT)
-rayzor build --aot --target=wasm --optimize=size
-
-# Production WASM for WASI (AOT)
-rayzor build --aot --target=wasi --optimize=speed
-```
+Every collection is a `BTreeMap`, explicitly so iteration order is
+deterministic — reproducible codegen depends on it. Do not swap in a `HashMap`.
+
+Arithmetic is not one opcode per operator: it is `BinOp`/`UnOp`/`Cmp` carrying a
+`BinaryOp`/`UnaryOp`/`CompareOp`. Calls are `CallDirect`/`CallIndirect`, field
+addressing is `GetElementPtr`/`PtrAdd`, aggregates are
+`CreateStruct`/`ExtractValue`/`InsertValue`, closures are
+`MakeClosure`/`ClosureFunc`/`ClosureEnv`, enums are
+`CreateUnion`/`ExtractDiscriminant`/`ExtractUnionValue`.
+
+`ir/dump.rs` prints MIR in an LLVM-like textual form — registers `$N`, blocks
+`bbN`, functions `fnN`, sorted by id so dumps diff cleanly. Note that
+`RAYZOR_DUMP_MIR=1` fires **before** the optimization passes, so it is not what
+the backend sees; use `rayzor dump --diff` for that.
+
+### Lowering
+
+HIR → MIR does three things at once, which is why it is the largest stage: it
+flattens structured control flow into basic blocks, resolves HIR names to MIR
+ids, and materialises what the source leaves implicit — boxing, drops, dispatch.
+State lives in one `HirToMirContext` implemented across `ir/mir/`:
+
+| Submodule | Role |
+|---|---|
+| `decl/` | what must exist before any body lowers: signatures, metadata, vtables |
+| `stmt/`, `expr/`, `field/` | the lowering proper |
+| `resolve/` | HIR names and symbols → MIR ids |
+| `helpers/` | boxing, drops, allocation, type ids |
+
+Call targets resolve by `SymbolId` in the local then external function map, then
+fall back to matching the **fully-qualified name**. Bare-name matching is not
+part of the contract: SymbolIds are per-context, so the FQN is the only identity
+that legitimately crosses module boundaries.
+
+Monomorphization runs on MIR *after* lowering and after the stdlib merge — so
+generic specialisation sees SSA, and a bug in it presents as a MIR-level problem.
 
 ---
 
-## Core Components
+## Optimization
 
-### Symbol Management
+`PassManager::for_level` in `ir/optimization.rs` builds the pipeline; default is
+O2. `InsertFreePass` is added **before the level match, at every level** — it is
+a correctness pass, not an optimization.
 
-**SymbolTable**: Central registry for all identifiers
+| Level | Passes, in order (after InsertFree) |
+|---|---|
+| O0 | Inlining(15), DCE, UnreachableBlockElim, SRA, CopyProp, DCE |
+| O1 | Inlining, DCE, Devirtualization, ConstantFolding, CopyProp, UnreachableBlockElim |
+| O2 | O1 plus SRA, GlobalLoadCaching, BCE, GVN, CSE, LICM, LoopUnrolling, ControlFlowSimplify, DCE |
+| O3 | O2 plus LoopVectorization and TailCallOpt |
 
-```rust
-pub struct SymbolTable {
-    symbols: HashMap<SymbolId, Symbol>,
-    scopes: ScopeTree,
-}
+Containment is not monotonic — O1 is the only level without SRA.
 
-pub struct Symbol {
-    pub name: InternedString,
-    pub kind: SymbolKind,  // Variable, Function, Class, etc.
-    pub type_id: TypeId,
-    pub scope_id: ScopeId,
-    pub visibility: Visibility,
-    pub mutability: Mutability,
-}
+**O0 is not "no optimization."** It still forces inlining, because Haxe `inline`
+is a language guarantee rather than a hint, and because inlining small
+constructors is what exposes the Alloc+GEP shape that SRA needs. Without it,
+per-iteration constructor allocations are never scalarised and loops leak.
+
+The pipeline runs at most five times. A pass reporting `modified` only forces
+another iteration if it is transformative; the three cleanup passes (DCE,
+unreachable-block elimination, copy propagation) are excluded, so a round where
+only cleanup fired terminates the loop.
+
+### Ordering constraints
+
+These are not stylistic — each one exists because the later pass cannot see what
+it needs otherwise.
+
+```mermaid
+flowchart LR
+    IN["Inlining"] -. "exposes Alloc+GEP" .-> SRA["SRA"]
+    GLC["GlobalLoadCaching"] -. "dedups metadata loads" .-> BCE["BCE"]
+    BCE -. "emits invariant data_ptr load" .-> LICM["LICM"]
+    LICM -. "exposes trip counts" .-> LU["LoopUnrolling"]
+    LICM -. "clean bodies" .-> LV["LoopVectorization"]
 ```
 
-**Features**:
-- Hierarchical scopes
-- Symbol lookup with shadowing
-- Export/import tracking
-- Visibility checking
+SRA is function-local, so constructor bodies must be inlined first. LICM's
+`Alloc` handling runs last: escape analysis decides whether an allocation hoists
+to the loop preheader with its `Free` sunk past the loop, reusing one buffer
+across iterations.
 
-### Type System
+`ir/escape_analysis.rs` is exactly that intra-loop question — it is **not**
+general stack promotion. Object field decomposition belongs to SRA.
 
-**TypeTable**: Central registry for all types
+### InsertFree — the correctness backstop
 
-```rust
-pub struct TypeTable {
-    types: HashMap<TypeId, Type>,
-    inference_state: InferenceState,
-}
+HIR-level drop analysis only sees direct `new`, so this MIR pass catches factory
+functions that return heap pointers.
 
-pub struct Type {
-    pub id: TypeId,
-    pub kind: TypeKind,
-    pub source_location: Option<SourceLocation>,
-}
-
-pub enum TypeKind {
-    // Primitive types
-    Void, Int, Float, Bool, String, Dynamic,
-
-    // Compound types
-    Class(ClassType),
-    Interface(InterfaceType),
-    Enum(EnumType),
-    Abstract(AbstractType),
-    Function(FunctionType),
-
-    // Generic types
-    Array(TypeId),
-    Map(TypeId, TypeId),
-    Nullable(TypeId),
-
-    // Type system features
-    TypeParameter(TypeParam),
-    Constraint(ConstraintSet),
-}
+```mermaid
+flowchart TD
+    A["Alloc $p<br/>(or malloc / type_create_instance / anon_new)"] --> D["build_derived_set:<br/>follow GEP · Cast · BitCast · SsaBarrier · Copy · Select"]
+    D --> Q{"Any derived pointer escapes?"}
+    Q -->|"yes"| N["No Free — someone else owns it"]
+    Q -->|"no"| F["Insert Free before each Return"]
 ```
 
-**Key Operations**:
-- Type unification
-- Subtype checking
-- Type instantiation (for generics)
-- Constraint solving
-
-See [Type System](#type-system) section for details.
-
-### String Interning
-
-Efficient string storage and comparison.
-
-```rust
-pub struct StringInterner {
-    strings: Vec<String>,
-    map: HashMap<String, InternedString>,
-}
-
-pub struct InternedString(u32);
-```
-
-**Benefits**:
-- O(1) string comparison (compare IDs)
-- Reduced memory usage (strings stored once)
-- Fast symbol lookup
-
-### Error Reporting
-
-Comprehensive diagnostic system.
-
-```rust
-pub struct Diagnostic {
-    pub severity: DiagnosticSeverity,
-    pub message: String,
-    pub location: SourceLocation,
-    pub labels: Vec<Label>,
-    pub notes: Vec<String>,
-}
-```
-
-**Features**:
-- Precise source locations
-- Multi-span labels
-- Helpful suggestions
-- Error recovery
+A pointer escapes if it is returned, passed as a call argument, stored as a
+value, placed into a `CreateStruct`, stored to a global, used in a memcpy, or
+merged by a phi (conservative — SRA is expected to clean those up). Curated
+exceptions exist for known-safe array ops and anon setters; string allocations
+get a runtime release call rather than an `IrInstruction::Free`.
 
 ---
 
-## Type System
+## Backends
 
-### Type Hierarchy
+| Backend | Module | Role |
+|---|---|---|
+| MIR interpreter | `codegen/mir_interpreter.rs` | Register-based (MIR is already SSA, so `IrId` maps straight to a register). Instant startup, tier 0 |
+| Cranelift | `codegen/cranelift_backend.rs` | JIT tiers 1–3. Fast compile |
+| LLVM | `codegen/llvm_jit_backend.rs`, `llvm_aot_backend.rs` | Default AOT path; also the top JIT tier and a whole-module upgrade |
+| WASM | `codegen/wasm_backend.rs` + linker, component | MIR → core WASM → WASI P2 component. Linear memory, SIMD128 |
+| C | `codegen/c_backend.rs` | MIR → C99 → gcc/g++ -O2. An LLVM-free AOT route |
+| WGSL | `codegen/wgsl_transpiler.rs` | `@:shader` classes → WGSL at compile time. Not a general target |
 
-```
-Any (top type)
- │
- ├── Dynamic (escape hatch)
- │
- ├── Void (unit type)
- │
- ├── Primitives
- │   ├── Int
- │   ├── Float
- │   ├── Bool
- │   └── String
- │
- ├── Compound Types
- │   ├── Class
- │   ├── Interface
- │   ├── Enum
- │   └── Abstract
- │
- ├── Collections
- │   ├── Array<T>
- │   └── Map<K, V>
- │
- ├── Function Types
- │   └── (Args) -> ReturnType
- │
- └── Type Parameters
-     └── T, U, V, etc.
-```
+AOT defaults to LLVM (`llvm-backend` is a default cargo feature); without it
+`rayzor aot` errors rather than silently degrading. LLVM AOT prefers **system**
+`opt` and `llc` over the linked LLVM, falling back to inkwell — and when system
+tools are used, MIR O3 is capped to O2 because MIR GVN reorders floating-point
+operations.
 
-### Type Features
-
-#### Generics
-
-```haxe
-class Box<T> {
-    var value: T;
-
-    public function new(value: T) {
-        this.value = value;
-    }
-
-    public function get(): T {
-        return value;
-    }
-}
-
-var intBox = new Box<Int>(42);
-var stringBox = new Box<String>("hello");
-```
-
-**Implementation**:
-- Monomorphization (generate code for each instantiation)
-- Type parameter constraints
-- Variance annotations (covariant, contravariant)
-
-#### Nullable Types
-
-```haxe
-var x: Null<Int> = null;
-var y: Int = 42;  // Non-nullable by default
-```
-
-**Implementation**:
-- `Nullable<T>` wrapper type
-- Flow-sensitive null checking in TypeFlowGuard
-- Automatic narrowing after null checks
-
-#### Abstract Types
-
-```haxe
-abstract Degrees(Float) {
-    public inline function new(value: Float) {
-        this = value;
-    }
-
-    @:op(A + B)
-    public function add(other: Degrees): Degrees {
-        return new Degrees(this + other);
-    }
-}
-```
-
-**Features**:
-- Zero-cost abstractions (compile to underlying type)
-- Operator overloading (✅ binary operators complete, unary/array access in progress)
-- Implicit conversions (from/to rules)
-- Method inlining for zero-cost execution
-
-**Status**: ✅ Binary operator overloading fully implemented
-- All 11 binary operators working (+, -, *, /, %, ==, !=, <, >, <=, >=)
-- Zero-cost inlining verified at runtime
-- Remaining: Unary operators and array access (~5-6 hours)
-- See [OPERATOR_OVERLOADING_STATUS.md](OPERATOR_OVERLOADING_STATUS.md) for details
-
-#### Type Inference
-
-The compiler uses **bidirectional type checking**:
-
-1. **Bottom-up inference**: Infer types from leaves
-2. **Top-down checking**: Check against expected types
-3. **Constraint generation**: Generate equations for unknowns
-4. **Unification**: Solve constraint system
-
-Example:
-```haxe
-function example() {
-    var x = 42;        // Infer: x: Int
-    var y = x + 10;    // Infer: y: Int
-    var z = [x, y];    // Infer: z: Array<Int>
-    return z;          // Infer return: Array<Int>
-}
-```
+Cranelift fuses `fmul` feeding `fadd`/`fsub` into `fma`, but only within a single
+Cranelift block. `RAYZOR_NO_FMA=1` disables fusion in instruction lowering,
+Cranelift and LLVM alike, so a rounding discrepancy can be bisected across all
+three.
 
 ---
 
-## Memory Management Model
+## Tiered execution
 
-Rayzor adds optional memory safety features inspired by Rust.
+Five tiers. The first four rungs are Cranelift; **`Maximum` is LLVM** — an
+in-source comment claiming all JIT tiers are Cranelift is stale, contradicted by
+`uses_llvm()` and by the LLVM queue that installs it.
 
-### Ownership System (Optional)
-
-```haxe
-@:ownership
-class Resource {
-    var data: Array<Int>;
-
-    // Takes ownership
-    public function new(data: Array<Int>) {
-        this.data = data;  // Move
-    }
-
-    // Borrows immutably
-    public function read(): &Array<Int> {
-        return &data;  // Borrow
-    }
-
-    // Borrows mutably
-    public function modify(): &mut Array<Int> {
-        return &mut data;  // Mutable borrow
-    }
-}
+```mermaid
+flowchart LR
+    T0["Interpreted<br/>interpreter · MIR O0"] -->|"interpreter_threshold"| T1["Baseline<br/>Cranelift none · O0"]
+    T1 -->|"warm_threshold"| T2["Standard<br/>Cranelift speed · O1"]
+    T2 -->|"hot_threshold"| T3["Optimized<br/>Cranelift speed · O2"]
+    T3 -->|"blazing_threshold"| T4["Maximum<br/>LLVM · O3"]
+    T0 -.->|"tiers may be skipped"| T3
 ```
 
-**Ownership Rules**:
-1. Each value has exactly one owner
-2. Ownership can be transferred (move)
-3. References can be borrowed
-4. At most one mutable borrow OR multiple immutable borrows
+Promotion compares tier ordinals, so a counter that clears several thresholds at
+once skips rungs. Three different mechanisms own three different rungs:
 
-**Checking**:
-- Performed by OwnershipGraph in SemanticGraphs
-- Integrated with TypeFlowGuard
-- Compile-time verification only
+- **Baseline** — compiled inline on the main thread.
+- **Standard / Optimized** — routed to the `beadie` broker on a background
+  thread, one adapter and bead registry per tier.
+- **Maximum** — pushed onto an LLVM queue drained at the next `execute_function`
+  entry, because LLVM's `add_global_mapping` must run on the main thread.
 
-### Lifetime System (Optional)
+`sample_rate` does not skip counting — it samples only the promotion *check*, so
+statistics stay accurate at any rate.
 
-```haxe
-@:lifetime
-function dangling(): &Int {
-    var x = 42;
-    return &x;  // ERROR: x does not live long enough
-}
+**The promotion barrier** is the safety-critical part. Function pointers cannot
+be swapped while JIT code is running, so a HotSpot-style safepoint gates the
+swap: the promoter CASes to `PromotionRequested`, waits for the in-flight
+execution counter to drain to zero (one-second timeout, then cancel), swaps
+pointers under a write lock, and returns to `Idle`. Installs are monotonic — a
+pointer for a function already at a higher tier is dropped.
 
-@:lifetime
-function valid(x: &Int): &Int {
-    return x;  // OK: lifetime of parameter
-}
-```
+Two behaviours worth knowing before you benchmark:
 
-**Implementation**:
-- Lifetime regions tracked in OwnershipGraph
-- Lifetime inference (similar to Rust)
-- Lifetime annotations for explicit control
+- Every promotion compiles **all** modules into a fresh backend and leaks it.
+  This is deliberate: per-function backends failed on cross-module calls, because
+  compiling one module declares its callees as imports that cannot be resolved at
+  finalize. Whole-module compiles make them internal symbols.
+- **Only zero-argument functions actually run through a JIT pointer.** Argument
+  marshalling from interpreter values to native types is unimplemented, so any
+  function with parameters falls back to the interpreter even when a compiled
+  pointer exists.
 
-See [resource/haxe_mutability_and_borrow_model.md](../resource/haxe_mutability_and_borrow_model.md) for full details.
+The MIR interpreter also cannot execute vector instructions; functions using SIMD
+are pre-promoted to Baseline to avoid the bailout path.
+
+Presets (`script`, `application`, `server`, `benchmark`, `development`,
+`embedded`) select whole configurations, including whether promotion happens at
+all. See [the CLI reference](../CLI.md) for the flags.
 
 ---
 
-## Error Handling
+## Memory
 
-### Error Categories
+There is no garbage collector. Cleanup is decided at compile time, and
+`DropBehavior` has five variants:
 
-1. **Syntax Errors** (Parser)
-   - Unexpected tokens
-   - Unclosed delimiters
-   - Invalid syntax
+| Variant | Meaning |
+|---|---|
+| `AutoDrop` | compiler emits `Free` — user classes allocated with `new` |
+| `AutoDropWithDtor` | run the user's `drop()`, then `Free` — `@:derive(Drop)` |
+| `ManualDrop` | `@:manualDrop`; never auto-freed |
+| `RuntimeManaged` | runtime owns the lifetime — Thread, Channel, Arc, Mutex |
+| `NoDrop` | primitives, arrays, Dynamic |
 
-2. **Type Errors** (Type Checker)
-   - Type mismatch
-   - Undefined variable
-   - Invalid method call
+The HIR-level `DropPointAnalyzer` computes last use per variable, tracking loop
+position, reassignment, block depth, and two escape sets — general escapes and
+lambda captures, since a captured variable is owned by the closure and must not
+be freed at scope exit.
 
-3. **Flow Safety Errors** (TypeFlowGuard)
-   - Uninitialized variable
-   - Null dereference
-   - Dead code
+Annotations recognised: `@:safety`, `@:managed`, `@:move`, `@:shared`,
+`@:unique`, `@:borrow`, `@:owned`, `@:linear`, `@:affine`, `@:box`, `@:arc`,
+`@:atomic`, `@:rc`, `@:manualDrop`. `@:safety` on the Main class sets a
+program-wide mode: strict requires every class to be annotated, non-strict (the
+default) auto-wraps unannotated classes in `Rc`.
 
-4. **Memory Safety Errors** (OwnershipGraph)
-   - Use after move
-   - Use after free
-   - Invalid borrow
+`@:shared` is worth calling out: for extern classes whose ABI exposes both a deep
+copy and an atomic increment, `.clone()` lowers to the increment, and
+compile-time move tracking is suppressed because the refcount makes it safe at
+runtime. `@:shared` and `@:move` on one class is a design conflict (W0030).
 
-### Error Recovery
+### Object layout
 
-The compiler continues after errors to find multiple issues:
-
-- **Parser**: Skip to next valid construct
-- **Type Checker**: Insert error types, continue
-- **Flow Analysis**: Mark as unsafe, continue
-
-### Diagnostic Quality
-
-Example error message:
 ```
-error[E0308]: type mismatch
-  --> example.hx:5:15
-   |
- 5 |     var x: Int = "hello";
-   |                  ^^^^^^^ expected Int, found String
-   |
-help: did you mean to convert the string to an integer?
-   |
- 5 |     var x: Int = Std.parseInt("hello");
-   |                  ++++++++++++         +
+slot 0   __type_id : i64      ← stable name-hash class id
+slot 1   first user field
+...      every slot is 8 bytes
 ```
+
+`alloc_size = max(16, slot_count * 8)`. There is **no vtable pointer in the
+header** — dispatch resolves the vtable from the class id in slot 0, and
+interface values are fat pointers wrapped at the `new` site.
+
+`alloc_size_with_inheritance` takes the maximum over the whole `extends` chain at
+the allocation site rather than trusting the size recorded at class registration:
+an imported parent's fields may not have been visible when the subclass was
+registered, and an undersized allocation lets inherited-field writes run past the
+block. Over-allocating is safe because field indices do not move.
+
+`@:cstruct` and `@:gpuStruct` classes get flat, headerless allocations for C and
+GPU ABI compatibility.
+
+Runtime type information is carried in MIR rather than erased, which is what
+makes the slot-0 id meaningful downstream: `is`/`cast`, vtable and
+interface-vtable lookup, `Type.getClass()` and Dynamic field access all compare
+ids derived the same way at the allocation site and the check site, so they agree
+by construction rather than by a mirrored offset transform.
 
 ---
 
-## Optimization Strategy
+## Runtime
 
-### Optimization Levels
+Three crates, not one: `rayzor-runtime` (the native C-ABI surface — threading,
+strings, exceptions, reflection), `rayzor-runtime-core` (`no_std + alloc`,
+portable compute kernels shared with wasm), and `rayzor-runtime-wasm` (the guest
+platform surface).
 
-| Level | Description | Features |
-|-------|-------------|----------|
-| `-O0` | No optimization | Fast compile, slow runtime |
-| `-O1` | Basic optimization | Reasonable compile time, decent runtime |
-| `-O2` | Standard optimization | Slower compile, fast runtime |
-| `-O3` | Aggressive optimization | Slow compile, maximum runtime |
-| `-Os` | Size optimization | Minimize binary size |
+**Allocation.** `malloc`/`realloc`/`free` are extern declarations with no body;
+MIR's instruction is `Free { ptr }` with no size. Each backend realises them
+differently — Cranelift maps them to libc `FuncId`s, the LLVM JIT bakes the
+registered libc address as a constant and calls indirectly (MCJIT leaves the
+libcall relocation at zero on Linux), AOT lets the linker resolve them, and WASM
+aliases them to `rayzor_obj_*` which store an 8-byte size header, because a
+size-less `free` cannot drive a size-taking allocator.
 
-### Optimization Phases
+**A MIR function is extern iff its CFG is empty.** This is load-bearing: a user
+class with a `free()` or `malloc()` method shares the name by coincidence, and
+binding a bodied function to the libc `FuncId` makes the backend try to define a
+body over an import — which fails and installs a trap stub, so the method
+silently never runs. Never match these by bare name.
 
-1. **Early Optimizations** (on HIR)
-   - Dead code elimination
-   - Constant folding
-   - Simple inlining
+**Stdlib calls** go through one registry keyed by
+`MethodSignature { class, method, is_static, is_constructor, param_count }` —
+param count is part of the key so overloads map separately. The value describes
+the ABI: out-parameter, self-parameter, raw-value and sign-extension bitmasks,
+authoritative parameter and return types. Two lowering shapes exist and which one
+applies is data-driven, not a hardcoded class list: a direct extern call, or a
+hand-built MIR wrapper with a real CFG for calls that need unpacking.
 
-2. **Middle Optimizations** (on MIR)
-   - SSA-based optimizations
-   - Loop optimizations
-   - Common subexpression elimination
+**Closure ABI** is `{ fn_ptr @0, env_ptr @8 }`. Separately, non-extern Haxe
+functions receive a *trailing* env parameter, but only when they are an
+indirect-call target or an entry point; extern and C-convention functions never
+do. Call sites must agree — this is the classic source of arity mismatches.
 
-3. **Late Optimizations** (backend-specific)
-   - Register allocation
-   - Instruction selection
-   - Peephole optimizations
+**C ABI promotion**: on non-Windows targets, small integers are widened to i64 to
+satisfy the platform ABI. The call site decides by reading back the declared
+signature rather than re-deriving from the MIR type, so declaration and call
+cannot disagree. A mismatch here is silent argument corruption.
 
-### Profile-Guided Optimization (Planned)
-
-```bash
-# Step 1: Compile with instrumentation
-rayzor build --profile-generate
-
-# Step 2: Run program to collect profile
-./program < typical_input.txt
-
-# Step 3: Compile with profile data
-rayzor build --profile-use=profile.data
-```
-
-Benefits:
-- Inline hot functions
-- Optimize hot paths
-- Better branch prediction
+Adding a runtime function: declare the extern in `haxe-std`, register the mapping
+with `map_method!`, implement the `extern "C"` function (remembering the i64
+widening), and `register_symbol!` it so the JIT can resolve it.
 
 ---
 
-## Development Workflow
+## On-disk formats
 
-### Development Mode
+Three magics, all postcard-encoded, all in `ir/blade.rs`:
 
-```bash
-rayzor dev --watch --hot-reload
-```
+| Format | Magic | Holds |
+|---|---|---|
+| `.blade` | `BLAD` | one MIR module plus metadata and cached maps |
+| symbol manifest | `BSYM` | pre-resolved stdlib symbols for fast startup |
+| `.rzb` | `RZBF` | all modules, module table, entry point, build info |
 
-Features:
-- **Fast compilation**: Incremental, minimal optimization
-- **Hot-reload**: Instantly see changes without restart
-- **Interpreter**: No native compilation delay
-- **Rich diagnostics**: Helpful error messages
+Full layouts: [BLADE_FORMAT_SPEC.md](BLADE_FORMAT_SPEC.md) and
+[RZB_FORMAT_SPEC.md](RZB_FORMAT_SPEC.md).
 
-### Testing Mode
+Two design points are worth stating here. **Cache invalidation uses three
+independent keys**: a source content hash, the compiler semver, and a build id
+stamped at compiler build time — the last exists because parser or MIR-shape
+changes do not bump the semver, and without it a rebuilt compiler happily reads
+caches whose layout it no longer understands. **Cached maps are keyed by name,
+never by `SymbolId`/`TypeId`**, because ids are reassigned per compilation; this
+is the same invariant that governs cross-module resolution generally.
 
-```bash
-rayzor test --optimize
-```
-
-Features:
-- **Optimized code**: Run with `-O2` optimizations
-- **Profiling**: Built-in performance measurement
-- **Coverage**: Track code coverage
-
-### Production Mode
-
-```bash
-rayzor build --release --target=native
-```
-
-Features:
-- **Maximum optimization**: `-O3` with PGO
-- **Native compilation**: Via LLVM
-- **Single binary**: No runtime dependencies
-- **Strip debug info**: Minimize binary size
-
-### Incremental Compilation
-
-The compiler tracks dependencies and recompiles only what's needed:
-
-```
-Source Change → Affected Modules → Re-parse → Re-check → Re-lower → Re-optimize
-```
-
-**Caching**:
-- Parsed ASTs
-- Type-checked TASTs
-- Semantic graphs
-- HIR modules
-- Optimized MIR
+`ir/tree_shake.rs` walks the call graph from the entry point and drops
+unreachable functions, externs and globals before bundling, so stdlib the program
+never calls does not ship. It runs outside the pass pipeline.
 
 ---
 
-## Related Documentation
+## Debugging
 
-### Essential Reading
+`rayzor debug` is a shipped toolkit: forensic run, multi-run bench, A/B compare
+across git refs, PC-to-Haxe-function resolution, an lldb wrapper, and a live
+metrics server with a browser dashboard. DWARF emission from Cranelift or LLVM is
+**not** implemented — do not claim it.
 
-- **[SSA_ARCHITECTURE.md](SSA_ARCHITECTURE.md)** - Detailed SSA integration strategy
-- **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** - Development plan
-- **[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)** - Production checklist
-
-### Domain-Specific Docs
-
-- **[resource/plan.md](../resource/plan.md)** - Project scope and goals
-- **[resource/strategy.md](../resource/strategy.md)** - Development → AOT workflow
-- **[resource/haxe_mutability_and_borrow_model.md](../resource/haxe_mutability_and_borrow_model.md)** - Memory safety model
-
-### Component Docs
-
-- **[compiler/src/ir/README.md](src/ir/README.md)** - IR design details
-- **[compiler/src/ir/BACKLOG.md](src/ir/BACKLOG.md)** - IR TODO items
-
----
-
-## Contributing
-
-### Code Organization Principles
-
-1. **One Concern Per Module**: Each file has a single responsibility
-2. **Explicit Dependencies**: Import what you need, no wildcards
-3. **Comments for Why**: Code shows what, comments explain why
-4. **Tests Co-located**: Tests live near the code they test
-
-### Adding New Features
-
-When adding a feature:
-
-1. **Update AST** (parser) - Parse the new syntax
-2. **Update TAST** (type_checker) - Type check the feature
-3. **Update SemanticGraphs** (optional) - Add analysis if needed
-4. **Update HIR** (ir/hir.rs) - Add HIR representation
-5. **Update MIR lowering** (ir/hir_to_mir.rs) - Lower to MIR
-6. **Add optimization** (ir/optimization.rs) - Optimize if applicable
-7. **Update codegen** - Generate code for target
-
-### Testing Strategy
-
-```rust
-// Unit tests in same file
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_feature() {
-        // Test logic
-    }
-}
-
-// Integration tests in examples/
-// examples/test_feature.rs
-
-// End-to-end tests in tests/
-// tests/test_complete_pipeline.rs
-```
-
----
-
-## Performance Characteristics
-
-### Compilation Speed
-
-| Phase | Typical Time | Scaling |
-|-------|--------------|---------|
-| Parsing | ~50µs/KB | Linear |
-| Type Checking | ~200µs/function | ~Linear |
-| SemanticGraphs | ~500µs/function | Linear |
-| HIR Lowering | ~100µs/function | Linear |
-| MIR Lowering | ~150µs/function | Linear |
-| Optimization | ~1ms/function | Varies |
-| Codegen | ~500µs/function | Linear |
-
-### Memory Usage
-
-| Component | Memory Usage |
-|-----------|-------------|
-| AST | ~500 bytes/node |
-| TAST | ~800 bytes/node |
-| SemanticGraphs | ~2KB/function |
-| HIR | ~1KB/function |
-| MIR | ~3KB/function |
-
-**Mitigation**: Incremental compilation with on-disk caching
-
----
-
-## Future Directions
-
-### Near-Term (3-6 months)
-
-- [ ] Complete JavaScript backend
-- [ ] Implement interpreter for hot-reload
-- [ ] Add LSP server for IDE support
-- [ ] Comprehensive test suite
-
-### Mid-Term (6-12 months)
-
-- [ ] LLVM backend for native compilation
-- [ ] Advanced optimizations (PGO, LTO)
-- [ ] Parallel compilation
-- [ ] Package manager integration
-
-### Long-Term (1-2 years)
-
-- [ ] Full Haxe standard library support
-- [ ] Cross-compilation to multiple targets
-- [ ] Incremental semantic analysis
-- [ ] Query-based compilation model
-
----
-
-## Conclusion
-
-The Rayzor compiler is designed as a **modern, safe, and performant** alternative Haxe implementation. Its layered architecture, sophisticated type system, and optional memory safety features make it suitable for both rapid prototyping and production use.
-
-The key innovations are:
-
-1. **SSA-based analysis infrastructure** for precise optimization
-2. **Multi-tier IR design** balancing semantics and performance
-3. **Optional memory safety** without compromising compatibility
-4. **Incremental compilation** for fast iteration
-
-This architecture provides a solid foundation for future enhancements while maintaining code quality and developer experience.
-
----
-
-**Document Version**: 1.0
-**Last Updated**: 2025-11-12
-**Status**: Active Development
-**License**: MIT
+Tier transitions can be traced with `RAYZOR_PROFILE_TIER_EVENTS`; see the
+[CLI reference](../CLI.md) for the full environment-variable surface, and
+`RAYZOR_DISABLE_PASSES` in particular for bisecting a miscompile without
+rebuilding.
