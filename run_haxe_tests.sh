@@ -55,10 +55,22 @@ for hx_file in "$TESTS_DIR"/*.hx; do
     esac
     output=$(timeout 30 "$RAYZOR" run $safety_flag "$hx_file" 2>&1) || exit_code=$?
 
-    if [ $exit_code -eq 0 ]; then
+    # A test can exit 0 and still have failed: the self-checking tests report
+    # by printing. Only a marker at column 0 counts, so the indented "FAIL"
+    # lines that test_rayzor_spec prints on purpose stay passing.
+    self_reported_fail=0
+    if printf '%s' "$output" | grep -qE '^(FAIL|FAILURES:)'; then
+        self_reported_fail=1
+    fi
+
+    if [ $exit_code -eq 0 ] && [ $self_reported_fail -eq 0 ]; then
         status="PASS"
         PASSED=$((PASSED + 1))
         printf "\033[32mPASS\033[0m\n"
+    elif [ $exit_code -eq 0 ]; then
+        status="FAIL(self-reported)"
+        FAILED=$((FAILED + 1))
+        printf "\033[31mFAIL(self-reported)\033[0m\n"
     elif [ $exit_code -eq 124 ]; then
         status="TIMEOUT"
         CRASHED=$((CRASHED + 1))

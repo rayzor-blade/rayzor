@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Aug  4 12:27:15 BST 2026
+  Tue Aug 11 19:08:42 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -420,9 +420,12 @@ true
 false
 Animal
 
+--- test_closure_captured_heap [PASS] ---
+Running compiler/tests/haxe/test_closure_captured_heap.hx [debug] [preset: Application]...
+PASS: closure-captured heap values outlive their frame
+
 --- test_closure_field_call [PASS] ---
 Running compiler/tests/haxe/test_closure_field_call.hx [debug] [preset: Application]...
-[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(4)): In block IrBlockId(21), instruction CallIndirect { dest: Some(IrId(22)), func_ptr: IrId(21), args: [], signature: Function { params: [Void], return_type: I32, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
 test_closure_field_call OK
 
 --- test_closures [PASS] ---
@@ -611,6 +614,10 @@ Running compiler/tests/haxe/test_dynamic_class.hx [debug] [preset: Application].
 7
 done
 
+--- test_dynamic_equality [PASS] ---
+Running compiler/tests/haxe/test_dynamic_equality.hx [debug] [preset: Application]...
+PASS: Dynamic equality semantics
+
 --- test_dynamic_methods [PASS] ---
 Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application]...
 3
@@ -647,6 +654,20 @@ Red
 Green
 Blue
 done
+
+--- test_enum_reflection_dynamic [PASS] ---
+Running compiler/tests/haxe/test_enum_reflection_dynamic.hx [debug] [preset: Application]...
+ok isOfType(boxed) = true
+ok isOfType(tagOnly) = true
+ok getEnumName = Color
+ok enumConstructor(boxed) = Blue
+ok enumConstructor(tagOnly) = Red
+ok enumIndex(boxed) = 2
+ok enumIndex(tagOnly) = 0
+ok static enumConstructor = Blue
+ok static enumIndex = 2
+ok isOfType(String, Color) = false
+ALL PASS
 
 --- test_enum_reflection_value_apis [PASS] ---
 Running compiler/tests/haxe/test_enum_reflection_value_apis.hx [debug] [preset: Application]...
@@ -773,11 +794,11 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-1
 2
+1
+200
 300
 100
-200
 done
 
 --- test_forward [PASS] ---
@@ -803,7 +824,7 @@ Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
 caught
 done
 
---- test_generic_ctor_untyped_selfref [PASS] ---
+--- test_generic_ctor_untyped_selfref [FAIL(self-reported)] ---
 Running compiler/tests/haxe/test_generic_ctor_untyped_selfref.hx [debug] [preset: Application]...
 FAIL h_leaf=1 h_parent=2
 
@@ -843,6 +864,10 @@ done
 Running compiler/tests/haxe/test_generics_simple.hx [debug] [preset: Application]...
 42
 done
+
+--- test_global_cse_invalidation [PASS] ---
+Running compiler/tests/haxe/test_global_cse_invalidation.hx [debug] [preset: Application]...
+PASS: cached global loads are invalidated by stores and calls
 
 --- test_guard [PASS] ---
 Running compiler/tests/haxe/test_guard.hx [debug] [preset: Application]...
@@ -945,6 +970,10 @@ null
 hello
 done
 
+--- test_licm_memory_clobber [PASS] ---
+Running compiler/tests/haxe/test_licm_memory_clobber.hx [debug] [preset: Application]...
+PASS: loop-invariant reads respect what the loop writes
+
 --- test_llvm_bitcast_i32_i64 [PASS] ---
 Running compiler/tests/haxe/test_llvm_bitcast_i32_i64.hx [debug] [preset: Application]...
 42
@@ -953,6 +982,10 @@ PASS llvm-bitcast-i32-i64
 --- test_loop_counter_from_param [PASS] ---
 Running compiler/tests/haxe/test_loop_counter_from_param.hx [debug] [preset: Application]...
 PASS loop-counter-from-param while=44 for=44 closure=44
+
+--- test_loop_unroll_register_remap [PASS] ---
+Running compiler/tests/haxe/test_loop_unroll_register_remap.hx [debug] [preset: Application]...
+PASS: unrolled iterations keep distinct registers
 
 --- test_macro [PASS] ---
 Running compiler/tests/haxe/test_macro.hx [debug] [preset: Application]...
@@ -991,7 +1024,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{world => 99, hello => 42}
+{hello => 42, world => 99}
 42
 99
 true
@@ -1016,6 +1049,10 @@ warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at 
 warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1644: expected field declaration, found 'for'; falling back to legacy parser
 warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1762: expected field declaration, found 'Sys'; falling back to legacy parser
 PASS
+
+--- test_method_named_free [PASS] ---
+Running compiler/tests/haxe/test_method_named_free.hx [debug] [preset: Application]...
+PASS: libc-named methods compile and run
 
 --- test_method_reference_lvalue [PASS] ---
 Running compiler/tests/haxe/test_method_reference_lvalue.hx [debug] [preset: Application]...
@@ -1081,11 +1118,11 @@ none
 --- test_optional_chain [PASS] ---
 Running compiler/tests/haxe/test_optional_chain.hx [debug] [preset: Application]...
 42
-null
+0
 42
-null
+0
 99
-null
+0
 99
 done
 
@@ -1126,13 +1163,16 @@ Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
 hello
 done
 
+--- test_q4k_scale_unpack [PASS] ---
+Running compiler/tests/haxe/test_q4k_scale_unpack.hx [debug] [preset: Application]...
+ALL PASS
+
 --- test_q4km_dot [PASS] ---
 Running compiler/tests/haxe/test_q4km_dot.hx [debug] [preset: Application]...
 PASS q4km-dot case1=75.84 (~75.84) case2=-14.1860595703125 (~-14.186)
 
 --- test_rayzor_spec [PASS] ---
 Running compiler/tests/haxe/test_rayzor_spec.hx [debug] [preset: Application]...
-[tier] LLVM upgrade failed: Error in function 'main' (IrFunctionId(2)): In block IrBlockId(20), instruction CallIndirect { dest: Some(IrId(165)), func_ptr: IrId(3), args: [], signature: Function { params: [Void], return_type: Void, varargs: false }, arg_ownership: [], is_tail_call: false }: Void type cannot be used as BasicType (in Void) (continuing on Cranelift)
   ok   Math > adds
   ok   Math > greater
   ok   Math > bool true
@@ -1240,6 +1280,14 @@ PASS simd16i8-get l0=7 l1=23 l5=87 l15=247 l8signed=-121
 Running compiler/tests/haxe/test_simd16i8_load_bytes.hx [debug] [preset: Application]...
 PASS simd16i8-load-bytes sumA=136 ordered=1360
 
+--- test_simd16i8_shuffle [PASS] ---
+Running compiler/tests/haxe/test_simd16i8_shuffle.hx [debug] [preset: Application]...
+ALL PASS
+
+--- test_simd256_dot [PASS] ---
+Running compiler/tests/haxe/test_simd256_dot.hx [debug] [preset: Application]...
+PASS simd256-dot (128-bit reference only, no 256-bit on this target)
+
 --- test_simd4f_get_lane [PASS] ---
 Running compiler/tests/haxe/test_simd4f_get_lane.hx [debug] [preset: Application]...
 PASS simd4f-get-lane lanes=10,20,30,40 loopSum=100
@@ -1271,6 +1319,10 @@ PASS simd-dot-signed posNeg=-96 negPos=-96 negNeg=96 i8i7=-480 i8u8=-4576
 --- test_simd_from_array [PASS] ---
 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
 10
+
+--- test_single_f32 [PASS] ---
+Running compiler/tests/haxe/test_single_f32.hx [debug] [preset: Application]...
+PASS single-f32 perStep=16777216 f64=16777226 lit=1.2345678806304932
 
 --- test_socket_basic [PASS] ---
 Running compiler/tests/haxe/test_socket_basic.hx [debug] [preset: Application]...
@@ -1399,8 +1451,8 @@ ctor
 
 --- test_type_create_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
-0
-0
+3
+4
 
 --- test_type_enum_reflection [PASS] ---
 Running compiler/tests/haxe/test_type_enum_reflection.hx [debug] [preset: Application]...
@@ -1496,10 +1548,32 @@ Hello from trace!
 3.14
 Done
 
+--- nue_smoke_llama_chat [PASS] ---
+max:    8 tokens
+ctx:    2048 tokens
+temp:   0
+
+[load] reading GGUF (k-quants stay quantized; zero-copy)...
+[kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)
+[warm] model warmed in 0.9147000312805176s
+[load] done in 1.7283411026000977s
+[meta] qwen2 hidden=896 layers=24 heads=14/2 ffn=4864 vocab=151936 ctx=2048 headDim=64 ropeBase=1000000 normEps=0.0000009999999974752427
+[pool] workers=8
+[tok]  vocab=151936
+[chat] template=chatml
+[tok]  eos=151645
+[chat] template=chatml
+
+rep-penalty: 1.3  + no-repeat-8gram
+[gen] streaming...
+A compiler is a software program that translates
+
+[done] 8 tokens in 0.4782998561859131s (16.72590927330414 tok/s, ttft=0.22078895568847656s, finish=length)
+
 
 =========================================
-  TOTAL:        168
-  PASSED:       168
-  FAILED:       0
+  TOTAL:        180
+  PASSED:       179
+  FAILED:       1
   CRASHED:      0
 =========================================
