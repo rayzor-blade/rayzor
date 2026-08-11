@@ -169,9 +169,8 @@ cargo test
 ./run_haxe_tests.sh      # Haxe end-to-end suite
 ```
 
-Start with the [architecture doc](docs/architecture/ARCHITECTURE.md); it names
-the module that owns each stage. Two conventions worth knowing before your first
-patch: symbol ids are per-compilation-context, so only fully-qualified names may
+Start with the [architecture doc](docs/architecture/ARCHITECTURE.md). Two
+conventions worth knowing before your first patch: symbol ids are per-compilation-context, so only fully-qualified names may
 cross module boundaries; and MIR collections are ordered deliberately — do not
 swap a `BTreeMap` for a `HashMap`.
 
