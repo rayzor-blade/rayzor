@@ -291,7 +291,6 @@ Cache is invalidated when:
 For single-file executable distribution (similar to HashLink's `.hl`), see:
 
 - [RZB_FORMAT_SPEC.md](RZB_FORMAT_SPEC.md) - RayzorBundle format specification
-- [RZB_IMPLEMENTATION_PLAN.md](RZB_IMPLEMENTATION_PLAN.md) - Implementation details
 
 | Format   | Purpose           | Use Case                   |
 |----------|-------------------|----------------------------|
