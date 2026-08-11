@@ -2821,6 +2821,10 @@ impl StdlibMapping {
             // runtime no-op.
             map_method!(static "rayzor_Mem", "prefetch" => "rayzor_mem_prefetch", params: 1, returns: void,
                 types: &[IrTypeDescriptor::I64]),
+            // Mem.releaseFreePages(goalKb): Int — hand the allocator's free
+            // regions back to the OS. Phase-scoped, never per token.
+            map_method!(static "rayzor_Mem", "releaseFreePages" => "rayzor_mem_release_free_pages", params: 1, returns: void,
+                types: &[IrTypeDescriptor::I32]),
             // bytes.setInt64(pos: Int, value: Int64): Void
             map_method!(instance "rayzor_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
