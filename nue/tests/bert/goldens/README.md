@@ -1,6 +1,6 @@
 # BERT golden fixtures — all-MiniLM-L6-v2
 
-Acceptance reference for Nue's BERT encoder (plan: `docs/plans/BERT-phased-plan.md`, Phase 0).
+Acceptance reference for Nue's BERT encoder.
 Model: `sentence-transformers/all-MiniLM-L6-v2` — 6-layer BERT, hidden 384, 12 heads, head-dim
 32, ffn 1536, vocab 30522, max-pos 512, LayerNorm eps 1e-12, **exact erf GELU**, POST-norm,
 learned absolute positions. Sentence embedding = **masked mean pool + L2 normalize** (no [CLS]
