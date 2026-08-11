@@ -150,7 +150,7 @@ Vector* MIR instructions in the interpreter now `Err(JitBailout)` instead of sil
 
 ### 13. Full RTTI for Type / Reflect Classes ([Remaining Work](BACKLOG.md#remaining-work))
 
-Type.getClass() and the `__type_id` header are in place ([memory entry](../../docs/RAYZOR_ARCHITECTURE.md)). Full Type / Reflect runtime introspection (field iteration, method invocation, etc.) is the remaining ask.
+Type.getClass() and the `__type_id` header are in place (see [ARCHITECTURE.md](ARCHITECTURE.md)). Full Type / Reflect runtime introspection (field iteration, method invocation, etc.) is the remaining ask.
 
 ### 14. Compile-Time Type Generation — `MacroType<[expr]>` ([§6.6](BACKLOG.md#66-not-implemented---low-priority))
 
