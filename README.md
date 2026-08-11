@@ -118,18 +118,7 @@ Working today:
 - LSP server, and a `rayzor debug` toolkit (forensic run, bench, git A/B compare,
   crash-PC resolution, live metrics dashboard)
 
-Known limitations, stated plainly:
-
-- In the JIT path only zero-argument functions execute through a compiled
-  pointer; argument marshalling is unimplemented, so functions with parameters
-  fall back to the interpreter even once compiled.
-- The `semantic_graph` analysis layer (CFG/DFG/ownership graphs) is not built on
-  the CLI compile path — it backs diagnostics, not production builds.
-- No DWARF debug info is emitted from either backend.
-- Standard library coverage is partial.
-
-In progress: stdlib coverage, optimization tuning, and closing the JIT argument
-gap.
+In progress: standard library coverage and optimization tuning.
 
 ---
 
