@@ -559,23 +559,6 @@ class Q4Matmul {
         return Bytes.alloc(need);
     }
 
-    /** Hand back the prefill-only f16 scratch.
-
-        `_w16` is weight-sized — 112 MB for Mistral-7B's 14336x4096 FFN weight —
-        and only the AMX prefill path ever reads it. Being a `static var` it is
-        permanently reachable, so no escape analysis can reclaim it; the
-        lifetime is a policy choice, and the policy is that decode should not
-        pay for prefill. Measured: holding it costs 150 MB of peak footprint
-        (679 -> 529 MB of non-model overhead with AMX prefill disabled).
-
-        Re-growing it on a later prefill is close to free: the buffer is
-        allocated with calloc, so the pages arrive lazily, and the dequant
-        overwrites every one of them regardless. */
-    public static function releasePrefillScratch():Void {
-        if (_w16 != null) { _w16.free(); _w16 = null; }
-        if (_x16 != null) { _x16.free(); _x16 = null; }
-    }
-
     /** Haxe-owned AMX prefill: `out[batch,n] = x[batch,K] · dequant(qw)[n,K]^T`.
 
         Everything except the GEMM is Haxe — the Q4_K decode and both f16
@@ -1258,11 +1241,6 @@ class Q4Matmul {
         var bpr = K >> 8;
         var batch = Std.int(x.numel() / K);
         if (batch < 1) batch = 1;
-
-        // Decode reached: prefill is over, so give the weight-sized f16 scratch
-        // back rather than holding 112 MB for the rest of the process. A server
-        // handling another prompt re-grows it on the next prefill.
-        if (batch == 1) releasePrefillScratch();
 
         // Opt-in AMX prefill experiment: compute-bound Q4_K_M batches hand off
         // to the runtime kernel (Accelerate dequant-once + sgemm). Q4_K_M ONLY:
