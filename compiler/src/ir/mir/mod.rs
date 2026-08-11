@@ -780,7 +780,6 @@ fn lookup_class_field_gep(class_name: &str, field_name: &str) -> Option<u32> {
 
 mod decl;
 mod expr;
-mod expr_inner;
 mod field;
 mod helpers;
 /// `HirToMirContext`'s methods, split out to keep this file navigable.

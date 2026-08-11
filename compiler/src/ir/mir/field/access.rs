@@ -1206,4 +1206,295 @@ impl<'a> HirToMirContext<'a> {
             Some(loaded)
         }
     }
+
+    pub(crate) fn lower_field_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let HirExprKind::Field { object, field } = &expr.kind else {
+            unreachable!("lower_field_expr on a non-Field expression")
+        };
+        // Check if this is an enum variant access (e.g., Color.Red)
+        // In that case, the object is an Enum type symbol, not a value
+        if let HirExprKind::Variable { symbol, .. } = &object.kind {
+            if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
+                use crate::tast::SymbolKind;
+                if sym.kind == SymbolKind::Enum {
+                    // This is an enum variant access - get the variant discriminant
+                    let enum_name = self.string_interner.get(sym.name).unwrap_or("<unknown>");
+                    let field_sym = self.symbol_table.get_symbol(*field);
+                    let field_name = field_sym
+                        .and_then(|s| self.string_interner.get(s.name))
+                        .unwrap_or("<unknown>");
+
+                    if let Some(variants) = self.symbol_table.get_enum_variants(*symbol) {
+                        for (idx, variant_id) in variants.iter().enumerate() {
+                            let variant_sym = self.symbol_table.get_symbol(*variant_id);
+                            let variant_name = variant_sym
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .unwrap_or("<unknown>");
+                            // Compare by name since the field symbol might be different from the variant symbol
+                            if *variant_id == *field || variant_name == field_name {
+                                // If enum has parameterized variants, all variants must be boxed
+                                if self.enum_is_boxed(*symbol) {
+                                    return self.build_boxed_enum_tag_only(idx as i32);
+                                }
+                                return self.builder.build_const(IrValue::I64(idx as i64));
+                            }
+                        }
+                    }
+                    // If field is not a variant, fall through to regular field access
+                }
+            }
+        }
+
+        // Regular field access
+        debug!("[Field expression] About to lower object");
+        let obj_reg = self.lower_expression(object)?;
+        debug!(
+            "[Field expression] Object lowered to reg={}, now calling lower_field_access",
+            obj_reg
+        );
+
+        // @:move strict-move tracking: prepend a CheckLive guard if
+        // the field's receiver register is a strict-move local. The
+        // inner Variable arm may have already emitted one when the
+        // object expression is a bare local; this covers paths that
+        // bypass that arm (e.g. `this`-redirects, anon views).
+        if self.strict_move_locals.contains(&obj_reg) {
+            let loc = self.convert_source_location(&expr.source_location);
+            let _ = self.builder.build_check_live(obj_reg, loc);
+        }
+
+        // Track object as temp if it's an OWNED heap-allocated value
+        // This includes:
+        // 1. Direct `new` expressions: `new Complex(...)`
+        // 2. Method calls that return class instances: `z.mul(z)` returns new Complex
+        //
+        // We check if the return type is a Class (heap-allocated via malloc).
+        // Runtime/extern functions typically return primitives, strings, or Dynamic,
+        // not Class instances, so this heuristic is safe.
+        let is_owned_heap_value = matches!(
+            &object.kind,
+            HirExprKind::New { .. } | HirExprKind::Call { .. }
+        ) && self.get_drop_behavior(object.ty) == DropBehavior::AutoDrop;
+
+        // Only register NEW expressions as temporaries, not method Call results.
+        // Method calls (getObj(), input(), etc.) often return references to existing
+        // objects — freeing these would corrupt the heap. Only `new Foo(...)` creates
+        // a genuinely owned temporary that must be freed after the field access chain.
+        let is_new_expr = matches!(&object.kind, HirExprKind::New { .. });
+        if is_owned_heap_value && is_new_expr {
+            self.temp_heap_values.push(obj_reg);
+        }
+
+        let receiver_ty = object.ty; // The type of the object being accessed
+
+        // Structural subtyping: if object is a variable with an anon view,
+        // redirect field access to the backing representation
+        if let HirExprKind::Variable {
+            symbol: obj_sym, ..
+        } = &object.kind
+        {
+            if let Some(backing) = self.anon_views.get(obj_sym).cloned() {
+                let field_name = self
+                    .symbol_table
+                    .get_symbol(*field)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .map(|s| s.to_string());
+
+                if let Some(field_name) = field_name {
+                    match &backing {
+                        AnonBacking::Class { field_map, .. } => {
+                            if let Some((_, gep_idx, field_type_id)) =
+                                field_map.iter().find(|(n, ..)| *n == field_name)
+                            {
+                                let field_ir_ty = self.convert_type(*field_type_id);
+                                let idx_const =
+                                    self.builder.build_const(IrValue::I64(*gep_idx as i64))?;
+                                let field_ptr = self.builder.build_gep(
+                                    obj_reg,
+                                    vec![idx_const],
+                                    field_ir_ty.clone(),
+                                )?;
+                                return Some(self.builder.build_load(field_ptr, field_ir_ty)?);
+                            }
+                        }
+                        AnonBacking::WiderAnon { field_map, .. } => {
+                            if let Some((_, src_idx, field_type_id)) =
+                                field_map.iter().find(|(n, ..)| *n == field_name)
+                            {
+                                let anon_get_id = self.get_or_register_extern_function(
+                                    "rayzor_anon_get_field_by_index",
+                                    vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                                    IrType::I64,
+                                );
+                                let idx_val =
+                                    self.builder.build_const(IrValue::I32(*src_idx as i32))?;
+                                let raw_val = self.builder.build_call_direct(
+                                    anon_get_id,
+                                    vec![obj_reg, idx_val],
+                                    IrType::I64,
+                                )?;
+                                return self.coerce_from_i64(raw_val, *field_type_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Raw anonymous object handle: use haxe_reflect_field directly
+        // without haxe_unbox_reference_ptr (the handle is NOT a boxed DynamicValue*)
+        if let HirExprKind::Variable {
+            symbol: obj_sym, ..
+        } = &object.kind
+        {
+            // Skip raw_anon path if variable has a class hint (e.g., from @:derive(Clone))
+            if self.raw_anon_symbols.contains(obj_sym)
+                && !self.register_class_hints.contains_key(&obj_reg)
+                && !self.monomorphized_var_types.contains_key(obj_sym)
+            {
+                return self.raw_anon_reflect_field_read(obj_reg, *field, expr.ty);
+            }
+        }
+
+        // Recover an invalid receiver type (cross-module the typechecker
+        // can leave a local unresolved, e.g. `var b = Bytes.ofString(s)`)
+        // from the object variable's symbol type, then a class hint —
+        // an unresolved receiver has no class handle for field dispatch.
+        let receiver_ty = if receiver_ty == TypeId::invalid() {
+            let from_symbol = if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                self.symbol_table
+                    .get_symbol(*symbol)
+                    .map(|s| s.type_id)
+                    .filter(|t| *t != TypeId::invalid())
+            } else {
+                None
+            };
+            // Class name from either a register hint or the object
+            // variable's tracked stdlib class (`monomorphized_var_types`,
+            // set by `detect_stdlib_class_from_call` for factory results
+            // like `Bytes.ofString`).
+            let hint_name: Option<String> = self
+                .register_class_hints
+                .get(&obj_reg)
+                .cloned()
+                .or_else(|| {
+                    if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                        self.monomorphized_var_types.get(symbol).cloned()
+                    } else {
+                        None
+                    }
+                });
+            from_symbol
+                .or_else(|| self.find_class_type_by_name(hint_name.as_deref()?))
+                .unwrap_or(receiver_ty)
+        } else {
+            receiver_ty
+        };
+
+        // When receiver is Dynamic but has a class hint (e.g., from @:derive(Clone)),
+        // resolve receiver_ty to the actual class type for correct GEP field access.
+        let receiver_ty = {
+            let is_dynamic = {
+                let type_table = self.type_table;
+                type_table
+                    .get(receiver_ty)
+                    .map_or(false, |t| matches!(t.kind, TypeKind::Dynamic))
+            };
+            if is_dynamic {
+                if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
+                    // Find the class type by name
+                    let class_type = self.find_class_type_by_name(&class_hint);
+                    class_type.unwrap_or(receiver_ty)
+                } else {
+                    receiver_ty
+                }
+            } else {
+                receiver_ty
+            }
+        };
+
+        // Reference-class property on an unresolved receiver: when the
+        // local's type stayed invalid cross-module but a class hint
+        // survives (e.g. `Bytes.ofString(...)` result), resolve the
+        // property directly against the stdlib mapping by class name so
+        // it doesn't fall through to a same-named getter on an
+        // unrelated class.
+        if receiver_ty == TypeId::invalid() {
+            if let Some(result) =
+                self.try_stdlib_property_by_hint(obj_reg, &object.kind, *field, expr.ty)
+            {
+                return Some(result);
+            }
+        }
+
+        let result = self.lower_field_access(obj_reg, *field, receiver_ty, expr.ty);
+        debug!(
+            "[Field expression] lower_field_access returned {:?}",
+            result
+        );
+        result
+    }
+
+    pub(crate) fn lower_index_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let HirExprKind::Index { object, index } = &expr.kind else {
+            unreachable!("lower_index_expr on a non-Index expression")
+        };
+        let obj_reg = self.lower_expression(object)?;
+
+        // SIMD vector lane extraction: detect when the object is a Vector type
+        // (e.g. SIMD4f) and emit a direct VectorExtract instead of going through
+        // the heap-array `haxe_array_get_ptr` path. This is required because
+        // SIMD4f abstracts lower to v128 register values, not heap pointers.
+        if let Some(IrType::Vector { element, count }) = self.builder.get_register_type(obj_reg) {
+            let elem_ty = (*element).clone();
+            let lane_count = count;
+            // Constant lane index: emit VectorExtract directly with that lane.
+            if let HirExprKind::Literal(HirLiteral::Int(lane_val)) = &index.kind {
+                if *lane_val >= 0 && (*lane_val as usize) < lane_count as usize {
+                    let lane = *lane_val as u8;
+                    let extracted =
+                        self.builder
+                            .build_vector_extract(obj_reg, lane, elem_ty.clone())?;
+                    // Haxe `Float` is f64. F32 lanes always widen to F64 so downstream
+                    // consumers (string concat, float_to_string, arithmetic) see the
+                    // expected Float type. The HIR expr.ty is often Dynamic (@:coreType
+                    // abstracts erase to Dynamic), so we cannot rely on it.
+                    if matches!(elem_ty, IrType::F32) {
+                        return self.builder.build_cast(extracted, IrType::F32, IrType::F64);
+                    }
+                    // Same for narrow int lanes: Haxe `Int` is i32, so
+                    // widen with the accessor's SIGNED contract (the MIR
+                    // int cast zero-extends on Cranelift; `(x<<s)>>s`
+                    // arithmetic recovers the sign, and folds away
+                    // under a following `& 0xFF`). A raw i8 register
+                    // here otherwise degrades downstream typing.
+                    if matches!(elem_ty, IrType::I8 | IrType::I16) {
+                        let shift = if matches!(elem_ty, IrType::I8) {
+                            24
+                        } else {
+                            16
+                        };
+                        let widened =
+                            self.builder
+                                .build_cast(extracted, elem_ty.clone(), IrType::I32)?;
+                        let sh = self.builder.build_const(IrValue::I32(shift))?;
+                        let shl = self.builder.build_binop(BinaryOp::Shl, widened, sh)?;
+                        return self.builder.build_binop(BinaryOp::Shr, shl, sh);
+                    }
+                    return Some(extracted);
+                }
+            }
+            // Non-constant lane on a vector: not yet supported via direct
+            // VectorExtract (which requires a constant lane). Fall through to
+            // the runtime SIMD4f_extract MIR wrapper path below — but that
+            // path also currently only supports lane 0. For now we emit a
+            // diagnostic-friendly fallback by lowering the lane and routing
+            // through the wrapper, which will be improved when the wrapper
+            // gains a runtime lane switch.
+            let _ = lane_count;
+        }
+
+        let idx_reg = self.lower_expression(index)?;
+        self.lower_index_access(obj_reg, idx_reg, expr.ty)
+    }
 }
