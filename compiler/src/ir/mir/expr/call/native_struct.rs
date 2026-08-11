@@ -242,4 +242,158 @@ impl<'a> HirToMirContext<'a> {
         *fell_through = true;
         None
     }
+
+    pub(crate) fn try_cdef_method_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        let HirExprKind::Call { callee, .. } = &expr.kind else {
+            unreachable!("try_cdef_method_call on a non-Call expression")
+        };
+        let HirExprKind::Field { object, field } = &callee.kind else {
+            *fell_through = true;
+            return None;
+        };
+        let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
+        let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
+        if method_name == Some("cdef") {
+            let obj_type = object.ty;
+            if self.is_cstruct_class(obj_type) {
+                if let Some(layout) = self.get_or_compute_cstruct_layout(obj_type) {
+                    return self
+                        .builder
+                        .build_const(IrValue::String(layout.cdef_string));
+                }
+            }
+            // Fallback: for static calls, obj_type may differ from cached TypeId.
+            // Extract symbol_id from obj_type, find matching layout.
+            let obj_sym_id = {
+                let type_table = self.type_table;
+                type_table.get(obj_type).and_then(|t| {
+                    if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(sym_id) = obj_sym_id {
+                // Find the cached layout whose class has this symbol_id
+                let cdef_str = self.cstruct_layouts.iter().find_map(|(tid, layout)| {
+                    // Check if this type_id's class matches our symbol
+                    let type_table = self.type_table;
+                    if let Some(t) = type_table.get(*tid) {
+                        if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                            if *symbol_id == sym_id {
+                                return Some(layout.cdef_string.clone());
+                            }
+                        }
+                    }
+                    // Also check via HirTypeDecl
+                    for (htid, decl) in self.current_hir_types.iter() {
+                        if *htid == *tid {
+                            if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
+                                if c.symbol_id == sym_id {
+                                    return Some(layout.cdef_string.clone());
+                                }
+                            }
+                        }
+                    }
+                    None
+                });
+                if let Some(cdef) = cdef_str {
+                    return self.builder.build_const(IrValue::String(cdef));
+                }
+            }
+        }
+        *fell_through = true;
+        None
+    }
+
+    pub(crate) fn try_gpu_struct_method_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        let HirExprKind::Call { callee, .. } = &expr.kind else {
+            unreachable!("try_gpu_struct_method_call on a non-Call expression")
+        };
+        let HirExprKind::Field { object, field } = &callee.kind else {
+            *fell_through = true;
+            return None;
+        };
+        let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
+        let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
+        if matches!(
+            method_name,
+            Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment")
+        ) {
+            let obj_type = object.ty;
+            // Try direct type check first, then fallback via symbol_id
+            let gpu_layout = if self.is_gpu_struct_class(obj_type) {
+                self.get_or_compute_gpu_struct_layout(obj_type)
+            } else {
+                // Static call: obj_type may differ from cached TypeId
+                let obj_sym_id = {
+                    let type_table = self.type_table;
+                    type_table.get(obj_type).and_then(|t| {
+                        if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                            Some(*symbol_id)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                obj_sym_id.and_then(|sym_id| {
+                    self.gpu_struct_layouts.iter().find_map(|(tid, layout)| {
+                        let type_table = self.type_table;
+                        if let Some(t) = type_table.get(*tid) {
+                            if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                                if *symbol_id == sym_id {
+                                    return Some(layout.clone());
+                                }
+                            }
+                        }
+                        for (htid, decl) in self.current_hir_types.iter() {
+                            if *htid == *tid {
+                                if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
+                                    if c.symbol_id == sym_id {
+                                        return Some(layout.clone());
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    })
+                })
+            };
+            if let Some(layout) = gpu_layout {
+                match method_name.unwrap() {
+                    "gpuDef" => {
+                        // Return full MSL typedef (deps + own)
+                        let mut full = String::new();
+                        for dep in &layout.dep_typedefs {
+                            full.push_str(dep);
+                        }
+                        full.push_str(&layout.msl_typedef);
+                        return self.builder.build_const(IrValue::String(full));
+                    }
+                    "gpuSize" => {
+                        return self
+                            .builder
+                            .build_const(IrValue::I32(layout.total_size as i32));
+                    }
+                    "gpuAlignment" => {
+                        return self
+                            .builder
+                            .build_const(IrValue::I32(layout.alignment as i32));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        *fell_through = true;
+        None
+    }
 }

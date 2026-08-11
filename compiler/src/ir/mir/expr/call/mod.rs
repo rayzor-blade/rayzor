@@ -27,6 +27,18 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// Runs one call-shape probe, returning its result unless the probe reports
+/// that the callee was not its shape.
+macro_rules! probe {
+    ($self:ident.$m:ident($($a:expr),* $(,)?)) => {{
+        let mut fell_through = false;
+        let lowered = $self.$m($($a,)* &mut fell_through);
+        if !fell_through {
+            return lowered;
+        }
+    }};
+}
+
 mod array;
 mod derived;
 mod direct;
@@ -39,23 +51,14 @@ mod interface;
 mod intrinsic;
 mod method;
 mod native_struct;
+mod resolved_method;
 mod shader;
+mod static_receiver;
 mod stdlib_instance;
+mod stdlib_runtime;
 mod stdlib_static;
 mod super_call;
 mod virtual_dispatch;
-
-/// Runs one call-shape probe, returning its result unless the probe reports
-/// that the callee was not its shape.
-macro_rules! probe {
-    ($self:ident.$m:ident($($a:expr),* $(,)?)) => {{
-        let mut fell_through = false;
-        let lowered = $self.$m($($a,)* &mut fell_through);
-        if !fell_through {
-            return lowered;
-        }
-    }};
-}
 
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_call(&mut self, expr: &HirExpr) -> Option<IrId> {
