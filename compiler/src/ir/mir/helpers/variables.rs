@@ -22,8 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    // Helper methods...
-
     /// Collect all variables referenced in a block
     pub(crate) fn collect_referenced_variables_in_block(
         &self,
@@ -73,7 +71,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirExprKind::Block(block) => {
-                // Recursively collect variables from block expressions
                 self.collect_referenced_variables_in_block(block, vars);
             }
             HirExprKind::Field { object, .. } => {
@@ -119,12 +116,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             // A variable mutated inside a try/catch/finally lowered as an
-            // EXPRESSION (HirExprKind::TryCatch wrapped in HirStatement::Expr —
-            // the common case for `try { x += 1; } catch (e) {}` in a block)
-            // must still be detected so an enclosing loop builds its phi.
-            // Without this the `_ => {}` dropped it: the loop-var collector saw
-            // only the bare counter, no phi for `x`, and the post-loop use hit
-            // "Argument not found in value_map".
+            // EXPRESSION (`try { x += 1; } catch (e) {}` inside a block) must
+            // still be collected, or an enclosing loop won't build its phi.
             HirExprKind::TryCatch {
                 try_expr,
                 catch_handlers,
@@ -220,17 +213,11 @@ impl<'a> HirToMirContext<'a> {
 
     /// True iff `sym` is an actual function-parameter symbol.
     ///
-    /// Loop-phi construction excludes parameters (they don't need a header
-    /// phi). The previous test compared REGISTERS — `symbol_map.get(sym) ==
-    /// Some(&p.reg)` — which also matched a *local* initialized directly from
-    /// a parameter, because `var i = lo` aliases `i` to `lo`'s register
-    /// instead of emitting a copy. That misclassified the loop counter as a
-    /// parameter, so no phi was created: the increment was computed and then
-    /// discarded, and the loop condition read the parameter's entry value
-    /// forever — an infinite loop on band-iteration patterns like
-    /// `var i = lo; while (i < hi) { ...; i++; }` and `for (i in lo...hi)`.
-    /// Identify parameters by SYMBOL KIND so an aliasing local is not
-    /// excluded and correctly receives a loop phi.
+    /// Loop-phi construction excludes parameters, which need no header phi.
+    /// Identify them by SYMBOL KIND, never by register: `var i = lo` aliases
+    /// `i` to `lo`'s register instead of emitting a copy, so a register
+    /// comparison would misclassify such a local as a parameter and deny it
+    /// the loop phi it needs.
     pub(crate) fn is_parameter_symbol(&self, sym: &SymbolId) -> bool {
         self.symbol_table
             .get_symbol(*sym)
@@ -248,7 +235,6 @@ impl<'a> HirToMirContext<'a> {
                         self.ssa_hints.inline_candidates.insert(*symbol_id);
                     }
                     "optimization_hint" => {
-                        // Check the hint value
                         if let Some(HirAttributeArg::Literal(HirLiteral::String(hint))) =
                             attr.args.first()
                         {

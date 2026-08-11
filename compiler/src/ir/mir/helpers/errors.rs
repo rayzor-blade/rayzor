@@ -29,11 +29,9 @@ impl<'a> HirToMirContext<'a> {
         });
     }
 
-    /// Best-effort short type-name for a TypeId, for hint messages.
-    /// Falls back to a debug-ish form when the type table can't render
-    /// a clean name (we don't ship a full pretty-printer here — the
-    /// goal is to help the user write `var x:T = …`, not produce
-    /// canonical source).
+    /// Best-effort short type-name for a TypeId, for hint messages. Falls back to
+    /// a debug-ish form when the type table can't render a clean name: the goal is
+    /// to help the user write `var x:T = …`, not to produce canonical source.
     pub(crate) fn format_type_for_hint(&self, type_id: TypeId) -> String {
         let type_table = self.type_table;
         let ti = match type_table.get(type_id) {

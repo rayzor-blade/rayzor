@@ -49,7 +49,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Build vtable entries: for each slot, find the most-derived implementation
         let mut vtable = Vec::new();
         for (method_name, _) in &slots {
             let method_sym = self
@@ -93,7 +92,6 @@ impl<'a> HirToMirContext<'a> {
         for (child_sym, method_name) in &override_methods_snapshot {
             let method_name = *method_name;
             let child_sym = *child_sym;
-            // Walk up the parent chain to find the topmost class defining this method
             let mut defining_class = None;
             for parent in self.parent_chain(child_sym) {
                 if self
@@ -120,7 +118,6 @@ impl<'a> HirToMirContext<'a> {
         // Step 3: Build vtables for all classes in hierarchies with virtual methods.
         // Process topologically (parents before children).
         let mut classes_to_process: BTreeSet<SymbolId> = BTreeSet::new();
-        // Include all classes that define or override virtual methods
         for (base_class, _) in &base_virtual_methods {
             classes_to_process.insert(*base_class);
         }
@@ -133,9 +130,9 @@ impl<'a> HirToMirContext<'a> {
                 classes_to_process.insert(parent);
             }
         }
-        // Include ALL subclasses of classes with vtables — leaf classes that
-        // inherit (but don't override) virtual methods still need vtable entries
-        // so that haxe_vtable_lookup finds them by type_id at runtime.
+        // Every subclass of a class with a vtable is included: a leaf that
+        // inherits (but does not override) virtual methods still needs entries
+        // for haxe_vtable_lookup to find it by type_id at runtime.
         let parent_map_snapshot: Vec<_> = self
             .class_parent_map
             .iter()
@@ -178,9 +175,9 @@ impl<'a> HirToMirContext<'a> {
             self.build_vtable_for_class(cls);
         }
 
-        // Step 4: Populate virtual_dispatch_info for call sites.
-        // Map ALL method SymbolIds in virtual hierarchies (base + overrides) to their slot.
-        // This ensures calls through both base and derived types dispatch through the vtable.
+        // Step 4: Populate virtual_dispatch_info for call sites. Every method
+        // SymbolId in a virtual hierarchy (base and overrides) maps to its slot,
+        // so calls through base and derived types both dispatch via the vtable.
         let virtual_slots_snapshot: Vec<_> = self
             .class_virtual_slots
             .iter()
@@ -198,16 +195,16 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Register (or reuse) a NAME-keyed forward reference to a vtable dispatch
+    /// Register (or reuse) a name-keyed forward reference to a vtable dispatch
     /// thunk, given the target method's fully-qualified name. Used when the
-    /// method's class is fully imported and NOT present in this lowering
-    /// context (no SymbolId, no compiled function yet — e.g. a `new C()` in a
-    /// sibling file compiled before `C`), so neither the SymbolId-keyed maps
-    /// nor `external_function_name_map` can resolve it. The thunk name is
-    /// deterministic (`__vtable_dispatch_thunk__<sanitized_fqn>`), identical to
-    /// what `C`'s own context emits, so the empty stub DEDUPES with the real
-    /// thunk at the LLVM declare/merge pass — the fat-pointer slot then points
-    /// at the real dispatcher regardless of compile order.
+    /// method's class is imported and absent from this lowering context (no
+    /// SymbolId, no compiled function yet — e.g. a `new C()` in a sibling file
+    /// compiled before `C`), so neither the SymbolId-keyed maps nor
+    /// `external_function_name_map` can resolve it. The thunk name is
+    /// deterministic (`__vtable_dispatch_thunk__<sanitized_fqn>`) and identical
+    /// to what `C`'s own context emits, so the empty stub dedupes with the real
+    /// thunk at the LLVM declare/merge pass and the fat-pointer slot points at
+    /// the real dispatcher regardless of compile order.
     pub(crate) fn forward_ref_dispatch_thunk_by_name(
         &mut self,
         method_fqn: &str,
@@ -226,12 +223,11 @@ impl<'a> HirToMirContext<'a> {
                 return Some(*func_id);
             }
         }
-        // Minimal empty stub named exactly like the real thunk. Only its NAME
-        // matters for the fat-ptr slot (it stores the function's address); the
-        // real dispatcher's body/signature take over at merge dedup. Give it a
-        // permissive `(env, this) -> i64` Haxe-CC signature so the stub is
-        // self-consistent if ever called before merge (it won't be for a
-        // proper cross-module import).
+        // Minimal empty stub named exactly like the real thunk. Only its name
+        // matters for the fat-ptr slot (which stores the function's address);
+        // the real dispatcher's body and signature take over at merge dedup.
+        // The permissive `(env, this) -> i64` Haxe-CC signature keeps the stub
+        // self-consistent if it is ever called before the merge.
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let sig = FunctionSignatureBuilder::new()
@@ -247,8 +243,7 @@ impl<'a> HirToMirContext<'a> {
         let thunk_id = self
             .builder
             .start_function(stub_symbol, thunk_name.clone(), sig);
-        // Leave the body empty (forward declaration) — merge supplies the real
-        // one. Finish and restore the builder cursor.
+        // The body stays empty (forward declaration); merge supplies the real one.
         self.builder.finish_function();
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;

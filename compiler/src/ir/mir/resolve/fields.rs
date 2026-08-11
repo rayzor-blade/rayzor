@@ -31,7 +31,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> IrType {
         let type_table = self.type_table;
 
-        // Check if this TypeId is a type parameter that needs substitution
         if let Some(type_info) = type_table.get(field_type_id) {
             if let crate::tast::TypeKind::TypeParameter { symbol_id, .. } = &type_info.kind {
                 if let Some((base_type, concrete_args)) = generic_info {
@@ -49,7 +48,6 @@ impl<'a> HirToMirContext<'a> {
                                 } = &param_info.kind
                                 {
                                     if param_sym == symbol_id {
-                                        // Found match — substitute with concrete type
                                         if let Some(&concrete_type_id) = concrete_args.get(idx) {
                                             return self.convert_type(concrete_type_id);
                                         }
@@ -57,8 +55,8 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
-                        // Positional lookup failed (concrete_args may be shorter than base type_args).
-                        // If there's exactly 1 concrete arg, use it as the substitution.
+                        // concrete_args may be shorter than the base type_args, so a
+                        // lone concrete arg is taken as the substitution.
                         if concrete_args.len() == 1 {
                             let concrete_id = concrete_args[0];
                             if let Some(ci) = type_table.get(concrete_id) {
@@ -74,7 +72,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Not a type parameter — convert directly
         self.convert_type(field_type_id)
     }
 

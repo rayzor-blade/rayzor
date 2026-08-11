@@ -52,22 +52,19 @@ impl<'a> HirToMirContext<'a> {
                         sym_info.qualified_name.is_some()
                     );
 
-                    // Try to get the qualified name to determine the class
                     if let Some(qual_name) = sym_info.qualified_name {
                         if let Some(qual_name_str) = self.string_interner.get(qual_name) {
                             debug!("[PRE-CHECK] Qualified name: '{}'", qual_name_str);
 
-                            // SPECIAL CASE: Thread/Channel/Mutex/Arc methods are MIR wrappers, not runtime_mapping
-                            // These are implemented in stdlib MIR (thread.rs, channel.rs, etc.)
-                            // Pattern: "rayzor.concurrent.Thread.spawn" -> "Thread_spawn"
-                            // NOTE: This only applies to rayzor.concurrent.*, NOT sys.thread.*
+                            // Thread/Channel/Mutex/Arc methods are stdlib MIR
+                            // wrappers rather than runtime_mapping entries:
+                            // "rayzor.concurrent.Thread.spawn" -> "Thread_spawn".
                             let parts: Vec<&str> = qual_name_str.split('.').collect();
                             if parts.len() >= 2 {
                                 let class_name = parts[parts.len() - 2];
 
-                                // Check if this is a rayzor.concurrent.* class (NOT sys.thread.*)
-                                // sys.thread.Thread uses runtime mapping directly, not MIR wrappers
-                                // Use dynamic check via stdlib_mapping instead of hardcoded list
+                                // Only rayzor.concurrent.*; sys.thread.Thread uses
+                                // the runtime mapping directly.
                                 let is_rayzor_concurrent =
                                     qual_name_str.starts_with("rayzor.concurrent.");
                                 if is_rayzor_concurrent
@@ -89,9 +86,9 @@ impl<'a> HirToMirContext<'a> {
                                         );
                                     }
 
-                                    // WORKAROUND: static calls may carry a synthetic
-                                    // class receiver argument. Prefer the mapping
-                                    // signature arity to trim that argument.
+                                    // A static call may carry a synthetic class
+                                    // receiver argument; the mapping signature's
+                                    // arity decides whether to trim it.
                                     let mut actual_args = static_args;
                                     if let Some((expected_params, _)) =
                                         self.get_stdlib_mir_wrapper_signature(&mir_func_name)
@@ -110,7 +107,6 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
-                                    // Lower all arguments and collect their types
                                     let mut arg_regs = Vec::new();
                                     let mut param_types = Vec::new();
                                     for (idx, arg) in actual_args.iter().enumerate() {
@@ -120,8 +116,8 @@ impl<'a> HirToMirContext<'a> {
                                             param_types.push(self.convert_type(arg.ty));
                                         }
                                     }
-                                    // Register forward reference - will be provided by merged stdlib module
-                                    // We infer the signature from the call site arguments
+                                    // The body comes from the merged stdlib module,
+                                    // so the signature is inferred from the call site.
                                     let mir_func_id = self.register_stdlib_mir_forward_ref(
                                         &mir_func_name,
                                         param_types,
@@ -133,7 +129,6 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name, mir_func_id
                                     );
 
-                                    // Generate the call
                                     let result = self.builder.build_call_direct(
                                         mir_func_id,
                                         arg_regs,
@@ -144,8 +139,8 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Check if this is a stdlib class method by looking at qualified name
-                            // e.g., "rayzor.concurrent.Thread.spawn" or "test.Thread.spawn"
+                            // Stdlib class methods are keyed by qualified name, e.g.
+                            // "rayzor.concurrent.Thread.spawn" or "test.Thread.spawn".
                             let lookup_result = self.get_static_stdlib_runtime_func_with_params(
                                 qual_name_str,
                                 method_name,
@@ -174,8 +169,8 @@ impl<'a> HirToMirContext<'a> {
                                     return result;
                                 }
 
-                                // Get the expected signature from our registered extern functions
-                                // This ensures we use the correct types (e.g., I64 for Std.random)
+                                // The registered extern signature is authoritative
+                                // for the types (e.g. I64 for Std.random).
                                 let (expected_param_types, expected_return_type) = self
                                     .get_extern_function_signature(&runtime_func)
                                     .unwrap_or_else(|| {
@@ -204,7 +199,6 @@ impl<'a> HirToMirContext<'a> {
                                     static_args
                                 };
 
-                                // Lower all arguments
                                 let arg_regs: Vec<_> = runtime_call_args
                                     .iter()
                                     .filter_map(|a| self.lower_expression(a))
@@ -216,20 +210,17 @@ impl<'a> HirToMirContext<'a> {
                                     arg_regs
                                 );
 
-                                // Cast/box arguments to expected types if needed
                                 let final_arg_regs: Vec<_> = arg_regs.iter().enumerate()
                                     .map(|(i, &reg)| {
                                         if let (Some(expected_ty), Some(actual_ty)) = (
                                             expected_param_types.get(i),
                                             self.builder.get_register_type(reg)
                                         ) {
-                                            // If types differ, insert a cast or box
                                             if *expected_ty != actual_ty {
-                                                // When expected is Ptr(U8) (Dynamic/boxed), auto-box the value
+                                                // Ptr(U8) means the param is Dynamic, so the value is boxed rather than cast.
                                                 let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
                                                 if is_ptr_u8 && i < runtime_call_args.len() {
                                                     debug!("[STATIC METHOD BOX] Attempting auto-box for arg {} with type {:?}", i, runtime_call_args[i].ty);
-                                                    // Use box_value_for_dynamic to properly box based on HIR type
                                                     if let Some(boxed) = self.box_value_for_dynamic(reg, runtime_call_args[i].ty) {
                                                         debug!("[STATIC METHOD BOX] Auto-boxed arg {} for Dynamic param", i);
                                                         return boxed;
@@ -265,7 +256,6 @@ impl<'a> HirToMirContext<'a> {
                                     runtime_func, runtime_func_id
                                 );
 
-                                // Generate the call to the runtime function
                                 let result = self.builder.build_call_direct(
                                     runtime_func_id,
                                     final_arg_regs,
@@ -277,12 +267,10 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Fallback: still inside method_name scope.
-                    // If qualified_name is not set (e.g., Reflect.compare from import files),
-                    // try to find a matching static stdlib method by scanning all known classes.
-                    // Only match static methods to avoid false positives.
-                    // If qualified_name is available, prefer class-qualified lookup
-                    // before doing a global static-name fallback.
+                    // With no qualified_name (e.g. Reflect.compare from import
+                    // files), find the method by scanning known classes; static
+                    // methods only, to avoid false positives. A qualified name is
+                    // tried class-first, before the global static-name scan.
                     let mut static_fallback = None;
                     if let Some(qual_name_str) = sym_info
                         .qualified_name
@@ -336,7 +324,6 @@ impl<'a> HirToMirContext<'a> {
                             return result;
                         }
 
-                        // Lower all arguments first
                         let mut arg_regs: Vec<IrId> = Vec::new();
                         let mut arg_types: Vec<IrType> = Vec::new();
                         for arg in static_args.iter() {
@@ -346,9 +333,8 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Special case: Reflect.compare → haxe_reflect_compare_typed
-                        // Same logic as the qualified-name path: detect argument type and
-                        // append a type_tag parameter to avoid boxing.
+                        // Reflect.compare → haxe_reflect_compare_typed: detect the
+                        // argument type and append a type_tag param to avoid boxing.
                         if runtime_func_name == "haxe_reflect_compare" {
                             let mut known_type_tag: Option<i32> = None;
                             let mut type_param_name: Option<String> = None;
@@ -485,7 +471,7 @@ impl<'a> HirToMirContext<'a> {
                             expected_return_type,
                         );
                     }
-                } // end of if let Some(method_name)
+                }
             }
         }
         *fell_through = true;

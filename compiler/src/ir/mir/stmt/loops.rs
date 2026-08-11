@@ -61,34 +61,24 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Find all variables that are referenced in the loop
-        // For now, use a simple heuristic: any variable in the symbol_map
-        // that is referenced in the condition or body is a potential loop variable
-        //    // debug!("Loop body has {} statements", body.statements.len());
-        //     for (i, stmt) in body.statements.iter().enumerate() {
-        //        // debug!("Statement {}: {:?}", i, std::mem::discriminant(stmt));
-        //     }
-
-        // Collect all variables referenced in condition
+        // Heuristic for loop variables: anything referenced in the condition,
+        // the body or the continue update.
         let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_expr(condition, &mut referenced_vars);
 
-        // Collect all variables referenced in body
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
 
-        // Also collect variables referenced in continue_update if present
         if let Some(upd) = continue_update {
             self.collect_referenced_variables_in_block(upd, &mut referenced_vars);
         }
 
-        // Only include variables that were declared before the loop
-        // (i.e., they're already in the symbol_map)
-        // Exclude function parameters since they're immutable
+        // Only variables declared before the loop (already in symbol_map);
+        // function parameters are immutable.
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only ACTUAL parameter symbols (by kind, not by
+                // Exclude only actual parameter symbols (by kind, not by
                 // register — see is_parameter_symbol; a `var i = lo` local
                 // aliases the param's register and must still get a phi).
                 let is_param = self.is_parameter_symbol(sym);
@@ -112,22 +102,16 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Jump to condition block
         self.builder.build_branch(cond_block);
 
-        // Condition block - create phi nodes for loop variables
         self.builder.switch_to_block(cond_block);
 
         // Create phi nodes for all loop variables
         let mut phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
         for (symbol_id, (initial_reg, var_type)) in &loop_var_initial_values {
-            // debug!("Creating phi for symbol {:?}, initial reg {:?}", symbol_id, initial_reg);
             if let Some(phi_reg) = self.builder.build_phi(cond_block, var_type.clone()) {
-                // debug!("Created phi node with dest {:?}", phi_reg);
-                // Add incoming value from entry block
                 self.builder
                     .add_phi_incoming(cond_block, phi_reg, entry_block, *initial_reg);
-                // debug!("Added incoming edge from entry block {:?}", entry_block);
 
                 // Register the phi node as a local so Cranelift can find its type
                 if let Some(func) = self.builder.current_function_mut() {
@@ -145,19 +129,16 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Update symbol map to use phi node
                 phi_nodes.insert(*symbol_id, phi_reg);
                 self.symbol_map.insert(*symbol_id, phi_reg);
 
-                // Also update owned_heap_values so drop tracking uses the phi result
-                // This ensures that when a loop variable is reassigned, we free the
-                // current iteration's value (from phi), not the initial value
+                // Move drop tracking onto the phi so a reassigned loop variable
+                // frees the current iteration's value, not the initial one.
                 if self.owned_heap_values.contains_key(symbol_id) {
                     self.owned_heap_values.insert(*symbol_id, phi_reg);
                 }
             }
         }
-        // debug!("Created {} phi nodes", phi_nodes.len());
 
         // Create phi nodes in update_block for all loop variables (if update block exists).
         // These are needed because the update block can be reached from both:
@@ -166,8 +147,8 @@ impl<'a> HirToMirContext<'a> {
         // Without these phis, we'd use the wrong value on one of the paths.
         let mut continue_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
         if let Some(upd_block) = update_block {
-            // Temporarily switch to the update block to create phi nodes
-            // (We'll switch back and lower the body first)
+            // Switch to the update block only to create the phis; the body is
+            // lowered first.
             let saved_block = self.builder.current_block();
             self.builder.switch_to_block(upd_block);
             for (symbol_id, (_, var_type)) in &loop_var_initial_values {
@@ -188,21 +169,18 @@ impl<'a> HirToMirContext<'a> {
                     continue_phi_nodes.insert(*symbol_id, upd_phi_reg);
                 }
             }
-            // Switch back to entry block
             if let Some(saved) = saved_block {
                 self.builder.switch_to_block(saved);
             }
         }
 
-        // Push loop context (exit phi nodes will be added after condition evaluation)
-        // We need to evaluate the condition FIRST to know which block we're actually in
-        // (short-circuit operators like && create additional blocks)
-        // When there's a continue_update block, continue should jump there (not cond_block)
-        // so the loop counter increment always executes.
-        //
-        // For plain while loops (no update block), continue jumps to cond_block.
-        // The cond_block has phi nodes for loop variables — continue must add incoming
-        // edges to these phis, otherwise cranelift sees missing block arguments → SIGILL.
+        // Exit phi nodes are added after condition evaluation: the condition must
+        // be lowered first to know which block we end up in (short-circuit
+        // operators like && create additional blocks). With a continue_update
+        // block, continue jumps there rather than to cond_block so the loop
+        // counter increment always executes. For plain while loops continue
+        // targets cond_block, and must add incoming edges to its phi nodes or
+        // cranelift sees missing block arguments.
         let loop_continue_phi_nodes = if update_block.is_some() {
             continue_phi_nodes.clone()
         } else {
@@ -217,8 +195,8 @@ impl<'a> HirToMirContext<'a> {
             continue_phi_nodes: loop_continue_phi_nodes,
         });
 
-        // Evaluate condition - this may create additional blocks for short-circuit operators!
-        // After this, we may be in a different block than cond_block
+        // Short-circuit operators create extra blocks, so this may leave us in a
+        // different block than cond_block.
         debug!(
             "[lower_while_loop] Lowering condition expression, kind={:?}",
             std::mem::discriminant(&condition.kind)
@@ -232,19 +210,18 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Capture the block we're actually in AFTER condition evaluation
-        // This is where the conditional branch to body/exit will happen
+        // The block we are in after condition evaluation is the one that branches
+        // to body/exit.
         let cond_end_block = self.builder.current_block().unwrap_or(cond_block);
 
         // Now create exit block phi nodes with the correct predecessor block
         let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
         for (symbol_id, loop_phi_reg) in &phi_nodes {
             if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
-                // Allocate a new register for the exit block parameter
                 let exit_param_reg = self.builder.alloc_reg().unwrap();
 
-                // Create the phi node in the exit block with incoming edge from the ACTUAL
-                // block that branches to exit (cond_end_block, not necessarily cond_block)
+                // The incoming edge comes from the block that actually branches to
+                // exit (cond_end_block, not necessarily cond_block).
                 if let Some(func) = self.builder.current_function_mut() {
                     if let Some(exit_block_data) = func.cfg.get_block_mut(exit_block) {
                         let exit_phi = crate::ir::IrPhiNode {
@@ -272,7 +249,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Update loop context with the exit phi nodes
         if let Some(loop_ctx) = self.loop_stack.last_mut() {
             loop_ctx.exit_phi_nodes = exit_phi_nodes.clone();
         }
@@ -289,7 +265,6 @@ impl<'a> HirToMirContext<'a> {
             warn!("[lower_while_loop] CONDITION FAILED TO LOWER - no branch built!");
         }
 
-        // Body block
         debug!(
             "[lower_while_loop] Switching to body_block and lowering body ({} statements)",
             body.statements.len()
@@ -395,25 +370,20 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Pop loop context
         self.loop_stack.pop();
 
-        // Continue in exit block
-        // The exit block will receive loop-carried values as block parameters when
-        // the conditional branch from the loop header takes the false path
+        // The exit block receives loop-carried values as block parameters when the
+        // conditional branch from the loop header takes the false path.
         self.builder.switch_to_block(exit_block);
 
-        // Update symbol map to use exit phi nodes (already created before loop body)
         for (symbol_id, exit_param_reg) in &exit_phi_nodes {
             self.symbol_map.insert(*symbol_id, *exit_param_reg);
         }
 
-        // CRITICAL: Also update owned_heap_values to use exit phi values.
-        // Without this, owned_heap_values retains IrIds from the loop body block
-        // that don't dominate post-loop blocks. When an outer scope's exit_drop_scope
-        // later emits Free instructions using these stale IrIds, it creates an SSA
-        // dominance violation — at runtime, this causes double-free crashes because
-        // the stale register may hold an already-freed pointer.
+        // owned_heap_values must move onto the exit phis as well: IrIds from the
+        // loop body block do not dominate post-loop blocks, so Free instructions
+        // emitted by an outer exit_drop_scope would violate SSA dominance and can
+        // free an already-freed pointer.
         for (symbol_id, exit_param_reg) in &exit_phi_nodes {
             if self.owned_heap_values.contains_key(symbol_id) {
                 self.owned_heap_values.insert(*symbol_id, *exit_param_reg);
@@ -427,24 +397,6 @@ impl<'a> HirToMirContext<'a> {
         condition: &HirExpr,
         label: Option<&SymbolId>,
     ) {
-        // Do-while loop structure:
-        // do {
-        //     body;
-        // } while (condition);
-        //
-        // MIR structure with phi nodes:
-        // entry_block:
-        //     goto body_block(initial_values)
-        // body_block(phi_nodes):
-        //     <body statements>
-        //     goto cond_block
-        // cond_block:
-        //     %cond = <evaluate condition>
-        //     br %cond, body_block(updated_values), exit_block(final_values)
-        // exit_block(exit_phi_nodes):
-        //     <continue>
-
-        // Create blocks
         let Some(body_block) = self.builder.create_block() else {
             return;
         };
@@ -467,15 +419,13 @@ impl<'a> HirToMirContext<'a> {
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
         self.collect_referenced_variables_in_expr(condition, &mut referenced_vars);
 
-        // Only include variables that were declared before the loop
-        // (i.e., they're already in the symbol_map)
-        // Exclude function parameters since they're immutable
+        // Only variables declared before the loop (already in symbol_map);
+        // function parameters are immutable.
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Check if this is a function parameter by seeing if it's in the current function's parameters
-                // Exclude only ACTUAL parameter symbols, by kind not register
+                // Exclude only actual parameter symbols, by kind not register
                 // (see is_parameter_symbol).
                 let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
@@ -501,7 +451,6 @@ impl<'a> HirToMirContext<'a> {
         // Jump to body first (do-while always executes once)
         self.builder.build_branch(body_block);
 
-        // Body block - create phi nodes for loop variables
         self.builder.switch_to_block(body_block);
 
         // Create phi nodes for all loop variables at the start of body block
@@ -528,13 +477,11 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Update symbol map to use phi node
                 phi_nodes.insert(*symbol_id, phi_reg);
                 self.symbol_map.insert(*symbol_id, phi_reg);
 
-                // Also update owned_heap_values so drop tracking uses the phi result
-                // This ensures that when a loop variable is reassigned, we free the
-                // current iteration's value (from phi), not the initial value
+                // Move drop tracking onto the phi so a reassigned loop variable
+                // frees the current iteration's value, not the initial one.
                 if self.owned_heap_values.contains_key(symbol_id) {
                     self.owned_heap_values.insert(*symbol_id, phi_reg);
                 }
@@ -574,12 +521,11 @@ impl<'a> HirToMirContext<'a> {
         }
         self.loop_carried_symbols.pop();
 
-        // Build condition block
         self.builder.switch_to_block(cond_block);
         let cond_result = self.lower_expression(condition);
 
-        // Capture the block we're actually in AFTER condition evaluation
-        // This is where the conditional branch to body/exit will happen
+        // The block we are in after condition evaluation is the one that branches
+        // to body/exit.
         let cond_end_block = self.builder.current_block().unwrap_or(cond_block);
 
         // Now create exit block phi nodes with the correct predecessor block
@@ -593,10 +539,9 @@ impl<'a> HirToMirContext<'a> {
                     continue;
                 };
 
-                // Allocate a new register for the exit block parameter
                 let exit_param_reg = self.builder.alloc_reg().unwrap();
 
-                // Create the phi node in the exit block with incoming edge from cond_end_block
+                // The incoming edge comes from cond_end_block.
                 if let Some(func) = self.builder.current_function_mut() {
                     if let Some(exit_block_data) = func.cfg.get_block_mut(exit_block) {
                         let exit_phi = crate::ir::IrPhiNode {
@@ -624,23 +569,19 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Update loop context with the exit phi nodes
         if let Some(loop_ctx) = self.loop_stack.last_mut() {
             loop_ctx.exit_phi_nodes = exit_phi_nodes.clone();
         }
 
-        // Add back-edge phi incoming values from body end to body block
-        // These represent the updated values for the next iteration
+        // Back-edge phi incoming values: the updated values for the next iteration,
+        // reaching body_block from cond_end_block.
         for (symbol_id, phi_reg) in &phi_nodes {
-            // Get the current value of the variable after the loop body
             let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
                 updated_reg
             } else {
                 *phi_reg
             };
 
-            // Add incoming value from cond block (back edge for next iteration)
-            // The back edge comes from cond_end_block (after condition is evaluated)
             self.builder
                 .add_phi_incoming(body_block, *phi_reg, cond_end_block, back_edge_value);
         }
@@ -651,20 +592,16 @@ impl<'a> HirToMirContext<'a> {
                 .build_cond_branch(cond_reg, body_block, exit_block);
         }
 
-        // Pop loop context
         self.loop_stack.pop();
 
-        // Continue at exit block
         self.builder.switch_to_block(exit_block);
 
-        // Update symbol map to use exit phi nodes after the loop
         for (symbol_id, exit_reg) in &exit_phi_nodes {
             self.symbol_map.insert(*symbol_id, *exit_reg);
         }
 
-        // CRITICAL: Also update owned_heap_values to use exit phi values.
-        // Same fix as in lower_while_loop — prevents SSA dominance violations
-        // and double-free crashes when outer scopes free loop-carried heap values.
+        // owned_heap_values must move onto the exit phis as well (see
+        // lower_while_loop): body-block IrIds do not dominate post-loop blocks.
         for (symbol_id, exit_reg) in &exit_phi_nodes {
             if self.owned_heap_values.contains_key(symbol_id) {
                 self.owned_heap_values.insert(*symbol_id, *exit_reg);

@@ -61,11 +61,10 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
-    /// Extract the runtime type_id (as u32) from an expression that represents an enum value.
     /// Stable runtime id for an enum, from its declaration symbol. Mirrors the
     /// `TypeKind::Enum` arm of `runtime_type_id` so a value boxed by type and a
-    /// lookup keyed by symbol land on the SAME key. Enum RTTI registration uses
-    /// this id too; keeping one key space is what makes reflection on a
+    /// lookup keyed by symbol land on the same key. Enum RTTI registration uses
+    /// this id too; the single key space is what makes reflection on a
     /// Dynamic-typed enum work.
     pub(crate) fn enum_runtime_id(&self, enum_symbol: SymbolId) -> u32 {
         self.deterministic_iface_or_enum_type_id(enum_symbol, "enum")
@@ -201,7 +200,6 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Variable { symbol, .. } => {
                 if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
                     if sym.kind == crate::tast::SymbolKind::EnumVariant {
-                        // Find parent enum
                         if let Some(parent) =
                             self.symbol_table.find_parent_enum_for_constructor(*symbol)
                         {
@@ -277,7 +275,6 @@ impl<'a> HirToMirContext<'a> {
         // lookups, cast/is checks) for this enum, stable across sessions.
         let runtime_type_id = self.runtime_type_id(type_id);
 
-        // Get enum name from symbol table
         let enum_name = self
             .symbol_table
             .get_symbol(enum_symbol_id)
@@ -285,7 +282,6 @@ impl<'a> HirToMirContext<'a> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("Enum_{}", enum_symbol_id.as_raw()));
 
-        // Get variant names from the symbol table's enum_variants map
         let variant_names: Vec<String> =
             if let Some(variant_ids) = self.symbol_table.get_enum_variants(enum_symbol_id) {
                 variant_ids

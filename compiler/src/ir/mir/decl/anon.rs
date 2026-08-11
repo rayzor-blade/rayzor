@@ -33,7 +33,8 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         let backing = self.anon_views.get(&symbol)?.clone();
 
-        // Get target anonymous fields sorted alphabetically
+        // Target anonymous fields, sorted alphabetically: the shape key and the
+        // runtime field indices both depend on that order.
         let resolved_target = self.resolve_through_aliases(target_type);
         let target_fields = {
             let type_table = self.type_table;
@@ -59,7 +60,6 @@ impl<'a> HirToMirContext<'a> {
 
         let total_field_count = target_fields.len();
 
-        // Build shape key and get/create shape ID
         let shape_key: String = target_fields
             .iter()
             .map(|(name, _)| name.as_str())
@@ -75,7 +75,6 @@ impl<'a> HirToMirContext<'a> {
             id
         };
 
-        // Build descriptor string
         let descriptor = {
             let mut parts = Vec::with_capacity(target_fields.len());
             for (name, type_id) in &target_fields {
@@ -85,7 +84,6 @@ impl<'a> HirToMirContext<'a> {
             parts.join(",")
         };
 
-        // Emit rayzor_ensure_shape + rayzor_anon_new
         let ensure_shape_id = self.get_or_register_extern_function(
             "rayzor_ensure_shape",
             vec![IrType::I32, IrType::String],
@@ -120,7 +118,6 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(Box::new(IrType::U8)),
         )?;
 
-        // Copy fields from backing source into the new AnonObject
         match &backing {
             AnonBacking::Class { field_map, .. } => {
                 for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
@@ -181,7 +178,6 @@ impl<'a> HirToMirContext<'a> {
         class_type: TypeId,
         target_anon_type: TypeId,
     ) -> Option<IrId> {
-        // Get class symbol to look up fields
         let class_symbol = {
             let type_table = self.type_table;
             if let Some(ty_info) = type_table.get(class_type) {
@@ -205,7 +201,7 @@ impl<'a> HirToMirContext<'a> {
             }
         }?;
 
-        // Get target anonymous fields
+        // Target anonymous fields, sorted alphabetically
         let target_fields = {
             let type_table = self.type_table;
             if let Some(ty_info) = type_table.get(target_anon_type) {
@@ -266,8 +262,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Now build a temporary AnonBacking::Class and call materialize_anon_view logic
-        // We'll inline the materialization here to avoid needing a temporary symbol
+        // Materialization is inlined rather than routed through
+        // materialize_anon_view, which would need a temporary symbol.
         let total_field_count = target_fields.len();
 
         let shape_key: String = target_fields
@@ -410,7 +406,6 @@ impl<'a> HirToMirContext<'a> {
             .map(|(i, (name, _))| (name.as_str(), i))
             .collect();
 
-        // Verify all target fields exist in source
         for (name, _) in &target_fields {
             if !source_index_map.contains_key(name.as_str()) {
                 return None;

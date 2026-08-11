@@ -93,7 +93,6 @@ impl<'a> HirToMirContext<'a> {
         let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
         let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
         if method_name == Some("wgsl") {
-            // Find the @:shader class from the object type
             let obj_sym = {
                 let type_table = self.type_table;
                 type_table.get(object.ty).and_then(|t| {
@@ -109,7 +108,6 @@ impl<'a> HirToMirContext<'a> {
                 .map(|s| s.flags.is_shader())
                 .unwrap_or(false);
             if is_shader {
-                // Find the HIR class and transpile
                 for (_tid, decl) in self.current_hir_types.iter() {
                     if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
                         if Some(c.symbol_id) == obj_sym {

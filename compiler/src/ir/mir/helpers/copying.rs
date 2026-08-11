@@ -139,7 +139,6 @@ impl<'a> HirToMirContext<'a> {
             return false;
         }
 
-        // Check source kind
         let source_kind = {
             let type_table = self.type_table;
             type_table.get(resolved_source).map(|t| t.kind.clone())
@@ -168,11 +167,10 @@ impl<'a> HirToMirContext<'a> {
             let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
             // Fast path: lookup by TypeId via reverse index
             let mut fields = self.fields_for_type(resolved_source);
-            // Fallback: also try matching by class symbol_id. The map is keyed by
-            // context-local TypeIds, so confirm with the field's declaring class
-            // NAME where recorded — otherwise another class's fields enter this
-            // map and, being keyed by field name, silently overwrite the right
-            // indices.
+            // Fallback: match by class symbol_id. The map is keyed by context-local
+            // TypeIds, so confirm against the field's declaring class name where
+            // recorded — otherwise another class's fields enter this map and, being
+            // keyed by field name, overwrite the right indices.
             if fields.is_empty() {
                 let expected = self.class_qualified_name(class_symbol);
                 for (field_sym, (class_ty, idx)) in &self.field_index_map {

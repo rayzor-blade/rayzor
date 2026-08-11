@@ -34,11 +34,10 @@ impl<'a> HirToMirContext<'a> {
             .and_then(|s| self.string_interner.get(s.name))
             .map(|s| s.to_string())?;
 
-        // Register evidence beats the erased HIR type: a receiver whose MIR
-        // register is already a concrete String flowed out of a typed
-        // producer (e.g. `string_concat`) under a Dynamic-erased HIR type.
-        // It is NOT a boxed Dynamic — the unbox_reference peeling below
-        // would walk garbage. Dispatch the known field directly.
+        // Register evidence beats the erased HIR type: a receiver whose register is
+        // already a concrete String came from a typed producer (e.g. `string_concat`)
+        // under a Dynamic-erased HIR type. It is not a boxed Dynamic, so the
+        // unbox_reference peeling below would walk garbage.
         let obj_reg_ty = self.builder.get_register_type(obj);
         if (matches!(&obj_reg_ty, Some(IrType::String))
             || matches!(&obj_reg_ty, Some(IrType::Ptr(inner)) if matches!(inner.as_ref(), IrType::String)))
@@ -206,18 +205,13 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
-    /// Dynamic field READ fallback via Reflect API.
-    /// Used when receiver is Dynamic and field_index_map has no matching class field.
-    /// The object may be a boxed DynamicValue (from boxing) — unbox to get the anonymous handle.
-    /// Try to dispatch a Dynamic-receiver field read to a stdlib runtime
-    /// property getter (e.g. `Array.length`, `String.length`, …) before
-    /// falling through to `haxe_unbox_reference_ptr` + reflect.
+    /// Dispatch a Dynamic-receiver field read to a stdlib runtime property getter
+    /// (`Array.length`, `String.length`, …) before falling through to
+    /// `haxe_unbox_reference_ptr` + reflect.
     ///
-    /// Walks the stdlib mapping by field name — any zero-arg instance
-    /// property whose name matches qualifies. Boxes primitive results
-    /// as `DynamicValue*` so downstream Dynamic-aware code (string
-    /// concat, trace, `+`) sees what it expects rather than a raw
-    /// integer it would later dereference as a pointer.
+    /// Matches any zero-arg instance property of that name in the stdlib mapping.
+    /// Primitive results are boxed as `DynamicValue*` so Dynamic-aware consumers
+    /// (string concat, trace, `+`) don't dereference a raw integer as a pointer.
     pub(crate) fn try_dynamic_stdlib_property_dispatch(
         &mut self,
         obj: IrId,
@@ -293,7 +287,6 @@ impl<'a> HirToMirContext<'a> {
                     {
                         return Some(Ok(5));
                     }
-                    // Check if the expression is a variable with a known concrete type
                     if let HirExprKind::Variable { symbol, .. } = &first.kind {
                         if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(sym_ti) = type_table.get(sym.type_id) {

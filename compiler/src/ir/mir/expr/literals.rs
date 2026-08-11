@@ -39,11 +39,10 @@ impl<'a> HirToMirContext<'a> {
                 match ir_type {
                     IrType::F32 => self.builder.build_const(IrValue::F32(*f as f32)),
                     IrType::F64 => self.builder.build_const(IrValue::F64(*f)),
-                    _ => self.builder.build_const(IrValue::F64(*f)), // Default to F64
+                    _ => self.builder.build_const(IrValue::F64(*f)),
                 }
             }
             HirLiteral::String(s) => {
-                // Resolve the interned string to get the actual content
                 let string_content = self
                     .string_interner
                     .get(*s)
@@ -85,21 +84,13 @@ impl<'a> HirToMirContext<'a> {
         elements: &[HirExpr],
         array_type: TypeId,
     ) -> Option<IrId> {
-        // If the array's element type is an interface, each Class element
-        // needs to be wrapped in a fat pointer before being stored, so the
-        // array holds interface-dispatchable values. Determine the element
-        // type's interface symbol once up front.
+        // Elements of an interface-typed array must be stored as fat pointers,
+        // so resolve the element type's interface symbol once up front.
         //
-        // KNOWN LIMITATION: when an array literal is assigned to a
-        // variable of type `Array<Interface>` whose element type doesn't
-        // propagate to the literal's `expr.ty` (typechecker infers the
-        // literal as `Array<ConcreteClass>` from the elements), this lookup
-        // returns None and the elements are stored as raw class pointers.
-        // Downstream `arr[i].method()` then segfaults on interface dispatch.
-        // Proper fix requires either (a) typechecker-side coercion to insert
-        // `Cast` nodes for Class→Interface in array literals, or (b)
-        // plumbing the assignment target's type down into the literal's
-        // lowering. See bugs_known.md Quirk 3.
+        // Limitation: if the target `Array<Interface>` type doesn't propagate
+        // into the literal's own `expr.ty`, this yields None and elements are
+        // stored as raw class pointers. Fixing it needs typechecker-side
+        // Class→Interface coercion, or the target type plumbed down here.
         let elem_iface_sym = {
             let element_type_id = {
                 let type_table = self.type_table;
@@ -110,22 +101,13 @@ impl<'a> HirToMirContext<'a> {
             };
             element_type_id.and_then(|et| self.get_interface_symbol(et))
         };
-        // Array literal: [e1, e2, e3, ...]
-        //
-        // HaxeArray is a 32-byte struct (4 x 8-byte fields): ptr, len, cap, elem_size
-        //
-        // Strategy:
-        // 1. Allocate HaxeArray struct on HEAP (not stack!)
-        //    CRITICAL: Stack allocation causes use-after-free when the array is
-        //    stored in a global/static variable and accessed after the function returns.
-        // 2. Zero-initialize it (like new Array<T>())
-        // 3. For each element, call haxe_array_push_ptr to add it
-        // 4. Return pointer to HaxeArray struct
+        // The HaxeArray struct must live on the heap: a stack allocation is a
+        // use-after-free once the array is stored in a global and read back
+        // after the function returns.
 
         let element_count = elements.len();
 
-        // Heap-allocate HaxeArray struct (4 x i64 = 32 bytes) using malloc
-        // HaxeArray layout: { len: usize, cap: usize, elem_size: usize, ptr: *u8 }
+        // HaxeArray is 4 x i64 = 32 bytes: { len, cap, elem_size, ptr }
         let malloc_func_id = self.get_or_register_extern_function(
             "malloc",
             vec![IrType::U64],
@@ -200,18 +182,11 @@ impl<'a> HirToMirContext<'a> {
                 IrType::Void,
             );
 
-            // Pre-pass: lower every element so we know each one's MIR type.
-            // If the elements have heterogeneous register types (e.g. mixing
-            // Bool, F64, Ptr, I32) we MUST box each one as a `DynamicValue*`
-            // before storing — otherwise different-typed bytes share a single
-            // `i64` slot and `trace([true, 3.14, "s"])` reads them back as
-            // `[1, <f64-bits>, <ptr>]` raw nonsense. Homogeneous arrays
-            // (`[1, 2, 3]`) stay on the fast path.
-            //
-            // We also remember the element's HIR `TypeKind` so the boxing
-            // step can pick the right `haxe_box_*` flavour for `String`
-            // (which has its own `HaxeString` representation distinct from
-            // `DynamicValue`).
+            // Pre-pass to learn each element's MIR type. Elements with mixed
+            // register types must each be boxed as a `DynamicValue*`, otherwise
+            // different-typed bytes share one `i64` slot and read back as
+            // nonsense; homogeneous arrays stay on the fast path. The HIR
+            // `TypeKind` is kept so boxing can pick the right `haxe_box_*`.
             let lowered: Vec<Option<(IrId, Option<IrType>, Option<crate::tast::TypeKind>)>> =
                 elements
                     .iter()
@@ -220,12 +195,10 @@ impl<'a> HirToMirContext<'a> {
                         let v = if let Some(iface_sym) = elem_iface_sym {
                             let class_sym = self.get_class_symbol(elem.ty);
                             if let Some(class_sym) = class_sym {
-                                // wrap_in_interface_fat_ptr lazily builds
-                                // the (class, iface) vtable if it wasn't
-                                // built eagerly (e.g. class compiled before
-                                // interface and saw `implements I` as a
-                                // Placeholder type), so we don't gate on
-                                // `interface_vtables.contains_key` here.
+                                // Not gated on `interface_vtables.contains_key`:
+                                // wrap_in_interface_fat_ptr builds the
+                                // (class, iface) vtable lazily when it wasn't
+                                // built eagerly.
                                 if let Some(wrapped) =
                                     self.wrap_in_interface_fat_ptr(v, class_sym, iface_sym)
                                 {
@@ -330,11 +303,9 @@ impl<'a> HirToMirContext<'a> {
                                 .build_call_direct(f, vec![elem_val], ptr_u8.clone())
                         }
                         Some(IrType::String) => {
-                            // String literals come through as `IrType::String`,
-                            // a `HaxeString*` runtime struct — distinct from
-                            // a generic `Ptr`. Wrap in `DynamicValue` so the
-                            // trace formatter sees a `type_id == TYPE_STRING`
-                            // header at offset 0.
+                            // `IrType::String` is a `HaxeString*`, not a generic
+                            // `Ptr`; wrap it so readers see a `TYPE_STRING`
+                            // DynamicValue header at offset 0.
                             let f = self.get_or_register_extern_function(
                                 "haxe_box_haxestring_ptr",
                                 vec![ptr_u8.clone()],
@@ -407,7 +378,6 @@ impl<'a> HirToMirContext<'a> {
                     _ => elem_val,
                 };
 
-                // Call haxe_array_push_i64(arr, val) - this is a void function, so ignore the None return
                 self.builder.build_call_direct(
                     push_i64_func_id,
                     vec![array_ptr, push_val],
@@ -441,7 +411,6 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Determine key type from first entry
         let key_type_kind = {
             let type_table = self.type_table;
             type_table.get(entries[0].0.ty).map(|t| t.kind.clone())
@@ -615,17 +584,9 @@ impl<'a> HirToMirContext<'a> {
         fields: &[(InternedString, HirExpr)],
         expr_type: TypeId,
     ) -> Option<IrId> {
-        // Object literal: { field1: val1, field2: val2, ... }
-        //
-        // Lowering strategy using Arc-based anonymous objects:
-        // 1. Resolve field names and sort alphabetically for canonical ordering
-        // 2. Check typedef type for optional fields missing from the literal
-        // 3. Get or create a shape ID for the complete field set
-        // 4. Call rayzor_anon_new(shape_id, field_count) → Arc<AnonObject> handle
-        // 5. For each field: call rayzor_anon_set_field_by_index(handle, index, value)
-        // 6. Return the handle pointer (PtrU8)
+        // Lowered to an Arc-based anonymous object: fields are sorted
+        // alphabetically into a shape, then set by slot index.
 
-        // Resolve field names from the literal
         let mut literal_field_names: Vec<(String, usize)> = Vec::with_capacity(fields.len());
         for (i, (interned_name, _expr)) in fields.iter().enumerate() {
             let name = self
@@ -848,13 +809,11 @@ impl<'a> HirToMirContext<'a> {
                     if self.expr_is_value_type_expr(expr) {
                         self.convert_value_type_to_string(expr_val)?
                     } else {
-                        // Convert to string based on expression type
                         let expr_type_kind = {
                             let type_table = self.type_table;
                             type_table.get(expr.ty).map(|ti| ti.kind.clone())
                         };
 
-                        // (debug removed)
                         match expr_type_kind.as_ref() {
                             Some(TypeKind::String) => expr_val, // already a string
                             Some(TypeKind::Int) => {

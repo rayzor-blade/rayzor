@@ -343,12 +343,9 @@ impl<'a> HirToMirContext<'a> {
             .get_register_type(value_reg)
             .unwrap_or_else(|| self.convert_type(args[0].ty));
         let dynamic_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
-        // A statically-`Dynamic` argument is ALREADY a Dynamic pointer, so use it
-        // directly. `box_value_for_dynamic` returns `None` for a Dynamic value
-        // (its "no boxing needed" signal); routing that through the `?` below
-        // would mis-read it as failure and drop the whole `typeof` result,
-        // emitting a "Return with no value" trap-stub (W0020) for any
-        // `Type.typeof(v)` where `v : Dynamic`. Concrete values still get boxed.
+        // A statically-`Dynamic` argument is already a Dynamic pointer and is used
+        // as-is: `box_value_for_dynamic` signals "no boxing needed" with `None`,
+        // which the `?` below would read as failure. Concrete values still box.
         let arg_is_dynamic = matches!(
             self.type_table.get(args[0].ty).map(|t| &t.kind),
             Some(crate::tast::TypeKind::Dynamic)
@@ -359,10 +356,9 @@ impl<'a> HirToMirContext<'a> {
             self.box_value_for_dynamic(value_reg, args[0].ty)?
         };
 
-        // Always use the boxed ValueType path (haxe_type_typeof_value) so that
-        // parameterized variants like TClass(c) and TEnum(e) carry their type_id
-        // payload. The I32 ordinal path loses this information, causing pattern
-        // matching like `case TEnum(_):` to fail.
+        // Always take the boxed ValueType path (haxe_type_typeof_value) so
+        // parameterized variants like TClass(c)/TEnum(e) keep their type_id
+        // payload; the I32 ordinal path drops it.
         let value_fn = self.get_or_register_extern_function(
             "haxe_type_typeof_value",
             vec![dynamic_ptr_ty.clone()],
@@ -371,9 +367,8 @@ impl<'a> HirToMirContext<'a> {
         let result = self
             .builder
             .build_call_direct(value_fn, vec![value_dyn], IrType::I64)?;
-        // The I64 return is actually a pointer to a heap-allocated boxed enum.
-        // Cast to Ptr(U8) so pattern matching treats it as a boxed enum pointer
-        // rather than a plain integer (which would skip the tag-load path).
+        // The I64 return is a pointer to a heap-allocated boxed enum; cast to
+        // Ptr(U8) so pattern matching takes the tag-load path.
         self.builder.build_cast(result, IrType::I64, dynamic_ptr_ty)
     }
 }

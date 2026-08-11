@@ -74,7 +74,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                     field_name.push(ch2);
                 }
-                // Look up field and emit value
                 if let Some(&(field_type_id, gep_idx)) = field_map.get(&field_name) {
                     let field_ir_type = self.convert_type(field_type_id);
                     let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
@@ -345,10 +344,7 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(hash_func, vec![val], IrType::I32)?;
                 self.builder.build_cast(hash_i32, IrType::I32, IrType::I64)
             }
-            Some(TypeKind::Int) => {
-                // Widen i32 to i64
-                self.builder.build_cast(val, IrType::I32, IrType::I64)
-            }
+            Some(TypeKind::Int) => self.builder.build_cast(val, IrType::I32, IrType::I64),
             Some(TypeKind::Bool) => {
                 // false → 0, true → 1
                 self.builder.build_cast(val, IrType::Bool, IrType::I64)

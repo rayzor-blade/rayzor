@@ -36,25 +36,16 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::String) => 5,
             Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
             Some(TypeKind::Class { symbol_id, .. }) => {
-                // Class runtime IDs are derived from the qualified class
-                // name so they're identical across compilation sessions
-                // regardless of import order. Without this, `symbol_id + 1000`
-                // was the type_id — but symbol_ids depend on which file gets
-                // loaded first, so the cached MIR for StringTools (with
-                // StringBuf's type_id baked in as `Const I64(_)`) would have
-                // a different value depending on whether test_file_readall
-                // or test_stringbuf_stringtools compiled StringBuf first.
-                // Loading that cached MIR in a different session left the
-                // wrong type_id in object headers → instanceof/cast/vtable
-                // lookups missed → SIGILL.
+                // Derived from the qualified class name so the id is identical
+                // across compilation sessions regardless of import order: cached
+                // MIR bakes the type_id in as a constant, and object headers in
+                // a later session must still match it.
                 self.deterministic_class_type_id(*symbol_id)
                     .unwrap_or_else(|| {
-                        // Fallback for classes without a resolvable name —
-                        // legacy raw-id behaviour. NOTE: not stable across
-                        // runs/contexts; a location-hash replacement was
-                        // attempted 2026-06-13 but broke clone-identity
-                        // (ids disagreed with another id source) — needs a
-                        // unified fix with resolve_runtime_class_type_id.
+                        // Fallback for classes without a resolvable name; raw ids
+                        // are not stable across runs or contexts.
+                        // TODO: unify with resolve_runtime_class_type_id so a
+                        // location-derived id keeps clone-identity intact.
                         self.resolve_runtime_class_type_id(type_id, *symbol_id)
                             .as_raw()
                             + 1000
@@ -80,9 +71,8 @@ impl<'a> HirToMirContext<'a> {
     /// 5=String). Returns None when the symbol has no resolvable name.
     pub(crate) fn deterministic_class_type_id(&self, symbol_id: SymbolId) -> Option<u32> {
         let sym = self.symbol_table.get_symbol(symbol_id)?;
-        // Prefer qualified_name; fall back to bare name. The bare-name
-        // fallback may collide across packages — acceptable in practice
-        // since the legacy `symbol_id + 1000` also lacked package isolation.
+        // Prefer qualified_name; the bare-name fallback can collide across
+        // packages.
         let qname = sym
             .qualified_name
             .and_then(|n| self.string_interner.get(n))
@@ -114,20 +104,14 @@ impl<'a> HirToMirContext<'a> {
             hash ^= *b as u32;
             hash = hash.wrapping_mul(0x01000193);
         }
-        // Bias above primitive type_ids (0..=5) and the legacy +1000 floor
-        // so cached MIR that does `runtime_type_id - 1000` and stores the
-        // result in the object header still gets a positive distinguishable
-        // value. Lower 12 bits get reserved for the bias floor.
+        // Bias above the primitive type_ids (0..=5) and the +1000 floor so cached
+        // MIR doing `runtime_type_id - 1000` still yields a distinct positive id.
         const BIAS: u32 = 0x1000_0000;
         BIAS | (hash & 0x0fff_ffff)
     }
 
-    /// Deterministic fallback when the symbol has no resolvable name:
-    /// hash the definition location instead. line/column/byte_offset are
-    /// stable across runs (file_id is assignment-order-dependent, so it's
-    /// excluded). The legacy raw-id fallback varied per run — observed as
-    /// per-run `__reflect_ctor_wrap_<N>` names and run-to-run wasm heap
-    /// layout shifts.
+    /// Deterministic fallback when the symbol has no resolvable name: hash the
+    /// definition location instead, which is stable across runs.
     #[allow(dead_code)]
     pub(crate) fn location_fallback_type_id(
         &self,
@@ -139,6 +123,9 @@ impl<'a> HirToMirContext<'a> {
         if loc.line == 0 && loc.column == 0 && loc.byte_offset == 0 {
             return None;
         }
+        // line/column/byte_offset are stable across runs; file_id is
+        // assignment-order dependent, so this key is only stable for a fixed
+        // module order.
         let key = format!(
             "{}@{}:{}:{}:{}",
             kind_tag, loc.file_id, loc.line, loc.column, loc.byte_offset

@@ -28,7 +28,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> crate::ir::IrFunctionSignature {
         let mut builder = FunctionSignatureBuilder::new();
 
-        // Add type parameters from the HIR function (for generic functions)
         for type_param in &func.type_params {
             let param_name = self
                 .string_interner
@@ -69,7 +68,7 @@ impl<'a> HirToMirContext<'a> {
         // Collect all type param names (class + method) for TypeVar resolution
         let mut type_param_names: Vec<String> = Vec::new();
 
-        // Add class type parameters first (T, U, etc from the generic class)
+        // Class type parameters precede the method's own.
         for type_param in class_type_params {
             let param_name = self
                 .string_interner
@@ -80,7 +79,6 @@ impl<'a> HirToMirContext<'a> {
             builder = builder.type_param(param_name);
         }
 
-        // Add method's own type parameters (if any)
         for type_param in &func.type_params {
             let param_name = self
                 .string_interner
@@ -122,7 +120,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> crate::ir::IrFunctionSignature {
         let mut builder = FunctionSignatureBuilder::new();
 
-        // Add type parameters from the HIR function (for generic methods)
         for type_param in &func.type_params {
             let param_name = self
                 .string_interner
@@ -132,18 +129,15 @@ impl<'a> HirToMirContext<'a> {
             builder = builder.type_param(param_name);
         }
 
-        // Add implicit 'this' parameter as first parameter
-        // 'this' is always a pointer to the class instance, regardless of generic parameters
+        // Implicit 'this' comes first and is always a pointer to the instance.
         let this_type = match self.convert_type(class_type_id) {
             IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-            // If convert_type failed to resolve (e.g., generic class without instantiation),
-            // default to pointer since 'this' is always a pointer to instance
+            // Also when convert_type couldn't resolve it (uninstantiated generic class).
             _ => IrType::Ptr(Box::new(IrType::Void)),
         };
 
         builder = builder.param("this".to_string(), this_type);
 
-        // Add regular parameters
         for param in &func.params {
             let param_name = self
                 .string_interner
@@ -191,9 +185,9 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Fallback for BLADE-cached or cross-module functions: HIR defaults aren't available.
-        // Fill missing params with null/zero using the correct type from the signature.
-        // Check both local functions and extern function declarations (cross-module calls).
+        // BLADE-cached and cross-module functions have no HIR defaults: fill the missing
+        // params with zero of the signature's type, looking in both local functions and
+        // extern declarations.
         let sig_params: Vec<IrType> = self
             .builder
             .module
@@ -230,7 +224,6 @@ impl<'a> HirToMirContext<'a> {
         let total_provided = arg_regs.len();
         if total_provided < sig_param_count {
             for i in total_provided..sig_param_count {
-                // Use the correct type from the function signature
                 let default_val = if i < sig_params.len() {
                     match &sig_params[i] {
                         IrType::I32 | IrType::U32 => IrValue::I32(0),
@@ -338,29 +331,21 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Path 2: Direct class→anon or wider-anon→anon conversion at call boundary
-        // Check if callee parameter expects anonymous type but arg provides class/wider-anon
+        // Path 2: direct class→anon or wider-anon→anon conversion at the call boundary.
         if let Some(func_id) = callee_func_id {
             if let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() {
                 if let Some(&param_type_id) = param_types.get(param_index) {
                     let resolved_param = self.resolve_through_aliases(param_type_id);
                     let resolved_arg = self.resolve_through_aliases(arg_expr.ty);
 
-                    // Concrete → Dynamic at the call boundary: box the value so the
-                    // callee receives a real DynamicValue. Without this a primitive
-                    // arg is passed as raw bits and read back as a bogus Dynamic
-                    // pointer (Std.string garbles / crashes). Mirrors Let/Assign
-                    // boxing and the Cast→Dynamic path.
+                    // Concrete → Dynamic at the call boundary must box, as Let/Assign and
+                    // the Cast→Dynamic path do: a raw primitive would be read back as a
+                    // bogus Dynamic pointer.
                     let param_is_dynamic = {
                         let type_table = self.type_table;
-                        // `Null<scalar>` is represented as a boxed DynamicValue*
-                        // (see convert_type), so an argument for such a
-                        // parameter must be boxed here too. Gating only on
-                        // Dynamic let a raw scalar travel into a Ptr(U8) slot:
-                        // the callee then unboxed it and dereferenced the value
-                        // itself (`nc(9)` dereferenced address 9), and at -O the
-                        // register typed Ptr(U8) actually held a float, which
-                        // crashed codegen comparing it against null.
+                        // `Null<scalar>` is also a boxed DynamicValue* (see convert_type),
+                        // so gating on Dynamic alone would let a raw scalar travel into a
+                        // Ptr(U8) slot the callee then unboxes.
                         let param_is_optional_scalar =
                             match type_table.get(resolved_param).map(|t| &t.kind) {
                                 Some(TypeKind::Optional { inner_type }) => type_table
@@ -430,45 +415,30 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Path 3: Class → Interface at call boundary. When the callee
-                    // expects an interface-typed parameter and the arg is a class
-                    // implementing that interface, wrap the class pointer in a fat
-                    // pointer so the callee can do virtual dispatch via the vtable.
-                    // Without this, methods called on the parameter would resolve
-                    // through a raw class pointer and read garbage.
-                    //
-                    // We let `wrap_in_interface_fat_ptr` handle vtable presence
-                    // itself — it has a lazy-build fallback against
-                    // `interface_method_names` + `class_method_symbols` for
-                    // cases where eager registration in `register_class_metadata`
-                    // missed the (class, interface) pair (e.g. the interface
-                    // was declared in a later-loaded file).
+                    // Path 3: Class → Interface at the call boundary. An interface-typed
+                    // parameter needs a fat pointer, or dispatch on it reads garbage off
+                    // the raw class pointer. `wrap_in_interface_fat_ptr` handles vtable
+                    // presence itself, with a lazy-build fallback for (class, interface)
+                    // pairs that eager registration missed.
                     if let Some(iface_sym) = self.get_interface_symbol(resolved_param) {
                         // Don't double-wrap an already-fat interface value.
                         if self.interface_wrapped_args.contains(&arg_reg) {
                             return arg_reg;
                         }
-                        // The arg is ALREADY an interface value (fat pointer) of
-                        // this same interface — e.g. materializing the receiver
-                        // of `iface.method()`, or forwarding an interface-typed
-                        // local. A class→interface wrap here would resolve a
-                        // concrete class via the drift-prone type→SymbolId path
-                        // (which can land on an unrelated class) and overwrite
-                        // the real vtable with an empty one — the next dispatch
-                        // faults. Pass it through.
+                        // Already a fat pointer of this same interface (the receiver of
+                        // `iface.method()`, a forwarded interface-typed local): wrapping
+                        // again would resolve a class through the drift-prone
+                        // type→SymbolId path and overwrite the real vtable with an empty
+                        // one, so pass it through.
                         if self.get_interface_symbol(resolved_arg) == Some(iface_sym) {
                             return arg_reg;
                         }
-                        // A syntactic `new ClassName()` (optionally behind a
-                        // Cast) carries an AUTHORITATIVE class name. The type→
-                        // SymbolId resolution (`get_class_symbol`) drifts across
-                        // compile contexts and can land on an unrelated class, so
-                        // for a `new` arg we resolve ONLY by FQN and never fall
-                        // through to it:
-                        //  - resolvable here → normal vtable wrap;
-                        //  - not materialized in THIS context → by-NAME wrap
-                        //    with forward-ref dispatch thunks that dedupe with
-                        //    the real ones at merge (order-independent).
+                        // A syntactic `new ClassName()` (optionally behind a Cast) carries
+                        // an authoritative class name, so it resolves by FQN ONLY and never
+                        // falls through to `get_class_symbol`, whose type→SymbolId lookup
+                        // drifts across compile contexts. Resolvable here → normal vtable
+                        // wrap; not materialized in this context → by-name wrap with
+                        // forward-ref thunks that dedupe at merge.
                         if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
                             if let Some(class_sym) = self.lookup_class_symbol_by_name(&class_fqn) {
                                 if let Some(wrapped) =
@@ -485,10 +455,9 @@ impl<'a> HirToMirContext<'a> {
                                 return wrapped;
                             }
                         }
-                        // Not a `new` expr: the arg is a variable/field/call
-                        // whose static class is the trustworthy handle. Recover
-                        // the concrete class from the value register's class
-                        // hint when the typechecker promoted it to the interface.
+                        // Not a `new` expr: the static class of the variable/field/call is
+                        // the trustworthy handle, recovered from the register's class hint
+                        // when the typechecker promoted the arg to the interface.
                         let class_sym = self
                             .get_class_symbol(resolved_arg)
                             .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
@@ -496,11 +465,10 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(wrapped) =
                                 self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
                             {
-                                // The wrapped fat pointer may escape via the
-                                // callee (e.g. push into a long-lived Array<I>),
-                                // so we cannot auto-free it on return. Mark it
-                                // as escaped so callers skip the
-                                // `temp_heap_values` push that would emit Free.
+                                // The fat pointer may escape through the callee (pushed
+                                // into a long-lived Array<I>), so marking it escaped keeps
+                                // callers from pushing it to `temp_heap_values` and freeing
+                                // it on return.
                                 self.interface_wrapped_args.insert(wrapped);
                                 return wrapped;
                             }
@@ -510,15 +478,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Path 3 fallback for imported callees: when the callee's HIR
-        // param types aren't in `function_param_hir_types` (cache-loaded
-        // or fresh-imported class — its HIR never went through *this*
-        // context's lowering), fall back to per-param qualified names
-        // captured in `external_function_param_iface_names`. Find the
-        // current-context Interface symbol by name and run the same
-        // wrap. Without this, every cross-file constructor that takes
-        // an interface-typed param stores the raw class pointer and
-        // SIGBUSes on first vtable dispatch.
+        // Path 3 fallback for imported callees, whose HIR never went through this
+        // context's lowering so their param types are absent from
+        // `function_param_hir_types`: resolve the interface symbol from the per-param
+        // qualified names in `external_function_param_iface_names` and run the same wrap.
         if let Some(func_id) = callee_func_id {
             if !self.function_param_hir_types.contains_key(&func_id) {
                 if let Some(names) = self
@@ -530,28 +493,19 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(iface_sym) =
                             self.lookup_interface_symbol_by_qualified_name(param_name)
                         {
-                            // Already a fat pointer (e.g. produced by a
-                            // Class→Interface cast upstream)? Don't double-wrap
-                            // — that would nest fat pointers and make `this` the
-                            // inner wrapper.
+                            // Don't double-wrap a value that is already a fat pointer: the
+                            // nested wrapper would become the callee's `this`.
                             if self.interface_wrapped_args.contains(&arg_reg) {
                                 return arg_reg;
                             }
-                            // Already an interface value of this same interface
-                            // (see the primary path): pass it through rather than
-                            // re-wrapping it into a bogus-class fat pointer.
+                            // Already an interface value of this same interface (see the
+                            // primary path): re-wrapping would build a bogus-class fat ptr.
                             if self.get_interface_symbol(arg_expr.ty) == Some(iface_sym) {
                                 return arg_reg;
                             }
-                            // A syntactic `new ClassName()` carries an
-                            // AUTHORITATIVE class name; the type→SymbolId
-                            // resolution drifts across compile contexts and can
-                            // land on an unrelated class, so for a `new` arg we
-                            // resolve ONLY by FQN and never fall through to it:
-                            //  - resolvable here → normal vtable wrap;
-                            //  - not materialized in THIS context → by-NAME wrap
-                            //    with forward-ref dispatch thunks that dedupe at
-                            //    merge (order-independent).
+                            // As in the primary path, a syntactic `new ClassName()`
+                            // resolves by FQN only: resolvable here → normal vtable wrap;
+                            // otherwise by-name wrap with forward-ref thunks.
                             if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
                                 if let Some(class_sym) =
                                     self.lookup_class_symbol_by_name(&class_fqn)
@@ -571,15 +525,13 @@ impl<'a> HirToMirContext<'a> {
                                     return wrapped;
                                 }
                             }
-                            // Not a `new` expr: the typechecker often PROMOTES
-                            // the arg to the interface, erasing the class from
-                            // `arg_expr.ty`; the value register still holds a RAW
-                            // class object, recoverable from the class hint. Drop
-                            // any pre-cached vtable first — its method SymbolIds
-                            // may be from the class's originating context and
-                            // resolve to unrelated methods here; forcing the
-                            // lazy name-based rebuild resolves against the
-                            // current symbol table.
+                            // Not a `new` expr: the typechecker often promotes the arg to
+                            // the interface, erasing the class from `arg_expr.ty` while the
+                            // register still holds a raw class object, recoverable from the
+                            // class hint. Any pre-cached vtable is dropped first — its
+                            // method SymbolIds may come from the class's originating
+                            // context, so the lazy name-based rebuild must resolve against
+                            // the current symbol table.
                             let class_sym = self
                                 .get_class_symbol(arg_expr.ty)
                                 .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));

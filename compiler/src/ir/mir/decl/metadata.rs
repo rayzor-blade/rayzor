@@ -47,7 +47,6 @@ impl<'a> HirToMirContext<'a> {
         });
         let mut field_index = 1u32; // User fields start at index 1
 
-        // Collect all inherited fields from parent classes (recursively)
         let mut walk = vec![class.symbol_id];
         self.collect_inherited_fields(
             class.extends,
@@ -63,14 +62,11 @@ impl<'a> HirToMirContext<'a> {
         for field in &class.fields {
             // Static fields should be stored as globals, not instance fields
             if field.is_static {
-                // Register static field as a global
                 let global_id = self.builder.module.alloc_global_id();
                 let field_name = self.string_interner.get(field.name).unwrap_or("<unknown>");
                 let class_name = self.string_interner.get(class.name).unwrap_or("<unknown>");
 
-                // Get initializer value if it's a constant
                 let initializer = if let Some(ref init_expr) = field.init {
-                    // Try to evaluate as constant
                     let constant_init = self.try_evaluate_constant_init(init_expr);
                     if constant_init.is_none() {
                         // Non-constant static field initializers must run through __init__
@@ -109,7 +105,6 @@ impl<'a> HirToMirContext<'a> {
                 continue; // Don't add to instance fields
             }
 
-            // Store property accessor info if this is a property with custom getters/setters
             if let Some(ref property_info) = field.property_access {
                 self.property_access_map
                     .insert(field.symbol_id, property_info.clone());
@@ -145,11 +140,10 @@ impl<'a> HirToMirContext<'a> {
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
             // Publish (class name, field name) -> field_index to the global
-            // name-keyed registry. The E0100 fallback consumes this: the same
-            // field carries DIFFERENT SymbolIds per lowering context (measured:
-            // spinPool = SymbolId(7750) and SymbolId(9260) at two access
-            // sites), so the SymbolId-keyed map above misses cross-context.
-            // Same u32 as the primary lookup returns — identical index space.
+            // name-keyed registry that the fallback path consumes: the same
+            // field carries different SymbolIds per lowering context, so the
+            // SymbolId-keyed map above misses cross-context lookups. Same
+            // index space as the primary lookup.
             {
                 let (qn, cn) = self
                     .symbol_table
@@ -243,7 +237,6 @@ impl<'a> HirToMirContext<'a> {
                 })
             };
             if let Some(iface_sym) = iface_symbol {
-                // Add this interface
                 if !all_iface_symbols.contains(&iface_sym) {
                     all_iface_symbols.push(iface_sym);
                 }
@@ -267,7 +260,6 @@ impl<'a> HirToMirContext<'a> {
             if let Some(method_names) = self.resolve_interface_method_names(iface_sym) {
                 let mut vtable_entries = Vec::new();
                 for iface_method_name in &method_names {
-                    // Find the class method that matches this interface method name
                     let class_method_sym = class
                         .methods
                         .iter()
@@ -299,12 +291,10 @@ impl<'a> HirToMirContext<'a> {
                         }
                     })
                     .or_else(|| {
-                        // Fallback for canonicalised parent TypeId
+                        // Fallback for a canonicalised parent TypeId
                         // (`TypeId::from_raw(parent_sym.as_raw())` produced in
-                        // `tast_to_hir.rs::extends_canonical`). Without this,
-                        // `Button extends Widget` doesn't inherit Widget's
-                        // (Widget, IDrawable) vtable, so `cast(btn, IDrawable)`
-                        // returns null.
+                        // `tast_to_hir.rs::extends_canonical`); without it the
+                        // child inherits none of the parent's vtables.
                         let candidate = SymbolId::from_raw(extends_type_id.as_raw());
                         self.symbol_table.get_symbol(candidate).and_then(|sym| {
                             use crate::tast::SymbolKind;
@@ -317,7 +307,6 @@ impl<'a> HirToMirContext<'a> {
                     })
             };
             if let Some(parent_sym) = parent_symbol {
-                // Find all interfaces the parent implements
                 let parent_iface_keys: Vec<(SymbolId, SymbolId)> = self
                     .interface_vtables
                     .keys()
@@ -325,7 +314,6 @@ impl<'a> HirToMirContext<'a> {
                     .cloned()
                     .collect();
                 for (_, iface_sym) in parent_iface_keys {
-                    // Skip if child already has a vtable for this interface
                     if self
                         .interface_vtables
                         .contains_key(&(class.symbol_id, iface_sym))
@@ -351,7 +339,6 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(sym) = child_method {
                                 vtable_entries.push(sym);
                             } else if i < parent_vtable.len() {
-                                // Fall back to parent's vtable entry
                                 vtable_entries.push(parent_vtable[i]);
                             }
                         }
@@ -393,8 +380,8 @@ impl<'a> HirToMirContext<'a> {
             })
         });
         if let Some(parent_sym) = parent_symbol {
-            // A class is never its own parent; recording that would rebuild the
-            // cycle the walks now defend against.
+            // A class is never its own parent; recording that cycles the
+            // parent-chain walks.
             if parent_sym != class.symbol_id {
                 self.class_parent_map.insert(class.symbol_id, parent_sym);
             }
@@ -417,13 +404,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Diagnose the `@:move` + `@:shared` conflict. The two annotations
-        // express opposite ownership models (compile-time linear move vs
-        // runtime atomic sharing) and must never co-occur on the same
-        // class. We continue compilation after the warning — `@:shared`
-        // wins (move-tracking suppressed, arc_clone used) because that's
-        // the safer fallback at runtime if the user really did mean to
-        // share aliased references.
+        // `@:move` and `@:shared` express opposite ownership models
+        // (compile-time linear move vs runtime atomic sharing) and must never
+        // co-occur on the same class. Compilation continues after the warning
+        // with `@:shared` winning: move-tracking suppressed, arc_clone used.
         if has_move_attr && has_shared_attr {
             let span = diagnostics::SourceSpan::new(
                 diagnostics::SourcePosition::new(0, 0, 0),
@@ -461,17 +445,12 @@ impl<'a> HirToMirContext<'a> {
                     }
                     DerivedTrait::Clone => {
                         self.derive_clone_classes.insert(class.symbol_id);
-                        // Tier B: extern classes route to a named runtime fn.
-                        // Today: rayzor.ds.Tensor / rayzor.ds.QTensor.
-                        //
-                        // We match on the fully-qualified name (taken from the
-                        // class-level `@:native("rayzor::ds::Tensor")` metadata,
-                        // with `::` normalised to `.`) instead of the bare
-                        // `class.name` interner string. Matching on the bare
-                        // name would also catch any user-defined extern class
-                        // happening to be called `Tensor` / `QTensor` in some
-                        // other package and silently route its clone to the
-                        // wrong runtime symbol.
+                        // Tier B: extern classes route to a named runtime fn,
+                        // keyed on the fully-qualified name from the class-level
+                        // `@:native("rayzor::ds::Tensor")` metadata (`::`
+                        // normalised to `.`). Keying on the bare `class.name`
+                        // would also catch a same-named extern class in another
+                        // package and route its clone to the wrong symbol.
                         if class.is_extern {
                             let mut fqn: Option<String> = None;
                             for attr in &class.metadata {
@@ -491,35 +470,15 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             }
-                            // Derive the runtime clone extern name from the
-                            // FQN by convention so any future
-                            // `@:native("rayzor::ds::X")` extern class with
-                            // `@:derive([Clone])` works without a code
-                            // change here. The convention:
-                            //   - take the last FQN component
-                            //     (`rayzor.ds.Tensor` → `Tensor`),
-                            //   - lowercase it,
-                            //   - prepend `rayzor_`, append `_clone` (or
-                            //     `_arc_clone` when `@:shared` is also set).
-                            //
-                            // Examples:
-                            //   rayzor.ds.Tensor  → rayzor_tensor_clone /
-                            //                       rayzor_tensor_arc_clone
-                            //   rayzor.ds.QTensor → rayzor_qtensor_clone /
-                            //                       rayzor_qtensor_arc_clone
-                            //
-                            // If the convention name doesn't exist as a
-                            // runtime symbol, the JIT surfaces a clear link
-                            // error at call time — vastly preferable to the
-                            // silent decode hangs we saw when the prior
-                            // hardcoded match arm fell through to `None`
-                            // and downstream code assumed a clone fn was
-                            // registered.
-                            //
-                            // The string is owned (interned in
-                            // `derive_clone_extern_names`) because it's
-                            // synthesised per-class rather than a `&'static
-                            // str` literal.
+                            // The runtime clone extern name follows a convention,
+                            // so any `@:native("rayzor::ds::X")` extern class
+                            // with `@:derive([Clone])` works without a change
+                            // here: take the last FQN component, lowercase it,
+                            // prepend `rayzor_` and append `_clone` (or
+                            // `_arc_clone` when `@:shared` is also set), e.g.
+                            // `rayzor.ds.Tensor` → `rayzor_tensor_clone`. A name
+                            // with no matching runtime symbol surfaces as a link
+                            // error at call time.
                             let derived = fqn.as_deref().and_then(|s| {
                                 s.rsplit('.').next().map(|tail| {
                                     let lower = tail.to_ascii_lowercase();
@@ -557,21 +516,11 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Track @:move-annotated classes for strict move-semantics
-            // diagnostics (use-after-move). Populated in parallel with the
-            // `derive_clone_classes` set above so MIR lowering can emit
-            // `MarkMoved` / `CheckLive` opcodes against bindings of these
-            // classes. `TypedClass::has_move_annotation()` lives on TAST;
-            // HirClass carries the same info via metadata, so the pre-scan
-            // above already extracted both flags.
-            //
-            // `@:shared` wins over `@:move` when both are present: the W0030
-            // diagnostic above informs the user, and we deliberately skip
-            // the `derive_move_classes` insertion so MIR lowering won't emit
-            // `MarkMoved` / `CheckLive` opcodes against shared bindings.
-            // Runtime Arc refcount makes aliasing safe by construction, so
-            // compile-time move enforcement would be both spurious and
-            // incorrect (the class's `.clone()` returns the SAME pointer).
+            // `@:move`-annotated classes drive use-after-move diagnostics: MIR
+            // lowering emits `MarkMoved` / `CheckLive` against their bindings.
+            // `@:shared` wins when both are present — an Arc refcount makes
+            // aliasing safe by construction and `.clone()` returns the SAME
+            // pointer, so move enforcement would be spurious and incorrect.
             if has_move_attr && !has_shared_attr {
                 self.derive_move_classes.insert(class.symbol_id);
             }
@@ -645,14 +594,13 @@ impl<'a> HirToMirContext<'a> {
         let mut all_method_names: Vec<InternedString> = Vec::new();
 
         for &parent_type_id in &interface.extends {
-            // Recover the parent interface's SymbolId via `get_interface_symbol`
-            // (which name-matches when the extends clause lands as a Placeholder
-            // cross-module) and pull its methods through the drift-tolerant
-            // resolver. A raw type_table lookup + `.get(&psym)` silently drops
-            // the base methods when either the parent type or its SymbolId
-            // drifted across modules — truncating this derived interface's
-            // method list to its own methods and shifting every dispatch slot
-            // (the fat-pointer builder and call sites index by position here).
+            // Recover the parent's SymbolId via `get_interface_symbol` (which
+            // name-matches when the extends clause lands as a cross-module
+            // Placeholder) and pull its methods through the drift-tolerant
+            // resolver. A raw type_table lookup drops the base methods when the
+            // parent type or SymbolId drifted across modules, which shifts every
+            // dispatch slot — the fat-pointer builder and call sites index this
+            // list by position.
             if let Some(psym) = self.get_interface_symbol(parent_type_id) {
                 parent_symbols.push(psym);
                 if let Some(parent_methods) = self.resolve_interface_method_names(psym) {
@@ -784,18 +732,15 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn register_alias_metadata(&mut self, type_id: TypeId, alias: &HirTypeAlias) {
-        // Type aliases - check if it's an alias to an anonymous struct
-        // If so, register the anonymous struct fields in typedef_field_map
-        // This allows field access on typedef'd anonymous structs like FileStat
-
+        // An alias to an anonymous struct registers that struct's fields in
+        // typedef_field_map so field access works on the alias (e.g. FileStat).
         let type_table = self.type_table;
         if let Some(aliased_info) = type_table.get(alias.aliased_type) {
             if let TypeKind::Anonymous { fields } = &aliased_info.kind {
-                // Register each field of the anonymous struct by name
-                // All fields are 8 bytes for consistent boxing/sizing
+                // All fields are 8 bytes for consistent boxing/sizing.
                 for (index, field) in fields.iter().enumerate() {
-                    // Register in typedef_field_map by (typedef_type_id, field_name) -> index
-                    // This allows lookup when field access creates new symbols
+                    // Keyed by (typedef_type_id, field_name) so lookup still
+                    // works when field access creates new symbols.
                     self.typedef_field_map
                         .insert((type_id, field.name), index as u32);
 
@@ -808,7 +753,6 @@ impl<'a> HirToMirContext<'a> {
                         .map(|s| s.id);
 
                     if let Some(field_sym_id) = field_symbol {
-                        // Register in field_index_map: (TypeId of typedef, field index)
                         self.field_index_map
                             .insert(field_sym_id, (type_id, index as u32));
                     }

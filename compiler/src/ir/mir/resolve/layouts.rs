@@ -31,7 +31,6 @@ impl<'a> HirToMirContext<'a> {
             return Some(layout.clone());
         }
 
-        // Look up class info from type table
         let (symbol_id, class_name, no_mangle) = {
             let type_table = self.type_table;
             let type_info = type_table.get(type_id)?;
@@ -48,17 +47,12 @@ impl<'a> HirToMirContext<'a> {
         // TypeIds can differ between expression types and registration types,
         // so we find fields whose name matches our class's field names.
         if fields_with_index.is_empty() {
-            // Get the class name to match against field_index_map entries
             let class_name_interned = self.symbol_table.get_symbol(symbol_id).map(|s| s.name);
 
-            // Find all unique class type_ids in field_index_map
             let field_class_tys: std::collections::BTreeSet<TypeId> =
                 self.field_index_map.values().map(|(ty, _)| *ty).collect();
 
-            // For each class type_id, check if its fields belong to our class
-            // by checking field names against what the class should have
             for candidate_ty in &field_class_tys {
-                // Check if this candidate type has the same class name/symbol
                 let is_our_class = self.current_hir_types.iter().any(|(tid, decl)| {
                     if *tid != *candidate_ty {
                         return false;
@@ -309,7 +303,6 @@ impl<'a> HirToMirContext<'a> {
             return Some(layout.clone());
         }
 
-        // Look up class info from type table
         let (symbol_id, class_name) = {
             let type_table = self.type_table;
             let type_info = type_table.get(type_id)?;

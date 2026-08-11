@@ -73,14 +73,12 @@ impl<'a> HirToMirContext<'a> {
                     class_name.replace('.', "_")
                 };
 
-                // If the layout is already computed, use its deps
                 if let Some(layout) = self.cstruct_layouts.get(&target_type_id).cloned() {
                     for dep in &layout.dep_cdefs {
                         if !dep_cdefs.contains(dep) {
                             dep_cdefs.push(dep.clone());
                         }
                     }
-                    // Add own typedef as dep
                     let own_cdef = {
                         let mut s = format!("typedef struct {{ ");
                         for f in &layout.fields {
@@ -93,8 +91,7 @@ impl<'a> HirToMirContext<'a> {
                         dep_cdefs.push(own_cdef);
                     }
                 }
-                // For pointers, a forward declaration is sufficient in C.
-                // The struct name is enough — no need to compute full layout.
+                // A pointer only needs a forward declaration in C, so the name suffices.
                 return format!("{}*", c_name);
             }
         }
@@ -160,8 +157,6 @@ impl<'a> HirToMirContext<'a> {
         func_id
     }
 
-    /// Record which function parameters are constrained type parameters.
-    /// Used at call sites to wrap class arguments in fat pointers.
     /// Propagate @:jsImport metadata from symbol/owning class to MIR function.
     pub(crate) fn propagate_js_import(
         &mut self,

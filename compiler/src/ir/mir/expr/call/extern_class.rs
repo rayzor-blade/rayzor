@@ -79,40 +79,20 @@ impl<'a> HirToMirContext<'a> {
                     }
                 });
 
-            // SIMD4f detection: the DECLARED (TAST) receiver type is the SOLE
-            // authority for SIMD-vector classification. Two independent hazards,
-            // both caused by SSA register-id REUSE corrupting the name/register
-            // class hint computed above, are corrected here:
-            //
-            //  1. A loop-carried phi accumulator (`vacc = vacc.add(..)`) inherits
-            //     a stale hint ("rayzor_Usize") from a register a prior Usize
-            //     value held — masking the real SIMD4f type and routing `.add()`
-            //     to Usize_add (scalar integer add on a vector — garbage).
-            //  2. Conversely, a Usize/Bytes receiver (plain address arithmetic)
-            //     inherits a stale SIMD hint ("rayzor_SIMD4f") from a register a
-            //     prior SIMD value held — mis-routing it into the SIMD4f arith
-            //     interception below, which builds a VectorBinOp fed i64 operands
-            //     that the LLVM tier rejects (panic / Cranelift-only fallback).
-            //
-            // Resolution: convert_type(receiver_type) decides. If it IS a vector,
-            // that class wins unconditionally (hazard 1). If it is NOT, any SIMD
-            // class named by the hint is stale and is discarded (hazard 2); a
-            // genuine chained SIMD receiver whose HIR type is opaque (Dynamic) is
-            // still recovered from the receiver register's type.
+            // The declared (TAST) receiver type is the sole authority for
+            // SIMD-vector classification: SSA register-id reuse lets the
+            // name/register hints computed above carry a stale class either way
+            // (a SIMD receiver hinted as Usize, or a Usize receiver hinted as
+            // SIMD4f, which would build a VectorBinOp over i64 operands).
             let ir_ty = self.convert_type(receiver_type);
             let receiver_class_hint_owned = if ir_ty.is_vector() {
-                // Distinguish the integer companion SIMD4i32 (i32x4)
-                // from SIMD4f (f32x4) — both are vectors, but their
-                // instance methods (sum/get/set) map to different
-                // wrappers. Without this, SIMD4i32.sum() dispatched to
-                // SIMD4f_sum (f32 reduce) — masked on native (Cranelift
-                // reduces by SSA value type) but wrong on wasm.
+                // SIMD4i32 (i32x4) and SIMD4f (f32x4) are both vectors but their
+                // instance methods (sum/get/set) map to different wrappers.
                 Some(simd_vector_class(&ir_ty).to_string())
             } else {
-                // receiver_type is NOT a vector: a SIMD class named by the
-                // name/register hint is stale (hazard 2) and MUST be rejected
-                // before it reaches the arith interception. A non-SIMD hint
-                // (e.g. a genuine Bytes/Usize) is left intact.
+                // Not a vector, so a SIMD class named by the hint is stale and
+                // must be rejected before reaching the arith interception below.
+                // A non-SIMD hint (a genuine Bytes/Usize) is left intact.
                 let non_simd_hint = receiver_class_hint_owned
                     .filter(|h| h != "rayzor_SIMD4f" && h != "rayzor_SIMD4i32");
                 if non_simd_hint.is_some() {
@@ -140,15 +120,11 @@ impl<'a> HirToMirContext<'a> {
             };
             let receiver_class_hint = receiver_class_hint_owned.as_deref();
 
-            // SIMD4f arithmetic METHODS (`a.add(b)` etc.) must compile
-            // to the same single vector instruction as the OPERATORS
-            // (`a + b`, lowered to VectorBinOp at ~19541). The default
-            // method-call path routes them to a MIR wrapper that
-            // mishandles the vector ABI and returns garbage (a SIMD4f
-            // value carried as I64/Ptr(Void)). Emit VectorBinOp
-            // directly. Restricted to rayzor_SIMD4f (f32x4); the i32x4
-            // companion is excluded because integer VectorBinOp
-            // miscompiles on the wasm backend.
+            // SIMD4f arithmetic methods (`a.add(b)`) must compile to the same
+            // single vector instruction as the operators (`a + b`); the default
+            // method-call path routes them to a MIR wrapper that mishandles the
+            // vector ABI. Restricted to rayzor_SIMD4f (f32x4) — integer
+            // VectorBinOp miscompiles on the wasm backend.
             if receiver_class_hint == Some("rayzor_SIMD4f") && args.len() == 2 {
                 let mname = self
                     .symbol_table
@@ -161,11 +137,9 @@ impl<'a> HirToMirContext<'a> {
                     Some("div") => Some(BinaryOp::Div),
                     _ => None,
                 };
-                // Defense-in-depth: the receiver operand's own DECLARED type
-                // must itself classify as f32x4. The hint is no longer trusted
-                // in isolation — this refuses to build a VectorBinOp over a
-                // non-vector operand (the failure mode a stale SIMD hint on a
-                // reused register would otherwise cause: VectorBinOp fed i64).
+                // The hint alone is not trusted: the operand's own declared type
+                // must classify as f32x4, so a VectorBinOp is never built over a
+                // non-vector operand.
                 let operands_are_simd4f = {
                     let t = self.convert_type(args[0].ty);
                     t.is_vector() && simd_vector_class(&t) == "rayzor_SIMD4f"
@@ -173,9 +147,9 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(bin_op) = vbop.filter(|_| operands_are_simd4f) {
                     let lhs_reg = self.lower_expression(&args[0])?;
                     let rhs_reg = self.lower_expression(&args[1])?;
-                    // vec_ty must ALWAYS be a vector: fall through both operand
-                    // register types (a scalar-typed operand register is a bug)
-                    // to the f32x4 default rather than emitting VectorBinOp{I64}.
+                    // vec_ty must always be a vector: fall through both operand
+                    // register types to the f32x4 default rather than emitting
+                    // VectorBinOp{I64}.
                     let vec_ty = self
                         .builder
                         .get_register_type(lhs_reg)
@@ -404,14 +378,12 @@ impl<'a> HirToMirContext<'a> {
                             }
                         };
 
-                        // Thread<T>.join() boxes its result via haxe_box_int_ptr
-                        // (rayzor_thread_join), so for a concrete HEAP T the boxed
-                        // i64 payload IS the object pointer. maybe_unbox's raw
-                        // passthrough arm — shared with methods that return an
-                        // UN-boxed handle (e.g. Arc.get) — would skip the unbox and
-                        // hand back the box address (garbage). Unbox inline, keyed on
-                        // the wrapper so only the boxing method changes behavior.
-                        // Excludes Ptr(primitive) (Null<Int>), handled above.
+                        // Thread<T>.join() boxes its result, so for a concrete heap
+                        // T the boxed i64 payload is the object pointer. maybe_unbox's
+                        // raw passthrough arm is shared with methods returning an
+                        // un-boxed handle (Arc.get) and would hand back the box
+                        // address, so unbox inline keyed on the wrapper name.
+                        // Ptr(primitive) (Null<Int>) is handled above.
                         let resolved_is_heap_ptr =
                             matches!(&resolved_expected, IrType::Ptr(inner) if !matches!(
                                 inner.as_ref(),
@@ -440,18 +412,16 @@ impl<'a> HirToMirContext<'a> {
                             return self.builder.build_cast(i64v, IrType::I64, ptr_u8);
                         }
 
-                        // Channel payloads are uniformly boxed DynamicValues; route the
-                        // return through the tag-aware unbox (fixes erased prim receive,
-                        // recovers boxed refs) instead of the raw shared path.
+                        // Channel payloads are uniformly boxed DynamicValues, so the
+                        // return goes through the tag-aware unbox, not the raw path.
                         if runtime_func == "Channel_receive" || runtime_func == "Channel_tryReceive"
                         {
                             let is_try = runtime_func == "Channel_tryReceive";
                             // Inferred channels erase T to I64, whose unbox
-                            // int-truncates a Float payload (4.75 -> 4). The
-                            // enclosing `var x:Float = ...` declared type is the
-                            // ground truth — refine to the float arm. Scoped to
-                            // floats + non-try (tryReceive keeps the tag-driven
-                            // unbox so nullables stay correct).
+                            // int-truncates a Float payload; the enclosing
+                            // declared type is the ground truth. Scoped to floats
+                            // and non-try, so tryReceive keeps the tag-driven
+                            // unbox and nullables stay correct.
                             let refined = if !is_try && matches!(resolved_expected, IrType::I64) {
                                 self.let_target_type_hint
                                     .map(|t| self.convert_type(t))

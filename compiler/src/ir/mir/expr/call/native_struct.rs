@@ -57,8 +57,8 @@ impl<'a> HirToMirContext<'a> {
                         if !is_gpu_struct && !is_shader {
                             continue;
                         }
-                        // @:shader wgsl() — handle before has_method check
-                        // (synthetic wgsl() may not be in HIR methods list)
+                        // A synthetic wgsl() may not be in the HIR methods list, so
+                        // it is handled before the has_method check.
                         if is_shader && callee_name.as_deref() == Some("wgsl") {
                             let type_table = self.type_table;
                             match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
@@ -81,7 +81,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                         let has_method = c.methods.iter().any(|m| m.function.symbol_id == *symbol);
                         if has_method {
-                            // Find canonical TypeId
+                            // The HIR TypeId may not be in type_table; recover the
+                            // canonical one by symbol.
                             let canonical_tid = {
                                 let type_table = self.type_table;
                                 type_table.get(*tid).and_then(|_| Some(*tid)).or_else(|| {
@@ -99,7 +100,7 @@ impl<'a> HirToMirContext<'a> {
                                     })
                                 })
                             };
-                            // Handle wgsl() on @:shader classes BEFORE layout check
+                            // wgsl() on @:shader classes runs before the layout check.
                             if is_shader && callee_name.as_deref() == Some("wgsl") {
                                 let type_table = self.type_table;
                                 match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
@@ -163,7 +164,6 @@ impl<'a> HirToMirContext<'a> {
                                                 .build_const(IrValue::String(encoded));
                                         }
                                         "wgsl" => {
-                                            // @:shader class — transpile HIR to WGSL
                                             let type_table = self.type_table;
                                             match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
                                                 c,
@@ -205,14 +205,13 @@ impl<'a> HirToMirContext<'a> {
                         if !is_cstruct {
                             continue;
                         }
-                        // Check if this class has a method with our cdef symbol
                         let has_cdef = c.methods.iter().any(|m| m.function.symbol_id == *symbol);
                         if has_cdef {
-                            // HIR TypeId may not be in type_table — find canonical TypeId by symbol
+                            // The HIR TypeId may not be in type_table; recover the
+                            // canonical one by symbol.
                             let canonical_tid = {
                                 let type_table = self.type_table;
                                 type_table.get(*tid).and_then(|_| Some(*tid)).or_else(|| {
-                                    // Scan type_table for a Class with matching symbol_id
                                     type_table.iter().find_map(|(_, t)| {
                                         if let crate::tast::core::TypeKind::Class {
                                             symbol_id: sid,
@@ -266,8 +265,8 @@ impl<'a> HirToMirContext<'a> {
                         .build_const(IrValue::String(layout.cdef_string));
                 }
             }
-            // Fallback: for static calls, obj_type may differ from cached TypeId.
-            // Extract symbol_id from obj_type, find matching layout.
+            // For a static call obj_type may differ from the cached TypeId, so
+            // match the layout by the class symbol instead.
             let obj_sym_id = {
                 let type_table = self.type_table;
                 type_table.get(obj_type).and_then(|t| {
@@ -279,9 +278,7 @@ impl<'a> HirToMirContext<'a> {
                 })
             };
             if let Some(sym_id) = obj_sym_id {
-                // Find the cached layout whose class has this symbol_id
                 let cdef_str = self.cstruct_layouts.iter().find_map(|(tid, layout)| {
-                    // Check if this type_id's class matches our symbol
                     let type_table = self.type_table;
                     if let Some(t) = type_table.get(*tid) {
                         if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
@@ -290,7 +287,6 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    // Also check via HirTypeDecl
                     for (htid, decl) in self.current_hir_types.iter() {
                         if *htid == *tid {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
@@ -330,7 +326,6 @@ impl<'a> HirToMirContext<'a> {
             Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment")
         ) {
             let obj_type = object.ty;
-            // Try direct type check first, then fallback via symbol_id
             let gpu_layout = if self.is_gpu_struct_class(obj_type) {
                 self.get_or_compute_gpu_struct_layout(obj_type)
             } else {
@@ -371,7 +366,7 @@ impl<'a> HirToMirContext<'a> {
             if let Some(layout) = gpu_layout {
                 match method_name.unwrap() {
                     "gpuDef" => {
-                        // Return full MSL typedef (deps + own)
+                        // The MSL typedef carries its dependencies before its own.
                         let mut full = String::new();
                         for dep in &layout.dep_typedefs {
                             full.push_str(dep);

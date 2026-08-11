@@ -110,7 +110,6 @@ impl<'a> HirToMirContext<'a> {
             );
             let is_string_key = matches!(key_type_kind, Some(crate::tast::TypeKind::String));
 
-            // Lower the map expression
             let Some(map_ptr) = self.lower_expression(iter_expr) else {
                 return;
             };
@@ -196,36 +195,20 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // For-in loops over Arrays desugar to index-based iteration:
-        // for (x in arr) { body }
-        //
-        // Becomes:
-        // {
-        //     var _i = 0;
-        //     var _len = haxe_array_length(arr);
-        //     while (_i < _len) {
-        //         var x = arr[_i];  // Using lower_index_access
-        //         body;
-        //         _i++;
-        //     }
-        // }
-
-        // Step 1: Lower the collection expression (the array)
+        // Arrays desugar to index-based iteration:
+        // `var _i = 0; while (_i < len) { var x = arr[_i]; body; _i++; }`
         debug!("[for-in]: lowering collection expression...");
         let Some(collection) = self.lower_expression(iter_expr) else {
             debug!("[for-in]: FAILED to lower collection expression!");
             return;
         };
 
-        // DEBUG: Log collection info
         let collection_type = self.builder.get_register_type(collection);
         debug!(
             "[for-in]: collection reg={:?}, type={:?}",
             collection, collection_type
         );
 
-        // Get element type from the iterator expression type
-        // iter_expr.ty is the Array<T> type, we need to extract T
         let elem_type_id = self
             .get_array_element_type(iter_expr.ty)
             .unwrap_or(iter_expr.ty);
@@ -249,7 +232,6 @@ impl<'a> HirToMirContext<'a> {
     ) {
         debug!("[for-in-range]: lowering range-based for-in loop");
 
-        // Lower start and end expressions
         let Some(start_val) = self.lower_expression(start_expr) else {
             return;
         };
@@ -310,8 +292,7 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only ACTUAL parameter symbols, by kind not register
-                // (see is_parameter_symbol).
+                // Parameters are excluded by symbol kind, not by register.
                 let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
@@ -330,13 +311,11 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Allocate counter on stack, initialize to start
         let Some(counter_ptr) = self.builder.build_alloc(IrType::I64, None) else {
             return;
         };
         self.builder.build_store(counter_ptr, start_i64);
 
-        // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
             return;
         };
@@ -347,7 +326,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Jump to condition check
         self.builder.build_branch(loop_cond_block);
 
         // Condition block: create loop-carried phis first.
@@ -438,10 +416,9 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_cond_branch(cmp_result, loop_body_block, loop_exit_block);
 
-        // Body block
+        // Body block: reload the counter and bind it to the pattern variable.
         self.builder.switch_to_block(loop_body_block);
 
-        // Reload counter and bind to pattern variable
         let Some(loop_val) = self.builder.build_load(counter_ptr, IrType::I64) else {
             self.loop_stack.pop();
             return;
@@ -453,9 +430,8 @@ impl<'a> HirToMirContext<'a> {
             _ => {}
         }
 
-        // Lower loop body
         // Track loop-carried symbols so the body's exit_drop_scope does not free
-        // values that escape via the exit phi (see lower_for_in_over_array).
+        // values that escape via the exit phi.
         self.loop_carried_symbols
             .push(phi_nodes.keys().copied().collect());
         self.enter_drop_scope();
@@ -479,7 +455,6 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Increment counter
         if !self.is_terminated() {
             self.exit_drop_scope();
             self.loop_carried_symbols.pop();
@@ -504,10 +479,7 @@ impl<'a> HirToMirContext<'a> {
             self.loop_carried_symbols.pop();
         }
 
-        // Pop loop context
         self.loop_stack.pop();
-
-        // Continue at exit block
         self.builder.switch_to_block(loop_exit_block);
 
         // Update symbols to exit phi values after the loop.
@@ -529,7 +501,6 @@ impl<'a> HirToMirContext<'a> {
         body: &HirBlock,
         label: Option<&SymbolId>,
     ) {
-        // Lower the iterable expression and store it in a temp variable
         let Some(obj_reg) = self.lower_expression(iter_expr) else {
             return;
         };
@@ -626,7 +597,6 @@ impl<'a> HirToMirContext<'a> {
         }
         let class_sym = class_sym.unwrap();
 
-        // Look up hasNext and next methods on the class
         let has_next_name = self.string_interner.intern("hasNext");
         let next_name = self.string_interner.intern("next");
 
@@ -769,12 +739,11 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(result) = stdlib_iter_result {
                     result
                 } else if let Some(iter_sym) = iterator_sym {
-                    // Compiled iterator() method path (existing logic)
+                    // Compiled iterator() method path.
                     let Some(iter_fn) = self.get_function_id(&iter_sym) else {
                         return;
                     };
 
-                    // Call iterator() to get the iterator object
                     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                     let Some(iter_obj) =
                         self.builder
@@ -846,7 +815,6 @@ impl<'a> HirToMirContext<'a> {
                         return;
                     };
 
-                    // Call keyValueIterator() to get the KV iterator object
                     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                     let Some(kv_obj) =
                         self.builder
@@ -940,7 +908,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Initialize index to 0
         let Some(zero) = self.builder.build_const(IrValue::I64(0)) else {
             return;
         };
@@ -956,22 +923,19 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Collect referenced variables in body for phi node creation
-        // (same pattern as lower_while_loop)
+        // Collect referenced variables in body for phi node creation.
         let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only ACTUAL parameter symbols, by kind not register
-                // (see is_parameter_symbol).
+                // Parameters are excluded by symbol kind, not by register.
                 let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
             .collect();
 
-        // Save initial values of loop variables
         let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
@@ -985,7 +949,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
             return;
         };
@@ -1088,14 +1051,12 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Get key from keys array
         let Some(key_value) = self.lower_index_access(keys_array, idx_for_access, key_type_id)
         else {
             self.loop_stack.pop();
             return;
         };
 
-        // Bind key to pattern
         if let HirPattern::Variable { symbol, .. } = key_pattern {
             self.symbol_map.insert(*symbol, key_value);
         }
@@ -1131,7 +1092,6 @@ impl<'a> HirToMirContext<'a> {
         let value_ir_type = self.convert_type(value_type_id);
         let map_value = match &value_ir_type {
             IrType::Ptr(_) => {
-                // Pointer types: bitcast i64 to ptr
                 if let Some(cast) = self.builder.build_bitcast(raw_value, value_ir_type) {
                     cast
                 } else {
@@ -1139,7 +1099,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             IrType::F64 => {
-                // Float: bitcast i64 bits to f64
                 if let Some(cast) = self.builder.build_bitcast(raw_value, IrType::F64) {
                     cast
                 } else {
@@ -1147,21 +1106,19 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             _ => {
-                // Int, Bool, etc.: raw i64 is fine (truncate/cast as needed)
+                // Int, Bool, etc.: the raw i64 is already the value.
                 raw_value
             }
         };
 
-        // Bind value to pattern
         if let HirPattern::Variable { symbol, .. } = value_pattern {
             self.symbol_map.insert(*symbol, map_value);
         }
 
         // Track loop-carried symbols so the body's exit_drop_scope does not free
-        // values that escape via the exit phi (see lower_for_in_over_array).
+        // values that escape via the exit phi.
         self.loop_carried_symbols
             .push(phi_nodes.keys().copied().collect());
-        // Lower the loop body
         self.enter_drop_scope();
         self.lower_block(body);
 
@@ -1181,7 +1138,6 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Increment index
         if !self.is_terminated() {
             self.exit_drop_scope();
             self.loop_carried_symbols.pop();
@@ -1209,11 +1165,10 @@ impl<'a> HirToMirContext<'a> {
         self.loop_stack.pop();
         self.builder.switch_to_block(loop_exit_block);
 
-        // Update symbol map to use exit phi nodes for post-loop code
+        // Post-loop code must see the exit phi values.
         for (symbol_id, exit_param_reg) in &exit_phi_nodes {
             self.symbol_map.insert(*symbol_id, *exit_param_reg);
         }
-        // Update owned_heap_values to use exit phi values
         for (symbol_id, exit_param_reg) in &exit_phi_nodes {
             if self.owned_heap_values.contains_key(symbol_id) {
                 self.owned_heap_values.insert(*symbol_id, *exit_param_reg);
@@ -1245,7 +1200,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Initialize index to 0
         let Some(zero) = self.builder.build_const(IrValue::I64(0)) else {
             return;
         };
@@ -1269,8 +1223,7 @@ impl<'a> HirToMirContext<'a> {
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only ACTUAL parameter symbols, by kind not register
-                // (see is_parameter_symbol).
+                // Parameters are excluded by symbol kind, not by register.
                 let is_param = self.is_parameter_symbol(sym);
                 in_map && !is_param
             })
@@ -1289,7 +1242,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
             return;
         };
@@ -1399,7 +1351,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Bind the pattern to the element value
         match pattern {
             HirPattern::Variable { symbol, .. } => {
                 self.symbol_map.insert(*symbol, element_value);
@@ -1430,7 +1381,6 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Increment index
         if !self.is_terminated() {
             self.exit_drop_scope();
             self.loop_carried_symbols.pop();

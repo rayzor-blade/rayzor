@@ -31,12 +31,10 @@ impl<'a> HirToMirContext<'a> {
         else {
             unreachable!("lower_cast on a non-Cast expression")
         };
-        // Collapse double-cast pattern from abstract methods:
-        // Cast(safe, target=Int) { Cast(unsafe, target=Dynamic) { This/Variable } }
-        // This pattern comes from `(cast this : Int)` syntax in abstract methods.
-        // The inner `cast this` (→Dynamic) is a no-op for abstract types, and the
-        // outer `(... : Int)` extracts the underlying value. Collapse to just the
-        // innermost expression.
+        // `(cast this : Int)` in an abstract method lowers to
+        // Cast(safe, Int) { Cast(unsafe, Dynamic) { This/Variable } }. The inner
+        // cast is a no-op for abstract types and the outer one extracts the
+        // underlying value, so the pair collapses to the innermost expression.
         if let HirExprKind::Cast {
             expr: inner_expr,
             target: inner_target,
@@ -58,14 +56,12 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(false)
             };
             if inner_target_is_dynamic && inner_source_is_abstract {
-                // The whole double-cast is an identity: abstract → dynamic → underlying
-                // Just lower the innermost expression directly
+                // abstract → dynamic → underlying is an identity.
                 return self.lower_expression(inner_expr);
             }
         }
 
-        // Check if target is an abstract type with @:from conversion rules
-        // This generalizes the SIMD4f path to work with any abstract
+        // Abstract targets may define @:from conversion rules.
         if let Some(converted) = self.try_abstract_from_cast(expr, *target) {
             return Some(converted);
         }
@@ -73,10 +69,9 @@ impl<'a> HirToMirContext<'a> {
         let from_type = self.convert_type(expr.ty);
         let to_type = self.convert_type(*target);
 
-        // For abstract types, the cast between abstract and underlying is a no-op
-        // (they share the same MIR type).
-        // BUT: for safe casts between class types, we must NOT skip — even though
-        // both are Ptr(Void), the runtime needs to verify the class hierarchy.
+        // An abstract and its underlying type share a MIR type, so the cast is a
+        // no-op. Safe casts between class types must NOT take this shortcut:
+        // both are Ptr(Void), but the runtime still verifies the hierarchy.
         if from_type == to_type && !*is_safe {
             return self.lower_expression(expr);
         }
@@ -108,12 +103,10 @@ impl<'a> HirToMirContext<'a> {
             // Fall through to Class→Class safe cast handler
         }
 
-        // For `cast this` in abstract methods: the source is Abstract (resolves to
-        // underlying e.g. I32) but target is Dynamic (Ptr(U8)). This is NOT a real
-        // Dynamic boxing — it's just the Haxe syntax for extracting the underlying
-        // value. Skip the cast to avoid reinterpreting integers as pointers.
-        // Also handle the case where `cast this` target is Dynamic and the source
-        // is a primitive type (the underlying type of the abstract).
+        // `cast this` in an abstract method has an Abstract source (underlying
+        // e.g. I32) and a Dynamic target (Ptr(U8)). That is not Dynamic boxing but
+        // the Haxe syntax for extracting the underlying value, so the cast is
+        // skipped to avoid reinterpreting an integer as a pointer.
         {
             let type_table = self.type_table;
             let source_kind = type_table.get(expr.ty).map(|t| t.kind.clone());
@@ -145,10 +138,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // For unsafe casts, emit a direct cast instruction (no runtime check).
-        // For safe casts, we need to fall through to the type-specific
-        // handling even when MIR types match (e.g., Class→Class are both
-        // Ptr(U8) but need runtime hierarchy verification).
+        // Unsafe casts are a direct cast instruction with no runtime check; safe
+        // casts fall through to the type-specific handlers even when the MIR
+        // types match, since Class→Class needs hierarchy verification.
         if !*is_safe {
             let value_reg = self.lower_expression(expr)?;
             return self.builder.build_cast(value_reg, from_type, to_type);
@@ -266,17 +258,13 @@ impl<'a> HirToMirContext<'a> {
                     .or(Some(value_reg))
             }
 
-            // Cross-module `(class : Interface)` where the SOURCE type
-            // didn't resolve to a Class in this MIR-lowering context
-            // (arrives Unknown/Placeholder — the class metadata wasn't
-            // imported here). The typechecker still promoted this to a
-            // Class→Interface cast (Bug #2's TAST promotion), and the
-            // value register IS a raw class object we can wrap: recover
-            // the source class SymbolId by NAME from the inner
-            // expression. Without this, the cast is a silent no-op and
-            // the raw pointer flows into an interface slot → later
-            // vtable dispatch reads garbage (the nue `new LlamaArch()` →
-            // ArchBuilder registration path).
+            // Cross-module `(class : Interface)` where the SOURCE type didn't
+            // resolve to a Class in this lowering context (it arrives
+            // Unknown/Placeholder because the class metadata wasn't imported).
+            // The value register is still a raw class object, so recover the
+            // source class SymbolId by NAME from the inner expression; otherwise
+            // the cast is a silent no-op and a raw pointer lands in an interface
+            // slot, where vtable dispatch reads garbage.
             (
                 src,
                 Some(TypeKind::Interface {
@@ -337,13 +325,10 @@ impl<'a> HirToMirContext<'a> {
                     // Same class or upcast: always succeeds
                     self.builder.build_cast(value_reg, from_type, to_type)
                 } else {
-                    // Downcast or unrelated: runtime check via object header.
-                    // haxe_safe_downcast_class reads the type id from offset 0,
-                    // walks the hierarchy, and returns obj_ptr or null.
-                    // Use `runtime_type_id` directly so the value here
-                    // matches the value the New handler stored in the
-                    // header (both sides are now the deterministic
-                    // name-hash, no transform on either end).
+                    // Downcast or unrelated: runtime check via the object header.
+                    // haxe_safe_downcast_class reads the type id at offset 0,
+                    // walks the hierarchy, and returns obj_ptr or null. The id
+                    // must be the raw `runtime_type_id` the New handler stored.
                     let _ = tgt_sym;
                     let target_type_id = self.runtime_type_id(*target) as i64;
                     let type_id_const = self.builder.build_const(IrValue::I64(target_type_id))?;
@@ -373,22 +358,15 @@ impl<'a> HirToMirContext<'a> {
                 let src_sym = *src_sym;
                 let tgt_sym = *tgt_sym;
 
-                // Wrap in fat pointer if the class implements the iface.
-                // Cannot defer to the Let handler because SafeCast's
-                // result type is the interface type, so Let would see
-                // Interface→Interface instead of Class→Interface.
+                // Wrap in a fat pointer when the class implements the iface.
+                // The Let handler cannot do this: SafeCast's result type is the
+                // interface type, so Let would see Interface→Interface.
                 //
-                // Presence in `interface_vtables` is the fast check, but
-                // cross-module the eager (class, iface) pair is often
-                // missing here (built lazily). `wrap_in_interface_fat_ptr`
-                // has a name-based lazy-build fallback, so ATTEMPT the
-                // wrap whenever the interface is known to have methods
-                // in this context; only fall back to null when we can't
-                // build a vtable at all (class genuinely doesn't
-                // implement it). Returning null on a valid cross-module
-                // implementer was the SIGSEGV root for a plain
-                // `param:Interface` arg — the raw class pointer flowed
-                // through and dispatch read past the object.
+                // `interface_vtables` is only the fast check — cross-module the
+                // eager (class, iface) pair is often missing, and
+                // `wrap_in_interface_fat_ptr` can build it lazily by name. So
+                // attempt the wrap whenever the interface has known methods here
+                // and fall back to null only when no vtable can be built at all.
                 let known_implements = self.interface_vtables.contains_key(&(src_sym, tgt_sym))
                     || self.interface_method_names.contains_key(&tgt_sym);
                 if known_implements {
@@ -439,28 +417,14 @@ impl<'a> HirToMirContext<'a> {
 
             // Interface → Interface cast.
             //
-            // Three sub-cases:
-            //
-            // - Same iface or source has ≥ target's methods: the
-            //   existing fat pointer's vtable already covers the
-            //   target's slots (interface-method order is stable
-            //   per declared interface), so a pass-through cast is
-            //   safe.
-            //
-            // - Source has fewer methods than target (e.g.
-            //   `Module` → `CausalLanguageModel`): the source fat
-            //   pointer was built with only the source iface's
-            //   slots. Reading the target's extra slots from the
-            //   source fat pointer runs past the allocated method
-            //   slots into garbage → call-indirect to a bogus
-            //   address → SIGSEGV.
-            //
-            //   Rebuild via `haxe_iface_fat_ptr_build`: extract
-            //   the obj_ptr from the source fat pointer, read the
-            //   class type_id from the object header, look up the
-            //   per-(class, target_iface) vtable populated in
-            //   `__vtable_init__`, and allocate a fresh fat
-            //   pointer with the correct method slots.
+            // When the source fat pointer's vtable already covers the target's
+            // slots, the cast passes through. When it does not (e.g. `Module` →
+            // `CausalLanguageModel`), reading the target's extra slots would run
+            // past the source's allocated method slots, so the fat pointer is
+            // rebuilt via `haxe_iface_fat_ptr_build`: take obj_ptr from the
+            // source fat pointer, read the class type_id from the object header,
+            // look up the per-(class, target_iface) vtable populated in
+            // `__vtable_init__`, and allocate a fresh fat pointer.
             (
                 Some(TypeKind::Interface {
                     symbol_id: src_iface_sym,
@@ -473,16 +437,13 @@ impl<'a> HirToMirContext<'a> {
             ) => {
                 let src_iface_sym = *src_iface_sym;
                 let tgt_iface_sym = *tgt_iface_sym;
-                // Pass-through is only correct when the target's method
-                // slots are a PREFIX of the source's (same names, same
-                // order) — i.e. the source vtable already holds each
-                // target method at the same index. A method-COUNT test
-                // is wrong for a sub-interface with its OWN methods:
+                // Pass-through is only correct when the target's method slots are
+                // a PREFIX of the source's (same names, same order), so the source
+                // vtable holds each target method at the same index. A method-COUNT
+                // test is wrong for a sub-interface with its OWN methods:
                 // `Module` (forward, parameters) → `CausalLanguageModel`
-                // (forwardIds, resetCache) has equal counts but disjoint
-                // slots, so pass-through would dispatch `resetCache`
-                // through `Module`'s `parameters` slot. Rebuild unless
-                // the names line up as a prefix.
+                // (forwardIds, resetCache) has equal counts but disjoint slots, so
+                // pass-through would dispatch `resetCache` through `parameters`.
                 let target_is_prefix = match (
                     self.interface_method_names.get(&src_iface_sym),
                     self.interface_method_names.get(&tgt_iface_sym),
@@ -495,8 +456,7 @@ impl<'a> HirToMirContext<'a> {
                     _ => src_iface_sym == tgt_iface_sym,
                 };
                 if src_iface_sym == tgt_iface_sym || target_is_prefix {
-                    // Source vtable covers the target's slots at the same
-                    // indices — existing pass-through behaviour is fine.
+                    // Source vtable covers the target's slots at the same indices.
                     let value_reg = self.lower_expression(expr)?;
                     self.builder.build_cast(value_reg, from_type, to_type)
                 } else {
@@ -545,7 +505,7 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::TypeCheck { expr, expected } = &expr.kind else {
             unreachable!("lower_type_check on a non-TypeCheck expression")
         };
-        // (expr is Type) — compile-time type check for statically-typed code
+        // `expr is Type` resolves at compile time for statically-typed code.
         let source_kind = {
             let type_table = self.type_table;
             type_table.get(expr.ty).map(|ti| ti.kind.clone())
@@ -555,7 +515,6 @@ impl<'a> HirToMirContext<'a> {
             type_table.get(*expected).map(|ti| ti.kind.clone())
         };
 
-        // For statically-typed code, resolve at compile time
         let result = match (&source_kind, &target_kind) {
             // Dynamic source: runtime type check via haxe_std_is
             (Some(TypeKind::Dynamic), _) => {
@@ -575,10 +534,7 @@ impl<'a> HirToMirContext<'a> {
                 )
             }
             // Same type kind → always true (but null check needed for refs)
-            _ if expr.ty == *expected => {
-                // Exact same type → true
-                self.builder.build_const(IrValue::Bool(true))
-            }
+            _ if expr.ty == *expected => self.builder.build_const(IrValue::Bool(true)),
             // Primitive type checks
             (Some(TypeKind::Int), Some(TypeKind::Int))
             | (Some(TypeKind::Float), Some(TypeKind::Float))
@@ -619,12 +575,9 @@ impl<'a> HirToMirContext<'a> {
                     let _value = self.lower_expression(expr);
                     self.builder.build_const(IrValue::Bool(true))
                 } else if self.is_subclass_of(*expected, expr.ty) {
-                    // Target is subclass of source (downcast) →
-                    // runtime check via object header. Both the
-                    // header (written by the New handler) and this
-                    // comparison use `runtime_type_id` directly,
-                    // which is the deterministic name-hash. No
-                    // ±1000 transform on either side.
+                    // Downcast: runtime check via the object header. The header
+                    // (written by the New handler) and this comparison both use
+                    // `runtime_type_id` directly.
                     let value_reg = self.lower_expression(expr)?;
                     let target_type_id = self.runtime_type_id(*expected) as i64;
                     let type_id_const = self.builder.build_const(IrValue::I64(target_type_id))?;

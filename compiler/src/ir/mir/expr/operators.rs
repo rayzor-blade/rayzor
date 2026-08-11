@@ -26,18 +26,11 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Unary { op, operand } = &expr.kind else {
             unreachable!("lower_unary on a non-Unary expression")
         };
-        // Handle increment/decrement operators specially
         match op {
             HirUnaryOp::PostIncr
             | HirUnaryOp::PreIncr
             | HirUnaryOp::PostDecr
             | HirUnaryOp::PreDecr => {
-                // For increment/decrement, we need to:
-                // 1. Load the current value
-                // 2. Compute new value (old ± 1)
-                // 3. Store the new value back
-                // 4. Return old value (post) or new value (pre)
-
                 let old_value = self.lower_expression(operand)?;
                 let one = self.builder.build_const(IrValue::I32(1))?;
 
@@ -48,7 +41,6 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_binop(BinaryOp::Sub, old_value, one)?
                 };
 
-                // Register the new_value with its type
                 let result_type = self.convert_type(expr.ty);
                 let src_loc = self.convert_source_location(&expr.source_location);
                 if let Some(func) = self.builder.current_function_mut() {
@@ -64,22 +56,16 @@ impl<'a> HirToMirContext<'a> {
                     );
                 }
 
-                // Store the new value back to the operand
                 match &operand.kind {
                     HirExprKind::Variable { symbol, .. } => {
-                        // Static field referenced bare: it lives in
-                        // GLOBAL storage, not an SSA local — rebinding
-                        // symbol_map silently dropped the write, so
-                        // `staticCounter++` was a lost store (plain
-                        // `x = x + 1` assignment already routed
-                        // through build_store_global).
+                        // A bare static field lives in GLOBAL storage, not an
+                        // SSA local, so the write must go through the global.
                         if let Some(&global_id) = self.global_symbol_map.get(symbol) {
                             self.builder.build_store_global(global_id, new_value);
                         } else {
                             // If we're inside a lambda with captured variables, also store back to environment
                             if let Some(ref env_layout) = self.current_env_layout {
                                 if env_layout.find_field(*symbol).is_some() {
-                                    // This is a captured variable - store it back to environment
                                     let env_ptr = IrId::new(0); // First parameter in lambda is environment pointer
                                     env_layout.store_field(
                                         &mut self.builder,
@@ -94,10 +80,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                     HirExprKind::Field { object, field } => {
-                        // Field access (e.g., this.length++) — store new value back
-                        // via GEP + Store, same as field assignment
                         if let Some(obj_reg) = self.lower_expression(object) {
-                            // Look up field index (with receiver-type disambiguation)
                             let field_idx = self
                                 .field_index_map
                                 .get(field)
@@ -128,17 +111,15 @@ impl<'a> HirToMirContext<'a> {
                     _ => {}
                 }
 
-                // Return appropriate value
                 let result_reg = match op {
-                    HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value, // Post: return old value
-                    HirUnaryOp::PreIncr | HirUnaryOp::PreDecr => new_value, // Pre: return new value
+                    HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
+                    HirUnaryOp::PreIncr | HirUnaryOp::PreDecr => new_value,
                     _ => unreachable!(),
                 };
 
                 Some(result_reg)
             }
             _ => {
-                // Handle other unary operators normally
                 let operand_reg = self.lower_expression(operand)?;
                 let result_reg = self
                     .builder
@@ -169,7 +150,6 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Binary { op, lhs, rhs } = &expr.kind else {
             unreachable!("lower_binary on a non-Binary expression")
         };
-        // Handle short-circuit operators specially
         match op {
             HirBinaryOp::And => return self.lower_logical_and(lhs, rhs),
             HirBinaryOp::Or => return self.lower_logical_or(lhs, rhs),
@@ -214,7 +194,6 @@ impl<'a> HirToMirContext<'a> {
             let rhs_is_string = rhs_is_string || is_string_concat_chain(rhs);
 
             if lhs_is_string || rhs_is_string {
-                // Lower both operands
                 let lhs_reg = self.lower_expression(lhs)?;
                 let rhs_reg = self.lower_expression(rhs)?;
 
@@ -239,8 +218,6 @@ impl<'a> HirToMirContext<'a> {
                     || (rhs_is_string
                         && matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
 
-                // Convert non-string operand to string if needed
-                // For class instances with toString(), call it directly at compile time
                 let lhs_str_val = if !lhs_is_string_mir {
                     if self.expr_is_value_type_expr(lhs) {
                         self.convert_value_type_to_string(lhs_reg)?
@@ -269,10 +246,9 @@ impl<'a> HirToMirContext<'a> {
                     rhs_reg
                 };
 
-                // String values are already pointers (*HaxeString):
-                // - string literals from haxe_string_literal return *mut HaxeString
-                // - conversion functions like int_to_string also return pointers
-                // Pass them directly to string_concat which expects *HaxeString args
+                // String values are already *HaxeString (both literals and the
+                // conversion helpers return pointers), which is what
+                // string_concat expects, so pass them through unwrapped.
                 let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
                 let concat_func_id = self.register_stdlib_mir_forward_ref(
                     "string_concat",
@@ -365,9 +341,9 @@ impl<'a> HirToMirContext<'a> {
                 return self.lower_derived_equality(op, lhs, rhs, sym);
             }
 
-            // Null<prim> equality: route through null-guarded unboxing
-            // compares (the nullable is a box; a raw cmp compared the
-            // box pointer). `x == null` keeps the pointer compare.
+            // Null<prim> equality routes through null-guarded unboxing compares:
+            // the nullable is a box, so a raw cmp would compare box pointers.
+            // `x == null` keeps the pointer compare.
             if !matches!(&lhs.kind, HirExprKind::Null) && !matches!(&rhs.kind, HirExprKind::Null) {
                 if let Some(res) = self.lower_nullable_prim_eq(op, lhs, rhs) {
                     return Some(res);
@@ -410,12 +386,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Dynamic arithmetic: when both HIR types are actually Dynamic, check actual
-        // MIR register types after lowering to determine if values are truly boxed
-        // DynamicValue pointers vs raw concrete values (e.g., class field access on
-        // Dynamic-typed object, or integer arithmetic result with Dynamic HIR type).
-        // NOTE: We check the actual HIR TypeKind, not just MIR Ptr(Void), because
-        // class types also lower to Ptr(Void) but are NOT boxed DynamicValues.
+        // Dynamic arithmetic: a Dynamic HIR type may still lower to a raw concrete
+        // value, so the MIR register type after lowering decides whether an operand
+        // is a boxed DynamicValue. Dynamic-ness itself comes from the HIR TypeKind,
+        // not from MIR Ptr(Void) — class types lower to Ptr(Void) but are not boxes.
         {
             let (lhs_is_dyn, rhs_is_dyn) = {
                 let type_table = self.type_table;
@@ -446,7 +420,6 @@ impl<'a> HirToMirContext<'a> {
                         | HirBinaryOp::Ne
                 );
                 if is_supported {
-                    // Lower operands first, then check actual register types
                     let lhs_reg = self.lower_expression(lhs)?;
                     let rhs_reg = self.lower_expression(rhs)?;
 
@@ -470,10 +443,6 @@ impl<'a> HirToMirContext<'a> {
                                 HirBinaryOp::Mul => BinaryOp::Mul,
                                 HirBinaryOp::Div => BinaryOp::Div,
                                 _ => {
-                                    // Unsupported vector op in Dynamic path; fall
-                                    // through to the regular Dynamic handling (will
-                                    // likely produce invalid code — covered by other
-                                    // type checks).
                                     return self.builder.build_vector_binop(
                                         BinaryOp::Add,
                                         lhs_reg,
@@ -488,11 +457,10 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Determine if each operand is actually a boxed DynamicValue:
-                    // - Variables: use boxed_dynamic_symbols tracking (handles lambda
-                    //   params that have Dynamic type but hold raw i64 values)
-                    // - Other expressions: check actual MIR register type — concrete
-                    //   types (I32, F64, etc.) are definitely not boxed pointers
+                    // Whether an operand is a boxed DynamicValue: variables are
+                    // tracked in boxed_dynamic_symbols (a lambda param can be
+                    // Dynamic yet hold a raw i64); anything else is judged by its
+                    // MIR register type, since a concrete type is never a box.
                     let is_concrete_ir_type = |ty: &IrType| -> bool {
                         matches!(
                             ty,
@@ -536,12 +504,9 @@ impl<'a> HirToMirContext<'a> {
                         }
                     };
                     // Eq/Ne on two pointer-shaped Dynamic operands cannot be decided
-                    // from the register type: a boxed value and a lambda parameter
-                    // holding a raw i64 are BOTH Ptr(Void) here, and neither is
-                    // tracked. Comparing them as pointers is wrong for boxes, and
-                    // unboxing is wrong for raw values -- so hand both to the runtime,
-                    // which validates each side before dereferencing it and falls back
-                    // to the raw value when it is not a box.
+                    // here: a box and a lambda param holding a raw i64 are both
+                    // Ptr(Void) and neither is tracked. The runtime validates each
+                    // side before dereferencing and falls back to the raw value.
                     if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
                         && !is_concrete(lhs_reg)
                         && !is_concrete(rhs_reg)
@@ -565,8 +530,6 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     if lhs_boxed && rhs_boxed {
-                        // Both are actually boxed DynamicValue pointers.
-                        // Unbox to f64, operate, rebox.
                         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                         let unbox_func = self.get_or_register_extern_function(
                             "haxe_unbox_float_ptr",
@@ -596,10 +559,8 @@ impl<'a> HirToMirContext<'a> {
 
                         if is_comparison {
                             // Eq/Ne go through the runtime, which dispatches on the
-                            // box tag: numeric across Int/Float, by value for Bool
-                            // and String, by reference otherwise. Unboxing to f64
-                            // would equate 1 and "1" and read a string as a double.
-                            // Ordering comparisons stay numeric.
+                            // box tag; unboxing to f64 would equate 1 and "1" and
+                            // read a string as a double. Ordering stays numeric.
                             if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
                                 let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                                 let eq_func = self.get_or_register_extern_function(
@@ -650,13 +611,11 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // At least one operand is NOT boxed — it's a raw concrete value
-                    // with Dynamic HIR type (e.g., class field access, integer arithmetic).
-                    // Handle mixed boxed+concrete and fully concrete cases.
+                    // At least one operand is a raw concrete value carrying a
+                    // Dynamic HIR type; unbox the other side if it is a box.
                     let mut effective_lhs = lhs_reg;
                     let mut effective_rhs = rhs_reg;
 
-                    // Unbox boxed side if mixed (one boxed, one concrete)
                     if lhs_boxed && !rhs_boxed {
                         let rhs_ty = self
                             .builder
@@ -717,7 +676,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Use actual register types for type coercion
                     let eff_lhs_ty = self
                         .builder
                         .get_register_type(effective_lhs)
@@ -793,10 +751,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Mixed Dynamic + concrete arithmetic:
-            // One operand is Dynamic, the other is a concrete primitive.
-            // Distinguish boxed DynamicValue* (Ptr(U8)) from type-erased raw values
-            // (Ptr(Void)). Only unbox Ptr(U8); cast Ptr(Void) to integer.
+            // Mixed Dynamic + concrete arithmetic. Boxed DynamicValue* (Ptr(U8))
+            // and type-erased raw values (Ptr(Void)) differ: only Ptr(U8) may be
+            // unboxed, Ptr(Void) is cast to integer.
             if (lhs_is_dyn || rhs_is_dyn) && !(lhs_is_dyn && rhs_is_dyn) {
                 let is_arith = matches!(
                     op,
@@ -816,7 +773,6 @@ impl<'a> HirToMirContext<'a> {
                     let mut lhs_reg = self.lower_expression(lhs)?;
                     let mut rhs_reg = self.lower_expression(rhs)?;
 
-                    // Determine concrete type from the non-Dynamic side
                     let concrete_ty = if lhs_is_dyn {
                         self.builder
                             .get_register_type(rhs_reg)
@@ -829,12 +785,11 @@ impl<'a> HirToMirContext<'a> {
 
                     let is_float = matches!(concrete_ty, IrType::F32 | IrType::F64);
 
-                    // Coerce the Dynamic-side register to match the concrete type.
-                    // Uses haxe_coerce_dynamic_to_int/float which handles both
-                    // boxed DynamicValue* and type-erased raw integers at runtime.
+                    // Coerce the Dynamic-side register to the concrete type through
+                    // haxe_coerce_dynamic_to_int/float, which accepts both boxed
+                    // DynamicValue* and type-erased raw integers.
                     let coerce_dyn = |s: &mut Self, reg: IrId| -> Option<IrId> {
                         let reg_ty = s.builder.get_register_type(reg);
-                        // Already concrete? No coercion needed.
                         if reg_ty
                             .as_ref()
                             .map(|t| {
@@ -897,12 +852,9 @@ impl<'a> HirToMirContext<'a> {
         let mut lhs_reg = self.lower_expression(lhs)?;
         let mut rhs_reg = self.lower_expression(rhs)?;
 
-        // Auto-unbox Null<T> operands when the binop is arithmetic on
-        // primitives. Without this, `Null<Int> + Null<Int>` (or
-        // `Int + Null<Int>`) operates on raw DynamicValue* pointers,
-        // producing garbage / crashes. Unbox using each operand's
-        // OWN inner primitive type — not expr.ty, which may itself
-        // still be Optional after typechecking unified to Null<Int>.
+        // Primitive arithmetic must not run on raw DynamicValue* pointers, so
+        // unbox Null<T> operands using each operand's OWN inner primitive type —
+        // expr.ty may still be Optional after typechecking unified to Null<Int>.
         if matches!(
             op,
             HirBinaryOp::Add
@@ -930,8 +882,6 @@ impl<'a> HirToMirContext<'a> {
         let lhs_type = self.convert_type(lhs.ty);
         let rhs_type = self.convert_type(rhs.ty);
 
-        // Type coercion for mixed int/float operations
-        // When one operand is float and the other is int, cast int to float
         let lhs_is_int = matches!(
             lhs_type,
             IrType::I8
@@ -969,8 +919,7 @@ impl<'a> HirToMirContext<'a> {
                 .build_cast(rhs_reg, rhs_type.clone(), IrType::F64)?;
         }
 
-        // Special handling for division: Haxe always returns Float from division
-        // If operands are integers, convert them to float first
+        // Haxe division always yields Float, so int operands are promoted first.
         if matches!(op, HirBinaryOp::Div) && lhs_is_int && rhs_is_int {
             lhs_reg = self
                 .builder
@@ -980,9 +929,8 @@ impl<'a> HirToMirContext<'a> {
                 .build_cast(rhs_reg, rhs_type.clone(), IrType::F64)?;
         }
 
-        // Check if result is a SIMD vector type — emit VectorBinOp directly (zero overhead)
-        // We check operand types (from register_types) rather than convert_type(expr.ty)
-        // because @:coreType abstracts may not resolve correctly through convert_type.
+        // Vector-ness is decided from the operand register types rather than
+        // convert_type(expr.ty): @:coreType abstracts may not resolve through it.
         let lhs_actual_type = self
             .builder
             .get_register_type(lhs_reg)

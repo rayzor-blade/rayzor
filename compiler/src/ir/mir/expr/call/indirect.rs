@@ -26,10 +26,6 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Call { callee, args, .. } = &expr.kind else {
             unreachable!("lower_indirect_call on a non-Call expression")
         };
-        // Indirect function call (function pointer)
-        // TODO: Get the full function signature from the callee's type
-        // For now, we'll infer it from the arguments and return type
-        // This is a temporary workaround until we pass type_table to HIR→MIR
         self.builder.call_label = Some("INDIRECT_CALL".to_string());
 
         debug!(
@@ -38,8 +34,8 @@ impl<'a> HirToMirContext<'a> {
             args.len()
         );
 
-        // Lower arguments FIRST, before trying to lower the callee
-        // This ensures lambdas in arguments get generated even if callee lowering fails
+        // Arguments are lowered before the callee, so lambdas passed as
+        // arguments are still generated when callee lowering fails.
         debug!("About to lower {} indirect call arguments", args.len());
         for (i, a) in args.iter().enumerate() {
             debug!("  arg[{}] kind={:?}", i, std::mem::discriminant(&a.kind));
@@ -59,23 +55,18 @@ impl<'a> HirToMirContext<'a> {
             arg_regs.len()
         );
 
-        // Now try to lower the callee - if this fails, the call won't be generated
-        // but the lambda functions in arguments will have been created
         let func_ptr = self.lower_expression(callee)?;
 
-        // Build function signature from callee type or argument types
+        // Signature from the callee's function type, else from the arguments.
         let param_types: Vec<IrType> = {
-            // Try to get param types from callee's function type
             let type_table = self.type_table;
             let callee_type = type_table.get(callee.ty);
             if let Some(type_ref) = callee_type {
                 if let crate::tast::TypeKind::Function { params, .. } = &type_ref.kind {
-                    // `Void -> T` is Haxe's spelling for "takes nothing",
-                    // so a Void entry is notation rather than a slot. Left
-                    // in, the signature has a parameter no call site can
-                    // fill: LLVM rejects a Void parameter outright, and
-                    // Cranelift asserts on the argument count once the
-                    // closure is called with its environment.
+                    // `Void -> T` is Haxe's spelling for "takes nothing", so a
+                    // Void entry is notation, not a slot. Keeping it yields a
+                    // parameter no call site can fill: LLVM rejects a Void
+                    // parameter, and Cranelift asserts on the argument count.
                     params
                         .iter()
                         .map(|p| self.convert_type(*p))

@@ -22,8 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    // === Drop Tracking Methods (Rust-style implicit drop semantics) ===
-
     /// Enter a new scope for drop tracking
     pub(crate) fn enter_drop_scope(&mut self) {
         self.drop_scope_stack.push(Vec::new());
@@ -75,10 +73,7 @@ impl<'a> HirToMirContext<'a> {
                     continue;
                 }
 
-                // Free this value if not terminated
                 self.emit_tracked_free(current_ir_id, true);
-
-                // Remove from owned_heap_values since it's been freed
                 self.owned_heap_values.remove(&symbol);
             }
         }
@@ -124,13 +119,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Emit drop+free ONLY for @:derive(Drop) classes. Non-Drop heap
-        // allocations are handled by InsertFreePass, which performs
-        // proper escape analysis (a local value passed to another
-        // constructor — e.g. `var v = new Vocab(); return new BPETokenizer(v, …)`
-        // — is correctly seen as escaping via the constructor arg).
-        // Freeing them here without that analysis caused a use-after-free
-        // on the returned object's captured field.
+        // Only @:derive(Drop) classes are freed here. Non-Drop heap allocations
+        // belong to InsertFreePass, which has the escape analysis needed to see
+        // a local passed on through a constructor argument; freeing them here
+        // would be a use-after-free on the escaped value.
         for (symbol, ir_id) in to_free {
             if !self.is_terminated() && self.get_drop_class_for_ir(ir_id).is_some() {
                 self.emit_tracked_free(ir_id, true);
@@ -141,8 +133,8 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
         }
-        // Note: We don't clear the scopes here because the function is about to return.
-        // The scopes will be cleared when the function context is dropped.
+        // Scopes are left intact: the function is about to return and they are
+        // cleared with the function context.
     }
 
     /// Cleanup only @:derive(Drop) class values at implicit function end.
@@ -199,7 +191,6 @@ impl<'a> HirToMirContext<'a> {
     /// Called before Free at scope exit, reassignment, and early return.
     pub(crate) fn emit_drop_call(&mut self, obj_reg: IrId, class_sym: SymbolId) {
         let drop_name = self.string_interner.intern("drop");
-        // Look up the drop() method
         let method_sym = match self.resolve_class_method_symbol(class_sym, drop_name) {
             Some(sym) => sym,
             None => {
@@ -236,13 +227,12 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Drop+free a TRACKER-provided value only when its definition DOMINATES
-    /// this point. Tracker state (`owned_heap_values` / drop scopes) is
-    /// linear over LOWERING order, so a value registered in one arm of an
-    /// if/else leaks into the sibling arm's view — a free emitted there
-    /// names a register that never materialized on the executed path and
-    /// aliases an unrelated live object at runtime (use-after-free).
-    /// Skipping the free trades a bounded leak for correctness.
+    /// Drop+free a tracked value only when its definition dominates this point.
+    /// Tracker state (`owned_heap_values` / drop scopes) is linear over lowering
+    /// order, so a value registered in one arm of an if/else is visible to the
+    /// sibling arm; a free emitted there would name a register that never
+    /// materialized and alias an unrelated live object. Skipping the free trades
+    /// a bounded leak for correctness.
     pub(crate) fn emit_tracked_free(&mut self, ir: IrId, with_drop_call: bool) {
         if self.is_terminated() {
             return;
@@ -266,17 +256,11 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn check_drop_points_after_statement(&mut self) {
         use crate::ir::drop_analysis::should_drop_at_statement;
 
-        // Get drop points - if none, skip
         let drop_points = match &self.current_drop_points {
             Some(dp) => dp,
             None => return,
         };
 
-        // Check each owned heap variable to see if it should be dropped
-        // We iterate over owned_heap_values to find variables that are:
-        // 1. Heap-allocated (tracked in drop_points.heap_allocated)
-        // 2. Not escaping (not in drop_points.escaping)
-        // 3. At their last use (drop_points.last_use[symbol].statement_index == current_stmt_index)
         let current_idx = self.current_stmt_index;
         let mut to_drop = Vec::new();
 
@@ -286,10 +270,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Emit Free for each variable at its last use
         for (symbol, ir_id) in to_drop {
             self.emit_tracked_free(ir_id, false);
-            // Remove from owned_heap_values since it's been freed
             self.owned_heap_values.remove(&symbol);
         }
     }

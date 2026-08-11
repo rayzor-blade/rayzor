@@ -24,27 +24,22 @@ use std::rc::Rc;
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_read(&mut self, lvalue: &HirLValue) -> Option<IrId> {
         match lvalue {
-            HirLValue::Variable(symbol) => {
-                // Look up the variable in our symbol map
-                self.symbol_map.get(symbol).copied()
-            }
+            HirLValue::Variable(symbol) => self.symbol_map.get(symbol).copied(),
             HirLValue::Field { object, field } => {
-                // Read object.field
                 if let Some(obj_reg) = self.lower_expression(object) {
-                    let receiver_ty = object.ty; // The type of the object being accessed
-                                                 // TODO: Look up field type from symbol table
-                                                 // For now, use invalid TypeId - runtime call path doesn't need it
-                    let field_ty = TypeId(u32::MAX); // Field's result type (placeholder)
+                    let receiver_ty = object.ty;
+                    // TODO: look up the field type from the symbol table; the runtime
+                    // call path does not need it.
+                    let field_ty = TypeId(u32::MAX);
                     self.lower_field_access(obj_reg, *field, receiver_ty, field_ty)
                 } else {
                     None
                 }
             }
             HirLValue::Index { object, index } => {
-                // Read object[index]
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
-                        let elem_ty = object.ty; // Use object's type for now
+                        let elem_ty = object.ty;
                         self.lower_index_access(obj_reg, idx_reg, elem_ty)
                     } else {
                         None
@@ -59,7 +54,6 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_write(&mut self, lvalue: &HirLValue, value: IrId) {
         match lvalue {
             HirLValue::Variable(symbol) => {
-                // Check if this is a global variable first
                 let global_id = self.global_symbol_map.get(symbol).copied().or_else(|| {
                     // Name-based fallback: SymbolIds may differ between contexts
                     let sym_name = self
@@ -92,18 +86,14 @@ impl<'a> HirToMirContext<'a> {
                     return;
                 }
 
-                // Get the old register before updating (for type inference)
+                // Kept for the type of the previous binding.
                 let old_reg = self.symbol_map.get(symbol).copied();
 
-                // Update the variable binding
                 self.symbol_map.insert(*symbol, value);
 
-                // Ensure the new value register has a local entry for phi node tracking
-                // Get the existing local type from the symbol, or infer from value
+                // The new value register needs a local entry for phi node tracking.
                 if let Some(func) = self.builder.current_function_mut() {
-                    // Only add if not already present
                     if !func.locals.contains_key(&value) {
-                        // Try to get the type from an existing binding of this symbol
                         let var_type = old_reg
                             .and_then(|r| func.locals.get(&r))
                             .map(|local| local.ty.clone())
@@ -130,7 +120,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirLValue::Field { object, field } => {
-                // Write object.field = value
                 if let Some(obj_reg) = self.lower_expression(object) {
                     // Check if this is a property with a custom setter.
                     // Clone the info so the immutable borrow of `self` is released
@@ -139,7 +128,6 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(property_info) = property_info_owned.as_ref() {
                         match &property_info.setter {
                             crate::tast::PropertyAccessor::Method(setter_method_name) => {
-                                // Look up the setter method by name in function_map
                                 let setter_func_id = self
                                     .function_map
                                     .iter()
@@ -154,9 +142,7 @@ impl<'a> HirToMirContext<'a> {
                                     .map(|(_, func_id)| *func_id);
 
                                 if let Some(func_id) = setter_func_id {
-                                    // Generate a call to the setter method
-                                    // Setters are called with: (this, value)
-                                    // and return the value that was set
+                                    // Setters take (this, value) and return the value set.
                                     let return_type =
                                         if let Some(func) = self.builder.current_function() {
                                             func.locals
@@ -169,10 +155,10 @@ impl<'a> HirToMirContext<'a> {
 
                                     self.builder.build_call_direct(
                                         func_id,
-                                        vec![obj_reg, value], // Pass object as 'this', value as parameter
+                                        vec![obj_reg, value],
                                         return_type,
                                     );
-                                    return; // Setter called successfully
+                                    return;
                                 }
 
                                 // Fallback: extern-class accessor — try the stdlib mapping
@@ -191,7 +177,6 @@ impl<'a> HirToMirContext<'a> {
                                     return;
                                 }
 
-                                // Setter method not found - this is an error
                                 let method_name_str = self
                                     .string_interner
                                     .get(*setter_method_name)
@@ -206,9 +191,9 @@ impl<'a> HirToMirContext<'a> {
                                 return;
                             }
                             crate::tast::PropertyAccessor::Null => {
-                                // `null` setter = writable from inside the class only.
-                                // Access control is enforced at the type-checker (TAST) level.
-                                // At MIR lowering, fall through to direct field access.
+                                // `null` setter = writable from inside the class only;
+                                // access control is enforced in the type checker, so
+                                // lowering falls through to direct field access.
                             }
                             crate::tast::PropertyAccessor::Never => {
                                 self.add_error(
@@ -292,9 +277,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // ANONYMOUS OBJECT FIELD STORE
-                    // If object is an anonymous type (or typedef alias to one),
-                    // use rayzor_anon_set_field_by_index
+                    // Anonymous types (or typedef aliases to one) store by sorted
+                    // field index through rayzor_anon_set_field_by_index.
                     {
                         let resolved_obj_ty = self.resolve_through_aliases(object.ty);
                         let is_anon = {
@@ -350,8 +334,8 @@ impl<'a> HirToMirContext<'a> {
                                         IrType::Void,
                                     );
 
-                                    // Coerce value to i64 for storage
-                                    // Use the field symbol's type if available, fall back to I64
+                                    // Anon storage is i64; coerce via the field's
+                                    // declared type when the symbol has one.
                                     let field_type_id = self
                                         .symbol_table
                                         .get_symbol(*field)
@@ -458,12 +442,10 @@ impl<'a> HirToMirContext<'a> {
                                         if let Some(field_ptr) = field_ptr {
                                             // GPU structs use f32 for Float — truncate f64→f32 on write
                                             let store_val = if fl.ir_type == IrType::F32 {
-                                                // Value may be f64, cast to f32
                                                 self.builder
                                                     .build_cast(value, IrType::F64, IrType::F32)
                                                     .unwrap_or(value)
                                             } else if fl.ir_type == IrType::I32 {
-                                                // Value may be i64, cast to i32
                                                 self.builder
                                                     .build_cast(value, IrType::I64, IrType::I32)
                                                     .unwrap_or(value)
@@ -478,11 +460,11 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Create constant for field index
                         if let Some(index_const) =
                             self.builder.build_const(IrValue::I32(field_index as i32))
                         {
-                            // Get the type of the field from the FIELD'S DECLARED TYPE in symbol table
+                            // The field's declared type in the symbol table wins; the
+                            // name scan below only runs when it converts to void*.
                             let field_ty = self.symbol_table.get_symbol(*field)
                                 .and_then(|s| {
                                     let converted = self.convert_type(s.type_id);
@@ -517,7 +499,6 @@ impl<'a> HirToMirContext<'a> {
                                     field_index: field_index as u32,
                                 }
                             });
-                            // Use GEP to get field pointer, then store
                             if let Some(field_ptr) = self.builder.build_gep_with_context(
                                 obj_reg,
                                 vec![index_const],
@@ -679,10 +660,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirLValue::Index { object, index } => {
-                // Write object[index] = value
-                // Use typed array set functions to pass values directly,
-                // avoiding DynamicValue boxing via haxe_box_*_ptr which
-                // would corrupt array storage (DynamicValue.type_id stored instead of value)
+                // Typed array setters pass the value directly: boxing through
+                // haxe_box_*_ptr would store the DynamicValue tag, not the value.
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
                         let idx_i64 = {
@@ -712,7 +691,6 @@ impl<'a> HirToMirContext<'a> {
                         let value_ir_type = self.builder.get_register_type(value);
                         match &value_ir_type {
                             Some(IrType::F32) | Some(IrType::F64) => {
-                                // Use haxe_array_set_f64(arr, index, value)
                                 let func_id = self.get_or_register_extern_function(
                                     "haxe_array_set_f64",
                                     vec![

@@ -46,8 +46,9 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(*symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
-        // @:derive(Hash) synthetic hashCode() — intercept Variable callee path
-        // Instance method calls are desugared to Variable callee with receiver as first arg
+        // @:derive(Hash) synthetic hashCode(). Instance calls arrive with a
+        // variable callee and the receiver desugared to args[0], so arity 1
+        // means a receiver and no user arguments.
         if vname == "hashCode" && *is_method && args.len() == 1 {
             let receiver = &args[0];
             let class_sym = {

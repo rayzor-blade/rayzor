@@ -29,25 +29,16 @@ impl<'a> HirToMirContext<'a> {
             .as_ref()
             .map(|b| b.statements.len())
             .unwrap_or(0);
-        // debug!("lower_function - name={:?}, symbol={:?}, has_body={}, stmt_count={}",
-        //           self.string_interner.get(hir_func.name),
-        //           symbol_id,
-        //           hir_func.body.is_some(),
-        //           body_stmt_count);
 
-        // Build MIR function signature
         let signature = self.build_function_signature(hir_func);
 
-        // Start building the function
         let func_name = self
             .string_interner
             .get(hir_func.name)
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("func_{}", symbol_id.as_raw()));
-        // debug!("===== STARTING FUNCTION: {} (symbol {:?}) =====", func_name, symbol_id);
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
 
-        // Store function mapping for call resolution
         self.function_map.insert(symbol_id, func_id);
 
         if hir_func.is_keep {
@@ -61,10 +52,8 @@ impl<'a> HirToMirContext<'a> {
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, false);
 
-        // Apply SSA-derived optimization hints to function attributes
-        // These hints come from DFG/SSA analysis and guide MIR optimization
+        // Optimization hints derived from DFG/SSA analysis.
         if self.ssa_hints.inline_candidates.contains(&symbol_id) {
-            // Mark for aggressive inlining (small function, simple control flow from SSA)
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 func.attributes.inline = crate::ir::InlineHint::Always;
             }
@@ -78,8 +67,6 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if self.ssa_hints.straight_line_functions.contains(&symbol_id) {
-            // Mark for optimization (no branches, from CFG analysis)
-            // Straight-line code can be optimized more aggressively
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 func.attributes.pure = true; // Assume pure for straight-line code
             }
@@ -90,31 +77,21 @@ impl<'a> HirToMirContext<'a> {
             .complex_control_flow_functions
             .contains(&symbol_id)
         {
-            // Don't mark for size optimization if complex control flow
-            // Complex phi nodes benefit from full optimization passes
+            // Complex phi nodes benefit from full optimization passes.
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 func.attributes.optimize_size = false;
             }
         }
 
-        // Note: CSE opportunities don't have a direct attribute mapping yet
-        // They will be used by the optimization pass manager
+        // qualified_name and source_location are set in lower_function_body (Pass 2).
 
-        // Note: qualified_name and source_location are set in lower_function_body (Pass 2).
-        // This dead-code path (lower_function is never called) is left for reference.
-
-        // Map parameters to MIR registers
-        // Parameters now have symbol IDs (preserved from TAST)!
-        /// debug!("Mapping {} parameters", hir_func.params.len());
         for (i, param) in hir_func.params.iter().enumerate() {
             if let Some(func) = self.builder.current_function() {
                 if let Some(sig_param) = func.signature.parameters.get(i) {
                     let param_reg = sig_param.reg;
-                    /// debug!("Parameter {} symbol {:?} '{}' -> register {:?}", i, param.symbol_id, param.name, param_reg);
-                    // Map parameter symbol to its register
                     self.symbol_map.insert(param.symbol_id, param_reg);
 
-                    // Also register parameter as a local so Cranelift can find its type
+                    // Register the parameter as a local so Cranelift can find its type
                     let param_type = self.convert_type(param.ty);
                     let src_loc = IrSourceLocation::unknown();
                     if let Some(func_mut) = self.builder.current_function_mut() {
@@ -133,36 +110,18 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Lower function body if present
         if let Some(body) = &hir_func.body {
-            // debug!("Lowering function body for {} (symbol {:?})", hir_func.name, symbol_id);
             let stmt_count = body.statements.len();
             let has_expr = body.expr.is_some();
-            // eprintln!("  Body has {} statements, trailing expr: {}", stmt_count, has_expr);
 
             self.lower_block(body);
-            // eprintln!("  After lower_block");
 
             // Add implicit return if needed
             self.ensure_terminator();
-            // eprintln!("  After ensure_terminator");
         } else {
-            // debug!("Function {} has no body", hir_func.name);
         }
 
-        // debug!("===== FINISHING FUNCTION =====");
-        // // Before finishing, dump the terminator for this function
-        // if let Some(func) = self.builder.current_function() {
-        //     eprintln!(
-        //         "DEBUG   Function '{}' entry block terminator: {:?}",
-        //         func.name,
-        //         func.cfg
-        //             .get_block(func.entry_block())
-        //             .map(|b| &b.terminator)
-        //     );
-        // }
         self.builder.finish_function();
-        // debug!("  Function finished, context cleared");
 
         // Clear per-function state
         self.symbol_map.clear();
@@ -170,7 +129,6 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
-        // Per-function: clear strict_move_locals at lower_function exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
     }
@@ -204,9 +162,8 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_block = Some(func.entry_block());
         self.current_function_symbol = Some(symbol_id);
 
-        // Set qualified name for stack traces.
-        // hir_func.qualified_name is built by build_qualified_name() during TAST lowering
-        // and includes the class prefix, e.g. "Main.thrower".
+        // Qualified name for stack traces; already carries the class prefix
+        // (e.g. "Main.thrower") from TAST lowering.
         if let Some(qname_id) = hir_func.qualified_name {
             if let Some(qname_str) = self.string_interner.get(qname_id) {
                 let qname = qname_str.to_string();
@@ -237,11 +194,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Check if the function or its owning class has @:export metadata.
-        // If so, mark the MIR function for WASM export.
+        // @:export on the function or its owning class marks it for WASM export.
         {
             let mut should_export = false;
-            // Check function's own symbol for @:export
             if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
                 if sym.flags.is_wasm_export() {
                     should_export = true;
@@ -332,8 +287,6 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Clear per-function drop tracking state
-        // Note: We track owned heap values to free them on reassignment (Rust-style drop)
-        // This handles the main memory leak case: loop iterations creating new objects
         self.owned_heap_values.clear();
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
@@ -415,16 +368,13 @@ impl<'a> HirToMirContext<'a> {
                     );
                 }
             }
-            // Enter function-level scope for variables declared at function level
-            // This ensures they're freed on function exit via cleanup_all_scopes()
+            // Function-level scope so its variables are freed on function exit.
             self.enter_drop_scope();
             self.lower_block(body);
-            // For functions that don't explicitly return (void functions without `return`),
-            // emit drop() calls for @:derive(Drop) owned values before the implicit return.
-            // Note: Functions WITH explicit return handle this in the Return statement handler.
-            // We DON'T call cleanup_all_scopes() here because non-Drop allocations are
-            // handled by InsertFreePass — calling free unconditionally would cause double-free.
-            // Instead, we only emit drop() + free for Drop-class values specifically.
+            // Implicit-return path: emit drop() only for @:derive(Drop) values.
+            // Non-Drop allocations are freed by InsertFreePass, so a full
+            // cleanup_all_scopes() here would double-free. Explicit returns are
+            // handled in the Return statement handler.
             if !self.is_terminated() && !self.derive_drop_classes.is_empty() {
                 self.cleanup_drop_classes_only();
             }
@@ -436,19 +386,15 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.finish_function();
-        // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
 
         // Register-keyed: IrIds restart per function, so stale entries
-
         // from the previous body would collide with unrelated registers.
-
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
-        // Per-function: strict_move_locals tracks IrIds bound to @:move locals in
-        // THIS function's SSA namespace; clearing prevents cross-function IrId
-        // pollution that would otherwise mis-emit MarkMoved/CheckLive.
+        // strict_move_locals holds IrIds in THIS function's SSA namespace;
+        // stale entries would mis-emit MarkMoved/CheckLive in the next one.
         self.strict_move_locals.clear();
         self.block_map.clear();
         self.current_this_type = None;
@@ -667,12 +613,7 @@ impl<'a> HirToMirContext<'a> {
             .get(hir_func.name)
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("func_{}", symbol_id.as_raw()));
-        // eprintln!(
-        //     "DEBUG ===== STARTING FUNCTION: {} (symbol {:?}) =====",
-        //     func_name, symbol_id
-        // );
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
-        // debug!("  Function ID: {:?}, Entry block created", func_id);
 
         // Store function mapping for call resolution
         self.function_map.insert(symbol_id, func_id);
@@ -715,23 +656,17 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Map parameters to MIR registers
-        // The first parameter (index 0) is the implicit 'this'
-        // User-defined parameters start at index 1
+        // Parameter 0 is the implicit 'this'; user parameters start at index 1.
         if let Some(func) = self.builder.current_function() {
-            // Map 'this' parameter - we need a special symbol for it
-            // For now, we'll create a synthetic symbol ID for 'this'
-            // TODO: This should ideally come from TAST/HIR where 'this' is properly resolved
+            // TODO: 'this' should come from TAST/HIR instead of a synthetic SymbolId.
             if let Some(this_param) = func.signature.parameters.get(0) {
                 let this_symbol = SymbolId::from_raw(0); // Synthetic 'this' symbol
                 self.symbol_map.insert(this_symbol, this_param.reg);
             }
 
-            // Map regular parameters (offset by 1 due to 'this')
             for (i, param) in hir_func.params.iter().enumerate() {
                 if let Some(sig_param) = func.signature.parameters.get(i + 1) {
                     let param_reg = sig_param.reg;
-                    // Map parameter symbol to its register
                     self.symbol_map.insert(param.symbol_id, param_reg);
                 }
             }
@@ -772,7 +707,6 @@ impl<'a> HirToMirContext<'a> {
             );
         }
 
-        // Debug: check the function CFG
         if let Some(func) = self.builder.current_function() {
             debug!(
                 "lower_instance_method: {} - CFG has {} blocks",
@@ -791,19 +725,7 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // debug!("===== FINISHING FUNCTION =====");
-        // Before finishing, dump the terminator for this function
-        // if let Some(func) = self.builder.current_function() {
-        //     eprintln!(
-        //         "DEBUG   Function '{}' entry block terminator: {:?}",
-        //         func.name,
-        //         func.cfg
-        //             .get_block(func.entry_block())
-        //             .map(|b| &b.terminator)
-        //     );
-        // }
         self.builder.finish_function();
-        // debug!("  Function finished, context cleared");
 
         // Clear per-function state
         self.symbol_map.clear();
@@ -811,7 +733,6 @@ impl<'a> HirToMirContext<'a> {
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
-        // Per-function: clear strict_move_locals at instance-method exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
     }
@@ -841,52 +762,32 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(func.entry_block());
 
-        // Clear drop tracking state for this function. Order matters:
-        // these MUST be cleared before the DropPointAnalyzer runs below
-        // so the constructor body is analysed against a clean slate
-        // rather than inheriting whatever the previously-lowered
-        // function left behind (see bugs_sys_getenv_in_ctor_residual).
+        // Must be cleared before the DropPointAnalyzer runs below, so the
+        // constructor body is analysed against a clean slate rather than
+        // inheriting the previously-lowered function's state.
         self.owned_heap_values.clear();
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
         self.reassigned_in_scope.clear();
 
-        // Run drop-point analysis on the constructor body — same as
-        // `lower_function_body` (3326-3346). Without this, the
-        // constructor body lowers under the previously-lowered
-        // function's `current_drop_points` / `current_stmt_index`,
-        // misrouting `build_free` / `build_drop` calls for heap values
-        // returned by extern callees (e.g. the `HaxeString` from
-        // `haxe_sys_get_env`). The corruption typically surfaces well
-        // after the constructor returns — caller heap activity then
-        // SIGILLs in nue/llama-chat midway through model setup. Symbol
-        // standalone Haxe programs may not reproduce because the
-        // stale state happens to be compatible, but the structural
-        // delta is real and applies to every ctor lowered after any
-        // other function.
+        // Drop-point analysis on the constructor body, as `lower_function_body`
+        // does. Without it the body lowers under the previously-lowered
+        // function's `current_drop_points` / `current_stmt_index`, misrouting
+        // `build_free` / `build_drop` for heap values from extern callees.
         let mut analyzer = DropPointAnalyzer::new();
         self.current_drop_points = Some(analyzer.analyze_function(&constructor.body));
         self.current_stmt_index = 0;
 
-        // Set current_this_type so implicit field accesses inside the
-        // constructor body resolve against the class type rather than
-        // inheriting the previous function's this-type.
+        // Implicit field accesses in the body resolve against the class type.
         self.current_this_type = Some(type_id);
 
-        // Constructors at the HIR level don't have an explicit return
-        // type expression, but at the MIR level they return the
-        // allocated instance pointer. Using the class type_id mirrors
-        // the convention `lower_function_body` uses for
-        // `current_function_return_type`.
+        // HIR constructors have no return type expression; at MIR level they
+        // return the allocated instance pointer, so use the class type_id.
         self.current_function_return_type = Some(type_id);
 
-        // Map 'this' and constructor parameters from the function
-        // signature's actual register IDs instead of fabricating them
-        // positionally as `IrId::new(i)`. The signature already has
-        // the right `reg` field on every parameter (set during Pass 1),
-        // and positionally-fabricated IrIds collide with whatever
-        // earlier passes (e.g. the inliner — fixed at 655d7ac) may
-        // have allocated.
+        // Take 'this' and the parameters from the signature's own `reg` fields
+        // (assigned in Pass 1). Fabricating IrIds positionally would collide
+        // with registers earlier passes already allocated.
         let this_reg = func
             .signature
             .parameters
@@ -900,10 +801,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Enter function-level scope for tracking heap allocations.
-        // This must come AFTER the drop-points analysis so the analyzer
-        // sees the clean (post-clear) heap-tracking state and doesn't
-        // double-count escapes from an inherited scope.
+        // Must come after the drop-points analysis, so the analyzer sees the
+        // cleared heap-tracking state and doesn't double-count escapes.
         self.enter_drop_scope();
 
         // Execute pre-super statements (e.g., field assignments that come before
@@ -954,19 +853,10 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Final fallback: the parent's TypeId may have been
-                            // renumbered (e.g. across compilation contexts where
-                            // type_table entries get rebuilt) but `class_parent_map`
-                            // is keyed by the child's stable SymbolId and stores
-                            // the parent's stable SymbolId. Resolve through that
-                            // to the parent's name, then constructor_name_map.
-                            // Without this fallback, `class MyException extends
-                            // Exception { new(m) { super(m); } }` failed with
-                            // "Parent constructor not found for TypeId 237" —
-                            // the TAST-assigned parent TypeId no longer existed
-                            // in type_table by the time the constructor was
-                            // lowered, but `haxe.Exception` was still in
-                            // `constructor_name_map`.
+                            // The parent's TypeId can be renumbered when type_table
+                            // entries are rebuilt across compilation contexts;
+                            // `class_parent_map` is keyed by stable SymbolIds, so
+                            // resolve through it to the name, then constructor_name_map.
                             if let Some(&parent_sym) = self.class_parent_map.get(&class_symbol) {
                                 if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
                                     if let Some(qual_name) = sym_info
@@ -1070,17 +960,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.finish_function();
-        // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
 
         // Register-keyed: IrIds restart per function, so stale entries
-
         // from the previous body would collide with unrelated registers.
-
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
-        // Per-function: clear strict_move_locals at constructor exit (parallels symbol_map).
         self.strict_move_locals.clear();
         self.block_map.clear();
     }

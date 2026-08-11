@@ -29,32 +29,18 @@ impl<'a> HirToMirContext<'a> {
         captures: &[HirCapture],
         lambda_type: TypeId,
     ) -> Option<IrId> {
-        // Closure/Lambda lowering using MakeClosure instruction:
-        //
-        // For: |x, y| { x + y + captured_z }
-        //
-        // Strategy:
-        // 1. Generate a lambda function that takes (env*, params...) where
-        //    env* is a struct containing all captured variables
-        // 2. Collect the values to be captured (from current scope)
-        // 3. Use MakeClosure instruction to create closure at runtime
-        //
-        // The MakeClosure instruction will:
-        // - Allocate an environment struct
-        // - Copy captured values into it
-        // - Create a closure struct { func_ptr, env_ptr }
-        // - Return the closure
+        // A lambda lowers to a function taking (env*, params...) plus a MakeClosure
+        // that allocates the environment struct, copies the captured values into it
+        // and yields a { func_ptr, env_ptr } closure.
 
-        // Step 1: Collect captured values from current scope FIRST
-        // (before generate_lambda_function which saves/restores state)
+        // Collect captured values before generate_lambda_function, which
+        // saves/restores lowering state.
         let mut captured_values = Vec::new();
-        // Filter captures to only include actual variables, not global functions
-        // Global functions (like `trace`) don't need to be captured - they're resolved by name
+        // Global functions (like `trace`) are resolved by name, never captured.
         let filtered_captures: Vec<_> = captures
             .iter()
             .filter(|c| {
                 if let Some(sym) = self.symbol_table.get_symbol(c.symbol) {
-                    // Skip Function symbols - they don't need capturing
                     if sym.kind == crate::tast::SymbolKind::Function {
                         debug!(
                             "Skipping function capture {:?} (name={:?})",
@@ -80,7 +66,6 @@ impl<'a> HirToMirContext<'a> {
                 debug!("  Found! Register: {:?}", captured_val);
                 captured_values.push(captured_val);
             } else {
-                // Captured variable not found in current scope
                 debug!("  NOT FOUND! Available symbols:");
                 for (sym, reg) in &self.symbol_map {
                     debug!("    {:?} -> {:?}", sym, reg);
@@ -93,23 +78,19 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Step 2: Generate the lambda function
-        // Pass filtered captures so the lambda doesn't try to load global functions from env
+        // Pass the filtered captures so the lambda doesn't try to load global
+        // functions out of the environment.
         let filtered_captures_slice: Vec<HirCapture> =
             filtered_captures.iter().map(|c| (*c).clone()).collect();
         let lambda_func_id =
             self.generate_lambda_function(params, body, &filtered_captures_slice, lambda_type)?;
 
-        // Step 3: Use MakeClosure instruction to create closure
         let result = self
             .builder
             .build_make_closure(lambda_func_id, captured_values);
 
-        // Step 4: Transfer ownership of captured variables to the closure
-        // When a variable is captured by a closure, ownership is MOVED into the closure
-        // environment. The enclosing scope should NOT free captured variables.
-        // This prevents double-free when both the enclosing scope and the closure
-        // try to free the same memory.
+        // Ownership of a captured variable moves into the closure environment, so
+        // the enclosing scope must not free it as well.
         for capture in &filtered_captures {
             if self.owned_heap_values.remove(&capture.symbol).is_some() {
                 debug!(
@@ -122,8 +103,8 @@ impl<'a> HirToMirContext<'a> {
         result
     }
 
-    /// PASS 2: Lower lambda body and infer signature
-    #[allow(dead_code)] // Will be used once we switch to two-pass
+    /// Lower a lambda body and infer its signature.
+    #[allow(dead_code)] // Used once lowering switches to two passes
     pub(crate) fn lower_lambda_body(
         &mut self,
         context: LambdaContext,
@@ -137,7 +118,6 @@ impl<'a> HirToMirContext<'a> {
             env_layout,
         } = context;
 
-        // Save state
         let saved_state = self.save_state();
 
         // Switch to lambda context
@@ -155,11 +135,9 @@ impl<'a> HirToMirContext<'a> {
         self.loop_carried_symbols.clear();
         self.current_env_layout = env_layout.clone();
 
-        // Clear drop tracking state for the lambda body.
-        // Lambda bodies are separate functions with their own register namespace.
-        // Without this, cleanup_all_scopes (called on return) would try to free
-        // the parent function's owned heap values using IrIds that refer to
-        // different registers in the lambda's context, causing heap corruption.
+        // Drop tracking must be cleared: a lambda body is a separate function with
+        // its own register namespace, so cleanup_all_scopes would otherwise free
+        // the parent's owned heap values through IrIds naming different registers.
         self.owned_heap_values.clear();
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
@@ -167,8 +145,8 @@ impl<'a> HirToMirContext<'a> {
         self.current_drop_points = None;
         self.current_stmt_index = 0;
 
-        // Map lambda parameters to registers AND register as locals
-        // (matching regular function param setup at line ~2274-2288)
+        // Map lambda parameters to registers and register them as locals, the same
+        // way regular function parameters are set up.
         for (i, param) in params.iter().enumerate() {
             let param_reg = IrId::new(param_offset + i as u32);
             self.symbol_map.insert(param.symbol_id, param_reg);
@@ -221,8 +199,7 @@ impl<'a> HirToMirContext<'a> {
         let body_result = match &body.kind {
             crate::ir::hir::HirExprKind::Block(block) => {
                 if block.statements.len() == 1 && block.expr.is_none() {
-                    // Single-expression block (common in arrow functions):
-                    // Extract the expression from the Expr statement and lower directly
+                    // Single-expression block, the common arrow-function shape.
                     if let crate::ir::hir::HirStatement::Expr(expr) = &block.statements[0] {
                         self.lower_expression(expr)
                     } else {
@@ -251,14 +228,11 @@ impl<'a> HirToMirContext<'a> {
             self.infer_lambda_return_type(lambda_func, entry_block, body_result)
         };
 
-        // The block the builder ENDED on after lowering the body — for a body
-        // whose last construct is a loop / conditional this is the loop-exit /
-        // merge block, NOT the entry block. The implicit return must terminate
-        // THAT block (mirroring how `ensure_terminator` finalizes a regular
-        // function on its current block). Finalizing only the entry block left
-        // a fall-through Void lambda's loop-exit block as `Unreachable`, which
-        // executes as a trap (`udf` / SIGILL) once the loop exits — e.g. a
-        // `(lo,hi,n)->{ var i=lo; while(i<hi){...;i++;} }` worker closure.
+        // The block the builder ended on after lowering the body: for a body whose
+        // last construct is a loop or conditional that is the loop-exit / merge
+        // block, not the entry block. The implicit return must terminate that
+        // block (as `ensure_terminator` does for a regular function), otherwise it
+        // stays `Unreachable` and traps at runtime.
         let term_block = self.builder.current_block().unwrap_or(entry_block);
 
         // Update signature and add terminator (borrows function mutably)
@@ -287,7 +261,6 @@ impl<'a> HirToMirContext<'a> {
             )?;
         }
 
-        // Restore state
         self.current_env_layout = None;
         self.restore_state(saved_state);
 

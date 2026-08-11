@@ -46,29 +46,19 @@ impl<'a> HirToMirContext<'a> {
         let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
         let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
         if let Some(func_id) = maybe_func_id {
-            // If the resolved function is from an import module (renumbered to
-            // 100_000+), it's a real user-defined or compiled stdlib function.
-            // Skip the stdlib runtime mapping check — it would incorrectly redirect
-            // user methods like "add" to stdlib functions (e.g., sys_deque_add).
-            // FIRST: Try to route through runtime mapping for extern class methods
-            // Check if there's a runtime mapping using the standard approach
-            // BUT: for String methods with optional params, use param-count-aware lookup
-            // Note: get_stdlib_runtime_info has an internal guard that returns None
-            // for user-defined class receivers, preventing name collisions.
+            // Route through the runtime mapping for extern class methods.
+            // get_stdlib_runtime_info's internal guard returns None for
+            // user-defined class receivers, preventing name collisions.
             let stdlib_info = {
                 let method_name_str = self
                     .symbol_table
                     .get_symbol(*field)
                     .and_then(|s| self.string_interner.get(s.name));
 
-                // Check if this is a method with optional params that needs param-count-aware lookup
                 if let Some(mn) = method_name_str {
                     if mn == "indexOf" || mn == "lastIndexOf" || mn == "substr" {
-                        // Use param-count-aware lookup for overloaded String methods.
-                        // `substr` has 1-arg (default len) and 2-arg forms registered
-                        // as separate mappings; without param-count dispatch the
-                        // generic name lookup matches the wrong arity and the call
-                        // is lowered against a mismatched signature.
+                        // Overloaded String methods register each arity as a separate
+                        // mapping, so a name-only lookup matches the wrong one.
                         let arg_count = args.len();
                         debug!(
                             "[String overload lookup] method={}, arg_count={}",
@@ -115,7 +105,6 @@ impl<'a> HirToMirContext<'a> {
                                 )
                             })
                     } else {
-                        // Extract receiver class hint by finding which class owns this method symbol
                         let receiver_hint: Option<String> = self.find_receiver_class_name(object);
                         let hint_ref = receiver_hint.as_deref();
                         self.get_stdlib_runtime_info(*field, object.ty, Some(args.len()), hint_ref)
@@ -132,8 +121,8 @@ impl<'a> HirToMirContext<'a> {
                 result_type.clone()
             ));
 
-            // FALLBACK: For extern classes not in type_table (like rayzor.Bytes),
-            // try to extract class name from the MIR function's qualified_name
+            // Extern classes not in type_table (e.g. rayzor.Bytes): recover the
+            // class name from the MIR function's qualified_name.
             debug!(
                 "[FALLBACK check] func_id={:?}, in module={}",
                 func_id,
@@ -148,12 +137,10 @@ impl<'a> HirToMirContext<'a> {
                     // Pattern: "rayzor.Bytes.set" -> class="rayzor_Bytes", method="set"
                     let parts: Vec<&str> = qn.split('.').collect();
                     if parts.len() >= 2 {
-                        // Get method name (last part) and class name (all but last, joined with underscore)
                         let mir_method_name = *parts.last().unwrap();
                         let class_parts = &parts[..parts.len() - 1];
                         let qualified_class = class_parts.join("_");
 
-                        // Try to find in stdlib mapping
                         if let Some((_sig, mapping)) = self
                             .stdlib_mapping
                             .find_by_name(&qualified_class, mir_method_name)
@@ -164,7 +151,6 @@ impl<'a> HirToMirContext<'a> {
                                 qualified_class, mir_method_name, runtime_func
                             );
 
-                            // Get expected parameter types from the extern function signature
                             let (expected_param_types, actual_return_type) = self
                                 .get_stdlib_mir_wrapper_signature(runtime_func)
                                 .map(|(params, ret)| (params, ret))
@@ -173,7 +159,6 @@ impl<'a> HirToMirContext<'a> {
                                     for arg in args {
                                         params.push(self.convert_type(arg.ty));
                                     }
-                                    // Use explicit return type from types: descriptor when available
                                     let ret_type = if let Some(ref rt) = mapping.return_type {
                                         rt.to_ir_type()
                                     } else if mapping.has_return {
@@ -184,10 +169,8 @@ impl<'a> HirToMirContext<'a> {
                                     (params, ret_type)
                                 });
 
-                            // Lower the object (this will be the first parameter)
                             let obj_reg = self.lower_expression(object)?;
 
-                            // Lower the arguments and auto-box if needed
                             let mut arg_regs = vec![obj_reg];
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_reg = self.lower_expression(arg)?;
@@ -204,7 +187,6 @@ impl<'a> HirToMirContext<'a> {
                                 arg_regs.push(final_reg);
                             }
 
-                            // Use expected parameter types for registration
                             let param_types = if expected_param_types.len() == arg_regs.len() {
                                 expected_param_types.clone()
                             } else {
@@ -215,14 +197,12 @@ impl<'a> HirToMirContext<'a> {
                                 params
                             };
 
-                            // Register the extern function
                             let extern_func_id = self.get_or_register_extern_function(
                                 runtime_func,
                                 param_types,
                                 actual_return_type.clone(),
                             );
 
-                            // Call the extern function
                             let call_result = self.builder.build_call_direct(
                                 extern_func_id,
                                 arg_regs,
@@ -240,9 +220,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Check for virtual dispatch: if the method is in a class hierarchy
-            // with overrides, dispatch through the vtable instead of calling directly.
-            // Skip vtable for super.method() — must call parent directly.
+            // Methods overridden in a class hierarchy dispatch through the vtable;
+            // super.method() must bypass it and call the parent directly.
             let object_is_super = matches!(object.kind, HirExprKind::Super);
             let vtable_lookup = if object_is_super {
                 None
@@ -303,7 +282,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                 };
 
-                // Lower arguments
                 let mut call_args = vec![obj_reg];
                 for arg in args.iter() {
                     if let Some(reg) = self.lower_expression(arg) {
@@ -324,7 +302,6 @@ impl<'a> HirToMirContext<'a> {
                     IrType::I64,
                 )?;
 
-                // Build the function signature for the indirect call
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
                 for arg in args {
                     param_types.push(self.convert_type(arg.ty));
@@ -344,7 +321,6 @@ impl<'a> HirToMirContext<'a> {
             // super.method() — resolve to parent class method directly
             if object_is_super {
                 if let Some(method_name_i) = method_name_interned {
-                    // Find current class → parent via class_parent_map
                     let current_class = self.builder.current_function().and_then(|f| {
                         self.class_method_by_name
                             .iter()
@@ -378,10 +354,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Regular method call (not extern or no runtime mapping)
-            // Detect static calls: if the object is a class/abstract symbol
-            // reference (not an instance), this is a static method call and
-            // the object should NOT be passed as 'this'.
+            // A class/abstract symbol as receiver means a static call: the object
+            // must not be passed as 'this'.
             let is_static_class_call = if let HirExprKind::Variable {
                 symbol: obj_sym, ..
             } = &object.kind
@@ -406,8 +380,7 @@ impl<'a> HirToMirContext<'a> {
                     symbol: obj_sym, ..
                 } = &object.kind
                 {
-                    // For static calls, obj_sym is the class symbol itself.
-                    // Also try resolving through type_id → TypeKind::Class → symbol_id.
+                    // For static calls obj_sym is the class symbol itself.
                     let class_sym = self
                         .symbol_table
                         .get_symbol(*obj_sym)
@@ -437,11 +410,9 @@ impl<'a> HirToMirContext<'a> {
                 func_id
             ));
 
-            // Lower the object (this will be the first parameter)
             let obj_reg = self.lower_expression(object)?;
 
-            // If the object is Dynamic-typed, unbox it to get the raw object pointer.
-            // Dynamic variables store a boxed DynamicValue*, but the method expects
+            // Dynamic variables hold a boxed DynamicValue*, but the method expects
             // a raw class pointer as 'this'.
             let obj_reg = {
                 let is_dynamic = {
@@ -499,8 +470,8 @@ impl<'a> HirToMirContext<'a> {
             }
             let arg_regs = method_arg_regs;
 
-            // IMPORTANT: Use the function's actual return type, not expr.ty
-            // expr.ty can be incorrect (e.g., unresolved TypeParameter or wrong type)
+            // Use the function's actual return type: expr.ty can be an unresolved
+            // TypeParameter.
             let actual_return_type = if let Some(func) = self.builder.module.functions.get(&func_id)
             {
                 debug!(
@@ -516,14 +487,12 @@ impl<'a> HirToMirContext<'a> {
                 result_type.clone()
             };
 
-            // debug!("Calling method with {} args (including this)", arg_regs.len());
             let call_result =
                 self.builder
                     .build_call_direct(func_id, arg_regs, actual_return_type.clone())?;
 
-            // Auto-unbox for generic stdlib methods (e.g., Channel<Int>.tryReceive())
-            // When the function returns Ptr(U8) but the caller expects a resolved generic type,
-            // we need to unbox. Resolve T from the receiver object's type arguments.
+            // Generic stdlib methods return Ptr(U8) while the caller expects the
+            // resolved T — resolve it from the receiver's type arguments and unbox.
             let actual_is_ptr = matches!(&actual_return_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::Void));
             if actual_is_ptr && actual_return_type != IrType::Void {
                 let resolved_type = {
@@ -565,9 +534,9 @@ impl<'a> HirToMirContext<'a> {
             }
             return Some(call_result);
         } else {
-            // Method not found by direct symbol lookup.
-            // First: try rpkg/plugin extern dispatch via direct mapping lookup.
-            // This bypasses get_stdlib_runtime_info's guard which rejects rpkg classes.
+            // Method not found by direct symbol lookup. Try rpkg/plugin extern
+            // dispatch via a direct mapping lookup: get_stdlib_runtime_info's
+            // guard rejects rpkg classes.
             {
                 let method_name_str = self
                     .symbol_table
@@ -589,13 +558,10 @@ impl<'a> HirToMirContext<'a> {
                             runtime_call.return_type.map(|rt| rt.to_ir_type());
                         let is_static_call = sig.is_static;
 
-                        // A plugin mapping carries the exact ABI signature it
-                        // declared (param_types includes self for instance
-                        // methods). It is authoritative — and free of the TAST
-                        // param-type drift that otherwise mis-boxes scalar args
-                        // on an imported extern class. Prefer it over the
-                        // name-keyed wrapper registry (which has no entry for a
-                        // pure plugin symbol and so falls back to Ptr).
+                        // A plugin mapping declares its exact ABI (param_types
+                        // includes self for instance methods) and is authoritative;
+                        // the name-keyed wrapper registry has no entry for a pure
+                        // plugin symbol and would fall back to Ptr.
                         let (expected_param_types, actual_return_type) =
                             if let Some(descs) = runtime_call.param_types {
                                 let params: Vec<IrType> =
@@ -630,15 +596,11 @@ impl<'a> HirToMirContext<'a> {
                             let obj_reg = self.lower_expression(object)?;
                             vec![obj_reg]
                         };
-                        // Coerce each user arg to the wrapper's DECLARED param type.
-                        // Critical for SIMD4f static methods (splat/make/load): they
-                        // declare F32 lane params, but Haxe `Float` args are F64 —
-                        // without the demote the raw f64 bit-pattern lands in the f32
-                        // lanes as garbage (splat(4.0) -> nonsense). param_offset skips
-                        // the leading self slot on instance wrappers. Previously args
-                        // were pushed raw, so any wrapper whose signature param type
-                        // differed from the arg type (F32 vs F64 here) silently
-                        // mismatched at the call boundary.
+                        // Coerce each user arg to the wrapper's declared param type:
+                        // SIMD4f splat/make/load declare F32 lanes while Haxe `Float`
+                        // args are F64, so without the demote the f64 bit pattern lands
+                        // in the lanes as garbage. param_offset skips the leading self
+                        // slot on instance wrappers.
                         let param_offset = if is_static_call { 0 } else { 1 };
                         for (i, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
@@ -676,7 +638,7 @@ impl<'a> HirToMirContext<'a> {
                                 actual_return_type.clone(),
                             )?
                         };
-                        // Reconcile the descriptor's NATIVE return type with the
+                        // Reconcile the descriptor's native return type with the
                         // Haxe-declared type at this callsite.
                         let declared_ir = self.convert_type(expr.ty);
                         return Some(self.reconcile_extern_return(
@@ -691,8 +653,8 @@ impl<'a> HirToMirContext<'a> {
             // Fallback: Dynamic method call or stdlib method
             let object_type = object.ty;
 
-            // Check if the object is a stdlib class (including extern abstracts like Ptr, Ref, Box, Usize)
-            // These should resolve via stdlib_mapping without any Dynamic unboxing
+            // Stdlib classes (including extern abstracts like Ptr/Ref/Box/Usize)
+            // resolve via stdlib_mapping without any Dynamic unboxing.
             debug!(
                 "[FIELDACCESS] Entering stdlib class check for object_type={:?}",
                 object_type
@@ -704,8 +666,7 @@ impl<'a> HirToMirContext<'a> {
                         TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                         TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
                         TypeKind::GenericInstance { base_type, .. } => {
-                            // For GenericInstance like ObjectMap<Point, Int>,
-                            // resolve the base class/abstract symbol
+                            // ObjectMap<Point, Int> and friends resolve to the base symbol.
                             if let Some(base_info) = type_table.get(*base_type) {
                                 match &base_info.kind {
                                     TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
@@ -753,7 +714,6 @@ impl<'a> HirToMirContext<'a> {
                 });
 
                 if let Some(sym_id) = class_symbol_id {
-                    // Get the class name from qualified_name or native_name
                     let class_name_from_obj = self.symbol_table.get_symbol(sym_id).and_then(|s| {
                         // Prefer native_name (from @:native annotation)
                         s.native_name
@@ -771,10 +731,9 @@ impl<'a> HirToMirContext<'a> {
                         .get_symbol(*field)
                         .and_then(|s| self.string_interner.get(s.name));
 
-                    // PRIORITY: Use the field's qualified name to derive the class,
-                    // since the field symbol knows which package it belongs to.
-                    // This prevents sys.thread.Thread.sleep from being resolved
-                    // via rayzor.concurrent.Thread when the class symbol is shared.
+                    // Derive the class from the field's qualified name: the field symbol
+                    // knows its package, so sys.thread.Thread.sleep does not resolve via
+                    // rayzor.concurrent.Thread when the class symbol is shared.
                     let class_name_from_field = self
                         .symbol_table
                         .get_symbol(*field)
@@ -791,7 +750,6 @@ impl<'a> HirToMirContext<'a> {
 
                     let class_name_opt = class_name_from_field.or(class_name_from_obj);
 
-                    // Also try bare class name as final fallback
                     let class_name_opt = class_name_opt.or_else(|| {
                         self.symbol_table
                             .get_symbol(sym_id)
@@ -807,10 +765,9 @@ impl<'a> HirToMirContext<'a> {
                             .find_by_name(&class_name, method_name)
                             .map(|(sig, m)| (sig.clone(), m.clone()))
                             .or_else(|| {
-                                // @:forward fallback: check if method should be forwarded to underlying type
                                 let (underlying_type, forward_list) =
                                     self.abstract_forward_rules.get(&sym_id)?;
-                                // Check if this method is in the forward list (empty = forward all)
+                                // An empty forward list forwards every method.
                                 let method_interned =
                                     self.symbol_table.get_symbol(*field).map(|s| s.name);
                                 let is_forwarded = forward_list.is_empty()
@@ -818,7 +775,6 @@ impl<'a> HirToMirContext<'a> {
                                 if !is_forwarded {
                                     return None;
                                 }
-                                // Resolve underlying type's class name
                                 let underlying_class = self
                                     .resolve_type_class_name_with(&type_table, *underlying_type)?;
                                 self.stdlib_mapping
@@ -858,10 +814,9 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Reflect.compare: detect arg types from expressions and
-                            // route to haxe_reflect_compare_typed. This avoids boxing
-                            // and ensures string comparison works correctly.
-                            // Must be done before the arg boxing loop below.
+                            // Reflect.compare routes to haxe_reflect_compare_typed with
+                            // types read off the arg expressions, which avoids boxing.
+                            // Must run before the arg boxing loop below.
                             if runtime_name == "haxe_reflect_compare" && args.len() >= 2 {
                                 let type_info = self.infer_reflect_compare_type_info(args);
                                 if let Some(info) = type_info {
@@ -920,9 +875,8 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             // Lower args, auto-boxing primitives when the MIR wrapper
-                            // expects Ptr(U8) (e.g., Channel<Int>.send(42)).
-                            // For instance methods, prepend object as receiver (param 0).
-                            // For static methods, skip the object — it's just a class ref.
+                            // expects Ptr(U8). Instance methods prepend the receiver as
+                            // param 0; static methods skip the object (a bare class ref).
                             let mir_wrapper_sig =
                                 self.get_stdlib_mir_wrapper_signature(&runtime_name);
                             let is_static_call = mapping_is_static || !*is_method;
@@ -934,8 +888,6 @@ impl<'a> HirToMirContext<'a> {
                             for (i, arg) in args.iter().enumerate() {
                                 if let Some(reg) = self.lower_expression(arg) {
                                     let actual_ty = self.convert_type(arg.ty);
-                                    // For instance methods, param 0 = receiver, user args start at i+1
-                                    // For static methods, no receiver, user args start at i
                                     let param_idx = if is_static_call { i } else { i + 1 };
                                     let expected_ty = mir_wrapper_sig
                                         .as_ref()
@@ -982,10 +934,8 @@ impl<'a> HirToMirContext<'a> {
                                     mir_return_type.clone(),
                                 )?;
 
-                                // Resolve generic return type from receiver's type arguments
-                                // For Channel<Int>.tryReceive() -> Null<Int>, result_type may be
-                                // Ptr(Void) (Dynamic) because the generic T is not resolved.
-                                // We resolve T from the receiver object's actual type args.
+                                // result_type can still be Ptr(Void) when the generic T is
+                                // unresolved, so resolve T from the receiver's type args.
                                 let resolved_result = {
                                     let needs_resolve = result_type == IrType::Any
                                         || matches!(&result_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
@@ -1014,8 +964,8 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 };
 
-                                // MIR wrappers return values in their declared type directly —
-                                // no unboxing needed (they don't return boxed DynamicValue*).
+                                // MIR wrappers return their declared type directly — they
+                                // never return a boxed DynamicValue*, so no unboxing.
                                 return Some(call_result);
                             } else {
                                 // Inject hidden enum type_id arg for runtime enum helpers
@@ -1089,22 +1039,15 @@ impl<'a> HirToMirContext<'a> {
             let type_table = self.type_table;
             if let Some(type_info) = type_table.get(object_type) {
                 if matches!(type_info.kind, TypeKind::Dynamic) {
-                    // Dynamic method call - need to resolve method by name.
-                    //
-                    // EXCLUDE the currently-compiling function from
-                    // candidates. Otherwise a method whose name
-                    // matches the enclosing function (e.g.,
-                    // `ArchRegistry.build` calling
-                    // `(arch:Dynamic).build(...)` on an
-                    // `ArchBuilder` instance) silently resolves
-                    // back to the enclosing function → infinite
-                    // recursion → stack overflow.
+                    // Resolve the method by name, excluding the
+                    // currently-compiling function: a same-named
+                    // method would otherwise resolve back to the
+                    // enclosing function and recurse forever.
                     let method_name = self.symbol_table.get_symbol(*field).map(|s| s.name);
                     let caller_func_id = self.builder.current_function;
                     if let Some(name) = method_name {
-                        // Look up function by name in function_map.
-                        // Tighten by arity to avoid grabbing
-                        // same-named methods on unrelated classes.
+                        // Match on arity too, so same-named methods
+                        // on unrelated classes are not picked up.
                         let target_argc = args.len() + 1; // +1 for receiver
                         let mut found_func = None;
                         for (sym, &func_id) in &self.function_map {
@@ -1128,7 +1071,6 @@ impl<'a> HirToMirContext<'a> {
                         }
 
                         if let Some(func_id) = found_func {
-                            // Lower the object and unbox it
                             let obj_reg = self.lower_expression(object)?;
 
                             // Unbox the Dynamic to get the actual object pointer
@@ -1144,16 +1086,14 @@ impl<'a> HirToMirContext<'a> {
                                 ptr_u8,
                             )?;
 
-                            // Lower the arguments
                             let arg_regs: Vec<_> =
-                                std::iter::once(unboxed_obj) // Add unboxed 'this' as first arg
+                                std::iter::once(unboxed_obj) // unboxed 'this' as first arg
                                     .chain(
                                         args.iter()
                                             .filter_map(|a| self.lower_expression(a)),
                                     )
                                     .collect();
 
-                            // Get the function's actual return type
                             let actual_return_type =
                                 if let Some(func) = self.builder.module.functions.get(&func_id) {
                                     func.signature.return_type.clone()
@@ -1171,7 +1111,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Check if the object type is a String - handle String method calls
             {
                 let type_table = self.type_table;
                 if let Some(type_info) = type_table.get(object_type) {
@@ -1180,15 +1119,14 @@ impl<'a> HirToMirContext<'a> {
                         object_type, type_info.kind
                     );
                     if matches!(type_info.kind, TypeKind::String) {
-                        // Get the method name from the field symbol
                         let method_name = self
                             .symbol_table
                             .get_symbol(*field)
                             .and_then(|s| self.string_interner.get(s.name));
 
                         if let Some(method_name) = method_name {
-                            // For String methods with optional params (indexOf, lastIndexOf),
-                            // look up the mapping by param count to get the right variant
+                            // String methods with optional params (indexOf, lastIndexOf)
+                            // register one mapping per arity.
                             let arg_count = args.len();
                             let mapping_opt = self
                                 .stdlib_mapping
@@ -1197,7 +1135,6 @@ impl<'a> HirToMirContext<'a> {
                                     self.stdlib_mapping.find_by_name("String", method_name)
                                 });
 
-                            // Look up the runtime function for this String method
                             if let Some((_sig, mapping)) = mapping_opt {
                                 let runtime_func = mapping.runtime_name;
 
@@ -1206,16 +1143,13 @@ impl<'a> HirToMirContext<'a> {
                                     method_name, arg_count, runtime_func
                                 );
 
-                                // Lower the object (the String pointer)
                                 let obj_reg = self.lower_expression(object)?;
 
-                                // Lower the method arguments
                                 let method_arg_regs: Vec<_> = args
                                     .iter()
                                     .filter_map(|a| self.lower_expression(a))
                                     .collect();
 
-                                // Build param types: string_ptr, ...args
                                 let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
                                 let mut param_types = vec![string_ptr_ty.clone()];
                                 for arg in &method_arg_regs {
@@ -1225,8 +1159,7 @@ impl<'a> HirToMirContext<'a> {
                                     param_types.push(arg_ty);
                                 }
 
-                                // Determine return type - for String methods returning String,
-                                // they return a pointer to HaxeString
+                                // String-returning methods hand back a HaxeString pointer.
                                 let return_type = if result_type == IrType::String {
                                     string_ptr_ty.clone()
                                 } else {
@@ -1260,7 +1193,7 @@ impl<'a> HirToMirContext<'a> {
                     TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                     TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
                     TypeKind::GenericInstance { base_type, .. } => {
-                        // For GenericInstance like Deque<Int>, get the base class/abstract symbol
+                        // Deque<Int> and friends resolve to the base symbol.
                         if let Some(base_info) = type_table.get(*base_type) {
                             match &base_info.kind {
                                 TypeKind::Class { symbol_id, .. } => {
@@ -1318,7 +1251,6 @@ impl<'a> HirToMirContext<'a> {
                             class_name
                         );
 
-                        // Check if it's a rayzor stdlib class by using native name or qualified name
                         let qualified_name_opt = class_symbol
                             .native_name
                             .and_then(|nn| self.string_interner.get(nn))
@@ -1330,7 +1262,6 @@ impl<'a> HirToMirContext<'a> {
                                     .map(|s| s.to_string())
                             });
 
-                        // Try to get the method name from the field symbol
                         let method_name =
                             if let Some(field_sym) = self.symbol_table.get_symbol(*field) {
                                 self.string_interner.get(field_sym.name)
@@ -1354,10 +1285,9 @@ impl<'a> HirToMirContext<'a> {
                                 None
                             };
 
-                            // Prefer class-qualified lookup when a qualified class name
-                            // exists, but always keep a global static fallback.
-                            // Some extern classes (e.g. Math) may not carry
-                            // qualified/native names on the symbol.
+                            // Prefer class-qualified lookup, but keep the global static
+                            // fallback: some extern classes (e.g. Math) carry no
+                            // qualified or native name on the symbol.
                             let runtime_func_opt = qualified_name_opt
                                 .as_deref()
                                 .and_then(|class_qualified_name| {
@@ -1400,9 +1330,7 @@ impl<'a> HirToMirContext<'a> {
                                 });
 
                             if let Some(runtime_func) = runtime_func_opt {
-                                // println!("✅ Generating runtime call to {} for {}.{}", runtime_func, class_name, method_name);
-
-                                // Lower all arguments (don't include object for static methods like spawn)
+                                // Static methods take no receiver, so the object is dropped.
                                 let arg_regs: Vec<_> = static_args
                                     .iter()
                                     .filter_map(|a| self.lower_expression(a))
@@ -1431,7 +1359,6 @@ impl<'a> HirToMirContext<'a> {
                                         (param_types, result_type.clone())
                                     });
 
-                                // Cast/box arguments to expected types
                                 let final_arg_regs: Vec<_> = arg_regs.iter().enumerate()
                                         .map(|(i, &reg)| {
                                             if let (Some(expected_ty), Some(actual_ty)) = (
@@ -1460,7 +1387,6 @@ impl<'a> HirToMirContext<'a> {
                                     expected_return_type.clone(),
                                 );
 
-                                // Generate the call to the runtime function
                                 let call_result = self.builder.build_call_direct(
                                     runtime_func_id,
                                     final_arg_regs,

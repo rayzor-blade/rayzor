@@ -38,10 +38,9 @@ impl<'a> HirToMirContext<'a> {
         if receiver_is_super {
             let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
             if let Some(method_name) = method_name {
-                // Find parent class: determine which class the current function
-                // belongs to, then look up its parent via class_parent_map.
+                // The owning class of the current function gives the parent to
+                // dispatch into.
                 let current_class = self.builder.current_function().and_then(|f| {
-                    // Find the class this function is a method of
                     self.class_method_by_name
                         .iter()
                         .find(|(_, &method_sym)| self.function_map.get(&method_sym) == Some(&f.id))
@@ -49,7 +48,6 @@ impl<'a> HirToMirContext<'a> {
                 });
                 let parent_class =
                     current_class.and_then(|cls| self.class_parent_map.get(&cls).copied());
-                // Resolve parent's method by name
                 let super_func_id = parent_class
                     .and_then(|pc| {
                         self.class_method_by_name
@@ -57,7 +55,7 @@ impl<'a> HirToMirContext<'a> {
                             .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
                     })
                     .or_else(|| {
-                        // Fallback: direct symbol resolution
+                        // No parent entry — resolve the called symbol directly.
                         self.resolve_function_id_with_qualified_fallback(*symbol)
                     });
                 if let Some(func_id) = super_func_id {

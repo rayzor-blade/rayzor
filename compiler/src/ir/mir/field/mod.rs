@@ -34,7 +34,6 @@ impl<'a> HirToMirContext<'a> {
         field: SymbolId,
         field_ty: TypeId,
     ) -> Option<IrId> {
-        // Get field name for debugging
         let field_name = self
             .symbol_table
             .get_symbol(field)
@@ -46,12 +45,11 @@ impl<'a> HirToMirContext<'a> {
             field_name, field
         );
 
-        // Check field_index_map FIRST — if the field exists as a user-defined class field,
-        // use GEP directly. This prevents stdlib name collisions (e.g., user class with
-        // "length" field being incorrectly dispatched to array_length()).
-        // Only fall through to stdlib dispatch if the field is NOT found in field_index_map.
+        // field_index_map is consulted FIRST: a user-defined class field must GEP
+        // directly, or a name collision with the stdlib (a user `length` field
+        // dispatched to array_length()) wins. Stdlib dispatch is the fallback.
         let field_found_in_class = self.field_index_map.contains_key(&field) || {
-            // Also check by name
+            // Also check by name.
             if let Some(sym) = self.symbol_table.get_symbol(field) {
                 self.field_index_map.iter().any(|(s, _)| {
                     self.symbol_table.get_symbol(*s).map(|si| si.name) == Some(sym.name)
@@ -62,9 +60,8 @@ impl<'a> HirToMirContext<'a> {
         };
 
         if !field_found_in_class {
-            // Field not found as a class field — try stdlib dispatch (e.g., Array.length on a
-            // Dynamic-typed Array). This is only reached for actual stdlib objects whose fields
-            // are runtime functions, not for user-defined classes.
+            // Stdlib dispatch (e.g. Array.length on a Dynamic-typed Array): only
+            // stdlib objects reach here, and their fields are runtime functions.
             debug!(
                 "[lower_field_access_for_class] field '{}' not in field_index_map, trying stdlib",
                 field_name
@@ -140,14 +137,10 @@ impl<'a> HirToMirContext<'a> {
                                 self.convert_type(field_ty)
                             };
 
-                        // Route through MIR forward-ref if this runtime
-                        // name refers to a stdlib MIR wrapper (e.g.
-                        // `array_length` wraps `haxe_array_length`).
-                        // `get_or_register_extern_function` would
-                        // register it as Cranelift Import, then the
-                        // backend later tries to define the body and
-                        // fails with `Invalid to define identifier
-                        // declared as an import: array_length`.
+                        // A stdlib MIR wrapper (e.g. `array_length` wrapping
+                        // `haxe_array_length`) must go through a MIR forward-ref:
+                        // registering it as an extern import makes defining its
+                        // body in the backend invalid.
                         let runtime_func_id = if runtime_call.is_mir_wrapper {
                             self.register_stdlib_mir_forward_ref(
                                 &runtime_func,
@@ -177,15 +170,13 @@ impl<'a> HirToMirContext<'a> {
             field_name
         );
 
-        // Look up the field index from our field_index_map
-        // Also get the actual field type from the symbol table, NOT from the passed-in field_ty
-        // which may be Dynamic due to unresolved type parameters
+        // The field type comes from the symbol table, not the passed-in field_ty,
+        // which may be Dynamic from unresolved type parameters.
         let (resolved_class_ty, field_index, actual_field_type) = match self
             .field_index_map
             .get(&field)
         {
             Some(&(class_ty, idx)) => {
-                // Get the actual field type from the symbol table
                 let sym_type = self
                     .symbol_table
                     .get_symbol(field)
@@ -194,7 +185,7 @@ impl<'a> HirToMirContext<'a> {
                 (class_ty, idx, sym_type)
             }
             None => {
-                // Fallback: Try to find field by name instead of SymbolId
+                // Fall back to a by-name lookup instead of the SymbolId.
                 let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
 
                 let field_name_str = self.string_interner.get(field_name).unwrap_or("<unknown>");
@@ -205,7 +196,6 @@ impl<'a> HirToMirContext<'a> {
                     self.field_index_map.len()
                 );
 
-                // Search for any field with the same name
                 let mut found = None;
                 for (sym, &(class_ty, idx)) in &self.field_index_map {
                     if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
@@ -214,7 +204,6 @@ impl<'a> HirToMirContext<'a> {
                                 "[lower_field_access_for_class] Found field '{}' at index {} in class_ty={:?}",
                                 field_name_str, idx, class_ty
                             );
-                            // Get the actual field type from the matched symbol
                             found = Some((class_ty, idx, sym_info.type_id));
                             break;
                         }
@@ -241,14 +230,11 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        // Create constant for field index
         let index_const = self.builder.build_const(IrValue::I32(field_index as i32))?;
 
-        // Get the type of the field from the actual field symbol, NOT the Dynamic-typed field_ty
         let field_ir_ty = self.convert_type(actual_field_type);
 
-        // Build struct context for typed field access in backends.
-        // Use resolved_class_ty from the field_index_map lookup (already resolved above).
+        // Struct context lets the backends type the field access.
         let struct_ctx = {
             let class_sym = self.class_type_to_symbol.get(&resolved_class_ty);
             let class_name = class_sym
@@ -262,7 +248,6 @@ impl<'a> HirToMirContext<'a> {
             })
         };
 
-        // Use GetElementPtr to get pointer to the field
         let field_ptr = self.builder.build_gep_with_context(
             obj,
             vec![index_const],
@@ -270,10 +255,8 @@ impl<'a> HirToMirContext<'a> {
             struct_ctx,
         )?;
 
-        // Load the value from the field pointer
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
 
-        // Register the type of the loaded value
         self.builder
             .set_register_type(field_value, field_ir_ty.clone());
 
