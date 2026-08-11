@@ -179,6 +179,44 @@ Do this DURING the mechanical move (step 2), not as a separate pass: the diff
 is already being reviewed line by line at that point, and a comment-only pass
 over 42k lines afterwards is a second full review for no additional safety.
 
+## Correction: what Phase B can and cannot delete
+
+Phase A landed (`5aea6547`, `5a5d2514`). Mapping the arm afterwards contradicted
+part of the claim above, so it is corrected here rather than left to mislead.
+
+**The probes are not only re-deriving what TAST knew.** Several exist because
+the resolved `SymbolId` is not trustworthy where they run. The standing rule is
+that SymbolIds are per-context and only FQNs cross contexts, and the arm is
+built accordingly: a `name_match` for enum variants, an interface resolver whose
+own comment calls it drift-tolerant, an FQN-construction fallback introduced for
+a method "whose method SymbolId drifted", and a bare-name `function_map` lookup.
+A `CallTarget` carrying SymbolIds cannot replace a probe that exists *because*
+the SymbolId drifted. Those probes stay, and matching on the target must not
+bypass their fallbacks.
+
+**`is_method` is not a restatement of the TAST form.** It means "args[0] is the
+receiver slot", which is the form's answer and not always the truth:
+
+- TAST `MethodCall` can carry a synthetic non-value receiver in args[0] — a
+  class symbol for `Thread.spawn()`, an enum symbol for `MyEnum.Ok(42)`,
+  `HirExprKind::Super` for `super.m()` — which lowering strips or re-routes.
+- Static extensions (`using IntTools; x.double()`) lower to TAST
+  `StaticMethodCall` whose `arguments[0]` IS a real instance value.
+
+So `CallTarget::Method` does not imply instance dispatch and `CallTarget::Static`
+does not imply "no receiver in args". The `effective_static_call_args` /
+`has_synthetic_static_receiver` machinery that sorts this out survives Phase B
+untouched, and it is a large fraction of five of the eight probes.
+
+**Consequence.** "Most of the 9,555 lines becomes unnecessary" was too strong.
+A realistic Phase B replaces the *shape discrimination* at the head of each
+probe with a match on the target, while the bodies — receiver-slot handling,
+drift-tolerant re-resolution, stdlib mapping — remain. That is worth doing: it
+makes the dispatch explicit and ordered. It is not a deletion of 9.5k lines.
+
+`is_optional` needs nothing: `obj?.m()` is desugared in tast_to_hir into
+`Block{Let tmp; If(tmp != null) Call else null}` before any Call is built.
+
 ## Can HIR fold into MIR?
 
 In principle yes — HIR is a re-representation, not a desugaring layer. It keeps
