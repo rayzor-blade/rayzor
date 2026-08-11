@@ -88,3 +88,6 @@ examples/**/.rayzor/
 *.bak
 *.bak[0-9]
 *.backup
+
+# working plans and handoffs — local only
+docs/plans/
