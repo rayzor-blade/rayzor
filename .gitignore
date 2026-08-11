@@ -83,3 +83,8 @@ examples/**/.rayzor/
 *.mlmodel
 *.npy
 *.npz
+
+# editor backups — never belong in the tree
+*.bak
+*.bak[0-9]
+*.backup
