@@ -1302,6 +1302,9 @@ impl CSEPass {
             IrInstruction::Cast { src, to_ty, .. } => {
                 Some(format!("cast:{}:{:?}", src.as_u32(), to_ty))
             }
+            // Memory-dependent, unlike every other key here: only reusable
+            // until something writes the global. The driver invalidates it on
+            // a store to that global and on any call.
             IrInstruction::LoadGlobal { global_id, .. } => {
                 Some(format!("loadglobal:{}", global_id.0))
             }
@@ -1362,6 +1365,22 @@ impl OptimizationPass for CSEPass {
                 let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
 
                 for inst in &block.instructions {
+                    // Every other key here is a pure expression, but a global's
+                    // value is only reusable while nothing has written it. A
+                    // store invalidates that global; a call invalidates all of
+                    // them, since the callee may store one — possibly from a
+                    // module this pass never sees, as imported globals are
+                    // merged into the table.
+                    match inst {
+                        IrInstruction::StoreGlobal { global_id, .. } => {
+                            available.remove(&format!("loadglobal:{}", global_id.0));
+                        }
+                        IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. } => {
+                            available.retain(|k, _| !k.starts_with("loadglobal:"));
+                        }
+                        _ => {}
+                    }
+
                     if let Some(key) = Self::instruction_key(inst) {
                         if let Some(&existing) = available.get(&key) {
                             // Found common subexpression
