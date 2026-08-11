@@ -37,13 +37,12 @@ impl<'a> HirToMirContext<'a> {
             unreachable!("try_future_method_call on a non-Call expression")
         };
         if *is_method {
-            // Get method name from callee symbol
             let async_method_sym = match &callee.kind {
                 HirExprKind::Variable { symbol, .. } => Some(*symbol),
                 HirExprKind::Field { field, .. } => Some(*field),
                 _ => None,
             };
-            // Get receiver symbol from first arg (MethodCall puts receiver as args[0])
+            // MethodCall puts the receiver in args[0].
             let receiver_sym_from_args = args.first().and_then(|a| {
                 if let HirExprKind::Variable { symbol, .. } = &a.kind {
                     Some(*symbol)

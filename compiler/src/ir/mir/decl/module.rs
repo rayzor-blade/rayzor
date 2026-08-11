@@ -24,20 +24,17 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     pub fn lower_module(&mut self, hir_module: &HirModule) -> Result<IrModule, Vec<LoweringError>> {
-        // Extract SSA optimization hints from HIR metadata
-        // These were populated during HIR lowering by querying DFG/SSA
+        // Hints were populated during HIR lowering by querying DFG/SSA.
         self.extract_ssa_hints_from_hir(hir_module);
 
-        // Set module metadata
         self.builder.module.metadata.language_version =
             hir_module.metadata.language_version.clone();
 
-        // IMPORTANT: Register type metadata FIRST before lowering any functions
-        // This populates field_index_map which is needed for field access
-        // Two-pass: register interfaces first so interface_method_names is populated
-        // before classes try to build vtables.
-        // Topological sort: parent interfaces must be registered before children
-        // so inherited methods are available when building child method tables.
+        // Type metadata must be registered before any function is lowered: it
+        // populates field_index_map, which field access needs. Interfaces come
+        // before classes so interface_method_names exists when classes build
+        // vtables, and parent interfaces before children so inherited methods
+        // are available for the child method tables.
         {
             let interfaces: Vec<(TypeId, &HirTypeDecl)> = hir_module
                 .types
@@ -84,30 +81,23 @@ impl<'a> HirToMirContext<'a> {
         // Build class vtables after all type metadata is registered
         self.build_class_vtables();
 
-        // CRITICAL: Two-pass lowering to handle forward references
-        // Class methods might be lowered after module functions that call them,
-        // causing "function not found" errors.
+        // Two-pass lowering handles forward references: a class method may be
+        // lowered after a module function that calls it.
         //
-        // Pass 1: Register ALL function signatures WITHOUT lowering bodies
-        // This ensures function_map is fully populated before any calls are made
+        // Pass 1 registers ALL function signatures without lowering bodies, so
+        // function_map is complete before any call is emitted.
 
-        // Pass 1a: Register class method signatures
-        // eprintln!("[PASS1] {} types in HIR module '{}'", hir_module.types.len(), hir_module.name);
+        // Pass 1a: class method signatures
         for (type_id, type_decl) in &hir_module.types {
             match type_decl {
                 HirTypeDecl::Class(class) => {
                     let cname = self.string_interner.get(class.name).unwrap_or("?");
-                    // eprintln!("[PASS1] class={} ctor={} methods={}", cname, class.constructor.is_some(), class.methods.len());
-                    // eprintln!(
-                    //     "DEBUG Pass1a: Registering methods for class {:?}",
-                    //     self.string_interner.get(class.name).unwrap_or("<unknown>")
-                    // );
                     self.current_class_symbol = Some(class.symbol_id);
                     for method in &class.methods {
-                        // Skip bodyless extern class methods. The stdlib mapping in Phase 2
-                        // creates properly qualified functions (e.g., "haxe_bytes_get") via
-                        // get_or_register_extern_function. Phase 1 stubs use bare method
-                        // names (e.g., "get") which cause WASM import collisions.
+                        // Skip bodyless extern class methods: the stdlib mapping
+                        // registers them under qualified names (e.g.
+                        // "haxe_bytes_get"), while a Pass 1 stub would use the
+                        // bare name and collide on WASM imports.
                         if class.is_extern && method.function.body.is_none() {
                             continue;
                         }
@@ -116,7 +106,6 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             None
                         };
-                        // Pass class type params for generic class methods
                         self.register_function_signature_with_class_type_params(
                             method.function.symbol_id,
                             &method.function,
@@ -125,7 +114,6 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
-                    // Register constructor signature with class type params
                     if let Some(constructor) = &class.constructor {
                         if !class.is_extern {
                             self.register_constructor_signature_with_class_type_params(
@@ -167,10 +155,9 @@ impl<'a> HirToMirContext<'a> {
         // field_index_map is fully populated after class registration (Pass 1).
         self.rebuild_fields_by_type_cache();
 
-        // Pass 2: Now lower all function bodies (both class methods and module functions)
-        // At this point, function_map is fully populated
+        // Pass 2 lowers function bodies; function_map is complete by now.
 
-        // Pass 2a: Lower class methods and constructors
+        // Pass 2a: class methods and constructors
         for (type_id, type_decl) in &hir_module.types {
             let name_str = if let HirTypeDecl::Class(c) = type_decl {
                 let n = self.string_interner.get(c.name).unwrap_or("<unknown>");
@@ -178,17 +165,16 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 "<not-a-class>"
             };
-            // debug!("Pass2a: Processing type - TypeId={:?}, name={:?}", type_id, name_str);
             match type_decl {
                 HirTypeDecl::Class(class) => {
-                    // Get qualified class name for runtime mapping checks
-                    // Prefer lowered @:native name (e.g., "rayzor::concurrent::Arc" -> "rayzor_concurrent_Arc")
-                    // Fall back to qualified_name with underscores (e.g., "rayzor.Bytes" -> "rayzor_Bytes")
+                    // Class name for runtime-mapping lookups: lowered @:native
+                    // name ("rayzor::concurrent::Arc" -> "rayzor_concurrent_Arc"),
+                    // else qualified name with dots replaced ("rayzor.Bytes" ->
+                    // "rayzor_Bytes").
                     let qualified_class_name = self
                         .symbol_table
                         .get_symbol(class.symbol_id)
                         .and_then(|sym| {
-                            // Prefer native name if available
                             if let Some(native) = sym.native_name {
                                 self.string_interner
                                     .get(native)
@@ -203,18 +189,15 @@ impl<'a> HirToMirContext<'a> {
                     // Fallback to simple class name if no qualified name
                     let class_name = self.string_interner.get(class.name);
 
-                    // Lower each method body
                     for method in &class.methods {
-                        // SPECIAL CASE: Skip lowering method if this is an extern class
-                        // with a runtime mapping for this method. For extern classes like FileSystem,
-                        // methods are handled by the runtime mapping system, not by MIR stubs.
+                        // A method of an extern class with a runtime mapping is
+                        // served by the mapping system, not by a MIR stub.
                         let should_skip_method = if method.function.body.is_none() {
-                            // Method has no body - check if it has a runtime mapping
-                            // Try qualified name first (e.g., "rayzor_Bytes"), then fall back to simple name
+                            // Qualified name first (e.g. "rayzor_Bytes"), then the
+                            // simple class name.
                             let has_mapping = if let Some(method_name) =
                                 self.string_interner.get(method.function.name)
                             {
-                                // Try qualified name first
                                 let found_in_qualified = qualified_class_name
                                     .as_ref()
                                     .map(|qn| {
@@ -242,8 +225,8 @@ impl<'a> HirToMirContext<'a> {
                                 false
                             };
 
-                            // Also skip if this is an extern class - extern classes have
-                            // their methods handled by runtime mappings or MIR wrappers
+                            // Extern classes get their methods from runtime
+                            // mappings or MIR wrappers either way.
                             let is_extern_class = self
                                 .symbol_table
                                 .get_symbol(class.symbol_id)
@@ -319,15 +302,12 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Lower constructor body
                     if let Some(constructor) = &class.constructor {
-                        // SPECIAL CASE: Skip lowering constructor if this is an extern class
-                        // with a runtime mapping for "new". For extern classes like Channel, Thread, etc.,
-                        // the "new" constructor is handled by the runtime mapping system, not by
-                        // generating a MIR constructor function.
-                        // Try qualified class name first (e.g., "rayzor_Bytes"), then fall back to simple name
+                        // An extern class with a runtime mapping for "new" gets
+                        // its constructor from the mapping system, so no MIR
+                        // constructor is generated. Qualified class name first
+                        // (e.g. "rayzor_Bytes"), then the simple name.
                         let should_skip_constructor = {
-                            // Helper to check runtime mapping for a class name
                             let check_class_runtime = |name: &str| -> bool {
                                 if let Some(class_name_static) =
                                     self.stdlib_mapping.get_class_static_str(name)
@@ -351,7 +331,6 @@ impl<'a> HirToMirContext<'a> {
                                 false
                             };
 
-                            // Try qualified name first, then fall back to simple name
                             let found_in_qualified = qualified_class_name
                                 .as_ref()
                                 .map(|qn| check_class_runtime(qn))
@@ -379,7 +358,6 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if !should_skip_constructor {
-                            // debug!("Lowering constructor for class {:?}", class.name);
                             self.lower_constructor_body(
                                 class.symbol_id,
                                 constructor,
@@ -418,10 +396,9 @@ impl<'a> HirToMirContext<'a> {
             self.lower_function_body(*symbol_id, hir_func, None, None);
         }
 
-        // Lower globals
-        // Sort globals by symbol ID for deterministic lowering order.
-        // globals is a BTreeMap — unsorted iteration causes non-deterministic
-        // function ID assignment when global initializers create extern functions.
+        // Sort globals by symbol id: unsorted iteration makes function-id
+        // assignment non-deterministic when an initializer registers an extern
+        // function.
         let mut sorted_globals: Vec<_> = hir_module.globals.iter().collect();
         sorted_globals.sort_by_key(|(sid, _)| sid.as_raw());
         for (symbol_id, global) in sorted_globals {
@@ -431,7 +408,6 @@ impl<'a> HirToMirContext<'a> {
         // Generate reflective constructor wrappers for Type.createInstance().
         self.generate_constructor_reflect_wrappers();
 
-        // Generate __vtable_init__ function for class virtual dispatch tables
         if !self.class_vtables.is_empty() || !self.constructor_reflect_wrappers.is_empty() {
             self.generate_vtable_init_function();
         }
@@ -443,12 +419,6 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if self.errors.is_empty() {
-            // eprintln!(
-            //     "  ℹ️  Returning MIR module with {} functions, {} extern_functions",
-            //     self.builder.module.functions.len(),
-            //     self.builder.module.extern_functions.len()
-            // );
-
             Ok(std::mem::replace(
                 &mut self.builder.module,
                 IrModule::new(String::new(), String::new()),

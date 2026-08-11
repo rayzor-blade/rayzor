@@ -23,30 +23,25 @@ use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_logical_and(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
-        // Short-circuit AND: if lhs is false, don't evaluate rhs
-        // Create blocks: eval_rhs, merge
+        // Short-circuit AND: if lhs is false, don't evaluate rhs.
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
-        // Evaluate LHS
         let lhs_val = self.lower_expression(lhs)?;
 
-        // Create false_val BEFORE branching so it's in this block's scope
+        // Build false_val before branching so it lives in this block's scope.
         let false_val = self.builder.build_bool(false)?;
 
-        // Capture the current block BEFORE branching - this is where LHS was evaluated
+        // Capture the block LHS was evaluated in, before branching.
         let lhs_block = self.builder.current_block()?;
 
-        // Branch on LHS: if true, evaluate RHS; if false, skip to merge with false
         self.builder.build_cond_branch(lhs_val, eval_rhs, merge)?;
 
-        // Block for evaluating RHS
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
-        // Merge block with phi node
         self.builder.switch_to_block(merge);
         let result = self.builder.build_phi(merge, IrType::Bool)?;
         // lhs_block is where we came from if LHS was false (short-circuit path)
@@ -59,30 +54,25 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_logical_or(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
-        // Short-circuit OR: if lhs is true, don't evaluate rhs
-        // Create blocks: eval_rhs, merge
+        // Short-circuit OR: if lhs is true, don't evaluate rhs.
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
-        // Evaluate LHS
         let lhs_val = self.lower_expression(lhs)?;
 
-        // Create true_val BEFORE branching so it's in this block's scope
+        // Build true_val before branching so it lives in this block's scope.
         let true_val = self.builder.build_bool(true)?;
 
-        // Capture the current block BEFORE branching - this is where LHS was evaluated
+        // Capture the block LHS was evaluated in, before branching.
         let lhs_block = self.builder.current_block()?;
 
-        // Branch on LHS: if false, evaluate RHS; if true, skip to merge with true
         self.builder.build_cond_branch(lhs_val, merge, eval_rhs)?;
 
-        // Block for evaluating RHS
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
-        // Merge block with phi node
         self.builder.switch_to_block(merge);
         let result = self.builder.build_phi(merge, IrType::Bool)?;
         // lhs_block is where we came from if LHS was true (short-circuit path)
@@ -94,14 +84,13 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
-    /// Lower `Null<prim>` equality. The nullable is a DynamicValue box, so
-    /// the generic path compared the BOX POINTER against the value —
-    /// `var x:Null<Int> = 9; x == 9` was always false. Routes
-    /// Optional<Int|Float|Bool> vs bare prim (either order) and
-    /// Optional vs Optional through null-guarded tag-aware runtime
-    /// compares. Returns None when the shape doesn't apply (caller falls
-    /// through to the generic compare); `x == null` never reaches here
-    /// (HirExprKind::Null operands are excluded at the call site).
+    /// Lower `Null<prim>` equality. The nullable is a DynamicValue box, so the
+    /// generic compare would test the box pointer against the value. Routes
+    /// Optional<Int|Float|Bool> vs bare prim (either order) and Optional vs
+    /// Optional through null-guarded tag-aware runtime compares. Returns None
+    /// when the shape doesn't apply (caller falls through to the generic
+    /// compare); `x == null` never reaches here (HirExprKind::Null operands are
+    /// excluded at the call site).
     pub(crate) fn lower_nullable_prim_eq(
         &mut self,
         op: &HirBinaryOp,
@@ -155,11 +144,11 @@ impl<'a> HirToMirContext<'a> {
         };
         // The null-eq helpers take the Optional operand as a *DynamicValue box
         // pointer. Most Optional<prim> values already are one (a variable, a
-        // user-fn return), but some stdlib calls return a RAW primitive despite
-        // a Null<T> type — e.g. Std.parseInt returns i64 (i64::MIN = null). A raw
-        // value reinterpreted as a pointer and dereferenced by the helper
-        // SIGSEGVs, so box it first (this mirrors what a `var x:Null<T> = ...`
-        // assignment does). Detect "raw" by the register not being a pointer.
+        // user-fn return), but some stdlib calls return a raw primitive despite
+        // a Null<T> type — Std.parseInt returns i64 (i64::MIN = null) — and the
+        // helper would dereference that raw value as a pointer. Detect "raw" by
+        // the register not being a pointer and box it, as `var x:Null<T> = ...`
+        // would.
         let box_if_raw = |me: &mut Self, reg: IrId, inner: Prim| -> Option<IrId> {
             if matches!(me.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
                 return Some(reg);
@@ -243,23 +232,19 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
-        // Null coalescing: lhs ?? rhs
-        // If lhs is non-null, return lhs; otherwise evaluate and return rhs
-        //
-        // Uses intermediary blocks (like ternary) to avoid Cranelift phi issues
-        // when br_if targets a merge block directly.
+        // Intermediary blocks (as for ternary) avoid Cranelift phi issues when
+        // br_if targets a merge block directly.
         let lhs_pass = self.builder.create_block()?;
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
-        // Check if LHS is Optional{primitive} — needs unbox in pass-through
+        // Optional{primitive} needs an unbox on the pass-through path.
         let opt_prim = self.is_optional_primitive(lhs.ty);
 
-        // Evaluate LHS
         let lhs_val = self.lower_expression(lhs)?;
 
-        // Null check: lhs != 0 (null pointers and null values are 0)
-        // Use same type as LHS to avoid type mismatch in comparison
+        // Null check: lhs != 0 (null pointers and null values are 0). The zero
+        // takes the LHS type to avoid a type mismatch in the comparison.
         let lhs_ir_type = self.builder.get_register_type(lhs_val);
         let zero = match lhs_ir_type {
             Some(IrType::I32) => self.builder.build_const(IrValue::I32(0))?,
@@ -269,11 +254,9 @@ impl<'a> HirToMirContext<'a> {
         };
         let is_not_null = self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?;
 
-        // If not null -> lhs_pass block, else -> evaluate rhs
         self.builder
             .build_cond_branch(is_not_null, lhs_pass, eval_rhs)?;
 
-        // LHS pass-through block — unbox if Optional{primitive}
         self.builder.switch_to_block(lhs_pass);
         let lhs_final = if opt_prim {
             // Unbox the boxed primitive: Ptr(U8) → inner type
@@ -335,14 +318,13 @@ impl<'a> HirToMirContext<'a> {
         let lhs_pass_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
-        // Block for evaluating RHS (only when lhs is null)
         self.builder.switch_to_block(eval_rhs);
         let rhs_val = self.lower_expression(rhs)?;
         let rhs_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
-        // Merge block with phi node
-        // When LHS was Optional{primitive}, result type is the unboxed primitive type (RHS type)
+        // When LHS was Optional{primitive}, the result type is the unboxed
+        // primitive type (the RHS type).
         self.builder.switch_to_block(merge);
         let result_type = if opt_prim {
             self.convert_type(rhs.ty)
@@ -374,38 +356,15 @@ impl<'a> HirToMirContext<'a> {
         else_expr: &HirExpr,
         result_ty: Option<TypeId>,
     ) -> Option<IrId> {
-        // Conditional expression: cond ? then : else
-        //
-        // Becomes:
-        //   %cond_val = <evaluate cond>
-        //   br %cond_val, then_block, else_block
-        // then_block:
-        //   %then_val = <evaluate then>
-        //   br merge_block
-        // else_block:
-        //   %else_val = <evaluate else>
-        //   br merge_block
-        // merge_block:
-        //   %result = phi [%then_val, then_block], [%else_val, else_block]
-        //   (plus phi nodes for any variables modified in branches)
-
         let then_block = self.builder.create_block()?;
         let else_block = self.builder.create_block()?;
         let merge_block = self.builder.create_block()?;
 
-        // Snapshot symbol_map before branches
+        // Snapshot symbol_map before branches so each branch can be lowered
+        // against the same starting bindings.
         let symbol_map_before = self.symbol_map.clone();
-        // eprintln!(
-        //     "DEBUG lower_conditional: symbol_map has {} entries before condition",
-        //     symbol_map_before.len()
-        // );
 
-        // Evaluate condition
         let cond_val = self.lower_expression(cond)?;
-        // eprintln!(
-        //     "DEBUG lower_conditional: After evaluating condition, in block {:?}",
-        //     self.builder.current_block()
-        // );
 
         // Branch-phi for effectful Call results.
         //
@@ -508,11 +467,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Branch based on condition
         self.builder
             .build_cond_branch(cond_val, then_block, else_block)?;
 
-        // Then block
         self.builder.switch_to_block(then_block);
         // Rebind effectful-call-bound symbols to the then-branch phi.
         for (sym, then_phi, _) in &branch_phi_rebind {
@@ -527,12 +484,11 @@ impl<'a> HirToMirContext<'a> {
                     then_val = Some(boxed);
                 }
             }
-            // NOTE: branch building deferred until after type harmonization
+            // Branch building is deferred until after type harmonization.
         }
         let then_end_block = self.builder.current_block()?;
         let symbol_map_after_then = self.symbol_map.clone();
 
-        // Else block
         // Reset to before-branch state.
         self.symbol_map = symbol_map_before.clone();
         // Rebind effectful-call-bound symbols to the else-branch phi.
@@ -549,7 +505,7 @@ impl<'a> HirToMirContext<'a> {
                     else_val = Some(boxed);
                 }
             }
-            // NOTE: branch building deferred until after type harmonization
+            // Branch building is deferred until after type harmonization.
         }
         let else_end_block = self.builder.current_block()?;
         let symbol_map_after_else = self.symbol_map.clone();
@@ -574,34 +530,24 @@ impl<'a> HirToMirContext<'a> {
                 );
 
                 // When the conditional's own result type is a concrete scalar,
-                // harmonise DOWN to that scalar instead of boxing the live
-                // branch up to a pointer. The pointer side is a synthesised
-                // null for a missing else (tast_to_hir::make_null_literal) and
-                // is never the value the expression yields; replacing it with a
-                // zero of the scalar type keeps the phi well-typed at no cost.
-                //
-                // Boxing instead produced a SECOND, dead phi fed by
-                // haxe_box_float_ptr, allocating on every execution:
-                // Int8Matmul.quantizeActRow does this three times per row, per
-                // matmul, per token -- 1,876,152 boxes in one generation, none
-                // freed (haxe_box_* is invisible to insert_free.rs).
-                //
-                // Simply SKIPPING the harmonisation is not an option: the phi
-                // then merges f64 with Ptr and segfaults.
-                //
-                // Null<T> cases such as `if (x == null) null else x.field` have
-                // a Dynamic/Null result type, so they keep the boxing path.
+                // harmonise down to that scalar instead of boxing the live branch
+                // up to a pointer: the pointer side is a synthesised null for a
+                // missing else (tast_to_hir::make_null_literal) and is never the
+                // value the expression yields, while boxing it leaves a dead phi
+                // fed by haxe_box_float_ptr that allocates on every execution
+                // (haxe_box_* is invisible to insert_free.rs). Skipping the
+                // harmonisation is not an option — the phi would merge f64 with
+                // Ptr. Null<T> cases such as `if (x == null) null else x.field`
+                // have a Dynamic/Null result type and keep the boxing path.
                 let result_is_scalar = result_ty
                     .and_then(|t| self.type_table.get(t))
                     .map(|t| matches!(t.kind, TypeKind::Float | TypeKind::Int | TypeKind::Bool))
                     .unwrap_or(false);
 
-                // ...and ONLY when the pointer side is literally `null`. A
-                // pointer branch carrying a REAL value (e.g. `x` in
-                // `(x == null) ? 0 : x` where x is Null<Int>) must still be
-                // boxed/unboxed by the existing path: zeroing it there turned a
-                // crash into `nc(9) == 0`, a silent wrong answer, which is worse
-                // than the crash it replaced.
+                // ...and only when the pointer side is literally `null`. A pointer
+                // branch carrying a real value (e.g. `x` in `(x == null) ? 0 : x`
+                // where x is Null<Int>) must keep the box/unbox path; zeroing it
+                // there would silently yield the wrong value.
                 let then_is_null_lit = matches!(then_expr.kind, HirExprKind::Null);
                 let else_is_null_lit = matches!(else_expr.kind, HirExprKind::Null);
 
@@ -641,14 +587,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Per-branch interface wrap for divergent-class conditionals.
-        // When the two branches are DIFFERENT concrete classes upcast to a
-        // shared interface, phi-ing the raw objects and wrapping ONCE downstream
-        // binds every vtable slot to a single branch's class (the then-branch's,
-        // since find_common_supertype returns the first type) — the other
-        // branch's object then dispatches through the wrong method table. Wrap
-        // each branch to the shared interface INSIDE its own block so the phi
-        // merges two already-correct fat pointers.
+        // Per-branch interface wrap for divergent-class conditionals. When the
+        // two branches are different concrete classes upcast to a shared
+        // interface, phi-ing the raw objects and wrapping once downstream binds
+        // every vtable slot to the then-branch's class (find_common_supertype
+        // returns the first type), so the else branch's object dispatches through
+        // the wrong method table. Wrapping inside each branch block makes the phi
+        // merge two already-correct fat pointers.
         let mut branch_iface_wrapped = false;
         if !then_terminated && !else_terminated {
             if let (Some(tv), Some(ev)) = (then_val, else_val) {
@@ -684,67 +629,35 @@ impl<'a> HirToMirContext<'a> {
             self.builder.switch_to_block(else_end_block);
             self.builder.build_branch(merge_block)?;
         }
-        // eprintln!(
-        //     "DEBUG lower_conditional: else_end_block = {:?}, symbol_map has {} entries",
-        //     else_end_block,
-        //     symbol_map_after_else.len()
-        // );
-
-        // If both branches terminated, no merge block needed
+        // Both branches returned/broke/continued: there is no value, and the
+        // merge block would be unreachable.
         if then_terminated && else_terminated {
-            // Both branches returned/broke/continued
-            // No value to return, and we shouldn't create unreachable merge block
             return None;
         }
 
-        // Merge block with phi nodes
         self.builder.switch_to_block(merge_block);
 
         // Find variables that were modified in either branch
         let mut modified_symbols = std::collections::BTreeSet::new();
-        // debug!("Checking for modified symbols");
-        // eprintln!("  symbol_map_before: {} entries", symbol_map_before.len());
-        // eprintln!(
-        //     "  symbol_map_after_then: {} entries",
-        //     symbol_map_after_then.len()
-        // );
-        // eprintln!(
-        //     "  symbol_map_after_else: {} entries",
-        //     symbol_map_after_else.len()
-        // );
 
         for (sym, reg_after_then) in &symbol_map_after_then {
             if symbol_map_before.get(sym) != Some(reg_after_then) {
-                // eprintln!(
-                //     "  Modified in then branch: {:?} (before: {:?}, after: {:?})",
-                //     sym,
-                //     symbol_map_before.get(sym),
-                //     reg_after_then
-                // );
                 modified_symbols.insert(*sym);
             }
         }
         for (sym, reg_after_else) in &symbol_map_after_else {
             if symbol_map_before.get(sym) != Some(reg_after_else) {
-                // eprintln!(
-                //     "  Modified in else branch: {:?} (before: {:?}, after: {:?})",
-                //     sym,
-                //     symbol_map_before.get(sym),
-                //     reg_after_else
-                // );
                 modified_symbols.insert(*sym);
             }
         }
-        // debug!("Found {} modified symbols", modified_symbols.len());
 
         for symbol_id in &modified_symbols {
-            // eprintln!("  Processing symbol {:?}", symbol_id);
             let before_reg = symbol_map_before.get(symbol_id).copied();
             let then_reg = symbol_map_after_then.get(symbol_id).copied();
             let else_reg = symbol_map_after_else.get(symbol_id).copied();
 
-            // Get type from locals table using the "before" register (from variable declaration)
-            // because new registers from assignments don't have local entries
+            // Take the type from the "before" register (the variable declaration):
+            // registers created by assignments have no locals entry.
             let type_lookup_reg = before_reg.or(then_reg).or(else_reg);
             let var_type = match type_lookup_reg.and_then(|r| {
                 self.builder
@@ -752,93 +665,48 @@ impl<'a> HirToMirContext<'a> {
                     .and_then(|f| f.locals.get(&r))
                     .map(|local| local.ty.clone())
             }) {
-                Some(t) => {
-                    // eprintln!("  Found type {:?} for symbol {:?}", t, symbol_id);
-                    t
-                }
+                Some(t) => t,
                 None => {
-                    // eprintln!(
-                    //     "  No type found for symbol {:?} (tried {:?}), skipping",
-                    //     symbol_id, type_lookup_reg
-                    // );
                     continue;
                 }
             };
 
-            // Only create phi nodes for variables that have values from all non-terminated branches
-            // This prevents creating invalid phi nodes for branch-local variables
+            // Only phi variables that have a value from every non-terminated
+            // branch; branch-local variables would produce an invalid phi.
             let has_then_value = !then_terminated && (then_reg.is_some() || before_reg.is_some());
             let has_else_value = !else_terminated && (else_reg.is_some() || before_reg.is_some());
 
-            // Skip if we can't provide values from all active branches
             if (!then_terminated && !has_then_value) || (!else_terminated && !has_else_value) {
-                // eprintln!("  Skipping phi for {:?} - not in all branches", symbol_id);
                 continue;
             }
 
             let sample_reg = then_reg.or(else_reg).or(before_reg).unwrap();
 
-            // Create phi node
-            // eprintln!(
-            //     "  Creating phi for {:?} with type {:?}",
-            //     symbol_id, var_type
-            // );
             let phi_reg = match self.builder.build_phi(merge_block, var_type.clone()) {
                 Some(r) => r,
                 None => {
-                    // eprintln!("  Failed to create phi node");
                     continue;
                 }
             };
-            // eprintln!("  Created phi node {:?}", phi_reg);
 
-            // Add incoming edges for non-terminated branches
-            // IMPORTANT: Only add phi incoming if the variable exists in that branch
-            // Don't use variables from other branches (causes domination errors)
-            // eprintln!(
-            //     "  Adding phi incoming: then_terminated={}, else_terminated={}",
-            //     then_terminated, else_terminated
-            // );
+            // Add incoming edges for non-terminated branches.
             if !then_terminated {
-                // Use then_reg if it exists, otherwise before_reg
-                // Do NOT use else_reg here - it would violate SSA dominance
+                // then_reg if it exists, otherwise before_reg; else_reg here would
+                // violate SSA dominance.
                 if let Some(val) = then_reg.or(before_reg) {
-                    // eprintln!(
-                    //     "  Calling add_phi_incoming(merge={:?}, phi={:?}, from={:?}, val={:?})",
-                    //     merge_block, phi_reg, then_end_block, val
-                    // );
                     self.builder
                         .add_phi_incoming(merge_block, phi_reg, then_end_block, val);
-                    // {
-                    //     Some(()) => eprintln!("  Successfully added phi incoming from then"),
-                    //     None => eprintln!(
-                    //         "  WARNING: Failed to add phi incoming from then block {:?}",
-                    //         then_end_block
-                    //     ),
-                    // }
                 }
             }
             if !else_terminated {
-                // Use else_reg if it exists, otherwise before_reg
-                // Do NOT use then_reg here - it would violate SSA dominance
+                // else_reg if it exists, otherwise before_reg; then_reg here would
+                // violate SSA dominance.
                 if let Some(val) = else_reg.or(before_reg) {
-                    // eprintln!(
-                    //     "  Calling add_phi_incoming(merge={:?}, phi={:?}, from={:?}, val={:?})",
-                    //     merge_block, phi_reg, else_end_block, val
-                    // );
                     self.builder
                         .add_phi_incoming(merge_block, phi_reg, else_end_block, val);
-                    // {
-                    //     Some(()) => eprintln!("  Successfully added phi incoming from else"),
-                    //     None => eprintln!(
-                    //         "  WARNING: Failed to add phi incoming from else block {:?}",
-                    //         else_end_block
-                    //     ),
-                    // }
                 }
             }
 
-            // Register phi as local
             if let Some(func) = self.builder.current_function_mut() {
                 if let Some(local) = func.locals.get(&sample_reg).cloned() {
                     func.locals.insert(
@@ -854,30 +722,19 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Update symbol map to use phi
             self.symbol_map.insert(*symbol_id, phi_reg);
         }
 
         // Create phi for expression result if both branches returned values
         let mut result_phi = None;
 
-        // Asymmetric case: ONE branch terminated (throw / return /
-        // unreachable infinite loop) while the OTHER produced a
-        // value. The if-as-expression still has a value at the merge
-        // point — it's just the non-terminated branch's value
-        // unconditionally, because the terminated branch never
-        // reaches merge. Without this, e.g.
-        //
-        //   var x:Int = if (cond) 42 else throw "...";
-        //
-        // returns `None` from `lower_conditional_typed`, and the
-        // surrounding `return x` becomes `Return(None)` in MIR —
-        // which the cranelift backend rejects for a typed-return
-        // function ("Return with no value"). The merge block has a
-        // single predecessor (the value branch), so no phi is
-        // needed; reuse the live value directly. Same applies for
-        // `return switch { … case _: throw … };` where the throw is
-        // the if-chain's terminal else.
+        // Asymmetric case: one branch terminated (throw / return / unreachable
+        // infinite loop) while the other produced a value. The if-as-expression
+        // still has that value at the merge point, unconditionally, and the merge
+        // block has a single predecessor — reuse the live value rather than
+        // building a phi. Returning None would lower
+        // `var x:Int = if (cond) 42 else throw "..."` to `Return(None)`, which
+        // the cranelift backend rejects for a typed-return function.
         if !then_terminated && else_terminated && then_val.is_some() {
             return then_val;
         }
@@ -885,12 +742,12 @@ impl<'a> HirToMirContext<'a> {
             return else_val;
         }
 
-        // Only create result phi if BOTH branches return values (for expression-style ifs)
-        // If only one returns a value, that's a type error - skip result phi
+        // Expression-style ifs only get a result phi when both branches yield a
+        // value; only one yielding a value is a type error.
         if then_val.is_some() && else_val.is_some() {
-            // Determine result type from the ACTUAL register types after harmonization,
-            // not the original HIR type (which may be pre-boxing, e.g. I32 before the
-            // type harmonization boxed it to Ptr(U8) to match a null branch).
+            // Take the result type from the register types after harmonization,
+            // not the original HIR type (which may be pre-boxing, e.g. I32 before
+            // harmonization boxed it to Ptr(U8) to match a null branch).
             let result_type = if let Some(tv) = then_val {
                 self.builder
                     .get_register_type(tv)
@@ -899,12 +756,8 @@ impl<'a> HirToMirContext<'a> {
                 self.convert_type(then_expr.ty)
             };
             let result = match self.builder.build_phi(merge_block, result_type.clone()) {
-                Some(r) => {
-                    // debug!("Created result phi {:?}", r);
-                    r
-                }
+                Some(r) => r,
                 None => {
-                    // debug!("Failed to create result phi");
                     return None;
                 }
             };
@@ -919,10 +772,6 @@ impl<'a> HirToMirContext<'a> {
                 let val = then_val.unwrap(); // Safe because we checked is_some() above
                 self.builder
                     .add_phi_incoming(merge_block, result, then_end_block, val);
-                // {
-                //     Some(()) => debug!("  Success"),
-                //     None => debug!("  FAILED!"),
-                // }
             }
             if !else_terminated {
                 let val = else_val.unwrap(); // Safe because we checked is_some() above
@@ -934,9 +783,8 @@ impl<'a> HirToMirContext<'a> {
             // was recovered (tracked in `interface_call_result_types`) and they
             // agree, the merged result is that same concrete type. Without this
             // a `cond ? iface.a() : iface.b()` result stays erased to Dynamic,
-            // and a downstream `var x:T = …` unboxes a raw pointer (→ SIGSEGV
-            // for object returns). Require agreement so a mixed merge is never
-            // mislabelled.
+            // and a downstream `var x:T = …` unboxes a raw pointer. Require
+            // agreement so a mixed merge is never mislabelled.
             if let (Some(tv), Some(ev)) = (then_val, else_val) {
                 if let (Some(&t_ty), Some(&e_ty)) = (
                     self.interface_call_result_types.get(&tv),

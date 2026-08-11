@@ -52,32 +52,22 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Check if this symbol is a function reference (local or external)
         if let Some(func_id) = self.get_function_id(symbol) {
-            // Use FunctionRef (not build_function_ptr / IrValue::Function).
-            // The cranelift backend's CallIndirect path unifies on
-            // closure objects: it loads fn_ptr from *(reg + 0) and
-            // env_ptr from *(reg + 8). FunctionRef wraps the bare
-            // function in exactly that {fn_ptr, env_ptr=null}
-            // layout, so an indirect call against `var f = static_fn`
-            // dereferences valid pointers. build_function_ptr only
-            // produces the raw fn_addr — an indirect call then
-            // reads the first 16 bytes of the function's code as
-            // "fn_ptr, env_ptr" and SIGSEGVs.
+            // FunctionRef, not build_function_ptr / IrValue::Function: the
+            // cranelift CallIndirect path unifies on closure objects, loading
+            // fn_ptr from *(reg + 0) and env_ptr from *(reg + 8). FunctionRef
+            // wraps the bare function in exactly that {fn_ptr, env_ptr=null}
+            // layout; a raw fn_addr would instead be read as those two fields
+            // out of the function's own code.
             return self.builder.build_function_ref(func_id);
         }
 
-        // IMPORTANT: If we're inside a lambda and this is a captured variable,
-        // we must RELOAD from the environment on each access. This ensures that:
-        // 1. Updates from other threads (e.g., main thread setting `ready = true`)
-        //    are visible to the lambda (thread reading `ready` in a while loop)
-        // 2. Mutable captured variables have proper by-reference semantics
-        //
-        // Without this reload, the captured variable would be cached in an SSA register
-        // at lambda entry and never refreshed, causing hangs in condition variable patterns.
+        // Inside a lambda, a captured variable must be RELOADED from the
+        // environment on every access: a register cached at lambda entry is
+        // never refreshed, so writes from other threads stay invisible and
+        // mutable captures lose their by-reference semantics.
         if let Some(ref env_layout) = self.current_env_layout {
             if let Some(_field) = env_layout.find_field(*symbol) {
-                // This is a captured variable - reload from environment
                 let env_ptr = IrId::new(0); // First parameter in lambda is environment pointer
                 let loaded = env_layout.load_field(&mut self.builder, env_ptr, *symbol)?;
                 debug!(
@@ -90,14 +80,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Try to get from symbol_map first (local variables, parameters)
-        // SPECIAL CASE: If this is a "this" variable by name but not by the synthetic SymbolId(0),
-        // redirect the lookup to use the synthetic `this` symbol. This handles implicit `this`
-        // references created during AST lowering for field access in class methods/constructors.
+        // A `this` variable that is not the synthetic SymbolId(0) comes from an
+        // implicit `this` created during AST lowering (field access in a method
+        // or constructor); redirect it so the symbol_map lookup finds the
+        // receiver.
         let lookup_symbol = if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
             if let Some(name) = self.string_interner.get(sym_info.name) {
                 if name == "this" && *symbol != SymbolId::from_raw(0) {
-                    // Redirect to synthetic `this` symbol
                     SymbolId::from_raw(0)
                 } else {
                     *symbol
@@ -109,7 +98,6 @@ impl<'a> HirToMirContext<'a> {
             *symbol
         };
 
-        // Check direct SymbolId match against global_symbol_map first
         if let Some(&gid) = self.global_symbol_map.get(&lookup_symbol) {
             let global_type = self
                 .builder
@@ -136,16 +124,14 @@ impl<'a> HirToMirContext<'a> {
                 let loc = self.convert_source_location(&expr.source_location);
                 let _ = self.builder.build_check_live(reg, loc);
             }
-            // Check if we need to convert the type
-            // This handles cases where captured variables are stored as i64 in closure environment
-            // but need to be used as their original type (e.g., i32)
+            // Captured variables are stored as i64 in the closure environment
+            // and need casting back to their original type (e.g. i32).
             if let Some(actual_type) = self.builder.get_register_type(reg) {
                 let expected_type = self.convert_type(expr.ty);
 
-                // If types don't match, consider adding a cast instruction
-                // CRITICAL: Do NOT cast from Ptr to smaller types (I32, etc.)
-                // This can happen when generic type resolution fails (e.g., Thread<T> where T is unresolved)
-                // and the type system incorrectly infers I32 for a class instance pointer
+                // Never cast a Ptr down to a smaller type: when generic type
+                // resolution fails (e.g. an unresolved `Thread<T>`) the type
+                // system infers I32 for what is a class instance pointer.
                 if actual_type != expected_type {
                     // Skip casts in these cases to preserve actual type:
                     // 1. Actual is pointer, expected is scalar (would truncate pointer)
@@ -221,11 +207,9 @@ impl<'a> HirToMirContext<'a> {
                 Some(reg)
             }
         } else {
-            // Symbol not in local scope - check if it's a class field
-            // If so, we need to access it via 'this' pointer
-
-            // First check field_index_map - this is more reliable than SymbolKind::Field
-            // because field symbols may be registered with SymbolKind::Variable
+            // Not in local scope: it may be a class field reached via `this`.
+            // field_index_map is more reliable than SymbolKind::Field because
+            // field symbols may be registered with SymbolKind::Variable.
             let field_entry = self.field_index_map.get(symbol).copied().or_else(|| {
                 // Name-based fallback: SymbolIds differ between compilation contexts
                 // (e.g., ArrayIterator.current in stdlib vs user code)
@@ -243,7 +227,6 @@ impl<'a> HirToMirContext<'a> {
             if let Some((field_class_type, _field_idx)) = field_entry {
                 // Get 'this' pointer (SymbolId(0) is the special 'this' mapping)
                 if let Some(&this_reg) = self.symbol_map.get(&SymbolId::from_raw(0)) {
-                    // Use current_this_type if available, otherwise use field_class_type
                     let owner_type = self.current_this_type.unwrap_or(field_class_type);
                     return self.lower_field_access(this_reg, *symbol, owner_type, expr.ty);
                 }
@@ -290,7 +273,6 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    // If we can't find the variant info, try to get the discriminant from the type
                     debug!("EnumVariant {:?} - could not find discriminant", symbol);
                 }
             }
@@ -312,10 +294,9 @@ impl<'a> HirToMirContext<'a> {
                     "[GLOBAL ACCESS] Found global {:?} -> {:?}",
                     symbol, global_id
                 );
-                // Which global id does this READ target? Compare against the
-                // id the owning module's __init__ STORES to: if they differ,
-                // the read and the initialiser are talking about different
-                // slots and the value will come back empty/zero.
+                // Reports the global id this READ targets; it must match the id
+                // the owning module's __init__ STORES to, or read and
+                // initialiser are addressing different slots.
                 if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                     let nm = self
                         .symbol_table
@@ -331,8 +312,6 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or_else(|| "<not-in-table>".to_string());
                     eprintln!("[globals] READ {} -> @g{} ({})", nm, global_id.0, gname);
                 }
-                // Load the global variable's value
-                // First get the global's type from the module
                 let global_type = self
                     .builder
                     .module
@@ -348,19 +327,12 @@ impl<'a> HirToMirContext<'a> {
                 .symbol_table
                 .get_symbol(*symbol)
                 .and_then(|s| self.string_interner.get(s.name));
-            // FQN-FIRST. `global_symbol_map` is per-module and never
-            // seeded from imports, so a static declared in another module
-            // always misses the exact-SymbolId lookup above and falls into
-            // the name scans below — which only ever search THIS module's
-            // globals, miss too, and return None. The caller then yields an
-            // empty value with no diagnostic: `Consts.PLAIN_STR` from
-            // another module reads as "".
-            //
-            // Imported globals ARE merged into `module.globals` (see the
-            // renumbering in compilation.rs), and `IrGlobal::name` carries
-            // the qualified form, so an exact qualified-name match resolves
-            // them without widening to bare names. See feedback: FQN-first,
-            // bare-name lookup IS the defect.
+            // FQN-first. `global_symbol_map` is per-module and never seeded
+            // from imports, so a static declared in another module always
+            // misses the exact-SymbolId lookup above. Imported globals ARE
+            // merged into `module.globals` (renumbered in compilation.rs) and
+            // `IrGlobal::name` carries the qualified form, so match that
+            // exactly rather than widening to bare names.
             let qual = self
                 .symbol_table
                 .get_symbol(*symbol)
@@ -377,11 +349,9 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // Not in THIS module's table — try modules already lowered.
                 if let Some((gid, gty)) = self.external_globals.get(qn).cloned() {
-                    // Type comes from the DEFINING module: this module's
-                    // table does not contain the global, so looking it up
-                    // locally yields IrType::Any and a String loaded as an
-                    // untyped slot prints as "<unknown type N>" and then
-                    // segfaults.
+                    // Type comes from the DEFINING module: this module's table
+                    // has no entry, so a local lookup would yield IrType::Any
+                    // and load e.g. a String as an untyped slot.
                     if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                         eprintln!(
                             "[globals] RESOLVED-EXTERNAL {} -> @g{} : {:?}",
@@ -430,10 +400,10 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
-                // Suffix matching is a LOOSENING step: `.foo` matches any
-                // class's `foo`. Kept as a bridge over SymbolId drift, but
-                // announced — if this is what resolved the read, the
-                // qualified name was unavailable and the result is a guess.
+                // Suffix matching LOOSENS resolution: `.foo` matches any
+                // class's `foo`. Kept as a bridge over SymbolId drift, and
+                // announced — a hit here means the qualified name was
+                // unavailable and the result is a guess.
                 for global in self.builder.module.globals.values() {
                     if global.name.ends_with(&format!(".{}", name_str)) || global.name == name_str {
                         if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
@@ -446,14 +416,10 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
             }
-            // TOTAL MISS. Previously a `debug!` (off by default) and a
-            // silent None, which the caller turns into an empty value —
-            // the read succeeds and yields "" or 0. Say so: a cross-module
-            // static that resolves to nothing is a defect, not a default.
-            // Gated: this also fires for benign stdlib internals (`i64`,
-            // `base`, ...) that are resolved by other means downstream, so
-            // always-on would bury the real cases in noise. It is the tool
-            // to reach for when a cross-module read yields "" or 0.
+            // Total miss: the caller turns None into an empty value, so a
+            // cross-module static that resolves to nothing reads as "" or 0.
+            // Gated because benign stdlib internals (`i64`, `base`, ...) also
+            // land here and are resolved by other means downstream.
             if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
                 eprintln!(
                     "[globals] unresolved variable {:?} (name={:?}, qualified={:?}) \

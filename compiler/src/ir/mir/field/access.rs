@@ -34,34 +34,20 @@ impl<'a> HirToMirContext<'a> {
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
         let field_ty = resolved_field_ty.unwrap_or(field_ty);
 
-        // SPECIAL CASE: Auto-unbox Dynamic for field access
-        // If receiver is Dynamic, automatically unbox to get the actual object pointer
+        // A Dynamic receiver is unboxed to the actual object pointer.
         let (obj, receiver_ty) = {
             let type_table = self.type_table;
             let obj_ir_type = self.builder.get_register_type(obj);
             if let Some(ty) = type_table.get(receiver_ty) {
                 if matches!(ty.kind, TypeKind::Dynamic) {
-                    // Cross-context iface dispatch fallback: when the receiver's
-                    // HIR type is `Dynamic` (interface method return type wasn't
-                    // resolved cross-file) but the MIR value is already a raw
-                    // pointer to a stdlib reference type (HaxeArray, HaxeString,
-                    // Bytes), the unbox-then-class-or-reflect path below treats
-                    // those bytes as a `DynamicValue` header and SIGBUSes.
-                    //
-                    // Check the stdlib mapping by field name against the common
-                    // reference classes first. If `length` matches `Array.length`,
-                    // call `array_length` directly with the raw pointer — the
-                    // runtime reads `HaxeArray.len` at a fixed offset and works.
-                    //
-                    // Class instances retain their `__type_id` header; for those,
-                    // `field_exists_in_any_class` further down handles dispatch
-                    // correctly after unboxing.
-                    //
-                    // A receiver register already typed String is a RAW
-                    // HaxeString that flowed out of a typed producer (e.g.
-                    // `string_concat`) under an erased HIR type — not a
-                    // DynamicValue box. The unbox+reflect path below walks
-                    // garbage; dispatch the known property directly.
+                    // A `Dynamic` HIR type does not imply a boxed DynamicValue: a
+                    // raw pointer to a stdlib reference type (HaxeString,
+                    // HaxeArray, Bytes) can flow here from a typed producer under
+                    // an erased type, and the unbox-then-class-or-reflect path
+                    // below would read those bytes as a `DynamicValue` header.
+                    // Dispatch known reference-class properties by name first;
+                    // class instances retain their `__type_id` header and are
+                    // handled by `field_exists_in_any_class` after unboxing.
                     if matches!(&obj_ir_type, Some(IrType::String))
                         || matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(inner.as_ref(), IrType::String))
                     {
@@ -115,7 +101,6 @@ impl<'a> HirToMirContext<'a> {
 
                             let field_in_class = self.field_exists_in_any_class(field);
 
-                            // Unbox to get the actual object pointer from DynamicValue*
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                             let unbox_func = self.get_or_register_extern_function(
                                 "haxe_unbox_reference_ptr",
@@ -160,7 +145,6 @@ impl<'a> HirToMirContext<'a> {
                         return self.raw_anon_reflect_field_read(obj, field, field_ty);
                     }
 
-                    // Unbox to get the actual object pointer
                     let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                     let unbox_func_id = self.get_or_register_extern_function(
                         "haxe_unbox_reference_ptr",
@@ -171,26 +155,22 @@ impl<'a> HirToMirContext<'a> {
                         self.builder
                             .build_call_direct(unbox_func_id, vec![obj], ptr_u8.clone())?;
 
-                    // Get the actual class type from the field's class
-                    // The field_index_map tells us which class this field belongs to
-                    // For Dynamic types, the field symbol may be a newly created placeholder,
-                    // so we need to look up by field name instead
+                    // For a Dynamic receiver the field symbol may be a freshly
+                    // created placeholder, so fall back to a name lookup.
                     let (actual_type, _resolved_field) = if let Some(&(class_type_id, _field_idx)) =
                         self.field_index_map.get(&field)
                     {
                         (class_type_id, field)
                     } else {
-                        // Field not found by SymbolId - try looking up by name
-                        // This handles Dynamic field access where a new symbol was created
+                        // Dynamic field access can create a fresh symbol, so match
+                        // by name when the SymbolId is not in field_index_map.
                         let field_name = self.symbol_table.get_symbol(field).map(|s| s.name);
 
                         if let Some(name) = field_name {
-                            // Search for any field with the same name in field_index_map
                             let mut found = None;
                             for (sym, &(class_ty, _idx)) in &self.field_index_map {
                                 if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                     if sym_info.name == name {
-                                        // Get the field's actual type from the symbol
                                         let resolved_field_ty = sym_info.type_id;
                                         found = Some((class_ty, *sym, resolved_field_ty));
                                         break;
@@ -199,7 +179,6 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             if let Some((class_ty, resolved_sym, resolved_field_ty)) = found {
-                                // Early return with the correct field symbol AND correct field type
                                 return self.lower_field_access(
                                     unboxed_obj,
                                     resolved_sym,
@@ -207,9 +186,8 @@ impl<'a> HirToMirContext<'a> {
                                     resolved_field_ty,
                                 );
                             } else {
-                                // Dynamic field READ fallback via Reflect API.
-                                // Safe: field_index_map name-match failed, so no class has this field.
-                                // Only anonymous objects (typed as Dynamic) reach here.
+                                // The name match failed, so no class has this
+                                // field: only anonymous objects reach here.
                                 return self.dynamic_reflect_field_read(
                                     unboxed_obj,
                                     field,
@@ -221,8 +199,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     };
 
-                    // If we reach here, we couldn't resolve the field - fall through to normal handling
-                    // This shouldn't happen for valid Dynamic field access, but provides a fallback
+                    // Field unresolved — fall through to normal handling.
                     (unboxed_obj, actual_type)
                 } else {
                     (obj, receiver_ty)
@@ -232,23 +209,19 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        // SPECIAL CASE: Check if this is a property access on a @:coreType extern class
-        // For example, Array.length should map to haxe_array_length() runtime call
-        // These classes have no actual fields - all access must go through runtime functions
-        //
-        // IMPORTANT: Skip this check if the field is a known user class field.
-        // Without this guard, brute-force fallback in get_stdlib_runtime_info can match
-        // user fields to unrelated stdlib methods with the same bare name (e.g.,
-        // ArrayIterator.current matched to Thread.current → sys_thread_current).
-        // When receiver type is Placeholder (unresolved extern class like rayzor.Bytes),
-        // never consider it a known user field — it must go through stdlib dispatch.
+        // @:coreType extern classes have no real fields; property access maps to
+        // a runtime call (Array.length → haxe_array_length). Gated on
+        // is_known_user_field: get_stdlib_runtime_info also matches by bare name
+        // and would bind a user field to an unrelated stdlib method. A
+        // Placeholder receiver (unresolved extern class such as rayzor.Bytes) is
+        // never a user field and must go through stdlib dispatch.
         let receiver_is_placeholder = {
             let type_table = self.type_table;
             type_table
                 .get(receiver_ty)
                 .map_or(false, |t| matches!(t.kind, TypeKind::Placeholder { .. }))
         };
-        // Existence PROBE only (gates stdlib property dispatch): ambiguity
+        // Existence probe only (gates stdlib property dispatch): ambiguity
         // still means "a user field of this name exists" — the erroring
         // resolver is reserved for callers that consume the slot.
         let is_known_user_field = !receiver_is_placeholder
@@ -280,17 +253,12 @@ impl<'a> HirToMirContext<'a> {
                     runtime_func
                 );
 
-                // Determine result type based on whether it returns a primitive or complex type
-                // If needs_out_param is false and has_return is true, it returns a primitive (i32/i64/f64)
-                // Otherwise it returns a complex type (Ptr) or void
                 let result_type = if !runtime_call.needs_out_param && runtime_call.has_return {
-                    // Returns a primitive - get the actual primitive type from field_ty
                     let field_kind = {
                         let type_table = self.type_table;
                         type_table.get(field_ty).map(|t| t.kind.clone())
                     };
 
-                    // Map TAST primitive types to IR types correctly
                     match field_kind {
                         Some(crate::tast::TypeKind::Int) => IrType::I32,
                         Some(crate::tast::TypeKind::Float) => IrType::F64,
@@ -304,7 +272,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 } else {
-                    // Returns a complex type or void
                     self.convert_type(field_ty)
                 };
 
@@ -316,9 +283,8 @@ impl<'a> HirToMirContext<'a> {
                     runtime_call.has_return
                 );
 
-                // Generate a call to the runtime property getter
-                // Property getters take the object as the only parameter
-                // Use explicit Ptr(Void) type for opaque stdlib objects (Array, String, etc.)
+                // Property getters take the object as their only parameter; opaque
+                // stdlib objects (Array, String, ...) pass as Ptr(Void).
                 let param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
                 let runtime_func_id = self.get_or_register_extern_function(
                     &runtime_func,
@@ -326,12 +292,10 @@ impl<'a> HirToMirContext<'a> {
                     result_type.clone(),
                 );
 
-                // Call the property getter with just the object
                 let result_reg =
                     self.builder
                         .build_call_direct(runtime_func_id, vec![obj], result_type.clone());
 
-                // DEBUG: Check actual type of result register
                 if let Some(reg) = result_reg {
                     if let Some(reg_type) = self.builder.get_register_type(reg) {
                         debug!(
@@ -353,17 +317,15 @@ impl<'a> HirToMirContext<'a> {
                     field_name_debug, field, receiver_ty
                 );
             }
-        } // end if !is_known_user_field
+        }
 
-        // Check if this is a property with a custom getter
-        // Try direct SymbolId lookup first, then fall back to name-based matching
+        // Property with a custom getter: SymbolId lookup first, then by name.
         let mut property_info_owned = self.property_access_map.get(&field).cloned();
         if property_info_owned.is_none() {
             // Name-based fallback: SymbolIds may differ between import and user modules.
             // Prefer entries with `Method(...)` getters over `Default` — orphan entries
             // from prior BLADE cache loads (with empty class_name and Default getter)
             // can shadow the real definition when iteration order surfaces them first.
-            // See bugs_known.md for the StringBuf.length cross-test contamination case.
             if let Some(field_name) = self.symbol_table.get_symbol(field).map(|s| s.name) {
                 // Keep the name-based match from crossing class boundaries: a
                 // candidate whose owner class is known to differ from the receiver's
@@ -405,8 +367,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
-                // A candidate whose owner is POSITIVELY confirmed to be the
-                // receiver's class beats unconfirmed ones.
+                // A candidate whose owner is confirmed to be the receiver's class
+                // beats unconfirmed ones.
                 if let Some(recv) = receiver_class_name.as_ref() {
                     let confirmed: Vec<_> = method_matches
                         .iter()
@@ -467,7 +429,6 @@ impl<'a> HirToMirContext<'a> {
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
                 crate::tast::PropertyAccessor::Method(getter_method_name) => {
-                    // Look up the getter method by name in function_map and external_function_map
                     let getter_func_id = self
                         .function_map
                         .iter()
@@ -552,9 +513,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // ANONYMOUS OBJECT FIELD ACCESS
-        // If receiver is an anonymous type (or a typedef alias to one),
-        // use rayzor_anon_get_field_by_index
+        // An anonymous receiver (or a typedef alias to one) reads through
+        // rayzor_anon_get_field_by_index.
         {
             let mut resolved_receiver_ty = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table;
@@ -562,15 +522,12 @@ impl<'a> HirToMirContext<'a> {
                 type_table.get(resolved_receiver_ty).map(|t| &t.kind),
                 Some(TypeKind::Anonymous { .. })
             );
-            // Cross-module: a structural typedef return (e.g.
-            // `function load():LoadedModel` where
-            // `typedef LoadedModel = {model:..., tokenizer:..., metadata:...}`)
-            // can decay to a synthetic Class carrying the typedef's qualified
-            // name instead of resolving to its real Anonymous target — no
-            // Placeholder involved, so `resolve_through_aliases` never sees
-            // it. Detect that pattern (a Class with no fields of its own) and
-            // recover the target by finding a same-named TypeAlias whose
-            // target IS Anonymous elsewhere in the shared type table.
+            // Cross-module, a structural typedef return can decay to a synthetic
+            // Class carrying the typedef's qualified name instead of resolving to
+            // its Anonymous target; no Placeholder is involved, so
+            // `resolve_through_aliases` never sees it. Detect that shape (a Class
+            // with no fields of its own) and recover the target from a same-named
+            // TypeAlias whose target is Anonymous.
             if !is_anon {
                 if let Some(TypeKind::Class { symbol_id, .. }) =
                     type_table.get(resolved_receiver_ty).map(|t| &t.kind)
@@ -596,7 +553,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             if is_anon {
-                // Get field name and find its sorted index + actual type from the anonymous struct
                 let field_name = self
                     .symbol_table
                     .get_symbol(field)
@@ -604,15 +560,14 @@ impl<'a> HirToMirContext<'a> {
                     .map(|s| s.to_string());
 
                 if let Some(field_name) = field_name {
-                    // Get all anonymous fields, sort them, and find both the sorted index
-                    // AND the actual field type (not the possibly-Dynamic expr type)
+                    // Anonymous fields are addressed by their name-sorted position;
+                    // take the declared type, not the possibly-Dynamic expr type.
                     let sorted_result = if let Some(ty_info) = type_table.get(resolved_receiver_ty)
                     {
                         if let TypeKind::Anonymous {
                             fields: anon_fields,
                         } = &ty_info.kind
                         {
-                            // Build (name, type_id) pairs and sort by name
                             let mut named_fields: Vec<(String, TypeId)> = anon_fields
                                 .iter()
                                 .filter_map(|f| {
@@ -635,7 +590,6 @@ impl<'a> HirToMirContext<'a> {
                     };
 
                     if let Some((sorted_idx, actual_field_ty)) = sorted_result {
-                        // Emit: rayzor_anon_get_field_by_index(handle, sorted_idx) -> u64
                         let anon_get_id = self.get_or_register_extern_function(
                             "rayzor_anon_get_field_by_index",
                             vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
@@ -649,45 +603,32 @@ impl<'a> HirToMirContext<'a> {
                             IrType::I64,
                         )?;
 
-                        // Convert the raw u64 back to the field's actual type
-                        // Use the anonymous struct's field type (not the expression-level type
-                        // which may be Dynamic)
+                        // Coerce with the struct's field type; the expression-level
+                        // type may be Dynamic.
                         return self.coerce_from_i64(raw_val, actual_field_ty);
                     }
                 }
             }
         }
 
-        // Look up the field index from our field_index_map
-        // Also capture the actual field type from the symbol table for correct IR type resolution.
-        // The passed-in field_ty may be Dynamic when the TAST couldn't resolve the field type
-        // (e.g., forward-referenced classes in the same file).
+        // The passed-in field_ty may be Dynamic when the TAST could not resolve
+        // the field (e.g. forward-referenced classes in the same file), so also
+        // capture the declared type from the symbol table.
         let (class_type_id, field_index, actual_field_ty) = match self
             .field_index_map
             .get(&field)
             .copied()
         {
             Some((class_ty, idx)) => {
-                // The SymbolId is a GLOBAL monotonic counter, so any stdlib
-                // member added anywhere shifts every later id; an imported
-                // receiver's field id can then ALIAS a different class's
-                // field_index_map entry and GEP the wrong offset (SIGSEGV in
-                // cross-module dispatch). When the looked-up owner class does
-                // not equal the receiver, it is either an inherited field
-                // (fine) or a cross-context collision (wrong). Cross-check with
-                // the drift-proof name+receiver-type probe (no E0803) and
-                // override only on a UNIQUE disagreement — a collision. For
-                // inherited fields the probe yields None/Ambiguous, so the
-                // SymbolId result stands.
-                // A drifted id can alias a DIFFERENT class's entry OR a
-                // different field of the SAME class (wrong index but matching
-                // class), so gating on class mismatch is insufficient. The
-                // name+receiver probe is the authoritative slot (by field name,
-                // disambiguated by the stable receiver type); prefer its unique
-                // result whenever it resolves, and fall back to the SymbolId
-                // fast path only when the probe is None/Ambiguous (e.g.
-                // inherited fields the probe does not attribute to the
-                // receiver's own class). The probe never emits E0803.
+                // SymbolIds come from a global monotonic counter, so an imported
+                // receiver's field id can alias another field_index_map entry —
+                // a different class, or a different field of the same class — and
+                // GEP the wrong offset. The name + receiver-type probe is the
+                // authoritative slot (field name, disambiguated by the stable
+                // receiver type), so prefer its unique result and keep the
+                // SymbolId fast path only when the probe is None/Ambiguous (e.g.
+                // inherited fields it cannot attribute to the receiver's own
+                // class). The probe never emits E0803.
                 let mut chosen = (class_ty, idx);
                 let mut probe_tag = "no-name";
                 if let Some(fname) = self.symbol_table.get_symbol(field).map(|s| s.name) {
@@ -746,8 +687,8 @@ impl<'a> HirToMirContext<'a> {
                 (chosen.0, chosen.1, sym_type)
             }
             None => {
-                // Fallback: Try to find field by name instead of SymbolId
-                // This handles cases where the same field has different SymbolIds in different scopes
+                // The same field carries different SymbolIds in different scopes,
+                // so fall back to a name lookup.
                 let field_name = self
                     .symbol_table
                     .get_symbol(field)
@@ -756,13 +697,12 @@ impl<'a> HirToMirContext<'a> {
 
                 let field_name_str = self.string_interner.get(field_name).unwrap_or("<unknown>");
 
-                // Use helper that disambiguates by receiver type when multiple classes
-                // have the same field name (e.g., StringBuf.length vs List.length)
+                // Disambiguates by receiver type when several classes share a field
+                // name (StringBuf.length vs List.length).
                 let found_result = self
                     .resolve_field_index_by_name(field_name, receiver_ty)
                     .map(|(class_ty, idx)| {
                         let sym_type = {
-                            // Find the symbol in field_index_map that matches this class_ty + idx
                             let mut st = field_ty;
                             for (sym, &(cty, cidx)) in &self.field_index_map {
                                 if cty == class_ty && cidx == idx {
@@ -777,19 +717,16 @@ impl<'a> HirToMirContext<'a> {
                         (class_ty, idx, sym_type)
                     });
 
-                // Fallback: class_instance_fields lookup via register_class_hints
-                // This handles derive trait returns (e.g. clone()) where the receiver's
-                // HIR type is Dynamic but the register has a class hint set.
+                // Derive-trait returns (e.g. clone()) leave the receiver's HIR type
+                // Dynamic but set a class hint on the register.
                 let found_result = found_result.or_else(|| {
                     let class_hint = self.register_class_hints.get(&obj)?;
-                    // Find the class SymbolId matching this hint name
                     for (sym_id, fields) in &self.class_instance_fields {
                         let sym_name = self
                             .symbol_table
                             .get_symbol(*sym_id)
                             .and_then(|s| self.string_interner.get(s.name));
                         if sym_name == Some(class_hint.as_str()) {
-                            // Search for our field by name in this class's fields
                             for &(f_sym, f_type, gep_idx) in fields {
                                 let f_name = self
                                     .symbol_table
@@ -828,23 +765,19 @@ impl<'a> HirToMirContext<'a> {
                 match found_result {
                     Some(result) => result,
                     None => {
-                        // Try typedef_field_map for anonymous struct fields (like FileStat)
-                        // This handles cases where the typedef's anonymous struct fields
-                        // are accessed with newly created symbols at the access site
-                        //
-                        // receiver_ty might be the typedef's TypeId OR the aliased anonymous struct TypeId
-                        // Try both and also search all registered typedefs for this field name
+                        // Typedef anonymous-struct fields are accessed with freshly
+                        // created symbols at the access site, and receiver_ty may be
+                        // the typedef's TypeId or its aliased anonymous struct, so
+                        // all registered typedefs are searched as well.
                         let mut typedef_lookup = self
                             .typedef_field_map
                             .get(&(receiver_ty, field_name))
                             .copied();
 
-                        // If not found with receiver_ty, search all typedefs for this field
                         if typedef_lookup.is_none() {
                             for ((typedef_ty, fname), &idx) in &self.typedef_field_map {
                                 if *fname == field_name {
                                     typedef_lookup = Some(idx);
-                                    // Use the typedef's type id for the result
                                     return Some(self.lower_typedef_field_access(
                                         obj,
                                         *typedef_ty,
@@ -856,22 +789,19 @@ impl<'a> HirToMirContext<'a> {
                         }
 
                         if let Some(typedef_field_idx) = typedef_lookup {
-                            // Found in typedef_field_map - return (receiver_type, field_index, field_ty)
                             (receiver_ty, typedef_field_idx, field_ty)
                         } else {
-                            // Last resort: look up the field by name in the type_table for anonymous structs
-                            // This handles cross-module typedef field access where the typedef was
-                            // registered in a different HIR->MIR pass
+                            // Last resort for cross-module typedef access, where the
+                            // typedef was registered in a different HIR→MIR pass:
+                            // find any anonymous struct carrying this field name.
                             let type_table = self.type_table;
 
-                            // Get the field name string for lookup
                             let field_name_str = self
                                 .string_interner
                                 .get(field_name)
                                 .map(|s| s.to_string())
                                 .unwrap_or_default();
 
-                            // Search all types for an anonymous struct with this field name
                             let mut found_field = None;
                             for (type_id, type_info) in type_table.iter() {
                                 if let TypeKind::Anonymous { fields } = &type_info.kind {
@@ -893,7 +823,6 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             if let Some((found_type_id, field_idx)) = found_field {
-                                // Get the actual field type from the type_table
                                 let actual_field_ty = {
                                     let type_table = self.type_table;
                                     if let Some(type_info) = type_table.get(found_type_id) {
@@ -948,13 +877,6 @@ impl<'a> HirToMirContext<'a> {
                                     "[E0100] field='{}' sym={:?} receiver_ty={:?} kind={:?}",
                                     field_name_str, field, receiver_ty, recv_kind
                                 );
-                                // Is the receiver's class present in
-                                // class_instance_fields AT ALL in this context?
-                                // Two name/id resolution strategies both failed
-                                // here, which points at the field table being
-                                // ABSENT (never forwarded across the module
-                                // boundary) rather than merely keyed differently.
-                                // Print the evidence instead of guessing again.
                                 let class_sym =
                                     match self.type_table.get(receiver_ty).map(|ti| &ti.kind) {
                                         Some(TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
@@ -1012,13 +934,12 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        // Get the type of the field — use actual_field_ty from the class metadata
-        // (the symbol table's type), not field_ty (the expression-level type which
-        // may be Dynamic when the TAST couldn't resolve forward-referenced class fields)
+        // Use the declared type from the class metadata; the expression-level
+        // field_ty may be Dynamic.
         let field_ir_ty = self.convert_type(actual_field_ty);
 
-        // Type erasure: if the field's declared type is TypeParameter, use I64 for GEP stride
-        // (all type-erased fields are stored as I64 regardless of concrete type)
+        // Type-erased fields are stored as I64 whatever the concrete type, so a
+        // TypeParameter field uses an I64 GEP stride.
         let field_is_type_param = {
             let declared_type_id = self.symbol_table.get_symbol(field).map(|s| s.type_id);
             if let Some(decl_id) = declared_type_id {
@@ -1036,8 +957,7 @@ impl<'a> HirToMirContext<'a> {
             field_ir_ty.clone()
         };
 
-        // @:cstruct: use byte-offset PtrAdd instead of index-based GEP
-        // Check both class_type_id (from field_index_map) and receiver_ty (expression type)
+        // @:cstruct addresses fields by byte offset (PtrAdd), not index-based GEP.
         let cstruct_type = if self.is_cstruct_class(class_type_id) {
             Some(class_type_id)
         } else if self.is_cstruct_class(receiver_ty) {
@@ -1107,7 +1027,6 @@ impl<'a> HirToMirContext<'a> {
                         .build_const(IrValue::I64(fl.byte_offset as i64))?;
                     let byte_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
                     let field_ptr = self.builder.build_ptr_add(obj, offset_const, byte_ptr_ty)?;
-                    // Load as GPU type (f32/i32)
                     let raw_value = self.builder.build_load(field_ptr, fl.ir_type.clone())?;
                     // Promote f32→f64 so Haxe Float semantics work on CPU
                     let promoted = if fl.ir_type == IrType::F32 {
@@ -1125,22 +1044,17 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Create constant for field index
         let index_const = self.builder.build_const(IrValue::I32(field_index as i32))?;
 
-        // Use GetElementPtr to get pointer to the field
-        // obj is a pointer to the struct, indices are [field_index]
         let field_ptr = self
             .builder
             .build_gep(obj, vec![index_const], gep_element_ty.clone())?;
 
-        // Load the value from the field pointer
         let field_value = self.builder.build_load(field_ptr, gep_element_ty.clone())?;
 
-        // Type erasure coercion: if field was loaded as I64 (erased type param),
-        // coerce to the concrete type expected by the caller.
-        // Note: field_ir_ty is always I64 for type params (from convert_type(TypeParameter)),
-        // so we must check the RESOLVED type (field_ty) to detect when coercion is needed.
+        // An erased type param loads as I64 and must be coerced to the caller's
+        // concrete type. field_ir_ty is I64 for every type param, so only the
+        // resolved field_ty says whether coercion is needed.
         let expected_ir_ty = self.convert_type(field_ty);
         if field_is_type_param && expected_ir_ty != IrType::I64 {
             let coerced = self.coerce_from_i64(field_value, field_ty)?;
@@ -1148,38 +1062,32 @@ impl<'a> HirToMirContext<'a> {
             return Some(coerced);
         }
 
-        // Register the type of the loaded value for use in later instructions (e.g., Cmp)
+        // Later instructions (e.g. Cmp) read the register type.
         self.builder.set_register_type(field_value, field_ir_ty);
 
         Some(field_value)
     }
 
     pub(crate) fn lower_index_access(&mut self, obj: IrId, idx: IrId, ty: TypeId) -> Option<IrId> {
-        // Array element address, computed INLINE rather than via an
-        // `haxe_array_get_ptr` runtime call. A non-inlinable call per element is an
-        // optimization barrier: it blocks bounds-check hoisting and loop
-        // vectorization (a `for (x in a) s += x` reduction can't become a SIMD
-        // addv, and on wasm it's a host-import boundary). HaxeArray is #[repr(C)]
+        // The element address is computed inline rather than through an
+        // `haxe_array_get_ptr` call: a non-inlinable call per element is an
+        // optimization barrier that blocks bounds-check hoisting and loop
+        // vectorization (a `for (x in a) s += x` reduction cannot become a SIMD
+        // addv, and on wasm it is a host-import boundary). HaxeArray is #[repr(C)]
         // { ptr@0, len@8, cap@16, elem_size@24 } with uniform 8-byte element slots,
         // so the address is `*(arr.ptr) + idx*8` — the same i64-slot GEP used for
-        // object fields (build_gep with IrType::I64 scales the index by 8).
+        // object fields (build_gep with IrType::I64 scales the index by 8), and
+        // `obj` is the struct pointer whose first field is the data buffer.
         //
-        // OOB/null behavior is unchanged: the old call returned null on OOB and the
-        // caller then loaded from it (a crash), so an unchecked inline GEP is
-        // behavior-equivalent for valid in-bounds access while staying branch-free
-        // and vectorizable. (A bounds-check branch here would defeat the point —
-        // BCE only runs in the AOT/pipeline PassManager, not the JIT path.)
-        //
-        // `obj` is the HaxeArray struct pointer; `arr.ptr` (the data buffer) is the
-        // first field at offset 0, so a plain load reads it.
+        // The GEP is deliberately unchecked: a bounds-check branch here would
+        // defeat the vectorization it exists for, and BCE only runs in the
+        // AOT/pipeline PassManager, not the JIT path.
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let data_ptr = self.builder.build_load(obj, ptr_u8)?;
-        // elem_ptr = data_ptr + idx * 8 (uniform 8-byte slots = the i64 stride).
         let elem_ptr = self.builder.build_gep(data_ptr, vec![idx], IrType::I64)?;
 
-        // Determine the correct load type based on the element type.
-        // Array slots are always 8 bytes, so we load as the storage type first.
-        // For types smaller than 8 bytes (Int→I32, Bool), we need to cast after loading.
+        // Slots are always 8 bytes, so load the storage type and narrow after
+        // (Int→I32, Bool).
         let (load_type, target_type) = {
             let type_table = self.type_table;
             match type_table.get(ty).map(|ti| &ti.kind) {
@@ -1199,7 +1107,6 @@ impl<'a> HirToMirContext<'a> {
 
         let loaded = self.builder.build_load(elem_ptr, load_type.clone())?;
 
-        // Cast to target type if different from load type (e.g., I64 → I32 for Int elements)
         if load_type != target_type {
             self.builder.build_cast(loaded, load_type, target_type)
         } else {
@@ -1211,13 +1118,12 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Field { object, field } = &expr.kind else {
             unreachable!("lower_field_expr on a non-Field expression")
         };
-        // Check if this is an enum variant access (e.g., Color.Red)
-        // In that case, the object is an Enum type symbol, not a value
+        // For an enum variant access (Color.Red) the object is an Enum type
+        // symbol, not a value.
         if let HirExprKind::Variable { symbol, .. } = &object.kind {
             if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
                 use crate::tast::SymbolKind;
                 if sym.kind == SymbolKind::Enum {
-                    // This is an enum variant access - get the variant discriminant
                     let enum_name = self.string_interner.get(sym.name).unwrap_or("<unknown>");
                     let field_sym = self.symbol_table.get_symbol(*field);
                     let field_name = field_sym
@@ -1230,9 +1136,10 @@ impl<'a> HirToMirContext<'a> {
                             let variant_name = variant_sym
                                 .and_then(|s| self.string_interner.get(s.name))
                                 .unwrap_or("<unknown>");
-                            // Compare by name since the field symbol might be different from the variant symbol
+                            // Compare by name: the field symbol may differ from the
+                            // variant symbol.
                             if *variant_id == *field || variant_name == field_name {
-                                // If enum has parameterized variants, all variants must be boxed
+                                // A parameterized variant forces every variant boxed.
                                 if self.enum_is_boxed(*symbol) {
                                     return self.build_boxed_enum_tag_only(idx as i32);
                                 }
@@ -1240,12 +1147,11 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    // If field is not a variant, fall through to regular field access
+                    // Not a variant: fall through to regular field access.
                 }
             }
         }
 
-        // Regular field access
         debug!("[Field expression] About to lower object");
         let obj_reg = self.lower_expression(object)?;
         debug!(
@@ -1263,29 +1169,22 @@ impl<'a> HirToMirContext<'a> {
             let _ = self.builder.build_check_live(obj_reg, loc);
         }
 
-        // Track object as temp if it's an OWNED heap-allocated value
-        // This includes:
-        // 1. Direct `new` expressions: `new Complex(...)`
-        // 2. Method calls that return class instances: `z.mul(z)` returns new Complex
-        //
-        // We check if the return type is a Class (heap-allocated via malloc).
-        // Runtime/extern functions typically return primitives, strings, or Dynamic,
-        // not Class instances, so this heuristic is safe.
+        // A Class return type means the value was heap-allocated via malloc;
+        // runtime/extern functions return primitives, strings or Dynamic instead.
         let is_owned_heap_value = matches!(
             &object.kind,
             HirExprKind::New { .. } | HirExprKind::Call { .. }
         ) && self.get_drop_behavior(object.ty) == DropBehavior::AutoDrop;
 
-        // Only register NEW expressions as temporaries, not method Call results.
-        // Method calls (getObj(), input(), etc.) often return references to existing
-        // objects — freeing these would corrupt the heap. Only `new Foo(...)` creates
-        // a genuinely owned temporary that must be freed after the field access chain.
+        // Only `new` expressions register as temporaries: a method call often
+        // returns a reference to an existing object, and freeing that after the
+        // field-access chain would corrupt the heap.
         let is_new_expr = matches!(&object.kind, HirExprKind::New { .. });
         if is_owned_heap_value && is_new_expr {
             self.temp_heap_values.push(obj_reg);
         }
 
-        let receiver_ty = object.ty; // The type of the object being accessed
+        let receiver_ty = object.ty;
 
         // Structural subtyping: if object is a variable with an anon view,
         // redirect field access to the backing representation
@@ -1402,7 +1301,6 @@ impl<'a> HirToMirContext<'a> {
             };
             if is_dynamic {
                 if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
-                    // Find the class type by name
                     let class_type = self.find_class_type_by_name(&class_hint);
                     class_type.unwrap_or(receiver_ty)
                 } else {
@@ -1441,10 +1339,9 @@ impl<'a> HirToMirContext<'a> {
         };
         let obj_reg = self.lower_expression(object)?;
 
-        // SIMD vector lane extraction: detect when the object is a Vector type
-        // (e.g. SIMD4f) and emit a direct VectorExtract instead of going through
-        // the heap-array `haxe_array_get_ptr` path. This is required because
-        // SIMD4f abstracts lower to v128 register values, not heap pointers.
+        // SIMD abstracts (SIMD4f) lower to v128 register values, not heap
+        // pointers, so a Vector object extracts a lane directly instead of taking
+        // the heap-array path.
         if let Some(IrType::Vector { element, count }) = self.builder.get_register_type(obj_reg) {
             let elem_ty = (*element).clone();
             let lane_count = count;
@@ -1484,13 +1381,10 @@ impl<'a> HirToMirContext<'a> {
                     return Some(extracted);
                 }
             }
-            // Non-constant lane on a vector: not yet supported via direct
-            // VectorExtract (which requires a constant lane). Fall through to
-            // the runtime SIMD4f_extract MIR wrapper path below — but that
-            // path also currently only supports lane 0. For now we emit a
-            // diagnostic-friendly fallback by lowering the lane and routing
-            // through the wrapper, which will be improved when the wrapper
-            // gains a runtime lane switch.
+            // VectorExtract needs a constant lane, so a computed lane falls
+            // through to the runtime SIMD4f_extract wrapper below.
+            // TODO: the wrapper only handles lane 0; it needs a runtime lane
+            // switch.
             let _ = lane_count;
         }
 

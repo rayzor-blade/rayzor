@@ -82,8 +82,6 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 // TypeId mismatch - the extends field might use instance type while
                 // hir_module.types uses declaration type. Search by matching class type.
-
-                // Get the type definition to find the class symbol
                 let type_table_symbol = self.type_table.get(parent_type_id).and_then(|t| match &t
                     .kind
                 {
@@ -91,7 +89,6 @@ impl<'a> HirToMirContext<'a> {
                     _ => None,
                 });
                 if let Some(parent_symbol) = parent_symbol_hint.or(type_table_symbol).as_ref() {
-                    // Find the HIR class by symbol_id
                     for (decl_type_id, type_decl) in self.current_hir_types.iter() {
                         if let HirTypeDecl::Class(class) = type_decl {
                             if class.symbol_id == *parent_symbol {
@@ -204,11 +201,9 @@ impl<'a> HirToMirContext<'a> {
         field_index: &mut u32,
         walk: &mut Vec<SymbolId>,
     ) {
-        // A class cannot be its own ancestor. `extends` is followed by TypeId,
-        // and TypeIds are context-local — merely DECLARING a new type shifts
-        // them, which made `PosException` resolve as its own parent and recurse
-        // until the stack died, with no diagnostic and no output. Key the guard
-        // on SymbolId, which is stable across those shifts.
+        // A class cannot be its own ancestor. `extends` is followed by TypeId, and
+        // TypeIds are context-local — declaring a new type shifts them — so the guard
+        // keys on SymbolId, which is stable across those shifts.
         if walk.contains(&parent_class.symbol_id) {
             return;
         }
@@ -272,10 +267,9 @@ impl<'a> HirToMirContext<'a> {
         let mut current = start;
         while let Some(&parent) = self.class_parent_map.get(&current) {
             if !seen.insert(parent) {
-                // Should be unreachable now that the parent symbol is recorded
-                // directly (see `extends_symbol`); kept because an unbounded
-                // walk must never be able to hang the compiler. Say so rather
-                // than looping or exiting silently.
+                // Unreachable while the parent symbol is recorded directly
+                // (`extends_symbol`); kept because an unbounded walk must never be
+                // able to hang the compiler. Warn rather than loop or exit silently.
                 static WARNED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -296,7 +290,6 @@ impl<'a> HirToMirContext<'a> {
     /// Check if `source_type` is a subclass of `target_type` by walking the extends chain.
     /// Uses SymbolId-based lookup to handle TAST/HIR TypeId mismatch.
     pub(crate) fn is_subclass_of(&self, source_type: TypeId, target_type: TypeId) -> bool {
-        // Get target SymbolId from type_table
         let target_sym = {
             let type_table = self.type_table;
             match type_table.get(target_type).map(|ti| &ti.kind) {
@@ -317,7 +310,6 @@ impl<'a> HirToMirContext<'a> {
         let mut current_sym = source_sym;
         let mut visited = BTreeSet::new();
         while visited.insert(current_sym) {
-            // Find the class with this SymbolId in current_hir_types
             let parent_type = self.current_hir_types.values().find_map(|decl| {
                 if let crate::ir::hir::HirTypeDecl::Class(class) = decl {
                     if class.symbol_id == current_sym {
@@ -332,12 +324,11 @@ impl<'a> HirToMirContext<'a> {
 
             match parent_type {
                 Some(parent_type_id) => {
-                    // Get parent's SymbolId from type_table, with fallback to
-                    // the canonicalised form `TypeId::from_raw(symbol_id.as_raw())`
-                    // produced in `tast_to_hir.rs::extends_canonical`. Without
-                    // this fallback, `class Cat extends Animal` reports false
-                    // for `Cat is Animal` because the synthetic parent TypeId
-                    // doesn't resolve through `type_table`.
+                    // Parent SymbolId from type_table, falling back to the
+                    // canonicalised `TypeId::from_raw(symbol_id.as_raw())` from
+                    // `tast_to_hir.rs::extends_canonical`: that synthetic parent
+                    // TypeId does not resolve through `type_table`, so without the
+                    // fallback `Cat is Animal` reports false.
                     let parent_sym = {
                         let type_table = self.type_table;
                         type_table
@@ -512,13 +503,11 @@ impl<'a> HirToMirContext<'a> {
                 let sym_type = self.symbol_table.get_symbol(*symbol)?.type_id;
                 self.get_class_symbol(sym_type)
             }
-            // Do NOT recurse through a Cast whose target is an interface: the
-            // Cast handler (class→interface case) already wrapped the inner
-            // class value in a fat pointer. Recursing would let the outer
-            // `lower_expression` post-process wrap the result a second time,
-            // producing fat_ptr{fat_ptr, fn_ptr} where `this` becomes the
-            // inner fat_ptr — observable as silent loss of receiver fields
-            // (e.g. `name` reads as empty) on the next interface dispatch.
+            // Don't recurse through a Cast whose target is an interface: the Cast
+            // handler (class→interface case) already wrapped the inner class value
+            // in a fat pointer, and recursing lets the outer `lower_expression`
+            // post-process wrap it a second time, producing fat_ptr{fat_ptr, fn_ptr}
+            // with `this` bound to the inner fat pointer.
             HirExprKind::Cast {
                 expr: inner,
                 target,
@@ -557,15 +546,11 @@ impl<'a> HirToMirContext<'a> {
         arg_expr: &HirExpr,
         arg_reg: IrId,
     ) -> Option<SymbolId> {
-        // Attempt recovery when the arg's static type isn't a resolvable
-        // concrete Class implementing the callee interface — i.e. the
-        // typechecker promoted it to the interface, or (cross-module) it
-        // arrives Unknown/Placeholder because the class metadata wasn't
-        // imported into this context. Both cases leave the value register
-        // holding a RAW class object we can wrap. Bail only when the arg is a
-        // concrete Class (the primary path already handles it) or a primitive
-        // (never wrappable) — otherwise we may guess a class from the New/
-        // variable name below.
+        // Recover only when the arg's static type isn't a resolvable concrete Class:
+        // the typechecker promoted it to the interface, or cross-module it arrives
+        // Unknown/Placeholder. Both leave the register holding a raw class object.
+        // A concrete Class (handled by the primary path) and a primitive (never
+        // wrappable) must not be guessed at from the New/variable name below.
         let arg_kind_ok = {
             let tt = self.type_table;
             match tt.get(arg_expr.ty).map(|t| &t.kind) {
@@ -678,11 +663,10 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
-        // Qualify with the enclosing class's package (same-package sibling
-        // class shares it). Prefer the enclosing class's qualified name over
-        // `current_module`, which may be truncated and yield the wrong package
-        // — a wrong package produces a thunk name that DOESN'T dedupe with the
-        // real one at merge (empty stub → trap).
+        // Qualify with the enclosing class's package (a same-package sibling class
+        // shares it). Prefer the enclosing class's qualified name over
+        // `current_module`, which may be truncated and yield the wrong package: that
+        // produces a thunk name which does not dedupe with the real one at merge.
         let enclosing_pkg = self
             .current_class_symbol
             .and_then(|s| self.symbol_table.get_symbol(s))
@@ -699,12 +683,6 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Resolve an imported class's constructor by fully-qualified name when it
-    /// isn't in this context's `constructor_map`/`constructor_name_map` (the
-    /// class compiled in another module). Looks up `<class_fqn>.new` in the
-    /// stable name-keyed `external_function_name_map`. Returns None if the
-    /// class name is unknown or the constructor isn't visible yet — the caller
-    /// then leaves the object unconstructed (unchanged prior behaviour).
     /// Qualified constructor key (`<class_fqn>.new`) for a cross-module `new`.
     /// Prefers the recovered class symbol's qualified name; falls back to the
     /// bare class name qualified by the current module's package.
@@ -798,9 +776,6 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Fill in default argument values for a function call when fewer args are provided
-    /// than the function expects. `arg_regs` already contains the lowered arguments
-    /// (possibly including implicit 'this' for methods/constructors).
     /// Set register_class_hints on a call result if the HIR return type is a class.
     /// This enables method dispatch on cross-module return values
     /// (e.g., `a.add(b).toString()` where `add` returns Point2D across packages).

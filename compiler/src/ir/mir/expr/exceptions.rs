@@ -51,13 +51,11 @@ impl<'a> HirToMirContext<'a> {
         //   continuation:
         //     <rest of code>
 
-        // Snapshot the pre-try value of every variable that the try or catch
-        // bodies reference (and that already exists, i.e. is not declared inside
-        // a branch and is not a parameter). After the branches run we build phis
-        // at the convergence point so the right value survives — exactly like
-        // `lower_if_statement`. Without this the continuation kept whichever
-        // branch was lowered LAST (the catch), so `try { ok=true } catch { ok=false }`
-        // always saw the catch value even when nothing threw.
+        // Snapshot the pre-try value of every variable the try or catch bodies
+        // reference and that already exists (not declared inside a branch, not a
+        // parameter), then build phis at the convergence point as
+        // `lower_if_statement` does. Without the merge the continuation keeps
+        // whichever branch was lowered last — the catch.
         let mut tc_tracked: std::collections::BTreeSet<SymbolId> =
             std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(try_block, &mut tc_tracked);
@@ -106,8 +104,6 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // --- try_entry block (current block) ---
-
-        // Call rayzor_exception_push_handler() -> *mut u8 (jmp_buf pointer)
         let push_fn = self.get_or_register_extern_function(
             "rayzor_exception_push_handler",
             vec![],
@@ -117,7 +113,6 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
 
-        // Call _setjmp(jmp_buf) -> i32 (0 = normal, 1 = exception caught)
         let setjmp_fn = self.get_or_register_extern_function(
             "_setjmp",
             vec![IrType::Ptr(Box::new(IrType::Void))],
@@ -132,7 +127,6 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
 
-        // Branch: setjmp_result == 0 → normal_path, else → landing_pad
         let zero = self
             .builder
             .build_const(IrValue::I32(0))
@@ -149,7 +143,6 @@ impl<'a> HirToMirContext<'a> {
         self.builder.switch_to_block(normal_path_block);
         self.lower_block(try_block);
 
-        // Pop handler on normal exit
         let pop_fn = self.get_or_register_extern_function(
             "rayzor_exception_pop_handler",
             vec![],
@@ -185,7 +178,7 @@ impl<'a> HirToMirContext<'a> {
         // --- landing_pad block: exception was thrown ---
         self.builder.switch_to_block(landing_pad_block);
 
-        // Pop handler (the longjmp already happened, but we need to remove it from the stack)
+        // The longjmp already fired; the handler still has to leave the stack.
         let pop_fn2 = self.get_or_register_extern_function(
             "rayzor_exception_pop_handler",
             vec![],
@@ -194,7 +187,6 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_call_direct(pop_fn2, vec![], IrType::Void);
 
-        // Get the exception value and type_id
         let get_exc_fn =
             self.get_or_register_extern_function("rayzor_get_exception", vec![], IrType::I64);
         let exception_id = self
@@ -262,13 +254,12 @@ impl<'a> HirToMirContext<'a> {
                         .build_const(IrValue::I32(expected_type_id as i32))
                         .expect("failed to create type_id const");
 
-                    // Use polymorphic matching for class types (walks inheritance),
-                    // exact match for primitives (Int, String, etc.)
+                    // Class types match polymorphically (walks inheritance);
+                    // primitives (Int, String, …) match exactly.
                     let is_class_type =
                         matches!(catch_type_kind, Some(crate::tast::TypeKind::Class { .. }));
 
                     let type_match = if is_class_type {
-                        // Call rayzor_exception_type_matches(actual, expected) -> i32
                         let match_fn = self.get_or_register_extern_function(
                             "rayzor_exception_type_matches",
                             vec![IrType::I32, IrType::I32],
@@ -294,7 +285,6 @@ impl<'a> HirToMirContext<'a> {
                             .build_cmp(CompareOp::Ne, result, zero_val)
                             .expect("failed to build type cmp")
                     } else {
-                        // Exact match for primitive types
                         self.builder
                             .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
                             .expect("failed to build type cmp")
@@ -338,7 +328,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_branch(after_catch_target);
             }
         } else {
-            // No catch clauses — go directly to finally or continuation
+            // No catch clauses — go straight to finally or continuation.
             if let Some(fb) = finally_block {
                 self.builder.build_branch(fb);
             } else {
@@ -404,7 +394,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Continue with rest of code
         self.builder.switch_to_block(continuation_block);
     }
 
@@ -420,13 +409,11 @@ impl<'a> HirToMirContext<'a> {
         // Exception handling via setjmp/longjmp (expression form).
         // try { body } catch (e) { handler } finally { cleanup }
 
-        // Snapshot the pre-try value of every variable the try/catch
-        // bodies touch, so we can build merge phis at the continuation.
-        // The catch runs INSTEAD of the try, so without a merge the
-        // continuation keeps whichever branch lowered LAST (the catch),
-        // and a var the catch modified leaks even when nothing threw
-        // (`try { ok = true } catch { ok = false }` always saw `false`).
-        // Mirrors lower_if_statement's then/else merge.
+        // Snapshot the pre-try value of every variable the try/catch bodies
+        // touch, to build merge phis at the continuation. The catch runs instead
+        // of the try, so without a merge the continuation keeps whichever branch
+        // lowered last and a var the catch modified leaks out. Mirrors
+        // lower_if_statement's then/else merge.
         let mut tc_tracked: std::collections::BTreeSet<SymbolId> =
             std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_expr(try_expr, &mut tc_tracked);
@@ -572,8 +559,8 @@ impl<'a> HirToMirContext<'a> {
                         .build_const(IrValue::I32(expected_type_id as i32))
                         .expect("const");
 
-                    // Use polymorphic matching for class types (walks inheritance),
-                    // exact match for primitives
+                    // Class types match polymorphically (walks inheritance);
+                    // primitives match exactly.
                     let is_class_type =
                         matches!(catch_type_kind, Some(crate::tast::TypeKind::Class { .. }));
 

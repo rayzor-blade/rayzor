@@ -87,7 +87,6 @@ impl<'a> HirToMirContext<'a> {
         true
     }
 
-    /// @:derive(Drop) — emit a call to the user's drop() method on the given object.
     /// Block that defines `ir` in the currently-built function (params →
     /// entry block). None when no emitted instruction produces it.
     pub(crate) fn def_block_of(&self, ir: IrId) -> Option<IrBlockId> {
@@ -109,9 +108,9 @@ impl<'a> HirToMirContext<'a> {
     /// Type a loop-carried phi should use for `reg`. Normally the variable's
     /// declared local type — but when that diverges from the value's actual
     /// register type on float-vs-integer (e.g. a `Usize` address whose local was
-    /// mis-inferred as `Float`), the phi MUST follow the VALUE. Otherwise the
-    /// backend lowers the mismatched phi with a corrupting `sitofp` at the entry
-    /// and a `bitcast` at the use, destroying the carried pointer → SIGSEGV.
+    /// mis-inferred as `Float`), the phi must follow the value: the backend lowers
+    /// a mismatched phi with a `sitofp` at the entry and a `bitcast` at the use,
+    /// destroying the carried pointer.
     pub(crate) fn loop_phi_type(&self, reg: IrId, local_ty: IrType) -> IrType {
         match self.builder.get_register_type(reg) {
             Some(rt)
@@ -123,10 +122,6 @@ impl<'a> HirToMirContext<'a> {
             _ => local_ty,
         }
     }
-
-    // ========================================================================
-    // Two-Pass Lambda Generation (New Architecture) - Helper Methods
-    // ========================================================================
 
     pub(crate) fn save_state(&self) -> SavedLoweringState {
         SavedLoweringState {
@@ -155,7 +150,6 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_block = state.current_block;
         self.symbol_map = state.symbol_map;
         self.current_env_layout = state.current_env_layout;
-        // Restore drop tracking state
         self.owned_heap_values = state.owned_heap_values;
         self.drop_scope_stack = state.drop_scope_stack;
         self.loop_carried_symbols = state.loop_carried_symbols;
@@ -201,7 +195,6 @@ impl<'a> HirToMirContext<'a> {
             modified
         };
 
-        // Create stack slots for each modified variable
         let mut var_slots: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for sym in &modified_vars {
             if let Some(&current_reg) = self.symbol_map.get(sym) {
@@ -216,7 +209,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
             return;
         };
@@ -229,7 +221,6 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.build_branch(loop_cond_block);
 
-        // Push loop context
         self.loop_stack.push(LoopContext {
             continue_block: loop_cond_block,
             break_block: loop_exit_block,
@@ -290,7 +281,6 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_void.clone(), IrType::I32],
                     IrType::I64,
                 );
-                // key = rayzor_anon_get_field_by_index(next_value, 0)
                 if let Some(idx_0) = self.builder.build_const(crate::ir::IrValue::I32(0)) {
                     if let Some(key_val) = self.builder.build_call_direct(
                         get_field_fn,
@@ -302,7 +292,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
-                // value = rayzor_anon_get_field_by_index(next_value, 1)
                 if let Some(idx_1) = self.builder.build_const(crate::ir::IrValue::I32(1)) {
                     if let Some(value_val) = self.builder.build_call_direct(
                         get_field_fn,
@@ -323,7 +312,6 @@ impl<'a> HirToMirContext<'a> {
         // read after the loop (see lower_for_in_over_array).
         self.loop_carried_symbols
             .push(var_slots.keys().copied().collect());
-        // Lower the loop body
         self.enter_drop_scope();
         self.lower_block(body);
 
@@ -396,7 +384,6 @@ impl<'a> HirToMirContext<'a> {
                                 return to_ty.clone();
                             }
                             IrInstruction::Const { dest, value, .. } if *dest == *ret_reg => {
-                                // Infer from constant value
                                 let ty = match value {
                                     IrValue::I32(_) => IrType::I32,
                                     IrValue::I64(_) => IrType::I64,
@@ -490,7 +477,6 @@ impl<'a> HirToMirContext<'a> {
         body_result: Option<IrId>,
         return_type: &IrType,
     ) -> Option<()> {
-        // Check if terminator already exists
         {
             let block = function.cfg.get_block_mut(entry_block)?;
             if !matches!(block.terminator, IrTerminator::Unreachable) {
@@ -498,7 +484,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Create appropriate terminator
         let terminator = match return_type {
             IrType::Void => IrTerminator::Return { value: None },
             _ => {
@@ -516,7 +501,6 @@ impl<'a> HirToMirContext<'a> {
                         _ => IrValue::I64(0),
                     };
 
-                    // Now get block and add instruction
                     let block = function.cfg.get_block_mut(entry_block)?;
                     block.add_instruction(IrInstruction::Const {
                         dest: default_reg,

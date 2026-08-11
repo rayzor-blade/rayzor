@@ -32,13 +32,11 @@ impl<'a> HirToMirContext<'a> {
     ) {
         let mut signature = self.build_function_signature(hir_func);
 
-        // For instance methods, add implicit 'this' parameter
-        // 'this' is always a pointer to the class instance, regardless of generic parameters
+        // 'this' is always a pointer to the instance, generic parameters or not.
         if let Some(type_id) = this_type {
             let this_type = match self.convert_type(type_id) {
                 IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-                // If convert_type failed to resolve (e.g., generic class without instantiation),
-                // default to pointer since 'this' is always a pointer to instance
+                // Unresolved (a generic class with no instantiation) is a pointer too.
                 _ => IrType::Ptr(Box::new(IrType::Void)),
             };
             signature.parameters.insert(
@@ -61,22 +59,14 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
-        // A bodyless declaration (e.g. an `extern class Tensor` method like
-        // `addInto`) lands here with no HIR statements to lower, so it's
-        // registered as an empty forward-ref placeholder. `IrFunction::new`
-        // defaults `kind` to `UserDefined` — correct for a genuine forward
-        // reference to a user function, but WRONG when the name is actually
-        // a known stdlib MIR-wrapper (e.g. `Tensor_addInto`): `own_func_ids`
-        // (compilation.rs) uses `kind != MirWrapper` to decide whether this
-        // file's own compile "owns" the function and must PROTECT it from
-        // the stdlib merge's by-name replacement. A wrongly-`UserDefined`
-        // stdlib-wrapper stub gets protected, survives the merge as
-        // permanently empty, and traps (`brk`, TrapCode::user(1)) the first
-        // time it's called. A file that declares/references the extern
-        // method but never itself CALLS it never reaches the call-site-side
-        // fixup in `register_stdlib_mir_forward_ref`, so the tag must be
-        // set correctly here too, at creation, via the same name-based
-        // stdlib lookup used elsewhere.
+        // A bodyless declaration (an `extern class Tensor` method like `addInto`)
+        // becomes an empty forward-ref placeholder, and `IrFunction::new` defaults
+        // `kind` to `UserDefined`. `own_func_ids` (compilation.rs) reads
+        // `kind != MirWrapper` as "this compile owns the function" and protects it
+        // from the stdlib merge's by-name replacement, so a mistagged stdlib wrapper
+        // survives the merge empty and traps when called. The tag must be set here at
+        // creation: a file that declares the extern but never calls it never reaches
+        // the call-site fixup in `register_stdlib_mir_forward_ref`.
         if hir_func.body.is_none() {
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 if self.stdlib_mapping.is_mir_wrapper_function(&func.name) {
@@ -114,10 +104,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Propagate @:jsImport
         self.propagate_js_import(symbol_id, func_id, this_type);
 
-        self.builder.finish_function(); // Close to allow next function to start
+        self.builder.finish_function();
     }
 
     /// Register a function signature with class type parameters (for generic class methods)
@@ -132,11 +121,10 @@ impl<'a> HirToMirContext<'a> {
         let mut signature =
             self.build_function_signature_with_class_type_params(hir_func, class_type_params);
 
-        // For instance methods, add implicit 'this' parameter
         if let Some(type_id) = this_type {
-            // Check the actual HIR TypeKind to distinguish abstracts from classes.
-            // convert_type() can misresolve class types to I32 in cross-module
-            // compilation when the type table entry is missing. Use TypeKind directly.
+            // Distinguish abstracts from classes off the HIR TypeKind: convert_type()
+            // can misresolve class types to I32 in cross-module compilation when the
+            // type table entry is missing.
             let is_abstract_value_type = {
                 let type_table = self.type_table;
                 match type_table.get(type_id).map(|t| &t.kind) {
@@ -163,15 +151,12 @@ impl<'a> HirToMirContext<'a> {
                     _ => false, // Classes, interfaces, etc. always use pointer
                 }
             };
-            // TypeIds are context-local. When the id drifts — adding ONE type to
-            // StdTypes shifts every TypeId while SymbolIds stay put — a class's
-            // id can land on an abstract-over-Int, and the check above then
-            // types `this` BY VALUE. That truncates the 64-bit receiver to i32
-            // and every field read off it faults (StringBuf.add/addSub/... ->
-            // SIGSEGV in haxe_bytes_data_address). The HIR module we are
-            // lowering is authoritative about what it declares, so let it veto:
-            // if HIR says this id is a CLASS, it is a class, whatever the
-            // (possibly stale) type_table entry says.
+            // TypeIds are context-local and drift (adding one type to StdTypes shifts
+            // every TypeId while SymbolIds stay put), so a class's id can land on an
+            // abstract-over-Int and the check above would then pass `this` BY VALUE,
+            // truncating the 64-bit receiver. The HIR module being lowered is
+            // authoritative about what it declares, so let it veto: if HIR says this
+            // id is a class, it is a class, whatever the type_table entry says.
             let hir_says_class = matches!(
                 self.current_hir_types.get(&type_id),
                 Some(HirTypeDecl::Class(_))
@@ -242,7 +227,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Propagate @:jsImport (same as register_function_signature)
         self.propagate_js_import(symbol_id, func_id, this_type);
 
         self.builder.finish_function();
@@ -260,15 +244,13 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(class_symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
-        // Constructor signature: takes implicit 'this' parameter + constructor params, returns void
-        // 'this' is always a pointer to the class instance, regardless of generic parameters
+        // 'this' is always a pointer to the instance, generic parameters or not.
         let this_type = match self.convert_type(type_id) {
             IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
             _ => IrType::Ptr(Box::new(IrType::Void)),
         };
         let mut sig_builder = FunctionSignatureBuilder::new().param("this".to_string(), this_type);
 
-        // Add constructor parameters
         for param in &constructor.params {
             let param_name = self
                 .string_interner
@@ -281,7 +263,6 @@ impl<'a> HirToMirContext<'a> {
 
         let mut signature = sig_builder.returns(IrType::Void).build();
 
-        // Assign register IDs to parameters
         for (i, param) in signature.parameters.iter_mut().enumerate() {
             param.reg = IrId::new(i as u32);
         }
@@ -307,13 +288,13 @@ impl<'a> HirToMirContext<'a> {
         let param_types: Vec<TypeId> = constructor.params.iter().map(|p| p.ty).collect();
         self.function_param_hir_types.insert(func_id, param_types);
 
-        // Also register with TypeId derived from class SymbolId as a fallback
+        // Fallback key: a TypeId derived from the class SymbolId.
         let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
         if fallback_type_id != type_id {
             self.constructor_map.insert(fallback_type_id, func_id);
         }
 
-        self.builder.finish_function(); // Close the stub
+        self.builder.finish_function();
     }
 
     /// Register constructor signature with class type params (for generic classes)
@@ -330,7 +311,6 @@ impl<'a> HirToMirContext<'a> {
         };
         let mut sig_builder = FunctionSignatureBuilder::new().param("this".to_string(), this_type);
 
-        // Add class type parameters
         for type_param in class_type_params {
             let param_name = self
                 .string_interner
@@ -340,7 +320,6 @@ impl<'a> HirToMirContext<'a> {
             sig_builder = sig_builder.type_param(param_name);
         }
 
-        // Add constructor parameters
         for param in &constructor.params {
             let param_name = self
                 .string_interner
@@ -352,15 +331,11 @@ impl<'a> HirToMirContext<'a> {
                 .type_table
                 .get(param.ty)
                 .map(|t| format!("{:?}", t.kind));
-            // eprintln!("[CTOR_TP] {}.new param={} ty={:?} kind={:?} → {:?}",
-            //     self.string_interner.get(self.symbol_table.get_symbol(class_symbol).unwrap().name).unwrap_or("?"),
-            //     param_name, param.ty, kind, ir_ty);
             sig_builder = sig_builder.param(param_name, ir_ty);
         }
 
         let mut signature = sig_builder.returns(IrType::Void).build();
 
-        // Assign register IDs
         for (i, param) in signature.parameters.iter_mut().enumerate() {
             param.reg = IrId::new(i as u32);
         }
@@ -394,9 +369,9 @@ impl<'a> HirToMirContext<'a> {
         self.builder.finish_function();
     }
 
-    /// Register a constructor by qualified name for cross-file resolution
-    /// This is critical when the TypeId differs between files (e.g., loading StringIteratorUnicode
-    /// as a dependency gives it a different TypeId than when StringTools.hx references it)
+    /// Register a constructor by qualified name for cross-file resolution.
+    /// The same class gets a different TypeId in each file that loads it, so the
+    /// qualified name is the only stable key.
     pub(crate) fn register_constructor_by_name(
         &mut self,
         class_symbol: SymbolId,
@@ -410,7 +385,6 @@ impl<'a> HirToMirContext<'a> {
                 self.constructor_name_map
                     .insert(qual_name.to_string(), func_id);
             } else if let Some(name) = self.string_interner.get(sym_info.name) {
-                // Fallback to simple name if no qualified name
                 self.constructor_name_map.insert(name.to_string(), func_id);
             }
             if let Some(bare) = self.string_interner.get(sym_info.name) {
@@ -430,21 +404,13 @@ impl<'a> HirToMirContext<'a> {
         mut param_types: Vec<IrType>,
         mut return_type: IrType,
     ) -> IrFunctionId {
-        // Check if already registered. A bodyless `extern class` method
-        // declaration (e.g. `Tensor.addInto`) is registered FIRST by
-        // `register_function_signature`, which defaults new IrFunctions to
-        // `FunctionKind::UserDefined` (functions.rs IrFunction::new) — it
-        // has no concept of "this is a stdlib MIR-wrapper name". When a
-        // call site THEN resolves the same name through here, the empty
-        // stub is reused as-is, still tagged UserDefined. That tag makes
-        // `own_func_ids` (compilation.rs) treat it as genuine user code and
-        // PROTECT it from the stdlib merge's by-name replacement — so the
-        // permanently-empty stub survives to codegen and traps at runtime
-        // (`brk`, TrapCode::user(1)) the first time it's called, instead of
-        // being replaced by the real body (e.g. `build_tensor_add_into`).
-        // Retagging here, at the one place that KNOWS this name is a
-        // stdlib MIR wrapper, closes the gap regardless of which pass
-        // registered the placeholder first.
+        // A bodyless `extern class` method (`Tensor.addInto`) is registered first by
+        // `register_function_signature` with `kind` defaulting to `UserDefined`.
+        // Reusing that stub as-is would keep the wrong tag, and `own_func_ids`
+        // (compilation.rs) then protects it from the stdlib merge's by-name
+        // replacement, so the empty stub reaches codegen and traps instead of being
+        // replaced by the real body. Retag here, the one place that knows the name is
+        // a stdlib MIR wrapper, whichever pass registered the placeholder.
         for (func_id, func) in self.builder.module.functions.iter_mut() {
             if func.name == name {
                 func.kind = FunctionKind::MirWrapper;
@@ -452,8 +418,7 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Override with correct signature if this is a known MIR wrapper
-        // This fixes the bug where Thread_spawn gets wrong signature from inferred lambda type
+        // A known MIR wrapper's registered signature overrides the inferred one.
         if let Some((correct_params, correct_return)) = self.get_stdlib_mir_wrapper_signature(name)
         {
             debug!(
@@ -466,7 +431,7 @@ impl<'a> HirToMirContext<'a> {
             return_type = correct_return;
         }
 
-        // Create forward reference with Haxe calling convention (will be replaced during merge)
+        // Forward reference; the body arrives with the stdlib merge.
         let func_id = IrFunctionId(self.builder.module.next_function_id);
         self.builder.module.next_function_id += 1;
 
@@ -481,12 +446,12 @@ impl<'a> HirToMirContext<'a> {
             })
             .collect();
 
-        // Stdlib MIR wrappers use C calling convention (no env param)
-        // This matches the actual definitions in thread.rs, channel.rs, sync.rs
+        // Stdlib MIR wrappers use the C convention (no env param), matching their
+        // definitions in thread.rs, channel.rs and sync.rs.
         let signature = IrFunctionSignature {
             parameters: params,
             return_type: return_type.clone(),
-            calling_convention: CallingConvention::C, // C calling convention for stdlib MIR wrappers
+            calling_convention: CallingConvention::C,
             can_throw: false,
             type_params: vec![],
             uses_sret: matches!(return_type, IrType::Struct { .. }),
@@ -495,7 +460,7 @@ impl<'a> HirToMirContext<'a> {
         use crate::ir::{FunctionAttributes, InlineHint, IrControlFlowGraph, Linkage};
         use crate::tast::SymbolId;
 
-        // Create stub function (empty blocks = forward declaration)
+        // Empty blocks mark this as a forward declaration.
         let mut attributes = FunctionAttributes::default();
         attributes.linkage = Linkage::Public;
         attributes.inline = InlineHint::Auto;
@@ -504,24 +469,20 @@ impl<'a> HirToMirContext<'a> {
             id: func_id,
             symbol_id: SymbolId::from_raw(0),
             name: name.to_string(),
-            // Mirror the bare extern name into `qualified_name` so the stub
-            // joins both `func_id_to_qualified_name` and
-            // `bare_name_to_id_set` keyed by the same string used in
-            // `stdlib_function_name_map`. Without this, stubs registered
-            // by this helper are silently absent from the qname reverse
-            // index (see compilation.rs:3682) and the per-CallDirect
-            // rewrite cannot redirect a stale stub id to the real body.
-            // Downstream code that treats `qualified_name.is_some()` as
-            // "real body" already gates on `!cfg.blocks.is_empty()` too,
-            // so empty stubs remain safely skipped for serialization and
-            // early-rename paths.
+            // Mirror the bare extern name into `qualified_name` so the stub joins both
+            // `func_id_to_qualified_name` and `bare_name_to_id_set` under the same
+            // string `stdlib_function_name_map` uses; without it the stub is absent
+            // from the qname reverse index and the per-CallDirect rewrite cannot
+            // redirect a stale stub id to the real body. Consumers that read
+            // `qualified_name.is_some()` as "has a body" also gate on
+            // `!cfg.blocks.is_empty()`, so empty stubs stay skipped.
             qualified_name: Some(name.to_string()),
             signature,
             cfg: IrControlFlowGraph::new(), // Empty - will be replaced during merge
             locals: BTreeMap::new(),
             register_types: BTreeMap::new(),
             attributes,
-            kind: FunctionKind::MirWrapper, // Stdlib MIR function
+            kind: FunctionKind::MirWrapper,
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),

@@ -49,14 +49,10 @@ impl<'a> HirToMirContext<'a> {
                 .collect();
             eprintln!("[globals] __init__ will initialise: {:?}", dyn_syms);
         }
-        // Generate __init__ function that materializes globals into backend storage.
-        // This function is called once at module load time and before repeated benchmark
-        // runs so statics behave like standard Haxe and do not retain stale values.
-        //
-        // Function signature: fn __init__() -> void
-        // Body: Reset every global to its declared initializer/default, then evaluate
-        //       dynamic initializers in source order.
-
+        // `__init__` materialises globals into backend storage: reset every
+        // global to its declared initializer/default, then evaluate dynamic
+        // initializers in source order. It runs at every module load so statics
+        // behave like standard Haxe and never retain stale values.
         let init_sig = FunctionSignatureBuilder::new()
             .returns(IrType::Void)
             .calling_convention(CallingConvention::Haxe)
@@ -67,7 +63,6 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .start_function(init_symbol, "__init__".to_string(), init_sig);
 
-        // Save current symbol map (should be empty, but just in case)
         let saved_symbol_map = self.symbol_map.clone();
         // Per-function isolation: __init__ has its own SSA namespace; snapshot
         // and clear strict_move_locals in parallel with symbol_map.
@@ -128,9 +123,7 @@ impl<'a> HirToMirContext<'a> {
 
             if let Some(gid) = global_id {
                 if let Some(cv) = const_val {
-                    // Constant-folded: emit as const + store
                     if let Some(val_reg) = self.builder.build_const(cv) {
-                        // Coerce to global type
                         let global_ty = self.builder.module.globals.get(&gid).map(|g| g.ty.clone());
                         let store_val = if let Some(ref gty) = global_ty {
                             let val_ty = self.builder.get_register_type(val_reg);
@@ -147,19 +140,14 @@ impl<'a> HirToMirContext<'a> {
                         self.builder.build_store_global(gid, store_val);
                     }
                 } else if let Some(init_value) = self.lower_expression(init_expr) {
-                    // Non-constant: lower expression and store
                     self.builder.build_store_global(gid, init_value);
                 }
             }
         }
 
-        // Return void
         self.builder.build_return(None);
-
-        // Finish the __init__ function
         self.builder.finish_function();
 
-        // Restore symbol map
         self.symbol_map = saved_symbol_map;
         self.strict_move_locals = saved_strict_move_locals;
     }
@@ -355,7 +343,6 @@ impl<'a> HirToMirContext<'a> {
 
         let mut ids = Vec::new();
         for (name, params, ret) in externs_to_declare {
-            // Check if already declared
             let existing = self
                 .builder
                 .module
@@ -367,7 +354,6 @@ impl<'a> HirToMirContext<'a> {
                 ids.push(id);
                 continue;
             }
-            // Declare it
             let id = self.builder.module.alloc_function_id();
             let sig = crate::ir::IrFunctionSignature {
                 parameters: params
@@ -404,13 +390,7 @@ impl<'a> HirToMirContext<'a> {
 
     pub(crate) fn ensure_terminator(&mut self) {
         let is_term = self.is_terminated();
-        // eprintln!(
-        //     "DEBUG ensure_terminator: is_terminated={}, current_func={:?}",
-        //     is_term,
-        //     self.builder.current_function().map(|f| &f.name)
-        // );
         if !is_term {
-            // debug!("ensure_terminator: Adding implicit return(None)");
             self.builder.build_return(None);
         }
     }
@@ -418,19 +398,16 @@ impl<'a> HirToMirContext<'a> {
     /// Register a heap-allocated value as owned by a variable
     /// This is called when a variable is assigned a newly allocated value (from `new`)
     pub(crate) fn register_owned_value(&mut self, symbol: SymbolId, ir_id: IrId) {
-        // Check if this variable already owns a heap value
         if let Some(old_ir_id) = self.owned_heap_values.get(&symbol).copied() {
-            // REASSIGNMENT: free the old value — but only when its
-            // definition dominates this block. `var x; if c { x = A }
-            // else { x = B }` lowers the arms sequentially, so the else
-            // arm sees A in the tracker even though A never runs on this
-            // path; freeing it here freed a live unrelated object.
+            // Reassignment frees the old value, but only when its definition
+            // dominates this block: `var x; if c { x = A } else { x = B }`
+            // lowers the arms sequentially, so the else arm still sees A in the
+            // tracker even though A never runs on this path.
             self.emit_tracked_free(old_ir_id, true);
 
-            // DON'T update scope entries - this caused dominator issues.
-            // The scope tracks the ORIGINAL declaration which may be from a different block.
-            // Reassigned values are handled here at reassignment time, not at scope exit.
-            // Mark this symbol as reassigned so scope exit skips it.
+            // Scope entries keep pointing at the ORIGINAL declaration, which may
+            // live in a different block. Reassigned values are freed here rather
+            // than at scope exit, so mark the symbol for scope exit to skip.
             self.reassigned_in_scope.insert(symbol);
         } else {
             // New declaration - add to current scope for cleanup on scope exit
@@ -439,7 +416,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Track the current value
         self.owned_heap_values.insert(symbol, ir_id);
 
         // Track Drop class association for @:derive(Drop)
@@ -566,7 +542,6 @@ impl<'a> HirToMirContext<'a> {
 
         let mut variants = Vec::new();
         for (i, variant) in enum_decl.variants.iter().enumerate() {
-            // Use explicit discriminant if provided, otherwise use index
             let discriminant = variant.discriminant.unwrap_or(i as i32) as i64;
 
             let variant_name = self
@@ -575,7 +550,6 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>")
                 .to_string();
 
-            // Convert variant fields to IR fields with resolved types
             let fields: Vec<IrField> = variant
                 .fields
                 .iter()
@@ -619,13 +593,10 @@ impl<'a> HirToMirContext<'a> {
 
     pub(crate) fn register_type_metadata(&mut self, type_id: TypeId, type_decl: &HirTypeDecl) {
         self.dbg_type_meta_calls += 1;
-        // Register type definitions in MIR for runtime type information
-        // This metadata is used for:
-        // - Enum discriminant values (for pattern matching)
-        // - Struct field layouts (for field access)
-        // - Interface method tables (for dynamic dispatch)
-        // - Type checking at runtime
-
+        // MIR type definitions carry the runtime type information: enum
+        // discriminants for pattern matching, struct field layouts for field
+        // access, interface method tables for dynamic dispatch, and the data
+        // behind runtime type checks.
         match type_decl {
             HirTypeDecl::Class(class) => {
                 self.register_class_metadata(type_id, class);

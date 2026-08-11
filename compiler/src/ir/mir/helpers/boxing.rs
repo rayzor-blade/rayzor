@@ -48,7 +48,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
 
-        // Check if target is Dynamic and value is concrete
         // Clone TypeKind to avoid borrow checker issues
         let (target_is_dynamic, value_kind_cloned) = {
             let type_table = self.type_table;
@@ -78,7 +77,6 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
-        // Determine which boxing function to call based on value type
         match &value_kind_cloned {
             // Value types (need malloc + copy)
             Some(TypeKind::Int) => {
@@ -157,13 +155,10 @@ impl<'a> HirToMirContext<'a> {
                     stable => stable,
                 };
 
-                // Create constant for type_id
                 let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
 
-                // Get pointer type
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-                // Call box_reference_ptr(value_ptr, type_id)
                 let box_func_id = self.get_or_register_extern_function(
                     "haxe_box_reference_ptr",
                     vec![ptr_u8.clone(), IrType::U32],
@@ -201,7 +196,7 @@ impl<'a> HirToMirContext<'a> {
                     "[BOXING] Unsupported type for boxing: {:?}",
                     value_kind_cloned
                 );
-                Some(value) // Skip boxing for unsupported types
+                Some(value)
             }
         }
     }
@@ -232,15 +227,11 @@ impl<'a> HirToMirContext<'a> {
             _ => {}
         }
 
-        // raw_value_params expect U64 — if the actual is a pointer
-        // (class instance, array, etc.), reinterpret its bits as U64
-        // so the runtime sees the address as an inline 64-bit value
-        // rather than receiving a register-tagged Ptr value where the
-        // ABI expects a u64 integer. Use bitcast (no-op bit
-        // reinterpretation) rather than numeric cast — pointers and
-        // u64 share representation. Without this, Map<K, ExternClass>.set
-        // passed a Ptr-typed register where U64 was expected and
-        // Cranelift's calling convention dropped or extended bits.
+        // raw_value_params expect U64 — if the actual is a pointer (class
+        // instance, array, etc.), reinterpret its bits as U64 so the runtime
+        // sees the address as an inline 64-bit value rather than a
+        // register-tagged Ptr where the ABI expects a u64 integer. Bitcast,
+        // not numeric cast: pointers and u64 share representation.
         if matches!(expected_ty, IrType::U64) {
             match actual_ty {
                 IrType::Ptr(_) => {
@@ -249,7 +240,7 @@ impl<'a> HirToMirContext<'a> {
                 IrType::F64 => {
                     // f64 bits → u64 raw bits. The Map runtime stores raw u64;
                     // reads back via the corresponding F64 typed `get` reverse
-                    // the bitcast. Without this, Map<K,Float>.set wrote zeros.
+                    // the bitcast.
                     return self.builder.build_bitcast(value, IrType::U64);
                 }
                 IrType::F32 => {
@@ -269,20 +260,17 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Only box if expected is Ptr(U8) and actual is a primitive
         let expected_is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
 
         if !expected_is_ptr_u8 {
             return Some(value);
         }
 
-        // Check if actual type is a primitive that needs boxing
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
         match actual_ty {
             IrType::I32 => {
                 debug!("[EXTERN BOXING] Boxing I32 to Ptr(U8) for extern call");
-                // First sign-extend i32 to i64, then call haxe_box_int_ptr
                 let extended = self.builder.build_cast(value, IrType::I32, IrType::I64)?;
                 let box_func_id = self.get_or_register_extern_function(
                     "haxe_box_int_ptr",
@@ -311,7 +299,6 @@ impl<'a> HirToMirContext<'a> {
             }
             IrType::F32 => {
                 debug!("[EXTERN BOXING] Boxing F32 to Ptr(U8) for extern call");
-                // Promote f32 to f64
                 let promoted = self.builder.build_cast(value, IrType::F32, IrType::F64)?;
                 let box_func_id = self.get_or_register_extern_function(
                     "haxe_box_float_ptr",
@@ -341,7 +328,6 @@ impl<'a> HirToMirContext<'a> {
             // (haxe_string_println), so the expected IrType cannot decide this.
             // Dynamic consumers that need a boxed String box at their own site.
             IrType::Function { .. } | IrType::Ptr(_) | IrType::String | IrType::Any => Some(value),
-            // Other types - pass through without boxing (may cause issues, but let's see)
             _ => {
                 debug!("[EXTERN BOXING] Skipping boxing for type {:?}", actual_ty);
                 Some(value)
@@ -357,7 +343,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
 
-        // Check if target is Optional with a primitive inner type
         let inner_type = {
             let type_table = self.type_table;
             match type_table.get(target_ty).map(|t| &t.kind) {
@@ -367,7 +352,6 @@ impl<'a> HirToMirContext<'a> {
         };
         let inner_type = inner_type?;
 
-        // Check if inner type is a TypeParameter — use typed boxing with fixup
         let is_type_param = {
             let type_table = self.type_table;
             match type_table.get(inner_type).map(|t| &t.kind) {
@@ -418,14 +402,11 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Only box genuine primitive *value* types. An IR-type check alone is
-        // not enough: an Enum lowers to `I64` (a tagged reference) and a
-        // pointer-sized abstract (Usize/Ptr/Ref/Box) also lowers to `I64`, yet
-        // these are reference/handle values that are ALREADY nullable and must
-        // NEVER be int-boxed — boxing them as Int corrupts the value (e.g.
-        // `Map<K,EnumT>.get` returning an enum pointer that the subsequent
-        // `switch` then reads as an int-box, getting the wrong variant tag).
-        // Decide purely from the TAST type kind (resolving abstracts through
-        // their underlying primitive). Only Int/Float/Bool/Char are boxable.
+        // not enough: an Enum and a pointer-sized abstract (Usize/Ptr/Ref/Box)
+        // both lower to `I64`, yet they are reference/handle values that are
+        // already nullable — int-boxing them corrupts the value. Decide from
+        // the TAST type kind (resolving abstracts through their underlying
+        // primitive); only Int/Float/Bool/Char are boxable.
         if !self.optional_inner_is_boxable_primitive(inner_type) {
             return None;
         }
@@ -439,7 +420,6 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
 
-        // Check if source is already a pointer (already boxed, or null literal)
         let val_ir = self.builder.get_register_type(value);
         match val_ir {
             Some(IrType::Ptr(_)) => return None, // Already a pointer, no boxing needed
@@ -448,9 +428,8 @@ impl<'a> HirToMirContext<'a> {
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-        // Check if value is the null literal (I64(0) or I32(0)) — cast to null pointer
-        // We can't easily detect null literals, but if source type is Dynamic/Unknown
-        // and register type is I64, it's likely a null literal or dynamic value.
+        // Null literals aren't directly detectable: a Dynamic/Unknown source
+        // sitting in an I64 register stands in for one.
         let source_is_null_literal = {
             let type_table = self.type_table;
             matches!(
@@ -459,11 +438,9 @@ impl<'a> HirToMirContext<'a> {
             )
         };
         if source_is_null_literal && matches!(val_ir, Some(IrType::I64)) {
-            // Cast null (i64 0) to Ptr(U8) null pointer
             return self.builder.build_cast(value, IrType::I64, ptr_u8);
         }
 
-        // Box the primitive value
         match &inner_ir {
             IrType::I32 | IrType::I64 => {
                 // Ensure value is I64 for haxe_box_int_ptr
@@ -515,7 +492,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
 
-        // Check if value is Dynamic and target is concrete
         // Clone TypeKind to avoid borrow checker issues
         let (value_is_dynamic, target_kind_cloned) = {
             let type_table = self.type_table;
@@ -546,19 +522,11 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
-        // Check the actual MIR register type of the value.
-        // If it's already a primitive (I64, I32, F64, Bool) rather than a pointer (Ptr(U8)),
-        // then it's NOT a boxed Dynamic value — skip unboxing.
-        // This handles MIR wrapper returns (e.g., Usize ops return I64 typed as Dynamic in HIR).
-        //
-        // The same logic applies to pointer-to-reference targets (Array, Interface,
-        // Anonymous, Class): if the value's MIR type is already a `Ptr(Void)` /
-        // `Ptr(U8)` produced by a callee that returns raw pointers (e.g. a cross-
-        // file interface dispatch whose HIR result type is treated as Dynamic
-        // because the call_indirect result type info didn't propagate), the value
-        // is the unwrapped pointer already. Running `haxe_unbox_reference_ptr` on
-        // it interprets the first 8 bytes of the HaxeArray (or class header) as a
-        // `DynamicValue.value_ptr`, returning garbage and SIGBUSing at first use.
+        // A value whose MIR register is already a primitive is not a boxed
+        // Dynamic (e.g. Usize ops return I64 but are typed Dynamic in HIR).
+        // Same for a reference target whose register is already a pointer:
+        // unboxing would read the array/class header's first 8 bytes as a
+        // `DynamicValue.value_ptr`.
         let actual_mir_type = self.builder.get_register_type(value);
         if let Some(ref mir_ty) = actual_mir_type {
             let is_already_unboxed = matches!(
@@ -572,9 +540,6 @@ impl<'a> HirToMirContext<'a> {
                 );
                 return Some(value);
             }
-            // Target is a reference-typed Haxe kind (Array, Interface, Anonymous,
-            // Class). When the MIR value is already a pointer, skip the
-            // haxe_unbox_reference_ptr — see comment above.
             if matches!(mir_ty, IrType::Ptr(_))
                 && matches!(
                     &target_kind_cloned,
@@ -591,7 +556,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Determine which unboxing function to call based on target type
         match &target_kind_cloned {
             // Value types (need to extract from heap)
             Some(TypeKind::Int) => {
@@ -628,11 +592,9 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(unbox_func_id, vec![value], IrType::Bool)
             }
 
-            // Enums: Check if this is actually an enum discriminant (i64) rather than a boxed value
-            // When accessing Color.Green, the HIR may incorrectly type it as Dynamic,
-            // but the actual MIR value is an i64 discriminant, not a boxed pointer
+            // Enums: a variant access may be typed Dynamic in HIR while the MIR
+            // value is a raw i64 discriminant rather than a boxed pointer.
             Some(TypeKind::Enum { .. }) => {
-                // Check the actual register type - if it's i64, don't unbox
                 let actual_type = self.builder.get_register_type(value);
                 if matches!(actual_type, Some(IrType::I64) | Some(IrType::I32)) {
                     debug!(
@@ -642,7 +604,6 @@ impl<'a> HirToMirContext<'a> {
                 }
                 debug!("[UNBOXING] Auto-unboxing Dynamic to Enum using unbox_reference");
 
-                // Call haxe_unbox_reference_ptr to extract the pointer
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                 let unbox_func_id = self.get_or_register_extern_function(
                     "haxe_unbox_reference_ptr",
@@ -653,8 +614,8 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(unbox_func_id, vec![value], ptr_u8)
             }
 
-            // Abstract types (like Ptr<T>, Ref<T>, Box<T>, Usize) — zero-cost over Int
-            // These are NOT heap-boxed, they're just i64 values. Skip unboxing.
+            // Abstract types (Ptr<T>, Ref<T>, Box<T>, Usize) are zero-cost over
+            // Int: plain i64 values, never heap-boxed.
             Some(TypeKind::Abstract { .. }) => {
                 debug!("[UNBOXING] Skipping unbox for Abstract type (zero-cost over Int)");
                 Some(value)
@@ -662,8 +623,8 @@ impl<'a> HirToMirContext<'a> {
 
             // Reference types (just extract the pointer)
             Some(TypeKind::Class { symbol_id, .. }) => {
-                // Check if this is a MIR wrapper class (extern abstract like Ptr, Ref, Box, Usize)
-                // These are zero-cost abstracts over Int — NOT heap-boxed, skip unboxing
+                // MIR wrapper classes (extern abstracts like Ptr, Ref, Box,
+                // Usize) are zero-cost over Int, never heap-boxed.
                 if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
                     // Try qualified name (e.g., "rayzor.Ptr" → "rayzor_Ptr"), then native name
                     let class_name = sym
@@ -691,7 +652,6 @@ impl<'a> HirToMirContext<'a> {
                     target_kind_cloned
                 );
 
-                // Call haxe_unbox_reference_ptr to extract the pointer
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                 let unbox_func_id = self.get_or_register_extern_function(
                     "haxe_unbox_reference_ptr",
@@ -727,7 +687,7 @@ impl<'a> HirToMirContext<'a> {
                     "[UNBOXING] Unsupported type for unboxing: {:?}",
                     target_kind_cloned
                 );
-                Some(value) // Skip unboxing for unsupported types
+                Some(value)
             }
         }
     }
@@ -745,20 +705,16 @@ impl<'a> HirToMirContext<'a> {
         actual_ty: &IrType,
         expected_ty: &IrType,
     ) -> Option<IrId> {
-        // Only unbox if actual is Ptr(U8) and expected is a primitive
         let actual_is_ptr_u8 =
             matches!(actual_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
 
         if !actual_is_ptr_u8 {
             // Truncate I64 → I32 when extern returns i64 but Haxe type is Int (I32).
-            // Without this, the I64 gets bitcast to F64 when passed as Float.
             if matches!(actual_ty, IrType::I64) && matches!(expected_ty, IrType::I32) {
                 return self.builder.build_cast(value, IrType::I64, IrType::I32);
             }
             // Map<K,Float>.get / .iterator and other raw-u64 returners hand back
-            // an 8-byte bit pattern. When the caller expects Float, reinterpret
-            // those bits as f64. Without this, `m.get("pi")` returns the u64
-            // pattern of π (a giant integer) instead of 3.14159265.
+            // an 8-byte bit pattern; a Float caller reinterprets those bits.
             if matches!(actual_ty, IrType::U64) && matches!(expected_ty, IrType::F64) {
                 return self.builder.build_bitcast(value, IrType::F64);
             }
@@ -771,8 +727,8 @@ impl<'a> HirToMirContext<'a> {
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-        // Check if expected type is nullable (Ptr(primitive)) - if so, unbox to the inner primitive type
-        // Null<Int> becomes Ptr(I32), we need to unbox to I32
+        // A nullable primitive expectation is a Ptr(primitive) — Null<Int> is
+        // Ptr(I32) — so unbox to the inner type.
         let target_type = match expected_ty {
             IrType::Ptr(inner) => match inner.as_ref() {
                 IrType::I32 | IrType::I64 | IrType::Bool | IrType::F32 | IrType::F64 => {
@@ -843,7 +799,6 @@ impl<'a> HirToMirContext<'a> {
             }
             IrType::String => {
                 debug!("[EXTERN UNBOXING] String type - using reference unboxing");
-                // Use haxe_unbox_reference_ptr for strings (returns the pointer directly)
                 let unbox_func_id = self.get_or_register_extern_function(
                     "haxe_unbox_reference_ptr",
                     vec![ptr_u8],
@@ -873,7 +828,6 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
 
-        // Check if source is Optional with a primitive inner type
         let inner_type = {
             let type_table = self.type_table;
             match type_table.get(source_ty).map(|t| &t.kind) {
@@ -935,30 +889,21 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Auto-box a primitive value when assigning to a Null<T> (Optional{primitive}) variable.
-    /// Returns Some(boxed_ptr) if boxing was performed, None if not needed.
     /// Inverse of `maybe_box_for_optional`: unbox a `Null<T>` value to its
     /// primitive `T` when the target type is the bare primitive. Returns
     /// the unboxed register, or `None` when the conversion doesn't apply.
-    /// Used at function-return / variable-assignment sites where the
-    /// declared target is a primitive but the expression produces a boxed
-    /// `Null<T>` (typically a `StringMap<T>.get(k)` result that's gone
-    /// through `(v == null) ? -1 : v` and the typechecker unified the
-    /// branches to `Null<T>`).
+    /// Used at function-return / variable-assignment sites where the declared
+    /// target is a primitive but the expression produces a boxed `Null<T>`.
     pub(crate) fn maybe_unbox_optional_for_target(
         &mut self,
         value: IrId,
         _value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
-        // Driven by the MIR register type, not the HIR type. Common case
-        // that motivated this helper: a ternary `(v == null) ? -1 : v`
-        // unifies its branches to bare `Int` in TAST, so the HIR `value_ty`
-        // arrives here as `Int` even though the register actually holds a
-        // boxed `DynamicValue*` (because the non-null branch came from
-        // `StringMap<Int>.get(k)` returning `Null<Int>`). Comparing the
-        // register's runtime type against the target catches this mismatch
-        // regardless of what the HIR types claim.
+        // Driven by the MIR register type, not the HIR type: a ternary like
+        // `(v == null) ? -1 : v` unifies its branches to bare `Int` in TAST
+        // while the register still holds a boxed `DynamicValue*` from the
+        // `StringMap<Int>.get(k)` branch.
         let target_ir = self.convert_type(target_ty);
 
         // Only apply to primitive targets — pointer/object targets are
@@ -979,16 +924,12 @@ impl<'a> HirToMirContext<'a> {
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-        // A non-`*u8` pointer register (e.g. `*void`) here is NOT a boxed
+        // A non-`*u8` pointer register (e.g. `*void`) is NOT a boxed
         // `DynamicValue*` — genuine boxes are always `*u8`. It is a
-        // switch-as-expression result temp holding a RAW primitive payload:
-        // an enum Int/Float variant read straight out of the `{tag, payload}`
-        // struct, surfaced through an untyped `*void` temp because the enum's
-        // variant/discriminant type was lost (e.g. a cross-module `Map<_,Enum>`
-        // whose element type resolved to Dynamic, so the or-pattern's bound
-        // variable never got a concrete type). Calling `haxe_unbox_int_ptr` on
-        // it would dereference the raw integer value → SIGSEGV. Recover the raw
-        // bits and cast to the target primitive instead.
+        // switch-as-expression temp holding a RAW primitive payload read out of
+        // an enum's `{tag, payload}` struct, surfaced as untyped `*void`
+        // because the variant's type was lost. Unboxing it would dereference
+        // the payload as a pointer, so recover the raw bits and cast instead.
         let mut is_known_box = self.boxed_value_regs.contains(&value);
         if !is_known_box {
             // Casts re-wrap a box without changing what it is (e.g. the Let

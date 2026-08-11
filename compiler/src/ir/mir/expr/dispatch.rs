@@ -22,26 +22,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// Lower a HIR expression to MIR value
-    /// Public entry: lower a HIR expression to MIR, then post-process to
-    /// wrap a Class value as an interface fat pointer when the expression's
-    /// static type was promoted to an Interface by the typechecker (e.g.
-    /// when used as a function arg, return value, or array element where
-    /// the slot expects an interface). Without this, stdlib calls like
-    /// `array_push` and any non-user-function dispatch would store a raw
-    /// class pointer, breaking subsequent interface dispatch on reads.
+    /// Lower a HIR expression to MIR, then wrap a Class value as an interface
+    /// fat pointer when the typechecker promoted the expression's static type
+    /// to an Interface (function arg, return value, array element). Without
+    /// this, stdlib calls like `array_push` store a raw class pointer and
+    /// subsequent interface dispatch on reads breaks.
     pub(crate) fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
         let result = self.lower_expression_inner(expr)?;
-        // Promotion wrap: only fires when expr.ty IS an interface AND the
-        // expression kind reveals an underlying class. Variable expressions
-        // whose symbol is interface-typed correctly skip this (their
-        // underlying type is also interface, get_class_symbol returns None).
-        // Inner Let/Cast handlers also produce wrapped fat pointers when
-        // their RHS is a class; that runs first, and by then expr.ty for
-        // the outer expression is the interface, leaving the underlying
-        // unchanged — but our extractor only fires when it can extract a
-        // class from `kind`, which a Let-result expression cannot, so no
-        // double-wrap.
+        // Fires only when expr.ty IS an interface AND `kind` reveals an
+        // underlying class. Interface-typed variables and Let/Cast results
+        // yield no class here, so an already-wrapped value is never wrapped
+        // twice.
         if let Some(iface_sym) = self.get_interface_symbol(expr.ty) {
             let underlying = self.extract_underlying_class_symbol(expr);
             if let Some(class_sym) = underlying {
@@ -83,14 +74,12 @@ impl<'a> HirToMirContext<'a> {
             merge_block
         };
 
-        // Get the current block before branching
         let entry_block = if let Some(block_id) = self.builder.current_block() {
             block_id
         } else {
             return;
         };
 
-        // Find all variables that are modified in either branch
         let mut modified_vars = std::collections::BTreeSet::new();
         for stmt in &then_branch.statements {
             self.find_modified_variables_in_statement(stmt, &mut modified_vars);
@@ -103,11 +92,9 @@ impl<'a> HirToMirContext<'a> {
 
         debug!("modified_vars.len() = {}", modified_vars.len());
 
-        // Save initial values of variables that will be modified
         let mut var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
-                // Get the type from the locals table
                 if let Some(func) = self.builder.current_function() {
                     if let Some(local) = func.locals.get(&reg) {
                         debug!("var {:?} has initial value {:?}", symbol_id, reg);
@@ -121,10 +108,9 @@ impl<'a> HirToMirContext<'a> {
 
         debug!("var_initial_values.len() = {}", var_initial_values.len());
 
-        // Evaluate condition
         if let Some(cond_reg) = self.lower_expression(condition) {
-            // Branch-phi for effectful Call results — same fix as in
-            // lower_conditional_typed. See that fn for the rationale.
+            // Branch-phi for effectful Call results; rationale in
+            // lower_conditional_typed.
             let cond_eval_block = match self.builder.current_block() {
                 Some(b) => b,
                 None => return,
@@ -239,7 +225,6 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_cond_branch(cond_reg, then_block, else_block);
 
-            // Lower then branch
             self.builder.switch_to_block(then_block);
             for (sym, then_phi, _) in &branch_phi_rebind {
                 self.symbol_map.insert(*sym, *then_phi);
@@ -253,11 +238,10 @@ impl<'a> HirToMirContext<'a> {
                 None
             };
 
-            // Save values after then branch
             let mut then_values: BTreeMap<SymbolId, IrId> = BTreeMap::new();
             if then_end_block.is_some() {
-                // Only collect values for variables that existed BEFORE the if/else
-                // Variables defined within the then branch should not be added
+                // Only variables that existed BEFORE the if/else: ones defined
+                // inside a branch must not leak out of it.
                 for symbol_id in var_initial_values.keys() {
                     if let Some(&reg) = self.symbol_map.get(symbol_id) {
                         then_values.insert(*symbol_id, reg);
@@ -265,7 +249,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Lower else branch if present
             let mut else_values: BTreeMap<SymbolId, IrId> = BTreeMap::new();
             let else_end_block = if let Some(else_branch) = else_branch {
                 self.builder.switch_to_block(else_block);
@@ -283,9 +266,8 @@ impl<'a> HirToMirContext<'a> {
                     let current = self.builder.current_block();
                     self.builder.build_branch(merge_block);
 
-                    // Save values after else branch
-                    // Only collect values for variables that existed BEFORE the if/else
-                    // Variables defined within one branch should not leak into the other
+                    // Only variables that existed BEFORE the if/else: ones
+                    // defined in one branch must not leak into the other.
                     for symbol_id in var_initial_values.keys() {
                         if let Some(&reg) = self.symbol_map.get(symbol_id) {
                             else_values.insert(*symbol_id, reg);
@@ -304,14 +286,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(entry_block)
             };
 
-            // Continue in merge block and create phi nodes
             self.builder.switch_to_block(merge_block);
 
-            // Create phi nodes for modified variables
             debug!("var_initial_values.len() = {}", var_initial_values.len());
             for (symbol_id, (initial_reg, var_type)) in &var_initial_values {
                 debug!("Checking var {:?} for phi node", symbol_id);
-                // Only create phi if at least one branch modified the variable
                 let then_val = then_values.get(symbol_id).copied().unwrap_or(*initial_reg);
                 let else_val = else_values.get(symbol_id).copied().unwrap_or(*initial_reg);
 
@@ -338,14 +317,12 @@ impl<'a> HirToMirContext<'a> {
                     then_end_block, else_end_block
                 );
 
-                // Create phi node
                 if let Some(phi_reg) = self.builder.build_phi(merge_block, var_type.clone()) {
                     debug!(
                         "  Created phi node {:?} in merge block {:?}",
                         phi_reg, merge_block
                     );
 
-                    // Add incoming values from both branches
                     if let Some(then_blk) = then_end_block {
                         debug!(
                             "  Adding phi incoming from then block {:?}, value {:?}",
@@ -363,7 +340,6 @@ impl<'a> HirToMirContext<'a> {
                             .add_phi_incoming(merge_block, phi_reg, else_blk, else_val);
                     }
 
-                    // Register the phi node as a local
                     if let Some(func) = self.builder.current_function_mut() {
                         if let Some(local) = func.locals.get(initial_reg).cloned() {
                             func.locals.insert(
@@ -379,7 +355,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Update symbol map to use phi node
                     self.symbol_map.insert(*symbol_id, phi_reg);
                 }
             }
@@ -387,13 +362,11 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_global(&mut self, symbol: SymbolId, global: &HirGlobal) {
-        // Allocate a global ID
         let global_id = self.builder.module.alloc_global_id();
 
-        // Convert initialization expression to IrValue if present
-        // For now, we only support constant expressions
+        // Only constant initializers become an IrValue; anything else is
+        // deferred to runtime evaluation via `dynamic_globals`.
         let initializer = if let Some(init_expr) = &global.init {
-            // Try to evaluate as constant expression
             match &init_expr.kind {
                 HirExprKind::Literal(lit) => {
                     match lit {
@@ -401,37 +374,29 @@ impl<'a> HirToMirContext<'a> {
                         HirLiteral::Int(i) => Some(IrValue::I64(*i)),
                         HirLiteral::Float(f) => Some(IrValue::F64(*f)),
                         HirLiteral::String(s) => {
-                            // String literals are added to string pool
-                            // and referenced by their pool ID
+                            // Stored as the string-pool id; the runtime resolves
+                            // the pool entry.
                             let string_id = self.builder.module.string_pool.add(s.to_string());
-                            // Store the string pool ID as an integer value
-                            // The runtime will look up the actual string from the pool
                             Some(IrValue::I32(string_id as i32))
                         }
-                        HirLiteral::Regex { .. } => {
-                            // Regex needs special handling
-                            None
-                        }
+                        HirLiteral::Regex { .. } => None,
                     }
                 }
                 _ => {
-                    // Try constant folding for expressions like 1 << 16
+                    // Constant folding covers expressions like `1 << 16`.
                     if let Some(folded) = self.try_evaluate_constant_init(init_expr) {
                         Some(folded)
                     } else {
-                        // Non-constant initialization - needs runtime evaluation
                         self.dynamic_globals.push((symbol, init_expr.clone()));
                         Some(IrValue::Undef)
                     }
                 }
             }
         } else {
-            // No initializer - use Undef
             Some(IrValue::Undef)
         };
 
-        // Create the global variable
-        // Note: Using placeholder name based on symbol ID since HirGlobal doesn't store name
+        // Placeholder name: HirGlobal carries no name of its own.
         let global_ty = self.refine_global_type_from_initializer(IrType::Any, initializer.as_ref());
 
         let ir_global = IrGlobal {
@@ -446,10 +411,8 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
         };
 
-        // Add to module
         self.builder.module.add_global(ir_global);
 
-        // Store the mapping so we can look up globals by symbol ID later
         self.global_symbol_map.insert(symbol, global_id);
         debug!("[GLOBAL] Registered global {:?} -> {:?}", symbol, global_id);
 
@@ -489,7 +452,6 @@ impl<'a> HirToMirContext<'a> {
         // Lower the code expression (string literal or concat like cdef() + "...")
         let code_reg = self.lower_expression(code_expr)?;
 
-        // Lower all argument expressions
         let mut arg_regs = Vec::new();
         for arg in args {
             if let Some(reg) = self.lower_expression(arg) {
@@ -497,8 +459,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Auto-inject module-local @:cstruct typedefs into TCC context
-        // Use already-cached cstruct_layouts (populated by field accesses, constructors, cdef() calls)
+        // Inject module-local @:cstruct typedefs into the TCC context from the
+        // layout cache (populated by field accesses, constructors, cdef() calls).
         let mut cstruct_prefix = String::new();
         {
             let mut seen_typedefs = std::collections::BTreeSet::new();
@@ -572,7 +534,6 @@ impl<'a> HirToMirContext<'a> {
             let mut seen_src = std::collections::BTreeSet::new();
             let mut seen_lib = std::collections::BTreeSet::new();
 
-            // Collect metadata from all relevant symbols
             let mut sym_ids: Vec<SymbolId> = Vec::new();
             for (_type_id, type_decl) in self.current_hir_types {
                 if let crate::ir::hir::HirTypeDecl::Class(c) = type_decl {
@@ -720,34 +681,26 @@ impl<'a> HirToMirContext<'a> {
         field_index: u32,
         field_ty: TypeId,
     ) -> Option<IrId> {
-        // Create constant for field index
         let index_const = self.builder.build_const(IrValue::I32(field_index as i32))?;
 
-        // Get the type of the field
         let field_ir_ty = self.convert_type(field_ty);
 
-        // Use GetElementPtr to get pointer to the field
-        // All typedef anonymous struct fields are 8 bytes
         let field_ptr = self
             .builder
             .build_gep(obj, vec![index_const], field_ir_ty.clone())?;
 
-        // Load the value from the field pointer
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
 
-        // Register the type of the loaded value
         self.builder.set_register_type(field_value, field_ir_ty);
 
         Some(field_value)
     }
 
     pub(crate) fn lower_expression_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
-        // DEBUG: Check if this is Field expression being lowered
         if matches!(&expr.kind, HirExprKind::Field { .. }) {
             debug!("[lower_expression] START - Field expression");
         }
 
-        // Set source location for debugging
         self.builder
             .set_source_location(self.convert_source_location(&expr.source_location));
 
@@ -812,12 +765,9 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirExprKind::Super => {
-                // 'super' should only appear in constructor super calls, which are handled
-                // specially in lower_constructor_body. If we reach here, it's likely being
-                // used incorrectly (e.g., super.method() which isn't supported yet)
-                // eprintln!("WARNING: HirExprKind::Super encountered in expression lowering");
-                // eprintln!("  This might be super.field or super.method() which isn't implemented yet");
-                // For now, treat it like 'this' (same object, but calling parent methods)
+                // 'super' only appears in constructor super calls, handled in
+                // lower_constructor_body. Reaching here means an unsupported
+                // form (e.g. super.method()); treat it as 'this'.
                 self.symbol_map.get(&SymbolId::from_raw(0)).copied()
             }
 
@@ -840,7 +790,6 @@ impl<'a> HirToMirContext<'a> {
             }
         };
 
-        // debug!("lower_expression result: {:?}", result);
         result
     }
 }

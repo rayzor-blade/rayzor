@@ -22,11 +22,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// Generate uniform constructor wrappers used by `Type.createInstance`.
+    /// Generate (or return cached) a virtual/interface dispatch thunk.
     ///
-    /// Wrapper ABI: `fn(obj_ptr: *u8, args: *void) -> void`
-    /// Runtime passes raw 64-bit array slots via `args`; wrappers reinterpret/cast
-    /// each slot to match the concrete constructor signature.
+    /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
+    /// vtable slots prepends a closure env that class methods don't declare, so
+    /// the thunk drops `env` and forwards to the real method.
     pub(crate) fn ensure_vtable_dispatch_thunk(
         &mut self,
         method_func_id: IrFunctionId,
@@ -60,14 +60,10 @@ impl<'a> HirToMirContext<'a> {
         let thunk_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
         self.next_wrapper_id += 1;
         // Name the thunk by the target method's QUALIFIED name, not its raw
-        // module-local func id. Local ids collide across modules post-merge:
-        // two modules both emit `__vtable_dispatch_thunk_2` for different
-        // methods, the LLVM declare pass dedupes by name, and whichever
-        // FunctionRef escaped renumbering binds to the FIRST module's thunk —
-        // dispatching e.g. `forwardIds` into an unrelated `forward` whose
-        // first op reads x.shape() from a token array (SIGSEGV in
-        // rayzor_tensor_shape). A qualified-name thunk is behaviorally
-        // identical no matter which module's copy a stale ref lands on.
+        // module-local func id: local ids collide across modules post-merge and
+        // the LLVM declare pass dedupes by name, so a stale FunctionRef would
+        // bind to another module's thunk. A qualified-name thunk is
+        // behaviorally identical whichever module's copy it lands on.
         let sanitized_qname: String = method_qname
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -299,13 +295,10 @@ impl<'a> HirToMirContext<'a> {
         self.next_wrapper_id += 1;
         let thunk_name = format!("__method_ref_thunk_{}", method_func_id.0);
 
-        // Save outer function/block state — thunk generation may run
-        // *during* lowering of another function (e.g. `var f =
-        // obj.m;` inside main). Without this, `start_function`
-        // re-targets the builder at the thunk and any `build_*`
-        // calls that *should* land in the outer function leak into
-        // the thunk's body. We saw it: the thunk MIR ended up with
-        // the method's body inlined when this wasn't saved.
+        // Save outer function/block state — thunk generation may run *during*
+        // lowering of another function (e.g. `var f = obj.m;` inside main).
+        // `start_function` re-targets the builder, so without this the outer
+        // function's `build_*` calls leak into the thunk's body.
         let saved_current_function = self.builder.current_function;
         let saved_current_block = self.builder.current_block;
         let saved_symbol_map = self.symbol_map.clone();
@@ -402,9 +395,8 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn generate_vtable_init_function(&mut self) {
-        // Generate __vtable_init__ function that registers class vtables at startup.
-        // Called before main() by the backend (same pattern as __init__).
-
+        // __vtable_init__ registers class vtables at startup; the backend calls
+        // it before main(), same as __init__.
         let sig = FunctionSignatureBuilder::new()
             .returns(IrType::Void)
             .calling_convention(CallingConvention::Haxe)
@@ -426,7 +418,6 @@ impl<'a> HirToMirContext<'a> {
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
 
-        // Register extern functions for vtable operations
         let vtable_init_fn = self.get_or_register_extern_function(
             "haxe_vtable_init",
             vec![IrType::I32, IrType::I32],
@@ -465,7 +456,6 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or(class_sym.as_raw() as i32);
             let slot_count = vtable.len() as i32;
 
-            // haxe_vtable_init(type_id, slot_count)
             let type_id_reg = self.builder.build_const(IrValue::I32(type_id));
             let slot_count_reg = self.builder.build_const(IrValue::I32(slot_count));
             if let (Some(tid), Some(sc)) = (type_id_reg, slot_count_reg) {
@@ -473,7 +463,6 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(vtable_init_fn, vec![tid, sc], IrType::Void);
             }
 
-            // For each slot, create a FunctionRef closure and store it.
             for (slot_idx, method_sym) in vtable.iter().enumerate() {
                 if let Some(&func_id) = self.function_map.get(method_sym) {
                     let dispatch_func_id = self
@@ -501,16 +490,15 @@ impl<'a> HirToMirContext<'a> {
         //
         // Also register per-(class, iface, slot) closure pointers so that
         // iface-to-iface casts (e.g. `cast(model:Module, CausalLanguageModel)`)
-        // can call `haxe_iface_fat_ptr_build` to rebuild a fat pointer with
-        // the target interface's full method set — without this the
-        // pass-through cast emits a Module-shaped fat ptr that's read as
-        // CausalLanguageModel, and the larger interface's method-slot
-        // reads run off the end of the source vtable into garbage.
+        // can call `haxe_iface_fat_ptr_build` and rebuild a fat pointer with the
+        // target interface's full method set. A pass-through cast would keep the
+        // source-shaped fat ptr, and the wider interface's slot reads would run
+        // off the end of the source vtable.
         let mut registered_iface_pairs: BTreeSet<(i64, i64)> = BTreeSet::new();
         let interface_vtables = self.interface_vtables.clone();
-        // Use the deterministic name-hash type ids consistent with what the
-        // cast emit sites and runtime registrations use.
         for ((class_sym, iface_sym), methods) in &interface_vtables {
+            // These ids must match the ones the cast emit sites and the runtime
+            // registrations use; a context-local id would not.
             let class_tid = self.deterministic_class_type_id(*class_sym);
             let iface_tid = self.deterministic_iface_or_enum_type_id(*iface_sym, "iface");
             if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
@@ -530,13 +518,10 @@ impl<'a> HirToMirContext<'a> {
             }
             if let (Some(class_tid), Some(iface_tid)) = (class_tid, iface_tid) {
                 for (slot_idx, method_sym) in methods.iter().enumerate() {
-                    // Only emit for locally-compiled methods. Imported
-                    // methods get their slot from their own file's
-                    // `__vtable_init__`. Using `external_function_map`
-                    // as a fallback feeds `build_function_ref` a
-                    // renumbered import id Cranelift can't resolve
-                    // ("Function {id} not found in function_map") and
-                    // trap-stubs the entire init.
+                    // Only locally-compiled methods: imported ones get their slot
+                    // from their own file's `__vtable_init__`. An id out of
+                    // `external_function_map` is renumbered and unresolvable by
+                    // `build_function_ref`, which trap-stubs the whole init.
                     let func_id = self.function_map.get(method_sym).copied();
                     if let Some(func_id) = func_id {
                         let dispatch_func_id = self
@@ -621,16 +606,11 @@ impl<'a> HirToMirContext<'a> {
         let ctor_wrappers = self.constructor_reflect_wrappers.clone();
         for (class_type_id, wrapper_func_id) in ctor_wrappers {
             // Key the ctor by the SAME deterministic id the class metadata is
-            // registered under. `register_class_rtti_from_module` populates
-            // TYPE_REGISTRY with `runtime_type_id` (an FNV-1a hash of the
-            // qualified name, stable across contexts), while this call used the
-            // RAW context-local TypeId — so CONSTRUCTOR_REGISTRY lived in a
-            // different key space. `haxe_type_create_instance` passes ONE id to
-            // both (empty-instance via TYPE_REGISTRY, then the ctor lookup), so
-            // the two only agreed by coincidence. Adding one type to StdTypes
-            // shifts every TypeId and re-rolls those coincidences, which is how
-            // a bare `@:coreType abstract` turned into a wrong/missing
-            // constructor and a garbage object.
+            // registered under: `register_class_rtti_from_module` fills
+            // TYPE_REGISTRY with `runtime_type_id` (FNV-1a of the qualified
+            // name, stable across contexts), and `haxe_type_create_instance`
+            // passes ONE id to both registries. A raw context-local TypeId here
+            // would put CONSTRUCTOR_REGISTRY in a different key space.
             let stable_id = self
                 .class_type_to_symbol
                 .get(&class_type_id)

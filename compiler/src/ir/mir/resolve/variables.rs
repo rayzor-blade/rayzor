@@ -49,12 +49,10 @@ impl<'a> HirToMirContext<'a> {
     ) {
         match stmt {
             HirStatement::Let { pattern, .. } => {
-                // Variable declarations are modifications
-                // debug!("Found Let statement");
+                // Variable declarations count as modifications.
                 self.collect_pattern_variables(pattern, modified);
             }
             HirStatement::Expr(expr) => {
-                // debug!("Found Expr statement with kind: {:?}", std::mem::discriminant(&expr.kind));
                 self.find_modified_variables_in_expression(expr, modified);
             }
             HirStatement::Assign { lhs, rhs, .. } => {

@@ -22,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
-    /// Get the number of fields for a specific enum variant
     /// Resolve the discriminant value for an enum variant by name.
     /// Looks up the enum type → symbol → variants, then finds the matching variant index.
     pub(crate) fn resolve_enum_variant_discriminant(
@@ -30,12 +29,10 @@ impl<'a> HirToMirContext<'a> {
         enum_type: TypeId,
         variant_name: InternedString,
     ) -> Option<i64> {
-        // Get the enum symbol from the type
         let enum_symbol = self
             .symbol_table
             .get_symbol_from_type(enum_type)
             .or_else(|| {
-                // Try unwrapping GenericInstance or Enum type
                 let type_table = self.type_table;
                 if let Some(type_info) = type_table.get(enum_type) {
                     match &type_info.kind {
@@ -63,14 +60,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Fallback: search ALL enums in symbol table for this variant name
-        // This handles cases where the enum_type doesn't map directly to a symbol
+        // Fallback for an enum_type that maps to no symbol: scan every enum
+        // variant in the symbol table for this name.
         let variant_name_str = self.string_interner.get(variant_name)?;
         for sym in self.symbol_table.all_symbols() {
             if sym.kind == crate::tast::symbols::SymbolKind::EnumVariant {
                 let sym_name = self.string_interner.get(sym.name).unwrap_or("");
                 if sym_name == variant_name_str {
-                    // Found the variant — get its parent enum and find the index
                     if let Some(parent_id) =
                         self.symbol_table.find_parent_enum_for_constructor(sym.id)
                     {
@@ -148,8 +144,8 @@ impl<'a> HirToMirContext<'a> {
                         type_args,
                         ..
                     } => {
-                        // Check if type_args contain concrete types (not TypeParameters)
-                        // If so, this IS the concrete instance and we need to find the base enum
+                        // Non-TypeParameter type_args mean this is already the
+                        // concrete instance, so the base enum must be located.
                         let has_concrete_args = !type_args.is_empty()
                             && type_args.iter().any(|ta| {
                                 type_table

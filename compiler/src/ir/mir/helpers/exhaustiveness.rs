@@ -29,7 +29,6 @@ impl<'a> HirToMirContext<'a> {
         scrutinee: &HirExpr,
         cases: &[HirMatchCase],
     ) {
-        // Resolve scrutinee type to determine if it's an enum
         let type_table = self.type_table;
         let type_info = match type_table.get(scrutinee.ty) {
             Some(info) => info,
@@ -54,7 +53,6 @@ impl<'a> HirToMirContext<'a> {
             _ => return,
         };
 
-        // Get all variant names from enum definition
         let variant_symbols = match self.symbol_table.get_enum_variants(enum_symbol) {
             Some(v) => v.clone(),
             None => return,
@@ -69,14 +67,12 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Collect covered variants from patterns
         let (covered, has_wildcard) = self.collect_covered_enum_variants(cases);
 
         if has_wildcard {
             return;
         }
 
-        // Compute missing variants
         let missing: Vec<InternedString> = all_variants
             .iter()
             .filter(|v| !covered.contains(v))
@@ -87,7 +83,6 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Emit warning
         let enum_name = self
             .symbol_table
             .get_symbol(enum_symbol)

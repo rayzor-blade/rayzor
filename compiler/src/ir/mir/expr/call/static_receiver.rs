@@ -45,11 +45,11 @@ impl<'a> HirToMirContext<'a> {
         };
         let stdlib_info = stdlib_info.as_ref().map(|(c, m, r)| (*c, *m, r));
         if is_static_class_call {
-            // Check if this static call has a stdlib runtime mapping.
-            // Static method calls (e.g., Reflect.hasField, Type.typeof, Std.string)
-            // arrive here as Field { object: ClassVar, field: method } and the
-            // stdlib_info lookup above may have failed because the class variable's
-            // TypeId isn't in type_table. Route through the extern function.
+            // Static calls (Reflect.hasField, Type.typeof, Std.string) arrive as
+            // Field { object: ClassVar, field: method }, and the stdlib_info
+            // lookup above can miss because the class variable's TypeId isn't in
+            // type_table. Re-look up the mapping by name and route through the
+            // extern function.
             let static_class_name = self.find_receiver_class_name(object);
             let static_method_name = self
                 .symbol_table
@@ -114,7 +114,6 @@ impl<'a> HirToMirContext<'a> {
                         return special_result;
                     }
 
-                    // Get expected parameter types from the mapping
                     let (expected_param_types, actual_return_type) = self
                         .get_stdlib_mir_wrapper_signature(runtime_func)
                         .unwrap_or_else(|| {
@@ -207,7 +206,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Handle returns_raw_value: cast raw U64 to appropriate type
                     if returns_raw_value {
                         if let Some(raw_reg) = call_result {
                             return match &result_type {
@@ -217,11 +215,9 @@ impl<'a> HirToMirContext<'a> {
                                 IrType::Bool => {
                                     self.builder.build_cast(raw_reg, IrType::U64, IrType::Bool)
                                 }
-                                // F64/F32: bitcast raw u64 bits back to float.
-                                // Map<K,Float>.get stores f64 bits as u64; this
-                                // reverses the set-side bitcast so reads return
-                                // the original f64 value (was returning u64 bits
-                                // mis-interpreted as a giant int).
+                                // Map<K,Float>.get stores f64 bits as u64; the
+                                // bitcast reverses the set-side one so reads
+                                // return the original f64.
                                 IrType::F64 => self.builder.build_bitcast(raw_reg, IrType::F64),
                                 IrType::F32 => {
                                     let f64v = self.builder.build_bitcast(raw_reg, IrType::F64)?;

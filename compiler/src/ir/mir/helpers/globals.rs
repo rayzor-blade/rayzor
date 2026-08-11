@@ -141,7 +141,7 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Bool) => self.builder.build_const(IrValue::Bool(false)),
             Some(TypeKind::String) => self.builder.build_string(String::new()),
             _ => {
-                // Try recursive default or no-arg constructor, else null
+                // Classes default to an instance where one can be built, else null.
                 Some(
                     self.try_default_for_class_field(field_type_id)
                         .unwrap_or_else(|| self.builder.build_null().unwrap()),
@@ -155,7 +155,6 @@ impl<'a> HirToMirContext<'a> {
     /// 2. Else if the field's class has a no-arg constructor, call it
     /// 3. Else return None (caller should use null)
     pub(crate) fn try_default_for_class_field(&mut self, field_type_id: TypeId) -> Option<IrId> {
-        // Resolve field type to class symbol
         let (class_symbol, class_name) = {
             let type_table = self.type_table;
             match type_table.get(field_type_id).map(|t| &t.kind) {
@@ -171,16 +170,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }?;
 
-        // Option 1: field's class has @:derive(Default) — recursive
         if self.derive_default_classes.contains(&class_symbol) {
             return self.lower_derived_default(class_symbol);
         }
 
-        // Option 2: field's class has a no-arg constructor
         let class_name_str = class_name?;
         let ctor_id = self.constructor_name_map.get(&class_name_str).copied()?;
 
-        // Check that constructor has no required params (only `this`)
         let sig_params = self
             .builder
             .module
@@ -189,11 +185,11 @@ impl<'a> HirToMirContext<'a> {
             .map(|f| f.signature.parameters.len())
             .unwrap_or(0);
 
-        // All params must have defaults, or there's only the `this` param
+        // Every param must have a default, or `this` must be the only one.
         let all_optional = if sig_params <= 1 {
-            true // only `this` or no params
+            true
         } else if let Some(defaults) = self.function_param_defaults.get(&ctor_id) {
-            // defaults[0] is `this` (always None), check params 1..
+            // defaults[0] is `this`, always None.
             defaults.iter().skip(1).all(|d| d.is_some())
         } else {
             sig_params <= 1
@@ -203,7 +199,6 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
 
-        // Allocate and call constructor
         let alloc_size = self
             .class_alloc_sizes_by_name
             .get(&class_name_str)
@@ -219,12 +214,10 @@ impl<'a> HirToMirContext<'a> {
         let header_ptr = self.builder.build_gep(obj_ptr, vec![zero], IrType::I64)?;
         self.builder.build_store(header_ptr, type_id_const);
 
-        // Call constructor with just `this`
         let mut args = vec![obj_ptr];
         self.fill_default_args(ctor_id, &mut args, true);
         self.builder.build_call_direct(ctor_id, args, IrType::Void);
 
-        // Set class hint
         self.register_class_hints.insert(obj_ptr, class_name_str);
 
         Some(obj_ptr)

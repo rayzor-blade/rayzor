@@ -36,36 +36,31 @@ impl<'a> HirToMirContext<'a> {
     ) {
         match pattern {
             HirPattern::Variable { name, symbol } => {
-                // Bind the value to the symbol
                 self.symbol_map.insert(*symbol, value);
 
                 // Register as local so Cranelift can find the type
                 if let Some(type_id) = ty {
                     let var_type_from_hint = self.convert_type(type_id);
 
-                    // Check if the actual register type is more specific than the hint
-                    // This can happen when:
-                    // - Generic method return types aren't properly resolved (Thread<T>)
-                    // - HIR type is vague (Ptr(Void)) but actual MIR type is specific (String)
+                    // The register type can be more specific than the hint: unresolved
+                    // generic returns (Thread<T>), or a vague HIR Ptr(Void) over what is
+                    // really a String.
                     let actual_reg_type = self.builder.get_register_type(value);
                     let var_type = if let Some(ref actual_type) = actual_reg_type {
-                        // If hint is Ptr(Void) but actual type is more specific, use actual type
                         let hint_is_void_ptr = matches!(&var_type_from_hint, IrType::Ptr(inner) if matches!(**inner, IrType::Void));
                         let actual_is_specific = !matches!(actual_type, IrType::Ptr(inner) if matches!(**inner, IrType::Void));
 
-                        // Also handle case where actual is pointer but hint is scalar
                         let actual_is_ptr = matches!(actual_type, IrType::Ptr(_));
                         let hint_is_scalar = matches!(
                             &var_type_from_hint,
                             IrType::I32 | IrType::I64 | IrType::Bool | IrType::F32 | IrType::F64
                         );
 
-                        // Float-vs-integer disagreement: the register holds the ACTUAL
-                        // value, so its type is authoritative for storage. A hint of
-                        // `Float` over an i64 value (e.g. a `Usize` address whose HIR type
-                        // decayed to Float) would otherwise make every read of the local
-                        // coerce i64→f64→i64 (a corrupting sitofp/bitcast) at loop phis and
-                        // call arguments — a use-after-free on the carried pointer.
+                        // Float-vs-integer disagreement: the register holds the actual
+                        // value, so its type is authoritative for storage. A `Float` hint
+                        // over an i64 (a `Usize` address whose HIR type decayed) would make
+                        // every read coerce i64→f64→i64 at loop phis and call arguments,
+                        // corrupting the carried pointer.
                         let float_int_mismatch = matches!(actual_type, IrType::F32 | IrType::F64)
                             != matches!(&var_type_from_hint, IrType::F32 | IrType::F64);
 
@@ -96,7 +91,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             _ => {
-                // For other patterns, fall back to old behavior
                 self.bind_pattern(pattern, value);
             }
         }
@@ -110,46 +104,40 @@ impl<'a> HirToMirContext<'a> {
     ) {
         match pattern {
             HirPattern::Variable { symbol, .. } => {
-                // Bind the value to the symbol
                 self.symbol_map.insert(*symbol, value);
             }
             HirPattern::Wildcard => {
-                // Wildcard doesn't bind anything
+                // Wildcard doesn't bind anything.
             }
             HirPattern::Tuple(patterns) => {
-                // Extract tuple elements and bind recursively
                 for (i, p) in patterns.iter().enumerate() {
-                    // Use ExtractValue instruction to get tuple element
                     if let Some(elem) = self.builder.build_extract_value(value, vec![i as u32]) {
                         self.bind_pattern(p, elem);
                     }
                 }
             }
             HirPattern::Literal(_) => {
-                // Literals in patterns are used for matching, not binding
-                // The matching logic should be handled elsewhere
+                // Literals in patterns match, they don't bind.
             }
             HirPattern::Constructor {
                 enum_type,
                 variant,
                 fields,
             } => {
-                // Use scrutinee type if valid (has concrete generic args), otherwise fall back to pattern's enum_type
-                // Use scrutinee type if it resolves to an enum, otherwise pattern's enum_type
+                // Prefer the scrutinee type when it resolves to an enum — it carries the
+                // concrete generic args; otherwise use the pattern's enum_type.
                 let effective_type = scrutinee_type
                     .filter(|t| *t != TypeId::invalid())
                     .filter(|t| self.resolve_enum_symbol(*t).is_some())
                     .unwrap_or(*enum_type);
                 let field_types = self.get_enum_variant_field_types(effective_type, *variant);
 
-                // Resolve whether this enum is boxed
-                // Try effective_type first, fall back to pattern's enum_type if unresolvable
+                // effective_type first, then the pattern's enum_type if it won't resolve.
                 let enum_symbol = self
                     .resolve_enum_symbol(effective_type)
                     .or_else(|| self.resolve_enum_symbol(*enum_type));
                 let is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
                 if !is_boxed || fields.is_empty() {
-                    // Unboxed enum or no fields to bind
                     return;
                 }
 
@@ -162,7 +150,6 @@ impl<'a> HirToMirContext<'a> {
                     None => return,
                 };
 
-                // Extract fields from enum data area and bind sub-patterns
                 for (i, field_pattern) in fields.iter().enumerate() {
                     if matches!(field_pattern, HirPattern::Wildcard) {
                         continue;
@@ -180,7 +167,6 @@ impl<'a> HirToMirContext<'a> {
                                 .cloned()
                                 .unwrap_or((IrType::I64, TypeId::invalid()));
 
-                            // Determine load strategy based on resolved type
                             let (load_type, needs_bitcast_after) = match &resolved_type {
                                 // Pointer types: load as raw I64, then bitcast to pointer
                                 IrType::Ptr(_) | IrType::String => {
@@ -199,7 +185,6 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(fpt) = field_ptr_typed {
                                 if let Some(mut field_val) = self.builder.build_load(fpt, load_type)
                                 {
-                                    // Bitcast to pointer type if needed
                                     if let Some(target_type) = needs_bitcast_after {
                                         if let Some(cast_val) =
                                             self.builder.build_bitcast(field_val, target_type)
@@ -207,7 +192,6 @@ impl<'a> HirToMirContext<'a> {
                                             field_val = cast_val;
                                         }
                                     }
-                                    // Record the resolved IR type and TypeId for this variable
                                     if let HirPattern::Variable { symbol, .. } = field_pattern {
                                         self.symbol_ir_types.insert(*symbol, resolved_type.clone());
                                         if resolved_type_id != TypeId::invalid() {
@@ -244,8 +228,8 @@ impl<'a> HirToMirContext<'a> {
                 self.bind_pattern(pattern, value);
             }
             HirPattern::Or(patterns) => {
-                // Or patterns need special handling - bind to all alternatives
-                // For now, just bind the first pattern
+                // Only the first alternative is bound; binding all of them is
+                // not implemented.
                 if let Some(first) = patterns.first() {
                     self.bind_pattern(first, value);
                 }

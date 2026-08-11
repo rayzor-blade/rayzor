@@ -37,13 +37,11 @@ impl<'a> HirToMirContext<'a> {
             None => return,
         };
 
-        // Create continuation block (after switch)
         let continuation = match self.builder.create_block() {
             Some(b) => b,
             None => return,
         };
 
-        // Create blocks for each case
         let mut case_test_blocks = Vec::new();
         let mut case_body_blocks = Vec::new();
 
@@ -83,11 +81,9 @@ impl<'a> HirToMirContext<'a> {
 
         let entry_block = self.builder.current_block();
 
-        // Branch to first case test
         if let Some(&first_test) = case_test_blocks.first() {
             self.builder.build_branch(first_test);
         } else {
-            // No cases, go to default
             self.builder.build_branch(default_block);
             self.builder.switch_to_block(continuation);
             return;
@@ -97,7 +93,6 @@ impl<'a> HirToMirContext<'a> {
         // phi node incoming edges at the continuation.
         let mut case_incoming: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
 
-        // Lower each case
         for (i, case) in cases.iter().enumerate() {
             let test_block = case_test_blocks[i];
             let body_block = case_body_blocks[i];
@@ -106,23 +101,19 @@ impl<'a> HirToMirContext<'a> {
                 .copied()
                 .unwrap_or(default_block);
 
-            // Generate pattern test block
             self.builder.switch_to_block(test_block);
 
-            // A case whose pattern list contains *only* wildcards (or is
-            // empty) is unconditional — emit a plain branch instead of
-            // `br_if true, body, next_test`. Without this, the next_test
-            // and any downstream default/continuation blocks linger in the
-            // CFG with the wrong terminator type (e.g., `ret void` inside
-            // a non-void function) and Cranelift turns that into invalid
-            // machine code (UD2 / SIGILL) even though it's runtime-unreachable.
-            // The guard arm below keeps its conditional branch — a guard can
-            // still fail at runtime, so next_test is genuinely reachable.
-            //
-            // Note: the constructor-pattern switch path (HirStatement::Switch)
-            // is the only caller for cases reaching this point — non-Constructor
-            // patterns are already desugared to an if/else chain in tast_to_hir,
-            // which has its own wildcard short-circuit.
+            // A case whose pattern list holds only wildcards (or is empty) is
+            // unconditional — emit a plain branch rather than
+            // `br_if true, body, next_test`. Otherwise next_test and the
+            // downstream default/continuation blocks linger in the CFG with the
+            // wrong terminator type (e.g. `ret void` inside a non-void function),
+            // which Cranelift turns into invalid machine code even though it is
+            // runtime-unreachable. The guard arm below keeps its conditional
+            // branch: a guard can still fail, so next_test stays reachable.
+            // Only the constructor-pattern switch path reaches here; other
+            // patterns are desugared to an if/else chain in tast_to_hir, which
+            // has its own wildcard short-circuit.
             let all_wildcards = !case.patterns.is_empty()
                 && case
                     .patterns
@@ -165,24 +156,20 @@ impl<'a> HirToMirContext<'a> {
                 let pattern_matches = match pattern_matches {
                     Some(v) => v,
                     None => {
-                        // Pattern test failed, go to next
                         self.builder.build_branch(next_test);
                         continue;
                     }
                 };
 
-                // If there's a guard, test it
                 if let Some(ref guard) = case.guard {
                     let guard_block = match self.builder.create_block() {
                         Some(b) => b,
                         None => return,
                     };
 
-                    // Branch: if pattern matches, test guard; else try next pattern
                     self.builder
                         .build_cond_branch(pattern_matches, guard_block, next_test);
 
-                    // Guard test block
                     self.builder.switch_to_block(guard_block);
                     let guard_val = match self.lower_expression(guard) {
                         Some(v) => v,
@@ -192,11 +179,9 @@ impl<'a> HirToMirContext<'a> {
                         }
                     };
 
-                    // Branch: if guard true, execute body; else try next pattern
                     self.builder
                         .build_cond_branch(guard_val, body_block, next_test);
                 } else {
-                    // No guard, just test pattern
                     self.builder
                         .build_cond_branch(pattern_matches, body_block, next_test);
                 }
@@ -211,7 +196,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Generate case body block
             self.builder.switch_to_block(body_block);
             // Bind pattern variables (extract enum fields into variable symbols)
             if !case.patterns.is_empty() {
@@ -237,7 +221,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Default block - just continue (could also panic for exhaustive matches)
         // Restore tracked vars to their initial values for the default path.
         for symbol_id in var_initial_values.keys() {
             if let Some(&(reg, _)) = var_initial_values.get(symbol_id) {
@@ -255,7 +238,6 @@ impl<'a> HirToMirContext<'a> {
             case_incoming.push((end_block, default_snapshot));
         }
 
-        // Continue after switch
         self.builder.switch_to_block(continuation);
 
         // Build phi nodes for variables modified in any case so the
@@ -308,8 +290,7 @@ impl<'a> HirToMirContext<'a> {
         pattern: &HirPattern,
         scrutinee_type: Option<TypeId>,
     ) -> Option<IrId> {
-        // Test if scrutinee matches pattern
-        // Returns a boolean IrId indicating match success
+        // Returns a boolean IrId indicating match success.
         match pattern {
             HirPattern::Variable { name, symbol } => {
                 // Variable pattern always matches. Don't bind here — binding happens
@@ -324,9 +305,8 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirPattern::Literal(lit) => {
-                // Literal pattern: compare scrutinee with literal value
-                // TODO: Get proper type from pattern context
-                // For now, use a default type based on the literal kind
+                // TODO: take the type from the pattern context instead of
+                // guessing it from the literal kind.
                 let default_type = match lit {
                     HirLiteral::Int(_) => TypeId::from_raw(1), // Assume Int type (ID 1)
                     HirLiteral::Float(_) => TypeId::from_raw(2), // Assume Float type
@@ -353,9 +333,9 @@ impl<'a> HirToMirContext<'a> {
                 let enum_symbol = self.resolve_enum_symbol(effective_enum_type);
                 let mut is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
 
-                // Override boxed/unboxed based on scrutinee register type:
-                // - I32 scalar: force unboxed (plain discriminant, pointer would SIGSEGV)
-                // - Ptr: force boxed (e.g., Type.typeof() returns heap-allocated ValueType)
+                // The scrutinee's register type decides the representation: an I32
+                // scalar is a plain discriminant, a Ptr is a heap-allocated box
+                // (e.g. Type.typeof() returning ValueType).
                 let scrut_type = self.builder.get_register_type(scrutinee);
                 if matches!(scrut_type, Some(IrType::I32)) {
                     is_boxed = false;
@@ -399,14 +379,13 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
 
-                // If no fields to match, just return tag comparison
                 if fields.is_empty() || fields.iter().all(|f| matches!(f, HirPattern::Wildcard)) {
                     return Some(tag_matches);
                 }
 
-                // Must short-circuit field extraction behind tag check.
-                // Other variants may have smaller allocations (e.g., None = 8 bytes tag only),
-                // so loading fields at offset 8+ would be out-of-bounds if tag doesn't match.
+                // Field extraction must short-circuit behind the tag check: other
+                // variants may have smaller allocations (None is 8 bytes of tag),
+                // so loading at offset 8+ is out of bounds when the tag differs.
                 let false_val = self.builder.build_const(IrValue::Bool(false))?;
                 let tag_check_block = self.builder.current_block()?;
                 let fields_block = self.builder.create_block()?;
@@ -414,7 +393,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_cond_branch(tag_matches, fields_block, merge_block);
 
-                // --- fields_block: tag matched, extract and test fields ---
+                // fields_block: tag matched, extract and test fields.
                 self.builder.switch_to_block(fields_block);
                 let mut all_fields_match = None;
 
@@ -442,7 +421,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_branch(merge_block);
                 let fields_exit_block = self.builder.current_block()?;
 
-                // --- merge_block: phi(fields_result | false) ---
+                // merge_block: phi(fields_result | false).
                 self.builder.switch_to_block(merge_block);
                 let result = self.builder.build_phi(merge_block, IrType::Bool)?;
                 self.builder.add_phi_incoming(
@@ -458,16 +437,8 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirPattern::Tuple(patterns) => {
-                // Tuple pattern: extract and test each element
-                //
-                // Tuple layout:
-                // struct Tuple { elem0, elem1, elem2, ... }
-                //
-                // Strategy:
-                // 1. Extract each element by index
-                // 2. Test each element against its pattern
-                // 3. Combine all results with AND
-
+                // Layout: struct Tuple { elem0, elem1, ... }; every element is
+                // tested against its pattern and the results ANDed.
                 if patterns.is_empty() {
                     // Empty tuple always matches
                     return self.builder.build_bool(true);
@@ -476,7 +447,6 @@ impl<'a> HirToMirContext<'a> {
                 let mut all_match = self.builder.build_bool(true)?;
 
                 for (i, elem_pattern) in patterns.iter().enumerate() {
-                    // Extract element at index i
                     let Some(elem_idx) = self.builder.build_int(i as i64, IrType::I64) else {
                         return None;
                     };
@@ -493,12 +463,10 @@ impl<'a> HirToMirContext<'a> {
                         return None;
                     };
 
-                    // Recursively test element pattern
                     let Some(elem_match) = self.lower_pattern_test(elem_val, elem_pattern) else {
                         return None;
                     };
 
-                    // Combine with AND
                     all_match = self
                         .builder
                         .build_binop(BinaryOp::And, all_match, elem_match)?;
@@ -508,18 +476,8 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirPattern::Array { elements, rest } => {
-                // Array pattern: check length and test elements
-                //
-                // Array layout:
-                // struct Array { length: i64, data: [elements...] }
-                //
-                // Strategy:
-                // 1. Extract array length (index 0)
-                // 2. Check length matches expected (if no rest pattern)
-                // 3. Extract and test each specified element
-                // 4. If rest pattern exists, bind remaining elements
-
-                // Extract array length from header (index 0)
+                // Layout: struct Array { length: i64, data: [elements...] }, so the
+                // length lives at index 0.
                 let Some(zero_idx) = self.builder.build_int(0, IrType::I64) else {
                     return None;
                 };
@@ -574,7 +532,6 @@ impl<'a> HirToMirContext<'a> {
                             .build_binop(BinaryOp::And, all_match, length_sufficient)?;
                 }
 
-                // Test each specified element
                 for (i, elem_pattern) in elements.iter().enumerate() {
                     // Array elements start at index 1 (after length header)
                     let Some(elem_idx) = self.builder.build_int((i + 1) as i64, IrType::I64) else {
@@ -593,7 +550,6 @@ impl<'a> HirToMirContext<'a> {
                         return None;
                     };
 
-                    // Recursively test element pattern
                     let Some(elem_match) = self.lower_pattern_test(elem_val, elem_pattern) else {
                         return None;
                     };
@@ -603,25 +559,14 @@ impl<'a> HirToMirContext<'a> {
                         .build_binop(BinaryOp::And, all_match, elem_match)?;
                 }
 
-                // TODO: Handle rest pattern binding
-                // For now, we just ignore the rest pattern
-                // In a full implementation, we'd create a slice of remaining elements
+                // TODO: bind the rest pattern to a slice of the remaining elements.
 
                 Some(all_match)
             }
 
             HirPattern::Object { fields, rest } => {
-                // Object pattern: extract and test fields
-                //
-                // Object layout (simplified):
-                // Hash map or struct with named fields
-                //
-                // Strategy:
-                // 1. For each pattern field, extract object field by name
-                // 2. Test extracted value against pattern
-                // 3. Combine all results with AND
-                // 4. rest flag indicates whether additional fields are allowed
-
+                // Each named field is tested against its pattern and the results
+                // ANDed; `rest` says whether extra fields are allowed.
                 if fields.is_empty() {
                     // Empty object pattern always matches (or matches any object if rest=true)
                     return self.builder.build_bool(true);
@@ -630,11 +575,8 @@ impl<'a> HirToMirContext<'a> {
                 let mut all_match = self.builder.build_bool(true)?;
 
                 for (field_name, field_pattern) in fields {
-                    // Extract field from object
-                    // TODO: Implement proper field lookup by name
-                    // For now, we use a simple hash-based approach
-
-                    // Calculate field offset based on name hash (placeholder)
+                    // TODO: real field lookup by name; this offset is a
+                    // placeholder derived from the name's length.
                     let field_offset = field_name.to_string().len() as i64;
 
                     let Some(field_idx) = self.builder.build_int(field_offset, IrType::I64) else {
@@ -653,7 +595,6 @@ impl<'a> HirToMirContext<'a> {
                         return None;
                     };
 
-                    // Recursively test field pattern
                     let Some(field_match) = self.lower_pattern_test(field_val, field_pattern)
                     else {
                         return None;
@@ -664,20 +605,17 @@ impl<'a> HirToMirContext<'a> {
                         .build_binop(BinaryOp::And, all_match, field_match)?;
                 }
 
-                // TODO: If rest=false, verify no additional fields exist
-                // For now, we just ignore the rest flag
+                // TODO: when rest=false, verify no additional fields exist.
 
                 Some(all_match)
             }
 
             HirPattern::Typed { pattern, ty } => {
-                // Typed pattern: check type and test inner pattern
-                // TODO: Implement type checking
+                // TODO: check the type; only the inner pattern is tested today.
                 self.lower_pattern_test_with_scrutinee_type(scrutinee, pattern, scrutinee_type)
             }
 
             HirPattern::Or(patterns) => {
-                // Or pattern: test each pattern with OR logic
                 if patterns.is_empty() {
                     return self.builder.build_bool(false);
                 }
@@ -698,14 +636,12 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirPattern::Guard { pattern, condition } => {
-                // Guard pattern: test pattern then condition
                 let pattern_match = self.lower_pattern_test_with_scrutinee_type(
                     scrutinee,
                     pattern,
                     scrutinee_type,
                 )?;
                 let guard_val = self.lower_expression(condition)?;
-                // AND the pattern match with the guard
                 self.builder
                     .build_binop(BinaryOp::And, pattern_match, guard_val)
             }

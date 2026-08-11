@@ -35,7 +35,6 @@ impl<'a> HirToMirContext<'a> {
                     "[LOWER STMT] Processing Let statement, has_init={}",
                     init.is_some()
                 );
-                // Lower initialization expression if present
                 if let Some(init_expr) = init {
                     debug!(
                         "[LOWER STMT] init_expr.kind = {:?}",
@@ -43,8 +42,7 @@ impl<'a> HirToMirContext<'a> {
                     );
                     let init_is_value_type = self.expr_is_value_type_expr(init_expr);
 
-                    // Check for stdlib class method calls like Arc.init() or arc.clone()
-                    // These methods return the same stdlib class type (e.g., Arc.init() -> Arc, Arc.clone() -> Arc)
+                    // Stdlib class methods return their own class type (Arc.init() -> Arc).
                     let monomorphized_class = if let HirExprKind::Call {
                         callee,
                         args: call_args,
@@ -54,9 +52,8 @@ impl<'a> HirToMirContext<'a> {
                     {
                         self.detect_stdlib_class_from_call(callee, call_args)
                             .or_else(|| {
-                                // For static calls (is_method=false) with Variable callee,
-                                // resolve the method via stdlib mapping to identify the class.
-                                // This handles extern class factory methods like GPUCompute.create().
+                                // A static call with a Variable callee resolves its class through
+                                // the stdlib mapping (extern factories like GPUCompute.create()).
                                 if !is_method {
                                     if let HirExprKind::Variable { symbol, .. } = &callee.kind {
                                         self.get_stdlib_runtime_info(
@@ -104,19 +101,10 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
-                    // Special case: if init is an array literal AND the var
-                    // has an explicit `Array<Interface>` type hint, the literal
-                    // expression's own `expr.ty` was inferred from the FIRST
-                    // element (typechecker doesn't propagate slot context), so
-                    // `lower_array_literal` reading `array_type=expr.ty` would
-                    // see `Array<ConcreteClass>` and skip the element wrap.
-                    // Bypass that and lower the literal with the declared
-                    // `Array<Interface>` slot type so each Class element gets
-                    // wrapped in a fat pointer at construction.
-                    // Erased-generic returns (inferred Channel<T>.receive())
-                    // need the declared type to pick the right unbox; carry
-                    // the Let's type_hint across the init lowering (same
-                    // save/restore pattern as object_literal_target_ty).
+                    // An array literal's `expr.ty` is inferred from its FIRST element, so lower
+                    // it against the declared `Array<Interface>` slot type instead to get the
+                    // per-element fat-pointer wrap. Erased-generic returns need the declared
+                    // type as well, to pick the right unbox.
                     let prev_let_hint = self.let_target_type_hint.take();
                     if matches!(&init_expr.kind, HirExprKind::Call { .. }) {
                         self.let_target_type_hint = *type_hint;
@@ -139,11 +127,9 @@ impl<'a> HirToMirContext<'a> {
                             self.lower_expression(init_expr)
                         }
                     } else {
-                        // Anon-literal target hint: a typed Let on a wider
-                        // typedef carries optional fields the literal omits;
-                        // pass it down so the writer's slot layout matches
-                        // what readers compute from the typedef. Same fix
-                        // shape as the Return handler above.
+                        // Anon-literal target hint: a typed Let on a wider typedef carries
+                        // optional fields the literal omits; pass it down so the writer's slot
+                        // layout matches what readers compute from the typedef.
                         let prev_target = self.object_literal_target_ty.take();
                         if matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. }) {
                             self.object_literal_target_ty = *type_hint;
@@ -166,7 +152,6 @@ impl<'a> HirToMirContext<'a> {
                         value
                     };
 
-                    // Bind to pattern and register as local
                     if value.is_none() {
                         warn!(
                             "[LET STMT] INIT EXPRESSION FAILED TO LOWER - variable won't be added to symbol_map! pattern={:?}",
@@ -198,7 +183,6 @@ impl<'a> HirToMirContext<'a> {
                         if is_async_call {
                             self.async_result_registers.insert(value_reg);
                             if let HirPattern::Variable { symbol, .. } = pattern {
-                                // Also mark any register the symbol maps to later
                                 self.async_result_registers.insert(value_reg);
                             }
                         }
@@ -209,33 +193,20 @@ impl<'a> HirToMirContext<'a> {
                                 self.monomorphized_var_types.insert(*symbol, mono_class);
                             }
                         } else if let HirPattern::Variable { symbol, .. } = pattern {
-                            // Fallback: propagate class hint from register (set by
-                            // Dynamic/TypeParameter method dispatch) to variable.
-                            // This enables disambiguation of chained calls like:
-                            //   var guard = mutex.lock(); guard.get(); guard.unlock();
+                            // Fallback: carry the register's class hint (set by
+                            // Dynamic/TypeParameter dispatch) onto the variable so chained
+                            // calls disambiguate: `var g = mutex.lock(); g.get(); g.unlock();`
                             if let Some(class_hint) = self.register_class_hints.get(&value_reg) {
                                 self.monomorphized_var_types
                                     .insert(*symbol, class_hint.clone());
                             }
                         }
 
-                        // Cross-context interface return-type propagation:
-                        // when the RHS register came from an iface
-                        // method call whose return type was Dynamic at
-                        // TAST but we re-resolved a concrete TypeId at
-                        // MIR, override the variable's effective HIR
-                        // type so subsequent receiver dispatch sees the
-                        // real type (e.g. `Array<Int>`) instead of
-                        // routing into the Dynamic-fallback path.
-                        //
-                        // Propagate when the variable's "declared" type
-                        // (`type_hint`) is itself Dynamic/Placeholder/
-                        // Unknown — that's the inference fallback TAST
-                        // emits when it couldn't pin a real type
-                        // cross-context. A real user annotation
-                        // (`var x:Array<Int> = …`) pins a concrete
-                        // hint, which the assign-side coercion already
-                        // handles, so we skip in that case.
+                        // An interface method call's return is Dynamic at TAST but
+                        // re-resolved concretely at MIR: override the variable's effective
+                        // type so receiver dispatch sees the real type instead of the
+                        // Dynamic fallback. Only when the declared hint is itself erased —
+                        // a real annotation is handled by the assign-side coercion.
                         if let HirPattern::Variable { symbol, .. } = pattern {
                             if let Some(&real_ty) = self.interface_call_result_types.get(&value_reg)
                             {
@@ -250,11 +221,9 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     })
                                     .unwrap_or(false);
-                                // The override drives object method dispatch
-                                // (`effective_receiver_type`). Setting it for a
-                                // scalar (Int/Float/Bool) return is meaningless
-                                // and disturbs direct uses of the value, so
-                                // restrict it to reference-typed returns.
+                                // The override drives `effective_receiver_type`; it is
+                                // meaningless for a scalar return and disturbs direct uses
+                                // of the value, so restrict it to reference types.
                                 let is_scalar = matches!(
                                     self.convert_type(real_ty),
                                     IrType::I8
@@ -275,52 +244,35 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // The RHS's real source type. When the RHS is an
-                        // interface method call, TAST erased its return to
-                        // `Dynamic` but MIR recovered the concrete type into
-                        // `interface_call_result_types` (the call already
-                        // returned a raw concrete value, not a box). The
-                        // box/unbox coercions below key off the source type, so
-                        // they must see that concrete type — using the erased
-                        // `Dynamic` inserts a spurious unbox that reads a raw
-                        // pointer as a box header (→ SIGSEGV for object returns
-                        // like Tensor), or, for an inferred binding, spuriously
-                        // boxes a scalar return (its `var_type` falls back to
-                        // the erased Dynamic and disagrees with the recovered
-                        // override).
+                        // The RHS's real source type: an interface method call returns a raw
+                        // concrete value even though TAST erased its type to Dynamic. The
+                        // box/unbox coercions below key off it, so the erased type would
+                        // insert a spurious unbox of a raw pointer (or box a scalar).
                         let recovered_init_ty =
                             self.interface_call_result_types.get(&value_reg).copied();
                         let init_ty = recovered_init_ty.unwrap_or(init_expr.ty);
 
-                        // Determine the type for the binding. An unannotated
-                        // binding infers the recovered concrete type, not the
-                        // erased Dynamic. An erased HINT is kept as the
-                        // binding type on purpose: for scalars the box is the
-                        // representation every Dynamic consumer (string
-                        // concat, Std.string) expects, and `maybe_box_value`
-                        // passes objects through raw regardless. The
-                        // consumers that need the concrete value back
-                        // (return-site, comparisons) unbox it there.
+                        // An unannotated binding takes the recovered concrete type. An erased
+                        // HINT stays the binding type on purpose: for scalars the box is the
+                        // representation every Dynamic consumer expects, and objects pass
+                        // through raw; consumers needing the value unbox at the use site.
                         let var_type = type_hint.or(Some(init_ty));
 
                         // Auto-box if assigning concrete value to Dynamic variable
                         // Auto-unbox if assigning Dynamic value to concrete variable
                         let final_value = if let Some(target_ty) = var_type {
-                            // Try boxing first (concrete → Dynamic)
                             let after_box = self
                                 .maybe_box_value(value_reg, init_ty, target_ty)
                                 .unwrap_or(value_reg);
 
-                            // Track if boxing actually happened (value was boxed into Dynamic)
                             if after_box != value_reg {
                                 if let HirPattern::Variable { symbol, .. } = pattern {
                                     self.boxed_dynamic_symbols.insert(*symbol);
                                 }
                             } else if let HirPattern::Variable { symbol, .. } = pattern {
-                                // No boxing happened. If the register holds a Ptr(U8) value
-                                // from a Dynamic-typed expression, it's a raw anon handle
-                                // (e.g., from haxe_ereg_matched_pos_anon). Track it so
-                                // field access skips haxe_unbox_reference_ptr.
+                                // A Ptr(U8) from a Dynamic-typed expression is a raw anon
+                                // handle (e.g. haxe_ereg_matched_pos_anon); track it so field
+                                // access skips haxe_unbox_reference_ptr.
                                 let is_dynamic_init = {
                                     let tt = self.type_table;
                                     tt.get(init_expr.ty)
@@ -336,7 +288,6 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Then try unboxing (Dynamic → concrete)
                             self.maybe_unbox_value(after_box, init_ty, target_ty)
                                 .unwrap_or(after_box)
                         } else {
@@ -351,7 +302,6 @@ impl<'a> HirToMirContext<'a> {
                             final_value
                         };
 
-                        // Apply abstract @:from implicit conversion if needed
                         let final_value = if let Some(target_ty) = var_type {
                             self.maybe_abstract_from_convert(final_value, init_ty, target_ty)
                                 .unwrap_or(final_value)
@@ -359,10 +309,9 @@ impl<'a> HirToMirContext<'a> {
                             final_value
                         };
 
-                        // Wrap class instance in interface fat pointer if needed.
-                        // Skip for SafeCast results — the SafeCast handler already creates
-                        // the fat pointer (or null for failed casts). Cloning a null pointer
-                        // from a failed SafeCast would SIGSEGV.
+                        // Wrap a class instance in an interface fat pointer. SafeCast results
+                        // are skipped: that handler already built the fat pointer, or null on
+                        // a failed cast, which must not be cloned.
                         let init_is_safe_cast =
                             matches!(&init_expr.kind, HirExprKind::Cast { is_safe: true, .. });
                         let (final_value, wrapped_for_interface) = if let Some(target_ty) = var_type
@@ -430,11 +379,9 @@ impl<'a> HirToMirContext<'a> {
 
                         self.bind_pattern_with_type(pattern, final_value, var_type, *is_mutable);
 
-                        // @:move strict-move tracking: if the bound class is
-                        // annotated `@:move`, mark the destination register as
-                        // strict-move-tracked, and if the initializer consumed
-                        // another strict-move local, emit a `MarkMoved` for
-                        // the source so later reads through it trip CheckLive.
+                        // @:move tracking: mark the destination register strict-move, and if
+                        // the initializer consumed another strict-move local, emit
+                        // `MarkMoved` for the source so later reads trip CheckLive.
                         {
                             let bound_class_sym = var_type
                                 .and_then(|t| self.get_class_symbol(t))
@@ -458,9 +405,8 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Register heap-allocated value for drop tracking
-                        // Only register AutoDrop types (user-defined classes), not RuntimeManaged
-                        // extern types (Thread, Channel, Arc, Mutex) or NoDrop types
+                        // Only AutoDrop types (user-defined classes) are drop-tracked, not
+                        // RuntimeManaged externs (Thread, Channel, Arc, Mutex) or NoDrop.
                         if let HirPattern::Variable { symbol, .. } = pattern {
                             if init_is_value_type {
                                 self.value_type_symbols.insert(*symbol);
@@ -476,9 +422,9 @@ impl<'a> HirToMirContext<'a> {
                                         symbol: src_symbol, ..
                                     } = &init_expr.kind
                                     {
-                                        // Class -> interface wrapping aliases the class object.
-                                        // Stop tracking source as sole owner to avoid premature
-                                        // class frees while interface wrappers still reference it.
+                                        // Class -> interface wrapping aliases the class object,
+                                        // so the source stops being the sole owner while the
+                                        // wrapper still references it.
                                         if self.owned_heap_values.remove(src_symbol).is_some() {
                                             self.reassigned_in_scope.insert(*src_symbol);
                                         }
@@ -492,19 +438,13 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Ownership transfer: when `var current = n1`, the heap-allocated
-                        // value is aliased. Transfer ownership from source to destination
-                        // so the drop analysis doesn't free the source while the alias lives.
-                        // Skip if interface wrapping already handled the transfer.
+                        // Ownership transfer: `var current = n1` aliases the heap value, so
+                        // ownership moves to the destination and the source is no longer freed
+                        // while the alias lives. Interface wrapping already did this transfer.
                         //
-                        // CRITICAL: Skip entirely for @:derive(Copy) bindings. For a Copy
-                        // class, `var b = a` does NOT alias `a` — `emit_shallow_copy` already
-                        // produced an INDEPENDENT allocation and registered `b` to own it.
-                        // Running the transfer here would (1) `register_owned_value(b, a's id)`
-                        // while `b` already owns the fresh copy, which `register_owned_value`
-                        // treats as a reassignment and FREES the just-created copy mid-function
-                        // (use-after-free on the next `b.x = ...`), and (2) re-point `b` at
-                        // `a`'s storage, destroying Copy independence and un-tracking `a`.
+                        // Skipped for @:derive(Copy): `emit_shallow_copy` already gave the
+                        // destination an independent allocation it owns, so transferring would
+                        // free that copy and re-point the destination at the source's storage.
                         if !wrapped_for_interface && copy_class_sym.is_none() {
                             if let HirPattern::Variable {
                                 symbol: dst_symbol, ..
@@ -569,57 +509,32 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirStatement::Expr(expr) => {
-                // Clear temps before expression
                 self.temp_heap_values.clear();
 
-                // Shadow-stack location updates are emitted only at call expressions
-                // (in the Call handler) and throw statements — not at every statement.
-                // This avoids the overhead of N extra extern calls per function.
+                // Shadow-stack location updates are emitted only at call expressions and
+                // throw statements, to avoid N extra extern calls per function.
 
                 let result = self.lower_expression(expr);
 
-                // Free any temporaries created during expression evaluation
-                // The result itself (if heap-allocated) is NOT a temporary if it's
-                // being used as a return value, but for bare expression statements
-                // like method calls for side effects, we should free the result too
-                //
-                // IMPORTANT: Don't track method call results for drop because:
-                // Track heap-allocated results for cleanup:
-                // 1. Direct `new` expressions: `new Complex(...)`
-                // 2. Method calls that return class instances: `z.mul(z)` returns new Complex
-                //
-                // The type_needs_drop check ensures we only track Class instances,
-                // not primitives, strings, or Dynamic values from runtime functions.
-                // NOTE: We do NOT track the top-level expression result as a temp.
-                // Functions like Array.push() may store their argument, and freeing
-                // the result would create dangling pointers. Only chained method call
-                // receivers are safe to free (tracked at the field-access lowering site).
+                // The top-level result is not tracked as a temp: functions like
+                // Array.push() may store their argument, so freeing the result would
+                // dangle. Only chained receivers are freed, at the field-access site.
                 let _ = result;
 
-                // Free all temporaries
                 self.drop_temps();
             }
 
             HirStatement::Assign { lhs, rhs, op } => {
-                // Check if RHS produces a heap-allocated value
-                // This includes:
-                // 1. Direct `new` expressions (e.g., `new Point(1, 2)`)
-                // 2. Method calls returning class instances (e.g., `z.mul(z).add(c)`)
-                // We use type_needs_drop to detect any heap-allocated value, not just `new`
+                // type_needs_drop catches any heap-allocated RHS, not just `new`.
                 let rhs_type_needs_drop = self.type_needs_drop(rhs.ty);
 
-                // For simple variable assignment, check if we need to free the old value
-                // We do this BEFORE evaluating RHS to avoid double-free if RHS reuses the variable
+                // Resolved before RHS evaluation, so a RHS that reuses the variable can't
+                // cause a double-free of the old value.
                 let lhs_symbol = match lhs {
                     HirLValue::Variable(symbol) => Some(*symbol),
                     _ => None,
                 };
 
-                // If assigning a heap-allocated value to a variable that already owns one,
-                // free the old value first (handled by register_owned_value)
-                // Note: The actual free happens in register_owned_value after we evaluate RHS
-
-                // Clear temps before RHS evaluation
                 self.temp_heap_values.clear();
                 let rhs_is_value_type = self.expr_is_value_type_expr(rhs) && op.is_none();
 
@@ -634,9 +549,8 @@ impl<'a> HirToMirContext<'a> {
                     None
                 };
 
-                // Anon-literal target hint: assigning a typed-var = { ... }
-                // must pass the lhs type down so the writer's slot layout
-                // includes optional fields the literal omits.
+                // Anon-literal target hint: `typedVar = { ... }` passes the lhs type down so
+                // the writer's slot layout includes optional fields the literal omits.
                 let prev_anon_target = self.object_literal_target_ty.take();
                 if matches!(&rhs.kind, HirExprKind::ObjectLiteral { .. }) {
                     if let Some(lhs_sym) = lhs_symbol {
@@ -650,7 +564,6 @@ impl<'a> HirToMirContext<'a> {
                 let rhs_value = self.lower_expression(rhs);
                 self.object_literal_target_ty = prev_anon_target;
 
-                // If Copy type, emit shallow copy
                 let (rhs_value, rhs_was_copied) =
                     if let (Some(class_sym), Some(val)) = (assign_copy_class, rhs_value) {
                         // Guard against self-assignment (a = a)
@@ -679,7 +592,6 @@ impl<'a> HirToMirContext<'a> {
                     };
 
                 if let Some(rhs_reg) = rhs_value {
-                    // Handle compound assignment if present
                     let final_value = if let Some(bin_op) = op {
                         let lhs_value = self.lower_lvalue_read(lhs);
                         lhs_value.and_then(|lhs_reg| {
@@ -714,14 +626,10 @@ impl<'a> HirToMirContext<'a> {
                         Some(rhs_reg)
                     };
 
-                    // Store to lvalue
                     if let Some(value) = final_value {
-                        // Dynamic↔typed coercion (box concrete→Dynamic, unbox Dynamic→concrete).
-                        // Applies to BOTH variable targets (`d = 60`) and field targets
-                        // (`obj.v = 60` where v:Dynamic) — the field's declared type comes
-                        // from its symbol. Without boxing on the field path, a primitive
-                        // written to a Dynamic field is stored raw and read back as a bogus
-                        // Dynamic pointer (Std.string garbles / crashes).
+                        // Dynamic↔typed coercion for variable targets (`d = 60`) and field
+                        // targets (`obj.v = 60` where v:Dynamic) alike: a primitive written
+                        // raw into a Dynamic field reads back as a bogus Dynamic pointer.
                         let lhs_target_ty: Option<TypeId> = match lhs {
                             HirLValue::Variable(sym) => self
                                 .symbol_table
@@ -735,24 +643,17 @@ impl<'a> HirToMirContext<'a> {
                                 .filter(|t| *t != TypeId::invalid()),
                             _ => None,
                         };
-                        // Recover the RHS's concrete type when it came from an
-                        // interface method call: TAST erased the return to
-                        // `Dynamic`, but MIR recovered the concrete type into
-                        // `interface_call_result_types`. Same rationale as the
-                        // Let-binding path — without this the coercion below
-                        // unboxes a raw concrete pointer (reading it as a box
-                        // header → SIGSEGV for object returns like Tensor).
+                        // Recover the concrete type of an interface-call RHS, which TAST
+                        // erased to `Dynamic`; otherwise the coercion below unboxes a raw
+                        // concrete pointer as though it were a box.
                         let recovered_rhs_ty =
                             self.interface_call_result_types.get(&value).copied();
                         let rhs_ty = recovered_rhs_ty.unwrap_or(rhs.ty);
-                        // For VARIABLE targets whose declared type is itself
-                        // inference-erased, the recovered type also overrides
-                        // the coercion target — mirroring the Let-binding
-                        // policy so a reassigned local keeps the raw concrete
-                        // representation its binding established. Field
-                        // targets keep their declared type: a Dynamic field
-                        // may be deliberate, and its readers use the box
-                        // protocol.
+                        // A variable target whose declared type is itself erased takes the
+                        // recovered type, so a reassigned local keeps the raw concrete
+                        // representation its binding established. Field targets keep their
+                        // declared type: a Dynamic field may be deliberate and its readers
+                        // use the box protocol.
                         let lhs_target_ty = match (lhs, recovered_rhs_ty, lhs_target_ty) {
                             (HirLValue::Variable(_), Some(recovered), Some(declared)) => {
                                 let declared_is_erased = self
@@ -776,10 +677,8 @@ impl<'a> HirToMirContext<'a> {
                             (_, _, t) => t,
                         };
                         let value = if let Some(target_ty) = lhs_target_ty {
-                            // RAYZOR_ASSIGN_DEBUG=1: names the variable whose
-                            // declared type drives the box/unbox coercion. A
-                            // primitive local showing target=Dynamic here is
-                            // the shape that boxes a constant into a phi.
+                            // RAYZOR_ASSIGN_DEBUG=1: names the variable whose declared type
+                            // drives the box/unbox coercion.
                             if std::env::var("RAYZOR_ASSIGN_DEBUG").is_ok() {
                                 if let HirLValue::Variable(sym) = lhs {
                                     let name = self
@@ -817,7 +716,6 @@ impl<'a> HirToMirContext<'a> {
                             value
                         };
 
-                        // Apply abstract @:from implicit conversion if needed
                         let value = if let HirLValue::Variable(sym) = lhs {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                 let target_ty = sym_info.type_id;
@@ -849,22 +747,11 @@ impl<'a> HirToMirContext<'a> {
                             (value, false)
                         };
 
-                        // Numeric promotion at assignment: `var f:Float = i;`
-                        // where i is an Int must sitofp-cast the int bits,
-                        // not reinterpret them as f64. Surfaces as
-                        // `case IntV(x): x` in a Float-returning switch
-                        // returning ~5e-322 — the switch-as-expression
-                        // desugar inits the temp to 0.0 (F64 register), but
-                        // the case-body assigns the i64 bit pattern of an
-                        // Int-bound pattern variable straight into an
-                        // f64-typed phi with no int→float instruction.
-                        //
-                        // Symbol-table lookup of the lhs's TypeId is
-                        // unreliable for synthetic temps from desugars —
-                        // `gen_temp_var()` allocates a SymbolId without
-                        // registering it. Fall back to the lhs register's
-                        // tracked IR type, which the Let-init already set
-                        // (e.g. 0.0 → F64).
+                        // Numeric promotion: `var f:Float = i` must sitofp the int bits, not
+                        // reinterpret them as f64. Synthetic temps from desugars have no
+                        // usable symbol-table TypeId (`gen_temp_var` allocates a SymbolId
+                        // without registering it), so fall back to the lhs register's
+                        // tracked IR type, which the Let-init already set.
                         let value = {
                             let tgt_ir_opt: Option<IrType> = match lhs {
                                 HirLValue::Variable(sym) => {
@@ -940,22 +827,15 @@ impl<'a> HirToMirContext<'a> {
                             _ => false,
                         };
 
-                        // Register heap-allocated value for drop tracking.
-                        // Only track when the RHS actually creates a NEW allocation (New or Call).
-                        // Field access and variable reads produce borrowed references that must
-                        // NOT be freed — they point into existing objects.
-                        // Only `new Foo(...)` creates guaranteed owned allocations.
-                        // Call results (method returns) are ambiguous — they may return
-                        // references to existing objects (e.g., satisfy() returns an existing
-                        // constraint). Treating Call as owned causes use-after-free in while
-                        // loops where exit_drop_scope frees the value before the back edge.
+                        // Only `new` counts as an owned allocation. Field access and variable
+                        // reads are borrowed references into existing objects, and a call
+                        // result is ambiguous — a method may return an existing object.
                         let rhs_is_owned_allocation =
                             rhs_was_copied || matches!(&rhs.kind, HirExprKind::New { .. });
 
-                        // When assigning to a Field/ArrayIndex lvalue, the RHS value escapes
-                        // to another object. If the RHS is a variable that we're tracking as
-                        // an owned heap allocation, we must STOP tracking it — the pointer now
-                        // lives inside another object and must NOT be freed at scope exit.
+                        // Assigning into a Field/Index lvalue escapes the value into another
+                        // object, so a tracked RHS variable stops being tracked — its pointer
+                        // now lives inside that object and must survive scope exit.
                         let lhs_is_field =
                             matches!(lhs, HirLValue::Field { .. } | HirLValue::Index { .. });
                         if lhs_is_field {
@@ -979,8 +859,8 @@ impl<'a> HirToMirContext<'a> {
                                 symbol: src_symbol, ..
                             } = &rhs.kind
                             {
-                                // Class -> interface wrapping aliases the class object.
-                                // Don't keep source as sole owner.
+                                // Class -> interface wrapping aliases the class object, so the
+                                // source stops being the sole owner.
                                 if self.owned_heap_values.remove(src_symbol).is_some() {
                                     self.reassigned_in_scope.insert(*src_symbol);
                                 }
@@ -994,8 +874,7 @@ impl<'a> HirToMirContext<'a> {
                                         // RHS creates a new allocation → free old, track new
                                         self.register_owned_value(symbol, value);
                                     } else {
-                                        // RHS is a borrowed reference (field access, variable, etc.)
-                                        // → free old owned value, STOP tracking
+                                        // Borrowed RHS: free the old owned value, stop tracking
                                         if let Some(old_ir_id) =
                                             self.owned_heap_values.remove(&symbol)
                                         {
@@ -1024,8 +903,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Free any intermediate temporaries created during RHS evaluation
-                    // These are values like the result of z.mul(z) in z = z.mul(z).add(c)
+                    // Free intermediates from RHS evaluation, e.g. `z.mul(z)` in
+                    // `z = z.mul(z).add(c)`.
                     self.drop_temps();
                 }
             }
@@ -1043,9 +922,8 @@ impl<'a> HirToMirContext<'a> {
                         "[Return]: Lowering return expression, expr kind: {:?}",
                         std::mem::discriminant(&e.kind)
                     );
-                    // Anon-literal target hint: if returning an ObjectLiteral
-                    // and the function's declared return is a wider typedef,
-                    // pass it down so optional fields land in the slot table.
+                    // Anon-literal target hint: a returned ObjectLiteral needs the declared
+                    // return typedef so its optional fields land in the slot table.
                     let prev_target = self.object_literal_target_ty.take();
                     if matches!(&e.kind, HirExprKind::ObjectLiteral { .. }) {
                         self.object_literal_target_ty = self.current_function_return_type;
@@ -1065,41 +943,27 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(boxed) = self.maybe_box_for_optional(val, e.ty, fn_ret_ty) {
                             return Some(boxed);
                         }
-                        // Inverse: function returns primitive `T` but expression
-                        // produces `Null<T>` (boxed `DynamicValue*`). Unbox via
-                        // the runtime helper. Without this the boxed pointer
-                        // gets returned as if it were the primitive — the
-                        // caller reads the pointer's address as the value and
-                        // sees garbage. Common case: returning a value pulled
-                        // from `StringMap<Int>.get(k)` (typed `Null<Int>`)
-                        // from a function declared `:Int` after a manual
-                        // null-coalesce ternary.
+                        // Inverse: a `Null<T>` expression (boxed `DynamicValue*`) returned
+                        // from a `:T` function must be unboxed, or the caller reads the box
+                        // pointer's address as the value.
                         if let Some(unboxed) =
                             self.maybe_unbox_optional_for_target(val, e.ty, fn_ret_ty)
                         {
                             return Some(unboxed);
                         }
-                        // Interface return wrapping: if the function's return
-                        // type is an interface and the expression has the
-                        // implementing class type, wrap the raw class pointer
-                        // in a fat pointer so the caller can vtable-dispatch.
-                        // The auto-wrap in `lower_expression` only fires when
-                        // `expr.ty` is interface — for `return classInstance`
-                        // when the declared return type is the interface,
-                        // `expr.ty` stays as the class, so we wrap here.
+                        // Interface return wrapping: the auto-wrap in `lower_expression` only
+                        // fires when `expr.ty` is the interface, but `return classInstance`
+                        // keeps `expr.ty` as the class, so wrap the raw class pointer here
+                        // for the caller's vtable dispatch.
                         let (wrapped, did_wrap) =
                             self.maybe_wrap_for_interface(val, e.ty, fn_ret_ty);
                         if did_wrap {
                             return Some(wrapped);
                         }
-                        // Cross-module: the returned value's type may not resolve
-                        // to a Class here (arrives Unknown/Placeholder), so
-                        // `maybe_wrap_for_interface` can't wrap `return newC()`
-                        // for an interface return. Recover the class by name and
-                        // wrap via the name-based fat-ptr build (mirrors the
-                        // call-arg path). Without this, a raw class object is
-                        // returned where the caller expects an interface fat
-                        // pointer (`LlamaArch.build():Module` → `new LlamaModel()`).
+                        // Cross-module the returned type can arrive Unknown/Placeholder, so
+                        // `maybe_wrap_for_interface` cannot wrap it; recover the class by
+                        // name and wrap via the name-based fat-ptr build, as the call-arg
+                        // path does.
                         if let Some(iface_sym) = self.get_interface_symbol(fn_ret_ty) {
                             if !self.interface_wrapped_args.contains(&val) {
                                 if let Some(class_fqn) = self.new_arg_class_fqn(e) {
@@ -1113,16 +977,10 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Numeric promotion: `function foo():Float { return x; }`
-                        // where x is an Int (e.g. bound from an enum variant
-                        // field, the case-arm result type-coerces to the
-                        // function's return type). The Let/Assign handlers do
-                        // this via `build_cast`, but Return doesn't — so the
-                        // raw int bits got reinterpreted as a float at the
-                        // callee/caller boundary. Surfaces as garbage like
-                        // 5e-322 from `case IntV(x): x;` when the function
-                        // returns Float. Cover Int→Float and Float→Int both
-                        // ways for parity with assignment behaviour.
+                        // Numeric promotion: `function foo():Float { return x; }` where x is
+                        // an Int must cast, or the raw int bits are reinterpreted as a float
+                        // across the callee/caller boundary. Both directions, for parity
+                        // with the Let/Assign handlers.
                         let val_ir = self.builder.get_register_type(val).unwrap_or(IrType::I64);
                         let ret_ir = self.convert_type(fn_ret_ty);
                         let needs_int_to_float = matches!(
@@ -1169,7 +1027,6 @@ impl<'a> HirToMirContext<'a> {
                     ret_value
                 );
                 self.builder.build_return(ret_value);
-                // debug!("Return instruction built");
             }
 
             HirStatement::Break(label) => {
@@ -1177,12 +1034,10 @@ impl<'a> HirToMirContext<'a> {
                     let break_block = loop_ctx.break_block;
                     let exit_phi_nodes = loop_ctx.exit_phi_nodes.clone();
 
-                    // Get the current block before branching
                     let current_block = self.builder.current_block().unwrap();
 
-                    // Add incoming edges to exit block phi nodes with current symbol values
+                    // Feed the exit-block phis the symbols' values on this edge.
                     for (symbol_id, exit_phi_reg) in &exit_phi_nodes {
-                        // Get the current value of this symbol
                         let current_value = if let Some(&reg) = self.symbol_map.get(symbol_id) {
                             reg
                         } else {
@@ -1190,7 +1045,6 @@ impl<'a> HirToMirContext<'a> {
                             *exit_phi_reg
                         };
 
-                        // Add incoming edge from current block to exit phi
                         self.builder.add_phi_incoming(
                             break_block,
                             *exit_phi_reg,
@@ -1199,12 +1053,10 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
-                    // CRITICAL: Save drop state before cleanup. The break path emits Free
-                    // instructions and modifies drop_scope_stack/owned_heap_values, but these
-                    // mutations must NOT persist for the non-break code path. Without this
-                    // save/restore, the scope stack is corrupted: the normal loop exit code
-                    // (exit_drop_scope at the back-edge) pops the WRONG scope, causing
-                    // variables from outer scopes to be freed prematurely → double-free.
+                    // The break path emits Frees and mutates
+                    // drop_scope_stack/owned_heap_values; those mutations must not persist
+                    // into the non-break path, or the back-edge's exit_drop_scope pops the
+                    // wrong scope.
                     let saved_scope_stack = self.drop_scope_stack.clone();
                     let saved_owned = self.owned_heap_values.clone();
 
@@ -1226,8 +1078,7 @@ impl<'a> HirToMirContext<'a> {
                     let continue_block = loop_ctx.continue_block;
                     let continue_phi_nodes = loop_ctx.continue_phi_nodes.clone();
 
-                    // Add incoming edges for update block phi nodes (if any).
-                    // This is analogous to how break adds edges for exit phi nodes.
+                    // Feed the update-block phis, as break does for the exit phis.
                     if !continue_phi_nodes.is_empty() {
                         if let Some(current_block) = self.builder.current_block() {
                             for (symbol_id, upd_phi_reg) in &continue_phi_nodes {
@@ -1246,9 +1097,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // CRITICAL: Save drop state before cleanup (same reason as break above).
-                    // Continue emits Free instructions for the current scope, but these
-                    // mutations must not persist for the non-continue code path.
+                    // Save drop state around the cleanup, same reason as break above.
                     let saved_scope_stack = self.drop_scope_stack.clone();
                     let saved_owned = self.owned_heap_values.clone();
 
@@ -1342,15 +1191,9 @@ impl<'a> HirToMirContext<'a> {
                         exception_reg
                     };
 
-                    // Call rayzor_throw_typed(exception_value, type_id).
-                    // For class throws, read the RUNTIME type id straight from the
-                    // object header[0] — it already holds the deterministic class
-                    // id that `runtime_type_id` produces for typed catches, so the
-                    // thrown id and the catch's expected id are the SAME encoding.
-                    // (A stale `+1000` here double-encoded it, so a derived class
-                    // thrown as `throw new MyException(...)` reported id N+1000
-                    // while `catch (e:MyException)` expected N → the specific catch
-                    // never matched and a later `catch (e:Exception)` caught it.)
+                    // For class throws the type id comes from the object header[0]: it
+                    // already holds the id `runtime_type_id` produces for typed catches, so
+                    // thrown and expected ids share one encoding.
                     let thrown_type_reg = if self.get_class_symbol(thrown_type).is_some() {
                         let obj_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
                         let obj_ptr = self
@@ -1397,9 +1240,7 @@ impl<'a> HirToMirContext<'a> {
                 then_branch,
                 else_branch,
             } => {
-                // debug!("About to call lower_if_statement, has_else={}", else_branch.is_some());
                 self.lower_if_statement(condition, then_branch, else_branch.as_ref());
-                // debug!("Returned from lower_if_statement");
             }
 
             HirStatement::Switch { scrutinee, cases } => {
@@ -1456,35 +1297,28 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR block to MIR
     pub(crate) fn lower_block(&mut self, block: &HirBlock) {
-        // Process all statements
         for stmt in block.statements.iter() {
             self.lower_statement(stmt);
 
-            // Check if any variables have their last use at this statement
-            // and emit Free for them (lifetime-based drop)
+            // Free variables whose last use is this statement (lifetime-based drop).
             self.check_drop_points_after_statement();
 
-            // Increment statement index for drop point tracking
             self.current_stmt_index += 1;
         }
 
-        // Process trailing expression if present
         if let Some(expr) = &block.expr {
             let _result = self.lower_expression(expr);
-            // The result could be used for implicit returns
         }
     }
 
     /// Lower a HIR block expression to MIR, returning the trailing expression's value
     pub(crate) fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
-        // Process all statements
         for stmt in block.statements.iter() {
             self.lower_statement(stmt);
             self.check_drop_points_after_statement();
             self.current_stmt_index += 1;
         }
 
-        // Return trailing expression value if present
         if let Some(expr) = &block.expr {
             self.lower_expression(expr)
         } else {

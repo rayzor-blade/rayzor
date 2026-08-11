@@ -74,9 +74,7 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
 
-            // Check if arg is a class or enum type
-            // For classes: try to call toString() method
-            // For enums: for now, fall through to traceAny (enum toString not yet implemented)
+            // Classes get toString(); enums fall through to traceAny.
             let type_table = self.type_table;
             let type_kind = type_table.get(arg.ty).map(|ti| ti.kind.clone());
 
@@ -87,9 +85,8 @@ impl<'a> HirToMirContext<'a> {
 
             let class_info =
                 if let Some(crate::tast::core::TypeKind::Class { symbol_id, .. }) = &type_kind {
-                    // Skip extern abstracts (CString, Usize, Ptr, etc.)
-                    // — they appear as Class in the type table but don't have toString()
-                    // Get class name for stdlib lookup
+                    // Extern abstracts (CString, Usize, Ptr) appear as Class in the type
+                    // table but have no toString().
                     let class_name_str = self
                         .symbol_table
                         .get_symbol(*symbol_id)
@@ -102,8 +99,8 @@ impl<'a> HirToMirContext<'a> {
                         .map(|s| s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN))
                         .unwrap_or(false);
 
-                    // Skip extern classes UNLESS they have a toString in stdlib_mapping
-                    // (e.g., StringMap, IntMap, Date have stdlib toString methods)
+                    // Extern classes are skipped unless stdlib_mapping gives them a
+                    // toString (StringMap, IntMap, Date).
                     let has_stdlib_tostring = self
                         .stdlib_mapping
                         .find_by_name(class_name_str, "toString")
@@ -118,8 +115,7 @@ impl<'a> HirToMirContext<'a> {
                     None
                 };
 
-            // Check if the trace argument is an enum variant expression (e.g., Color.Red)
-            // If so, we can print the variant name directly
+            // An enum variant expression (Color.Red) can print its variant name directly.
             if let HirExprKind::Field { object, field } = &arg.kind {
                 if let HirExprKind::Variable {
                     symbol: enum_symbol,
@@ -129,20 +125,17 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(enum_sym) = self.symbol_table.get_symbol(*enum_symbol) {
                         use crate::tast::SymbolKind;
                         if enum_sym.kind == SymbolKind::Enum {
-                            // Get the variant name
                             let field_sym = self.symbol_table.get_symbol(*field);
                             if let Some(variant_name) =
                                 field_sym.and_then(|s| self.string_interner.get(s.name))
                             {
-                                // Create a string constant with the variant name
-                                // IrValue::String will be converted by Cranelift to call haxe_string_literal
-                                // which returns a *mut HaxeString pointer
+                                // IrValue::String lowers to a haxe_string_literal call,
+                                // which returns a *mut HaxeString.
                                 let variant_name_str = variant_name.to_string();
                                 let string_ptr = self
                                     .builder
                                     .build_const(IrValue::String(variant_name_str))?;
 
-                                // Get or create the string trace function
                                 let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
                                 let string_trace_id = self.get_or_register_extern_function(
                                     "haxe_trace_string_struct",
@@ -150,7 +143,6 @@ impl<'a> HirToMirContext<'a> {
                                     IrType::Void,
                                 );
 
-                                // Trace the string
                                 return self.builder.build_call_direct(
                                     string_trace_id,
                                     vec![string_ptr],
@@ -162,11 +154,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Check if it's an enum variable - print discriminant for now
-            // Full variant name lookup for variables would require runtime RTTI
-            // Direct enum variant expressions (Color.Red) are handled above
-
-            // If this is a class type, try to call toString() on it
             if class_info.is_some() {
                 let obj_reg = self.lower_expression(arg)?;
                 if let Some(string_reg) = self.try_call_tostring(obj_reg, arg.ty)? {
@@ -184,8 +171,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Lower the argument first to get the actual MIR register
-            // Check if this is a field access
             let is_field = matches!(&arg.kind, HirExprKind::Field { .. });
             if is_field {
                 if let HirExprKind::Field { object, field } = &arg.kind {
@@ -195,7 +180,6 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or("<unknown>");
                     debug!("[TRACE] Argument is Field access: field={}", field_name);
 
-                    // Check what the object is
                     if let HirExprKind::Variable { symbol, .. } = &object.kind {
                         let var_sym = self.symbol_table.get_symbol(*symbol);
                         let var_name = var_sym
@@ -214,15 +198,11 @@ impl<'a> HirToMirContext<'a> {
                 debug!("[TRACE] arg_reg type from builder: {:?}", ty);
             }
 
-            // Check if the HIR type is an enum
-            // Also check if the arg is a variable and look up its declared type
-            // (trace() takes Dynamic, so arg.ty might be Dynamic even if the variable is an enum)
             let type_table = self.type_table;
             let mut hir_type_kind = type_table.get(arg.ty).map(|ti| ti.kind.clone());
 
-            // If arg.ty is Dynamic but the argument is a variable, look up the variable's declared type
-            // This is needed because trace() accepts Dynamic, so the expression type might be Dynamic
-            // even when the underlying variable has a more specific type (like an enum)
+            // trace() accepts Dynamic, so arg.ty can be Dynamic even when the underlying
+            // variable has a concrete type (an enum, say) — prefer the declared type.
             if matches!(
                 &hir_type_kind,
                 Some(crate::tast::core::TypeKind::Dynamic) | None
@@ -237,8 +217,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Handle enum variables - use RTTI-based trace with compile-time type_id
-            // Direct enum variant expressions (Color.Red) are handled above and print variant names
+            // Enum variables trace via RTTI with a compile-time type_id; direct variant
+            // expressions were handled above.
             if let Some(crate::tast::core::TypeKind::Enum {
                 symbol_id,
                 ref type_args,
@@ -247,17 +227,13 @@ impl<'a> HirToMirContext<'a> {
                 if self.symbol_table.get_symbol(symbol_id).is_some() {
                     let enum_type_id = self.enum_runtime_id(symbol_id);
 
-                    // Build type_id constant (u32)
                     let type_id_const = self
                         .builder
                         .build_const(IrValue::I32(enum_type_id as i32))?;
 
-                    // Check if enum is boxed (has parameterized variants)
-                    // Boxed enums store a pointer to heap-allocated struct
-                    // Unboxed enums store just the discriminant as i64
+                    // Boxed enums (those with parameterized variants) hold a pointer to a
+                    // heap struct; unboxed ones hold just the discriminant as i64.
                     if self.enum_is_boxed(symbol_id) {
-                        // Resolve concrete param types from type_args (type inference)
-                        // type_args maps type parameters to concrete types
                         let concrete_type_args: Vec<u8> = {
                             let type_table = self.type_table;
                             type_args
@@ -274,7 +250,6 @@ impl<'a> HirToMirContext<'a> {
                                 .collect()
                         };
 
-                        // If we have concrete type args, use the typed trace
                         if !concrete_type_args.is_empty()
                             && concrete_type_args.iter().any(|&t| t != 5)
                         {
@@ -293,7 +268,6 @@ impl<'a> HirToMirContext<'a> {
                                 .builder
                                 .build_bitcast(arg_reg, IrType::Ptr(Box::new(IrType::I8)))?;
 
-                            // Build param types data via heap alloc + stores
                             let alloc_size = self
                                 .builder
                                 .build_const(IrValue::I64(concrete_type_args.len() as i64))?;
@@ -328,7 +302,6 @@ impl<'a> HirToMirContext<'a> {
                             );
                         }
 
-                        // Fallback: use untyped boxed trace
                         let trace_enum_boxed_id = self.get_or_register_extern_function(
                             "haxe_trace_enum_boxed",
                             vec![IrType::I32, IrType::Ptr(Box::new(IrType::I8))],
@@ -345,8 +318,7 @@ impl<'a> HirToMirContext<'a> {
                             IrType::Void,
                         );
                     } else {
-                        // Unboxed enum: arg_reg holds the discriminant (i64)
-                        // Call haxe_trace_enum(type_id: u32, discriminant: i64)
+                        // Unboxed enum: arg_reg holds the discriminant (i64).
                         let trace_enum_id = self.get_or_register_extern_function(
                             "haxe_trace_enum",
                             vec![IrType::I32, IrType::I64],
@@ -362,20 +334,17 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Get the actual MIR type from the register (not the HIR type)
-            // This is important because HIR types may be vague (Ptr(Void)) but
-            // MIR registers have the actual type (String, etc.)
+            // The register type beats the HIR type: HIR can be vague (Ptr(Void)) where
+            // the MIR register knows it is a String.
             let actual_reg_type = self
                 .builder
                 .get_register_type(arg_reg)
                 .unwrap_or_else(|| self.convert_type(arg.ty));
 
             let mut arg_type = actual_reg_type.clone();
-            // If the MIR type is Ptr(Void) but we have better type info from the symbol,
-            // use the symbol's type instead. This handles cases like trace(t) where t is
-            // a float from Sys.time() but the trace() signature says Dynamic.
-            // BUT: don't override Ptr(U8) — that means a boxed DynamicValue* (e.g., from
-            // Array.pop() returning Null<T>), which traceAny can properly unbox.
+            // A Ptr(Void) register defers to the symbol's type: trace(t) where t is a
+            // float from Sys.time() still has a Dynamic trace() signature. Ptr(U8) is
+            // exempt — it is a boxed DynamicValue* that traceAny unboxes itself.
             let is_boxed_dynamic =
                 matches!(&arg_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
             if matches!(arg_type, IrType::Ptr(_)) && !is_boxed_dynamic {
@@ -393,13 +362,11 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Check if this is an Array type from HIR type info
             let is_array_type = matches!(
                 &hir_type_kind,
                 Some(crate::tast::core::TypeKind::Array { .. })
             );
 
-            // For Array types, call haxe_trace_array directly
             if is_array_type {
                 let trace_array_id = self.get_or_register_extern_function(
                     "haxe_trace_array",
@@ -411,11 +378,9 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(trace_array_id, vec![arg_reg], IrType::Void);
             }
 
-            // Handle TypeParameter types that are still type-erased (I64).
-            // Only activate when the register type didn't reveal the concrete type.
-            // Inside generic functions, emit a fixup for the monomorphize pass.
-            // Outside generic functions (shouldn't normally happen with proper type
-            // resolution), fall through to traceInt.
+            // A TypeParameter still erased to I64 (the register type revealed nothing)
+            // emits a fixup for the monomorphize pass inside a generic function, and
+            // falls through to traceInt outside one.
             if matches!(arg_type, IrType::I64 | IrType::I32)
                 && matches!(
                     &hir_type_kind,
@@ -432,10 +397,8 @@ impl<'a> HirToMirContext<'a> {
                         .map(|s| s.to_string());
 
                     if let Some(ref tp_name) = type_param_name {
-                        // Only emit a tag fixup if the current function actually
-                        // has this type parameter (i.e., we're inside a generic function).
-                        // If not, the fixup would never be resolved, so fall through
-                        // to normal trace dispatch instead.
+                        // A tag fixup is only resolvable if the current function owns this
+                        // type parameter; otherwise it would never be filled in.
                         let current_func_has_param = self
                             .builder
                             .current_function()
@@ -460,17 +423,14 @@ impl<'a> HirToMirContext<'a> {
                                 IrType::Void,
                             );
                         }
-                        // If not in a generic function, fall through to normal dispatch.
                     }
                 }
             }
 
-            // Special case: Optional<primitive> returned from MIR wrappers (e.g. array pop/shift)
-            // MIR wrappers cast DynamicValue* to IrType::Any (I64), but the value is still a boxed pointer.
-            // Detect via hir_type_kind and route to traceAny for proper unboxing.
-            // BUT: extern functions with returns_raw_value (e.g., StringMap.get) return the
-            // actual value bits as I64, NOT a boxed pointer. Nested Call expressions produce
-            // these raw values, so skip is_optional_boxed for Call args.
+            // Optional<primitive> from a MIR wrapper (array pop/shift) is cast to Any
+            // (I64) but is still a boxed pointer, so it routes to traceAny for unboxing.
+            // Externs with returns_raw_value (StringMap.get) return the actual value bits
+            // as I64 instead, and those arrive as Call expressions — hence the exclusion.
             let is_optional_boxed = matches!(&arg_type, IrType::I64 | IrType::I32)
                 && matches!(
                     &hir_type_kind,
@@ -485,9 +445,9 @@ impl<'a> HirToMirContext<'a> {
                     IrType::F32 | IrType::F64 => "traceFloat",
                     IrType::Bool => "traceBool",
                     IrType::String => "traceString", // String is ptr+len struct
-                    // Also handle Ptr(String) - returned by String methods like toUpperCase()
+                    // Ptr(String) comes back from String methods like toUpperCase().
                     IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => "traceString",
-                    // Ptr(U8) when HIR type is String — from MIR wrappers returning raw string pointers
+                    // Ptr(U8) with a String HIR type: a MIR wrapper's raw string pointer.
                     IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8) => {
                         let is_hir_string =
                             matches!(&hir_type_kind, Some(crate::tast::core::TypeKind::String));
@@ -502,17 +462,13 @@ impl<'a> HirToMirContext<'a> {
                 }
             };
 
-            // Debug: Print trace method selection
             debug!(
                 "[DEBUG trace] arg_reg={}, arg_type={:?}, trace_method={}",
                 arg_reg, arg_type, trace_method
             );
 
-            // Build the qualified name for the trace function
             let trace_func_name = format!("rayzor.Trace.{}", trace_method);
 
-            // Look up the runtime function name
-            // For now, manually map to the runtime function
             let runtime_func = match trace_method {
                 "traceInt" => "haxe_trace_int",
                 "traceFloat" => "haxe_trace_float",
@@ -522,9 +478,9 @@ impl<'a> HirToMirContext<'a> {
                 _ => "haxe_trace_any",
             };
 
-            // Special handling for String: use haxe_trace_string_struct that takes a pointer
+            // String traces through haxe_trace_string_struct, which takes a pointer to
+            // the HaxeString struct.
             if trace_method == "traceString" {
-                // String is represented as a pointer to HaxeString struct
                 let param_types = vec![IrType::Ptr(Box::new(IrType::String))];
                 let string_trace_id = self.get_or_register_extern_function(
                     "haxe_trace_string_struct",
@@ -564,14 +520,8 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
 
-            // Get or register the extern runtime function
-            // Note: Runtime trace functions expect specific types:
-            // - haxe_trace_int expects i64
-            // - haxe_trace_float expects f64
-            // We need to cast arguments to match
-            // Note: We don't need to cast arguments here - the Cranelift backend
-            // handles signature-aware type conversion automatically (see cranelift_backend.rs:1487-1491)
-            // It will insert sextend for i32->i64, fcvt for f32->f64, etc.
+            // No casts here: the backend converts arguments to match these param types
+            // (sextend for i32->i64, fcvt for f32->f64).
             let param_types = match trace_method {
                 "traceInt" => vec![IrType::I64],
                 "traceFloat" => vec![IrType::F64],
@@ -596,7 +546,6 @@ impl<'a> HirToMirContext<'a> {
             let runtime_func_id =
                 self.get_or_register_extern_function(runtime_func, final_param_types, IrType::Void);
 
-            // Generate the call
             return self.builder.build_call_direct(
                 runtime_func_id,
                 vec![final_arg_reg],
@@ -637,7 +586,7 @@ impl<'a> HirToMirContext<'a> {
                 args.len()
             );
 
-            // For static method calls, the actual argument is the second one (skip Std class)
+            // In a static-method call args[0] is the Std class; the value is args[1].
             let arg = if *is_method && args.len() == 2 {
                 &args[1]
             } else {
@@ -653,7 +602,7 @@ impl<'a> HirToMirContext<'a> {
 
             let arg_type = self.convert_type(arg.ty);
 
-            // Check HIR type for Array (TypeKind::Array maps to Ptr in MIR)
+            // TypeKind::Array maps to Ptr in MIR, so the HIR type is what identifies it.
             let hir_type_kind = {
                 let tt = self.type_table;
                 tt.get(arg.ty).map(|ti| ti.kind.clone())
@@ -674,8 +623,7 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
 
-            // Determine which MIR wrapper function to call based on type
-            // These wrappers call the extern runtime functions
+            // These MIR wrappers forward to the extern runtime functions.
             let mir_wrapper = match arg_type {
                 IrType::I32 | IrType::I64 => "int_to_string",
                 IrType::F32 | IrType::F64 => "float_to_string",
@@ -689,17 +637,14 @@ impl<'a> HirToMirContext<'a> {
                 mir_wrapper, arg_type
             );
 
-            // Lower the argument
             let arg_reg = self.lower_expression(arg)?;
 
-            // Get or register the MIR wrapper function
-            // These return String (a struct with ptr + len)
+            // The wrappers return String, a ptr+len struct.
             let param_types = vec![arg_type.clone()];
-            let return_type = IrType::String; // String is represented as ptr+len
+            let return_type = IrType::String;
             let mir_wrapper_id =
                 self.get_or_register_extern_function(mir_wrapper, param_types, return_type.clone());
 
-            // Generate the call to MIR wrapper
             return self
                 .builder
                 .build_call_direct(mir_wrapper_id, vec![arg_reg], return_type);

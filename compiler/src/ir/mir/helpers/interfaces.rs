@@ -34,20 +34,13 @@ impl<'a> HirToMirContext<'a> {
         // Resolve the method SymbolId vtable. Three tiers:
         //  (1) eager (class, iface) vtable from register_class_metadata;
         //  (2) lazy build from `class_method_symbols`/`class_method_by_name`;
-        //  (3) name-only: when neither the vtable nor the class's method
-        //      symbols are in THIS context (a fully-imported class the
-        //      importer never lowered — e.g. `new LlamaArch()` in
-        //      `ArchRegistry.withDefaults`), fall back to just the interface
-        //      method NAMES. We can't fill method-symbol slots, but the slot
-        //      loop resolves each slot's function by `<class_fqn>.<method>`
-        //      via the stable name-keyed `external_function_name_map`, so the
-        //      symbols aren't actually needed.
-        // Length the call sites will index against (drift-tolerant). A cached
-        // eager vtable that is SHORTER than this (a method compacted out in
-        // register_class_metadata, or built before a base interface's methods
-        // were merged in) would place every slot at the wrong offset — the call
-        // site reads past the fat pointer. Reject it and rebuild position-
-        // preserving below.
+        //  (3) name-only: neither the vtable nor the class's method symbols are
+        //      in this context (a fully-imported class this file never lowered).
+        //      Slots then resolve by `<class_fqn>.<method>` through the stable
+        //      name-keyed `external_function_name_map`, so symbols aren't needed.
+        // Call sites index against the interface's method count, so a cached
+        // vtable shorter than that would place every slot at the wrong offset:
+        // reject it and rebuild position-preserving below.
         let expected_method_count = self
             .resolve_interface_method_names(interface_symbol)
             .map(|n| n.len());
@@ -92,9 +85,9 @@ impl<'a> HirToMirContext<'a> {
                 Some(entries)
             })?;
         let method_count = vtable.len();
-        let fat_ptr_size = ((1 + method_count) * 8) as u64; // object_ptr + N function pointers
-                                                            // Allocate fat pointer with malloc so IrInstruction::Free
-                                                            // (lowered to libc free) uses matching allocator semantics.
+        // object_ptr + N function pointers, allocated with malloc so
+        // IrInstruction::Free (lowered to libc free) matches the allocator.
+        let fat_ptr_size = ((1 + method_count) * 8) as u64;
         let malloc_fn = self.get_or_register_extern_function(
             "malloc",
             vec![IrType::U64],
@@ -107,8 +100,7 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(Box::new(IrType::U8)),
         )?;
 
-        // Store object pointer at offset 0
-        // Need to bitcast obj_reg to i64 if it's a pointer
+        // Object pointer occupies slot 0, stored as i64.
         let obj_as_i64 = {
             let obj_ty = self
                 .builder
@@ -184,13 +176,10 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
             let dispatch_func_id = match func_id_opt {
-                // Slots MUST hold dispatch thunks, never raw methods: the
-                // CallIndirect lowering on every backend uses the closure
-                // ABI (env prepended), so a raw `(this, args)` method in a
-                // slot receives `(this=env, args=this, …)` — shifted args.
-                // Natively this was masked by devirtualization; on wasm it
-                // surfaced as iface methods silently reading garbage
-                // (Tokenizer.encode returning [] in llama-chat).
+                // Slots hold dispatch thunks, never raw methods: CallIndirect
+                // lowering uses the closure ABI (env prepended) on every
+                // backend, so a raw `(this, args)` method in a slot would
+                // receive `(this=env, args=this, …)`.
                 Some(func_id) => self
                     .ensure_vtable_dispatch_thunk(func_id)
                     .or_else(|| {
@@ -246,14 +235,8 @@ impl<'a> HirToMirContext<'a> {
 
         let slot_count = 1 + target_method_count; // object ptr + method slots
 
-        // NULL GUARD. A null interface value is legitimate — `get()` returning
-        // "not found", an unset field, a failed cast — and it must survive an
-        // assignment as null so the caller's `x == null` check can see it.
-        // The clone below DEREFERENCES the source wrapper to copy its slots,
-        // so without this branch `var a:Iface = returnsNull()` segfaults on the
-        // BIND, before any null check the user wrote can run. That crash lands
-        // in JIT'd code with no symbol and no message.
-        //
+        // A null interface value is legitimate and must survive assignment as
+        // null, but the clone below dereferences the source wrapper, so guard:
         //   if src == 0 { result = 0 } else { result = <clone> }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let src_as_int = self
@@ -277,7 +260,7 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or(null_ptr);
         self.builder.build_branch(join_block)?;
 
-        // clone path (the original body).
+        // clone path.
         self.builder.switch_to_block(clone_block);
         let fat_ptr_size = (slot_count * 8) as u64;
         let malloc_fn = self.get_or_register_extern_function(
@@ -351,15 +334,12 @@ impl<'a> HirToMirContext<'a> {
 
         // Class -> interface: build a fresh fat pointer wrapper from class vtable entries.
         if let Some(class_sym) = self.get_class_symbol(value_type) {
-            // Already an interface fat pointer (e.g. a conditional result whose
-            // branches were wrapped per-branch below, but whose static type is
-            // still one branch's class): never class-wrap again — nesting the
-            // fat pointer stores the wrapper where the receiver belongs and
-            // dispatch reads garbage.
+            // Already-wrapped registers (a conditional wrapped per branch, whose
+            // static type is still one branch's class) must not wrap again:
+            // nesting stores the wrapper where the receiver belongs.
             if self.interface_wrapped_args.contains(&value_reg) {
                 return (value_reg, false);
             }
-            // Check if we have a vtable for this (class, interface) pair
             if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
                 return (value_reg, false);
             }
@@ -383,14 +363,12 @@ impl<'a> HirToMirContext<'a> {
         (value_reg, false)
     }
 
-    /// Wrap a raw class object as an interface fat pointer when the class is
-    /// NOT resolvable in this lowering context (fully imported, compiled after
-    /// this file, so it has no SymbolId / vtable / compiled methods here). We
-    /// know only the class's fully-qualified name and the interface. Build the
-    /// `{obj, thunk…}` fat pointer, resolving each method slot to a NAME-keyed
-    /// forward-ref dispatch thunk (`<class_fqn>.<method>`) that dedupes with
-    /// the real thunk at merge. This is the order-independent counterpart to
-    /// `wrap_in_interface_fat_ptr` for the cross-module `new C()` case.
+    /// Wrap a raw class object as an interface fat pointer when the class is not
+    /// resolvable in this lowering context (fully imported, so it has no
+    /// SymbolId, vtable or compiled methods here) and only its fully-qualified
+    /// name is known. Each slot resolves to a name-keyed forward-ref dispatch
+    /// thunk (`<class_fqn>.<method>`) that dedupes with the real thunk at merge:
+    /// the order-independent counterpart to `wrap_in_interface_fat_ptr`.
     pub(crate) fn wrap_new_class_as_interface_by_name(
         &mut self,
         obj_reg: IrId,
@@ -493,23 +471,17 @@ impl<'a> HirToMirContext<'a> {
         best.map(|(i, _)| i)
     }
 
-    /// Emit a diagnostic at an interface method call site when the
-    /// call-side HIR type was `Dynamic`-shaped (a Ptr after
-    /// `convert_type`). Two cases:
+    /// Emit a diagnostic at an interface method call site whose HIR type was
+    /// `Dynamic`-shaped:
     ///
-    /// - `resolved` is `Some` → we recovered the concrete return type
-    ///   from `interface_method_return_types`. Emit a `Hint` so the
-    ///   user knows an annotation at the binding site would silence
-    ///   the recovery layer and the runtime extra work it implies.
-    /// - `resolved` is `None` → we did NOT find a matching iface
-    ///   method return type. The value will flow through downstream
-    ///   code as `Dynamic`, which is a footgun (boxed eq, reflect
-    ///   field reads, SIGSEGV-prone method dispatch). Emit a
+    /// - `resolved` is `Some` → the concrete return type was recovered from
+    ///   `interface_method_return_types`; emit a `Hint` that annotating the
+    ///   binding site removes the recovery layer.
+    /// - `resolved` is `None` → the value flows downstream as `Dynamic`; emit a
     ///   `Warning` recommending an explicit `:T` annotation.
     ///
-    /// Both diagnostics are no-ops when the HIR type is already
-    /// concrete (the common path, fired millions of times per
-    /// compile) so the cost stays in the cross-context case.
+    /// No-op when the HIR type is already concrete, which keeps the cost in the
+    /// cross-context case.
     pub(crate) fn emit_iface_return_diagnostic(
         &mut self,
         method_symbol: SymbolId,
@@ -518,10 +490,8 @@ impl<'a> HirToMirContext<'a> {
         location: SourceLocation,
     ) {
         use crate::tast::TypeKind;
-        // Only diagnose call sites whose HIR-level type kind is the
-        // erased fallback (Dynamic / Placeholder / Unknown). A concrete
-        // TAST type means the type checker already resolved it; no
-        // user-actionable advice to offer.
+        // Only erased kinds (Dynamic / Placeholder / Unknown) are diagnosable:
+        // a concrete TAST type means the type checker already resolved it.
         let expr_kind = self.type_table.get(expr_ty).map(|t| t.kind.clone());
         let is_erased = matches!(
             expr_kind,
@@ -530,10 +500,8 @@ impl<'a> HirToMirContext<'a> {
         if !is_erased {
             return;
         }
-        // Suppress diagnostics for Void-returning methods: there's no
-        // value flowing downstream, so there's no annotation to add
-        // and no misdispatch risk. (Common for things like
-        // `cache.reset()` on an iface field.)
+        // Void-returning methods have no downstream value, so no annotation to
+        // suggest and no misdispatch risk.
         if let Some(real_ty) = resolved {
             if matches!(
                 self.type_table.get(real_ty).map(|t| &t.kind),
@@ -548,9 +516,7 @@ impl<'a> HirToMirContext<'a> {
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("<unknown>")
             .to_string();
-        // Deduplicate: same (method, source line/col) fires once per
-        // compile. Without this, generic helpers called from many
-        // sites would dump dozens of identical warnings.
+        // Same (method, line, column) fires once per compile.
         let dedup_key = (
             method_name.clone(),
             location.file_id,

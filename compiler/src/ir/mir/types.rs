@@ -86,32 +86,24 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn convert_type(&self, type_id: TypeId) -> IrType {
         use crate::tast::TypeKind;
 
-        // Look up the type in the type table
         let type_table = self.type_table;
         let type_ref = type_table.get(type_id);
 
-        // DEBUG: Trace type conversion
-        // debug!("[convert_type] type_id={:?}, type_kind={:?}", type_id, type_ref.as_ref().map(|t| &t.kind));
-
         match type_ref.as_ref().map(|t| &t.kind) {
-            // Primitive types
             Some(TypeKind::Int) => IrType::I32,
             Some(TypeKind::Float) => IrType::F64,
             Some(TypeKind::Bool) => IrType::Bool,
             Some(TypeKind::Void) => IrType::Void,
             Some(TypeKind::String) => IrType::String,
 
-            // Function types - represented as function pointers (i64)
             Some(TypeKind::Function {
                 params,
                 return_type,
                 ..
             }) => {
-                // Convert parameter types
                 let param_types: Vec<IrType> =
                     params.iter().map(|p| self.convert_type(*p)).collect();
 
-                // Convert return type
                 let ret_type = Box::new(self.convert_type(*return_type));
 
                 IrType::Function {
@@ -121,7 +113,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Complex types - represented as pointers (i64)
             Some(TypeKind::Class { .. }) => IrType::Ptr(Box::new(IrType::Void)),
             Some(TypeKind::Interface { .. }) => IrType::Ptr(Box::new(IrType::Void)),
             Some(TypeKind::Enum { .. }) => IrType::I64, // Enums as discriminant values (i64 to match Haxe Int)
@@ -142,15 +133,14 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Abstract types - use their underlying type
             Some(TypeKind::Abstract {
                 underlying,
                 symbol_id,
                 ..
             }) => {
-                // First check: pointer-sized abstracts (Usize, Ptr, Ref, Box)
-                // must always be I64 regardless of their declared underlying type.
-                // These represent machine addresses and must never be truncated.
+                // Pointer-sized abstracts (Usize, Ptr, Ref, Box) are I64 regardless
+                // of their declared underlying type: they carry machine addresses
+                // and must never be truncated.
                 let name_str = self
                     .symbol_table
                     .get_symbol(*symbol_id)
@@ -159,28 +149,23 @@ impl<'a> HirToMirContext<'a> {
                 if matches!(name_str, "Usize" | "Ptr" | "Ref" | "Box") {
                     return IrType::I64;
                 }
-                // `Single` is the f32 scalar: `@:coreType abstract Single to
-                // Float from Float`. Its `to`/`from Float` are CAST
-                // compatibility, not identity — the representation is 32-bit.
-                // Decided here with the other representation-bearing coreTypes,
-                // before the underlying/opaque fallback, which would otherwise
-                // hand it an opaque 8-byte slot and silently keep f64 bits.
+                // `Single`'s `to`/`from Float` are cast compatibility, not identity:
+                // the representation is 32-bit. Decided here with the other
+                // representation-bearing coreTypes, before the underlying/opaque
+                // fallback, which would hand it an 8-byte slot holding f64 bits.
                 if name_str == "Single" {
                     return IrType::F32;
                 }
 
                 if let Some(underlying_type) = underlying {
-                    // If underlying type is specified, use it
                     self.convert_type(*underlying_type)
                 } else {
-                    // No underlying type specified — check for SIMD vector types first.
-                    // Match on native_name OR qualified_name OR bare name: a coreType
-                    // SIMD abstract used as a FUNCTION PARAMETER resolves to an
-                    // Abstract whose symbol may not carry native_name in this view,
-                    // and the `is_systems_type` check below would otherwise claim it
-                    // (SIMD* are mir_wrapper classes) and return I64 — truncating the
-                    // 128-bit vector to a 64-bit param. So detect the vector identity
-                    // from any available name and return the real vector type.
+                    // SIMD vectors must be matched before the `is_systems_type` check
+                    // below, which claims them (SIMD* are mir_wrapper classes) and
+                    // returns I64 — truncating the vector to a 64-bit param. Match on
+                    // native_name, qualified_name or bare name: a coreType SIMD
+                    // abstract reached through a function parameter may not carry
+                    // native_name in this view.
                     let type_names = self.symbol_table.get_symbol(*symbol_id).map(|sym| {
                         let native = sym
                             .native_name
@@ -219,8 +204,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Check if this is a systems type
-                    // (Ptr, Ref, Box, Usize) which are all i64 (pointer-sized) abstracts over Int
+                    // Systems types (Ptr, Ref, Box, Usize) are pointer-sized abstracts.
                     let is_systems_type = self
                         .symbol_table
                         .get_symbol(*symbol_id)
@@ -245,13 +229,11 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Type parameters — type erasure: all type params are pointer-sized (8 bytes).
-            // This allows ONE struct layout per generic class for all instantiations.
-            // Coercion to/from concrete types happens at generic boundaries (field access, calls).
-            // Exception: constrained type params (T:Interface) become Ptr(Void) — fat pointer
-            // for vtable-based dispatch on interface methods.
-            // NOTE: Functions that need TypeVar for generic dispatch (convert_to_string,
-            // trace handler) extract the type param name separately via resolve_type_param_name().
+            // Type erasure: type params are pointer-sized so one struct layout serves
+            // every instantiation; coercion happens at generic boundaries (field access,
+            // calls). Constrained params (T:Interface) become Ptr(Void) for vtable-based
+            // dispatch. Callers that need TypeVar for generic dispatch extract the type
+            // param name separately via resolve_type_param_name().
             Some(TypeKind::TypeParameter { constraints, .. }) => {
                 if !constraints.is_empty() && self.has_interface_constraint(&constraints) {
                     IrType::Ptr(Box::new(IrType::Void))
@@ -260,51 +242,39 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             Some(TypeKind::Dynamic) => {
-                // Dynamic type is used as a placeholder for unresolved generic type parameters
-                // in stdlib (e.g., ArrayIterator<T>.next() where T is unresolved).
-                // Since dynamic values can be any type including objects/pointers, we treat
-                // them as pointer-sized values to avoid truncation bugs.
+                // Also the stdlib placeholder for unresolved generic type params. A
+                // dynamic value can be an object/pointer, so it stays pointer-sized
+                // to avoid truncation.
                 IrType::Ptr(Box::new(IrType::Void))
             }
 
-            // Unknown or error types
             Some(TypeKind::Unknown) | Some(TypeKind::Error) => {
-                // Unknown or error types - treat as pointer-sized values to avoid truncation.
-                // These may be unresolved generic class instances that need full 64-bit values.
+                // May be unresolved generic class instances; pointer-sized to avoid
+                // truncating the full 64-bit value.
                 warn!("Unknown/Error type {:?}, defaulting to Ptr(Void)", type_id);
                 IrType::Ptr(Box::new(IrType::Void))
             }
 
-            // Generic instance types (ArrayIterator<T>, Map<K,V>, etc.) - pointer to instantiated class
             Some(TypeKind::GenericInstance { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Map type - pointer to map structure
             Some(TypeKind::Map { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Anonymous structure type - pointer to struct
             Some(TypeKind::Anonymous { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Union type - pointer (can hold any of the union members)
             Some(TypeKind::Union { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Intersection type - pointer to combined type
             Some(TypeKind::Intersection { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Type alias - resolve to target type
             Some(TypeKind::TypeAlias { target_type, .. }) => self.convert_type(*target_type),
 
-            // Placeholder type - treat as pointer (will be resolved later)
             Some(TypeKind::Placeholder { .. }) => IrType::Ptr(Box::new(IrType::Void)),
 
-            // Char type - single character, represented as i32
             Some(TypeKind::Char) => IrType::I32,
 
             None => {
-                // Type not found in type table
-                // This often happens for generic type parameters that weren't resolved,
-                // like T in ArrayIterator<T>.next() returning array[current++].
-                // Use Ptr(Void) to avoid truncation when these are actually pointers/objects.
-                // TODO: Properly resolve generic type parameters from instantiation context.
+                // Usually an unresolved generic type parameter; Ptr(Void) avoids
+                // truncating values that are actually pointers/objects.
+                // TODO: resolve generic type parameters from instantiation context.
                 warn!(
                     "Type {:?} not found in type table, defaulting to Ptr(Void)",
                     type_id
@@ -312,7 +282,6 @@ impl<'a> HirToMirContext<'a> {
                 IrType::Ptr(Box::new(IrType::Void))
             }
 
-            // Catch-all for other types
             Some(other) => {
                 warn!(
                     "Unhandled type kind for {:?}: {:?}, defaulting to Ptr(Void)",
@@ -442,16 +411,14 @@ impl<'a> HirToMirContext<'a> {
             IrType::F32 | IrType::F64 => "float_to_string",
             IrType::Bool => "bool_to_string",
             IrType::String => {
-                // Already a string
                 return Some(value);
             }
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => {
-                // Pointer to string - already a string pointer
                 return Some(value);
             }
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void) => {
-                // Ptr(Void) could be Array, Class, or DynBox.
-                // Check register_class_hints to detect Array pointers.
+                // Ptr(Void) could be Array, Class or DynBox; the class hint is
+                // the only thing that identifies an Array here.
                 let is_array = self
                     .register_class_hints
                     .get(&value)
@@ -472,13 +439,11 @@ impl<'a> HirToMirContext<'a> {
                 return self.convert_dynamic_to_string(value);
             }
             IrType::Ptr(_) => {
-                // Other pointer types - use runtime dispatch via DynBox to_string
                 return self.convert_dynamic_to_string(value);
             }
             IrType::TypeVar(ref type_param_name) => {
-                // Generic type parameter — use type-tag-aware conversion.
-                // The tag is a placeholder (0) that gets resolved during
-                // inlining or monomorphization via type_param_tag_fixups.
+                // The tag is a placeholder (0) resolved during inlining or
+                // monomorphization via type_param_tag_fixups.
                 let tag_reg = self.builder.build_const(IrValue::I32(0))?;
                 if let Some(func) = self.builder.current_function_mut() {
                     func.type_param_tag_fixups
@@ -489,7 +454,6 @@ impl<'a> HirToMirContext<'a> {
                     vec![IrType::I64, IrType::I32],
                     IrType::Ptr(Box::new(IrType::String)),
                 );
-                // Bitcast value to I64 for the generic call
                 let val_as_i64 = self
                     .builder
                     .build_bitcast(value, IrType::I64)
@@ -501,7 +465,6 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
             IrType::Any => {
-                // Unknown types - use runtime dispatch
                 return self.convert_dynamic_to_string(value);
             }
             _ => "int_to_string", // Fallback
@@ -512,15 +475,11 @@ impl<'a> HirToMirContext<'a> {
             mir_wrapper, from_type
         );
 
-        // Resolve the MIR wrapper's signature — int_to_string takes I64 (matching runtime),
-        // float_to_string takes F64, bool_to_string takes Bool.
-        // The Cranelift backend's C ABI auto-cast handles any I32↔I64 promotion
-        // at the call site, so no manual casting is needed here.
-        // Declare each wrapper with ITS OWN signature, never the caller's type.
-        // These are registered by name, so the first caller used to pin the
-        // parameter: one `Single` (f32) argument made `float_to_string` an
-        // f32-taking function, and every later `Float` then truncated f64 -> f32
-        // on the way in. The arg-side coercion widens/narrows to these.
+        // Declare each wrapper with its own signature, never the caller's type:
+        // wrappers are registered by name, so the first caller would otherwise pin
+        // the parameter (one `Single` f32 argument would make every later `Float`
+        // truncate on the way in). Arg-side coercion widens/narrows to these, and
+        // the Cranelift C ABI auto-cast covers I32↔I64 promotion at the call site.
         let param_ty = match mir_wrapper {
             "int_to_string" => IrType::I64,
             "float_to_string" => IrType::F64,
@@ -543,7 +502,6 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(Box::new(IrType::String)),
         );
 
-        // Bitcast value to *mut u8 for the runtime call
         let ptr_val = self
             .builder
             .build_bitcast(value, IrType::Ptr(Box::new(IrType::U8)))
@@ -559,9 +517,8 @@ impl<'a> HirToMirContext<'a> {
     /// Box a `Channel<T>` send payload into a self-describing DynamicValue so
     /// the receive side can tag-dispatch (see `haxe_channel_unbox_erased`).
     /// References carry their real class id (keeps `Std.is`/`Type.typeof`
-    /// honest); String uses the HaxeString wrapper; primitives keep the
-    /// existing extern-boxing path byte-for-byte. Channel-scoped: only the
-    /// `Channel_send`/`Channel_trySend` call sites route through here.
+    /// honest); String uses the HaxeString wrapper; primitives take the
+    /// extern-boxing path. Only `Channel_send`/`Channel_trySend` route here.
     pub(crate) fn box_channel_payload(
         &mut self,
         value: IrId,
@@ -605,17 +562,16 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(box_func_id, vec![value_as_ptr], ptr_u8)
             }
             Some(TypeKind::Function { .. }) => self.box_value_for_dynamic(value, value_ty),
-            // Primitives (Int/Float/Bool) and anything else keep today's path.
+            // Primitives (Int/Float/Bool) and anything else take the extern-boxing path.
             _ => self.maybe_box_for_extern_call(value, actual_ty, expected_ty),
         }
     }
 
     /// Tag-aware unbox for `Channel<T>` receive/tryReceive returns. The payload
     /// is always a self-describing DynamicValue (see `box_channel_payload`).
-    /// Mirrors `maybe_unbox_for_extern_return`, changing only two arms: the
-    /// erased I64 arm tag-dispatches via `haxe_channel_unbox_erased` (resolves
-    /// the boxed-prim-vs-ref ambiguity that the raw reinterpret got wrong), and
-    /// the reference arm unboxes the box (refs are boxed now, not raw). A
+    /// Mirrors `maybe_unbox_for_extern_return` except in two arms: the erased
+    /// I64 arm tag-dispatches via `haxe_channel_unbox_erased` to resolve the
+    /// boxed-prim-vs-ref ambiguity, and the reference arm unboxes. A
     /// `tryReceive` reference payload (Ptr(U8) erased, Ptr(Void) concrete)
     /// unboxes null-guarded, so an empty channel (0) resolves to null and
     /// `!= null` keeps working; prim payloads take the typed arms below.
@@ -630,14 +586,11 @@ impl<'a> HirToMirContext<'a> {
         if is_try {
             if let IrType::Ptr(inner) = resolved_expected {
                 match inner.as_ref() {
-                    // Ptr(U8) (erased/inferred) and Ptr(Void) (explicit class,
-                    // and Null<prim>!) are statically indistinguishable here —
-                    // a class payload must unwrap to the raw object ptr (the
-                    // raw-box passthrough was the streaming-writer SIGSEGV),
-                    // while a Null<prim> payload must KEEP its box (unwrapping
-                    // handed back the malloc'd value slot → garbage/null). Only
-                    // the DynamicValue tag can tell them apart, so dispatch at
-                    // runtime: haxe_channel_unbox_try (null-guarded).
+                    // Ptr(U8) (erased/inferred) and Ptr(Void) (explicit class, and
+                    // Null<prim>) are statically indistinguishable here: a class
+                    // payload must unwrap to the raw object ptr, while a Null<prim>
+                    // payload must keep its box. Only the DynamicValue tag can tell
+                    // them apart, so dispatch at runtime (null-guarded).
                     IrType::Void | IrType::U8 => {
                         let f = self.get_or_register_extern_function(
                             "haxe_channel_unbox_try",
@@ -723,8 +676,8 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_call_direct(f, vec![value], IrType::String)
             }
-            // Reference payload (class/enum/anon/array): boxed now, so recover the
-            // raw ref and type it as the expected pointer for downstream access.
+            // Reference payload (class/enum/anon/array): recover the raw ref and
+            // type it as the expected pointer for downstream access.
             other => {
                 let ret_ty = if matches!(other, IrType::Ptr(_)) {
                     other.clone()
@@ -821,7 +774,6 @@ impl<'a> HirToMirContext<'a> {
             if let Some(ti) = type_table.get(type_id) {
                 match &ti.kind {
                     crate::tast::TypeKind::TypeParameter { .. } => {
-                        // Try to resolve through current class's type_args
                         if let Some(this_ty) = self.current_this_type {
                             self.resolve_type_param_from_receiver(type_id, this_ty)
                                 .unwrap_or(type_id)
@@ -851,12 +803,11 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(false),
                 ti.map(|t| matches!(t.kind, crate::tast::TypeKind::Function { .. }))
                     .unwrap_or(false),
-                // Class / Interface / Anonymous / Array all share the
-                // "pointer-with-type_id-header" runtime representation.
-                // Without this branch, the catch-all below boxes them
-                // via `haxe_box_haxestring_ptr` which mis-tags them as
-                // `TYPE_STRING` — breaking `Type.typeof` /
-                // `Type.getClass` on the resulting `Dynamic`.
+                // Class / Interface / Anonymous / Array share the
+                // "pointer-with-type_id-header" runtime representation. Without
+                // this branch the catch-all below boxes them via
+                // `haxe_box_haxestring_ptr`, mis-tagging them as `TYPE_STRING`
+                // and breaking `Type.typeof`/`Type.getClass` on the `Dynamic`.
                 ti.map(|t| {
                     matches!(
                         t.kind,
@@ -871,7 +822,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Enum values need haxe_box_reference_ptr to preserve the enum's type_id.
-        // Tag with the STABLE runtime id, not the context-local TypeId, so the
+        // Tag with the stable runtime id, not the context-local TypeId, so the
         // box agrees with RTTI registration and with `is`/reflection lookups.
         if is_enum {
             let type_id_u32 = self.runtime_type_id(concrete_type_id);
@@ -932,18 +883,11 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if is_class_like {
-            // Class / Interface / Anonymous / Array: dispatch to
-            // `haxe_box_class_instance` which reads the actual
-            // runtime type_id from the instance's `__type_id`
-            // header at offset 0. We can't pass
-            // `concrete_type_id.as_raw()` to `haxe_box_reference_ptr`
-            // directly — the TAST TypeId at this site doesn't
-            // always match the IR TypeId stored in the header
-            // (different id namespaces). Header-driven tagging
-            // sidesteps that mismatch and is what makes
-            // `Type.typeof(class_instance)` / `Type.getClass`
-            // recover the correct class identity from the
-            // resulting Dynamic.
+            // `haxe_box_class_instance` reads the runtime type_id from the
+            // instance's `__type_id` header at offset 0 rather than taking a
+            // TypeId argument: the TAST TypeId here need not match the IR TypeId
+            // in the header (different id namespaces). Header-driven tagging is
+            // what lets `Type.typeof`/`Type.getClass` recover the class identity.
             let actual_reg_type = self
                 .builder
                 .get_register_type(value)
@@ -963,12 +907,10 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(box_func, vec![as_ptr], ptr_u8)
         } else if is_string || matches!(&ir_type, IrType::Ptr(_)) {
-            // String or generic-pointer type — box as HaxeString.
-            // (Catches String + any remaining `Ptr` fallback that isn't
-            // a class/interface/anon/array — e.g. type-erased opaque
-            // pointers from extern declarations.)
-            // haxe_box_haxestring_ptr wraps a HaxeString* pointer in a DynamicValue.
-            // The actual register may be I64 (type-erased) even though the resolved type is Ptr.
+            // String, plus any `Ptr` fallback that isn't class/interface/anon/array
+            // (e.g. type-erased opaque pointers from extern declarations), boxes as
+            // a HaxeString DynamicValue. The register may be I64 (type-erased) even
+            // though the resolved type is Ptr.
             let actual_reg_type = self
                 .builder
                 .get_register_type(value)
@@ -989,7 +931,6 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(box_func, vec![as_ptr], ptr_u8)
         } else if matches!(&ir_type, IrType::I32) {
-            // Int (i32) — extend to i64 and box
             let as_i64 = self
                 .builder
                 .build_cast(value, IrType::I32, IrType::I64)
@@ -1054,16 +995,13 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Coerce a raw i64 value from anonymous object storage back to the target type.
-    /// Inverse of coerce_to_i64.
-    /// Reconcile an extern call's NATIVE return type with the Haxe-declared
+    /// Reconcile an extern call's native return type with the Haxe-declared
     /// type at the callsite.
     ///
-    /// A native `i64` count consumed as Haxe `Int` must narrow to `i32`, and
-    /// an `i64`/`f64` mismatch must convert by VALUE. Leaving the register at
-    /// the native width makes the downstream arg-adaptation in
-    /// `IrBuilder::build_call_direct` treat an `I64 -> F64` pairing as
-    /// generic type erasure and BITCAST it (raw bits read as a float).
+    /// A native `i64` count consumed as Haxe `Int` must narrow to `i32`, and an
+    /// `i64`/`f64` mismatch must convert by value. Left at the native width, the
+    /// downstream arg-adaptation in `IrBuilder::build_call_direct` treats an
+    /// `I64 -> F64` pairing as generic type erasure and bitcasts it.
     ///
     /// Only numeric scalars are reconciled: `Any`/pointer/void declarations
     /// are genuine erased slots where the bits, not the value, are wanted.
@@ -1099,6 +1037,8 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or(value)
     }
 
+    /// Coerce a raw i64 value from anonymous object storage back to the target
+    /// type. Inverse of `coerce_to_i64`.
     pub(crate) fn coerce_from_i64(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
         let ir_type = self.convert_type(type_id);
         match &ir_type {

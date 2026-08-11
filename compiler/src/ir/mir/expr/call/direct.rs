@@ -72,18 +72,12 @@ impl<'a> HirToMirContext<'a> {
                 false
             };
 
-            // A generic instance method imported from another module
-            // resolves here to a cross-module forward-ref stub whose
-            // FunctionKind is not UserDefined (the real impl arrives via
-            // merge + fixup later). The is_user_defined gate would route
-            // it to the fallback path below, which does NOT attach the
-            // receiver's concrete type_args — so the monomorphizer can
-            // never specialize the imported generic method, and its whole
-            // call chain (e.g. an imported haxe.ds.BalancedTree.set ->
-            // setLoop -> balance -> compare) reaches codegen as generic
-            // trap stubs and SIGILLs. Route generic instance-method calls
-            // through the type_args-aware block regardless of kind, as
-            // long as the callee is not a genuine extern/intrinsic.
+            // An imported generic instance method resolves to a cross-module
+            // forward-ref stub whose FunctionKind is not UserDefined, and the
+            // fallback path below does not attach the receiver's type_args, so
+            // the monomorphizer could never specialize it. Generic instance
+            // calls therefore take the type_args-aware block regardless of
+            // kind, as long as the callee is not a genuine extern/intrinsic.
             let (callee_has_type_params, callee_is_externish) = self
                 .builder
                 .module
@@ -100,21 +94,16 @@ impl<'a> HirToMirContext<'a> {
                     )
                 })
                 .unwrap_or((false, false));
-            // A callee registered as an extern (e.g. the iterator-protocol
-            // methods List.iterator / .keys, which lower to extern Imports
-            // resolved at link time) must NOT take the receiver-type_args
-            // route: attaching type_args would ask the monomorphizer to
-            // specialize an extern that has no body, producing an
-            // unresolvable `Import` symbol that makes finalize panic on the
-            // whole module. Real cross-module methods (BalancedTree.set) are
-            // not in extern_functions, so they still route correctly.
+            // A callee registered as an extern must not take the
+            // receiver-type_args route: type_args would ask the monomorphizer
+            // to specialize a body-less extern, leaving an unresolvable
+            // `Import` symbol. Real cross-module methods are not in
+            // extern_functions, so they still route correctly.
             let callee_is_externish =
                 callee_is_externish || self.builder.module.extern_functions.contains_key(&func_id);
-            // The callee may be a cross-module function not yet present
-            // in this module (resolved to its eventual id but merged
-            // later), so callee_has_type_params is unreliable here. Detect
-            // genericity from the RECEIVER instead: a concrete generic
-            // class instance (Class/GenericInstance carrying type_args).
+            // A cross-module callee may not be merged into this module yet, so
+            // callee_has_type_params is unreliable; genericity is detected from
+            // the receiver carrying non-empty type_args instead.
             let receiver_is_generic_instance = *is_method && !args.is_empty() && {
                 let rt = self.resolve_through_aliases(args[0].ty);
                 self.type_table
@@ -131,26 +120,13 @@ impl<'a> HirToMirContext<'a> {
                 && (callee_has_type_params || receiver_is_generic_instance);
 
             if (is_user_defined || route_as_generic_method) && !receiver_needs_special_dispatch {
-                // Lower args and, for instance method
-                // calls, apply call-boundary materialization
-                // (class→iface fat-ptr wrap, anon coercion).
-                // HIR params don't include `this`, so the
-                // user arg at index `i` corresponds to HIR
-                // param index `i - 1` when `is_method=true`.
-                // Without this wrap, passing a raw class
-                // instance to a method whose param is
-                // interface-typed stores a non-fat-ptr in
-                // any iface field the callee assigns to →
-                // later virtual dispatch on that field
-                // SIGSEGVs (e.g. `reg.register("llama",
-                // new LlamaArch())` in nue.arch).
-                // Static calls are left untouched: they
-                // already go through the static-call path
-                // earlier in this handler when receiver is
-                // missing, and routing them through
-                // `maybe_materialize_for_call` here has
-                // triggered Cranelift symbol-clash on
-                // stdlib MIR wrappers like `array_length`.
+                // Instance calls get call-boundary materialization (class→iface
+                // fat-ptr wrap, anon coercion) so an interface-typed param
+                // never receives a raw class instance. HIR params exclude
+                // `this`, so user arg `i` is HIR param `i - 1`. Static calls
+                // are left untouched: they take the static-call path earlier in
+                // this handler, and materializing them clashes with the stdlib
+                // MIR wrappers.
                 let arg_regs: Vec<_> = if *is_method {
                     args.iter()
                         .enumerate()
@@ -176,16 +152,10 @@ impl<'a> HirToMirContext<'a> {
                         result_type.clone()
                     };
 
-                // For generic class method calls, extract concrete type args
-                // from the receiver's type (e.g., Container<String>.get() → type_args=[String]).
-                // This enables the monomorphizer to specialize the function.
-                //
-                // The callee may be a cross-module function not yet merged
-                // into this module, so its type_params are invisible here
-                // (has_type_params is false). Fall back to the receiver
-                // signal: a concrete generic-class instance receiver means
-                // we still want to attach the receiver's type_args so the
-                // monomorphizer can specialize the imported generic method.
+                // Generic class method calls carry the receiver's concrete type
+                // args (Container<String>.get() → type_args=[String]) so the
+                // monomorphizer can specialize. A not-yet-merged cross-module
+                // callee has invisible type_params, hence the receiver signal.
                 let has_type_params = self
                     .builder
                     .module
@@ -238,17 +208,13 @@ impl<'a> HirToMirContext<'a> {
                         actual_return_type,
                         call_type_args,
                     );
-                    // The function body uses type-erased I64 for all type param values.
-                    // When the resolved concrete type differs (F64, I32, String, etc.),
-                    // the caller's register has the right TYPE but the value is still
-                    // the I64 bit pattern. After inlining + SRA, this becomes visible.
-                    // Insert a bitcast for float types where i64→f64 reinterpretation
-                    // is needed at the calling convention level.
+                    // Generic bodies return type-erased i64: the caller's
+                    // register has the concrete type but still holds the i64 bit
+                    // pattern, so float results need a bitcast to land in the
+                    // float register file.
                     if let Some(reg) = result {
                         let reg_type = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
                         if matches!(reg_type, IrType::F64 | IrType::F32) {
-                            // Bitcast from i64 to f64 to ensure calling convention
-                            // uses the float register file
                             return self.builder.build_bitcast(reg, reg_type);
                         }
                     }

@@ -38,8 +38,6 @@ impl<'a> HirToMirContext<'a> {
             unreachable!("try_method_call on a non-Call expression")
         };
         if let HirExprKind::Field { object, field } = &callee.kind {
-            // This is a method call: object.method(args)
-            // The method symbol should be in our function_map (local or external)
             let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
             let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
             let in_local = self.function_map.contains_key(field);
@@ -92,22 +90,13 @@ impl<'a> HirToMirContext<'a> {
                         .and_then(|name| self.resolve_method_function_id(object.ty, name))
                 })
                 .or_else(|| {
-                    // Cross-module STATIC call whose method SymbolId
-                    // drifted AND whose forwarded stub carries no
-                    // qualified_name (the resolver above bails on its
-                    // `?`), in a context where the class's methods were
-                    // never registered (so the receiver-type path also
-                    // misses). Construct the EXACT fully-qualified name
-                    // from the CLASS symbol on the Field's object and
-                    // resolve by name — the same mechanism the
-                    // interface fat-ptr slots use. This is exact-FQN
-                    // construction, not suffix matching: an unresolved
-                    // name still errors loudly.
-                    //
-                    // Statics WITH args already survived through the
-                    // param-count name paths; the zero-arg form had no
-                    // name-based route at all (Q4Matmul.dumpCensus()
-                    // from the llama-chat entry module, E0100).
+                    // Cross-module STATIC call whose method SymbolId drifted and
+                    // whose forwarded stub carries no qualified_name, in a
+                    // context where the class's methods were never registered:
+                    // both paths above miss. Build the EXACT fully-qualified name
+                    // from the CLASS symbol on the Field's object and resolve by
+                    // name. Exact-FQN construction, not suffix matching — an
+                    // unresolved name still errors loudly.
                     let mname = method_name?;
                     let class_sym = match &object.kind {
                         HirExprKind::Variable { symbol, .. } => *symbol,

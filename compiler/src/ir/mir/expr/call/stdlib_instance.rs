@@ -42,19 +42,10 @@ impl<'a> HirToMirContext<'a> {
             return None;
         };
         if *is_method && !args.is_empty() {
-            // The first arg is the receiver for instance method calls
-            // Resolve TypeAlias to get the actual receiver type.
-            //
-            // Cross-context override: when the receiver
-            // expression is a Variable whose binding was
-            // populated by an iface call whose return type
-            // we re-resolved at MIR time (Dynamic →
-            // concrete), use that override instead of the
-            // poisoned `args[0].ty`. Without this, the
-            // dispatch falls into the Dynamic-receiver path
-            // and the downstream MIR-wrapper boxing
-            // produces a malformed call (SIGSEGVs on
-            // e.g. `Array.push`).
+            // args[0] is the receiver; resolve it through TypeAlias. Prefer the
+            // MIR-time override for a receiver bound by an iface call whose return
+            // type was re-resolved (Dynamic → concrete): `args[0].ty` still reads
+            // Dynamic and would route the call to the Dynamic-receiver path.
             let receiver_type = self
                 .effective_receiver_type(&args[0])
                 .map(|tid| self.resolve_through_aliases(tid))
@@ -68,7 +59,6 @@ impl<'a> HirToMirContext<'a> {
                         receiver_type, type_info.kind
                     );
                 } else {
-                    // Print method name for calls with invalid receiver type
                     let method_name = self
                         .symbol_table
                         .get_symbol(*symbol)
@@ -80,10 +70,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // SPECIAL CASE: Handle Dynamic and TypeParameter method calls
-            // When receiver is Dynamic or TypeParameter (unresolved generic), resolve method by name
-            // TypeParameter arises from chained calls on generic types like Arc<T>.get().lock()
-            // where the return type of get() is TypeParameter T
+            // Dynamic/TypeParameter receivers resolve the method by name. TypeParameter
+            // arises from chained calls on generics, e.g. Arc<T>.get().lock() where
+            // get() returns T.
             {
                 let type_table = self.type_table;
                 if let Some(type_info) = type_table.get(receiver_type) {
@@ -94,21 +83,14 @@ impl<'a> HirToMirContext<'a> {
                             | TypeKind::Placeholder { .. }
                             | TypeKind::Unknown
                     ) {
-                        // First, check if this might be a stdlib method call
-                        // by checking if the receiver expression comes from a stdlib function
-                        // (i.e., its result type would be Ptr(Void) for MIR wrappers)
                         let method_name_str = self
                             .symbol_table
                             .get_symbol(*symbol)
                             .and_then(|s| self.string_interner.get(s.name));
 
-                        // Check if any stdlib class has this method - use the mapping dynamically
-                        // instead of hardcoding method names. This handles cases like:
-                        // - MutexGuard.get() vs Arc.get() - both have "get" but are different
-                        // - Mutex.lock() returning Dynamic typed as MutexGuard
-                        // For Dynamic receivers, check user-defined methods FIRST.
-                        // Stdlib has common names like "sum", "get", "set" that
-                        // collide with user methods on Dynamic-typed objects.
+                        // For Dynamic receivers check user-defined methods first: stdlib
+                        // has common names ("get", "set", "sum") that collide with user
+                        // methods on Dynamic-typed objects.
                         let receiver_is_dynamic = {
                             let type_table = self.type_table;
                             type_table
@@ -138,12 +120,11 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if let Some(func_id) = user_func_for_dynamic {
-                            // User-defined method found for Dynamic receiver — use it with unboxing
                             let receiver_reg = self.lower_expression(&args[0])?;
 
-                            // Dynamic receivers are always boxed (from haxe_box_reference_ptr),
-                            // even if the MIR register type shows Ptr(Void) due to cast.
-                            // Always unbox unless receiver has a class hint (stdlib container).
+                            // Dynamic receivers are always boxed by haxe_box_reference_ptr,
+                            // even when the register type reads Ptr(Void) after a cast, so
+                            // unbox unless a class hint marks it a raw stdlib container.
                             let has_class_hint =
                                 self.register_class_hints.contains_key(&receiver_reg);
                             let should_unbox = !has_class_hint;
@@ -163,7 +144,6 @@ impl<'a> HirToMirContext<'a> {
                                 receiver_reg
                             };
 
-                            // Lower remaining args
                             let arg_regs: Vec<_> = std::iter::once(actual_receiver)
                                 .chain(args[1..].iter().filter_map(|a| self.lower_expression(a)))
                                 .collect();
@@ -187,15 +167,13 @@ impl<'a> HirToMirContext<'a> {
                             .unwrap_or(false);
                         if is_stdlib_method {
                             let method_name = method_name_str.unwrap();
-                            // Calculate actual param count (exclude receiver for instance methods)
+                            // The receiver does not count towards the params.
                             let actual_param_count = args.len().saturating_sub(1);
                             debug!(
                                 "[DYNAMIC METHOD] Found stdlib method '{}' in mapping, param_count={}",
                                 method_name, actual_param_count
                             );
 
-                            // Query the stdlib mapping for all classes that have this method.
-                            // Results are sorted by priority (MutexGuard before Arc, etc.)
                             let matching_classes =
                                 self.stdlib_mapping.find_classes_with_method(method_name);
                             debug!(
@@ -218,7 +196,6 @@ impl<'a> HirToMirContext<'a> {
                             // Disambiguate using class hints when multiple classes match
                             // (e.g., Arc.get vs MutexGuard.get — both have 0 params)
                             if filtered_classes.len() > 1 {
-                                // Check if the receiver variable has a class hint
                                 let receiver_hint = if let HirExprKind::Variable {
                                     symbol: recv_sym,
                                     ..
@@ -251,11 +228,10 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // No priority guessing: if the candidates still name more
-                            // than one distinct runtime function (same-target aliases
-                            // like rayzor_Bytes.get / haxe_io_Bytes.get are NOT
-                            // ambiguous), the receiver's type is unresolved and any
-                            // pick would silently call an unrelated class's method.
+                            // No priority guessing: more than one distinct runtime target
+                            // (same-target aliases like rayzor_Bytes.get / haxe_io_Bytes.get
+                            // are not ambiguous) means the receiver type is unresolved, and
+                            // any pick would call an unrelated class's method.
                             {
                                 let mut distinct: Vec<&str> = filtered_classes
                                     .iter()
@@ -290,7 +266,6 @@ impl<'a> HirToMirContext<'a> {
                                 );
                                 let runtime_func = runtime_call.runtime_name;
 
-                                // Check if this is a MIR wrapper class
                                 if self.stdlib_mapping.is_mir_wrapper_class(class_name) {
                                     // Use runtime_name directly as the MIR wrapper function name
                                     // (e.g., "Arc_init" not "rayzor_concurrent_Arc_init")
@@ -300,9 +275,9 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name
                                     );
 
-                                    // Lower all arguments with auto-boxing
-                                    // CRITICAL: If the receiver (args[0]) can't be lowered, skip this handler
-                                    // to prevent generating 0-arg calls for instance methods that expect self.
+                                    // If the receiver (args[0]) can't be lowered, skip this
+                                    // handler rather than emit a 0-arg call for an instance
+                                    // method that expects self.
                                     let mir_wrapper_sig =
                                         self.get_stdlib_mir_wrapper_signature(&mir_func_name);
                                     let mut arg_regs = Vec::new();
@@ -316,11 +291,10 @@ impl<'a> HirToMirContext<'a> {
                                                 .and_then(|(params, _)| params.get(i).cloned())
                                                 .unwrap_or_else(|| actual_ty.clone());
 
-                                            // TypeParameter/Dynamic/Placeholder args erased to I64
-                                            // should be CAST to Ptr(U8), not BOXED — but ONLY
-                                            // when the actual register value is a pointer (I64).
-                                            // For concrete primitives (I32, F64, Bool from Channel<Int>),
-                                            // the value must be BOXED, not cast.
+                                            // Erased TypeParameter/Dynamic/Placeholder args are
+                                            // pointers carried in an I64 and are cast to Ptr(U8);
+                                            // concrete primitives (I32/F64/Bool, e.g. from
+                                            // Channel<Int>) must be boxed instead.
                                             let is_erased_type_param = {
                                                 let type_table = self.type_table;
                                                 type_table
@@ -335,8 +309,6 @@ impl<'a> HirToMirContext<'a> {
                                                     })
                                                     .unwrap_or(false)
                                             };
-                                            // Check if register holds a concrete primitive
-                                            // (e.g., Channel<Int>.send(42) → reg is I32, not a pointer)
                                             let reg_ir_type = self.builder.get_register_type(reg);
                                             let is_concrete_primitive = matches!(
                                                 reg_ir_type,
@@ -363,7 +335,6 @@ impl<'a> HirToMirContext<'a> {
                                                 && matches!(&expected_ty, IrType::Ptr(_))
                                                 && !is_concrete_primitive
                                             {
-                                                // Cast I64 → Ptr(U8) — the I64 is actually a pointer
                                                 self.builder
                                                     .build_cast(
                                                         reg,
@@ -374,7 +345,6 @@ impl<'a> HirToMirContext<'a> {
                                             } else if is_concrete_primitive
                                                 && matches!(&expected_ty, IrType::Ptr(_))
                                             {
-                                                // Box concrete primitive for generic param
                                                 let box_ty = reg_ir_type.unwrap();
                                                 self.maybe_box_for_extern_call(
                                                     reg,
@@ -397,18 +367,14 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
-                                    // If receiver failed to lower, skip this handler
-                                    // and let the general fallback chain handle it
                                     if receiver_failed {
                                         // Don't generate a broken call; fall through
                                     } else {
-                                        // Get MIR wrapper return type
                                         let mir_return_type = mir_wrapper_sig
                                             .as_ref()
                                             .map(|(_, ret)| ret.clone())
                                             .unwrap_or_else(|| result_type.clone());
 
-                                        // Register forward reference
                                         let mir_func_id = self.register_stdlib_mir_forward_ref(
                                             &mir_func_name,
                                             param_types,
@@ -421,11 +387,11 @@ impl<'a> HirToMirContext<'a> {
                                             mir_return_type.clone(),
                                         )?;
 
-                                        // Auto-unbox: resolve generic T from receiver type args
-                                        // e.g., Channel<Int>.tryReceive() returns Ptr(U8) but should produce I32
+                                        // Resolve generic T from the receiver's type args to
+                                        // unbox: Channel<Int>.tryReceive() returns Ptr(U8)
+                                        // where the caller expects I32.
                                         let resolved_expected = {
                                             let type_table = self.type_table;
-                                            // The receiver is args[0] - check its type for generic args
                                             let from_receiver = if !args.is_empty() {
                                                 type_table.get(args[0].ty).and_then(|ti| match &ti
                                                     .kind
@@ -461,8 +427,7 @@ impl<'a> HirToMirContext<'a> {
                                             } else {
                                                 None
                                             };
-                                            // Also check if return type is Optional{primitive} (Null<T>)
-                                            // and resolve to the inner primitive for unboxing
+                                            // A Null<T> return resolves to its inner primitive.
                                             let from_optional =
                                                 type_table.get(expr.ty).and_then(|ti| {
                                                     if let crate::tast::TypeKind::Optional {
@@ -506,10 +471,9 @@ impl<'a> HirToMirContext<'a> {
                                             )
                                         };
 
-                                        // Store class hint for the result register to enable
-                                        // disambiguation of subsequent method calls on this value.
-                                        // E.g., Mutex.lock() returns MutexGuard, so the result
-                                        // should be tagged as MutexGuard for .get()/.unlock() dispatch.
+                                        // Tag the result register with its class so later calls
+                                        // on the value disambiguate: Mutex.lock() yields a
+                                        // MutexGuard, which then resolves .get()/.unlock().
                                         if let Some(result_reg) = final_result {
                                             let return_class = Self::get_return_class_hint(
                                                 class_name,
@@ -537,11 +501,9 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
-                                    // Build param types
                                     let param_types: Vec<_> =
                                         arg_regs.iter().map(|_| ptr_u8.clone()).collect();
 
-                                    // Determine return type: Void if function doesn't return, otherwise ptr
                                     let return_type = if has_return {
                                         ptr_u8.clone()
                                     } else {
@@ -577,28 +539,20 @@ impl<'a> HirToMirContext<'a> {
                                 }
 
                                 if let Some(func_id) = found_func {
-                                    // Lower the receiver
                                     let receiver_reg = self.lower_expression(&args[0])?;
 
-                                    // Check if the receiver was boxed by examining its MIR register type.
-                                    // Boxing creates a Ptr(U8) value. If the receiver has a different
-                                    // pointer type (like Ptr(Void) from a stdlib function return),
-                                    // it wasn't boxed and shouldn't be unboxed.
-                                    //
-                                    // IMPORTANT: If the receiver has a class hint (set by stdlib MIR
-                                    // wrapper dispatch), it's a raw class pointer from a method like
-                                    // MutexGuard_get — NOT a boxed DynamicValue. Don't unbox it.
+                                    // A class hint means the receiver is a raw class pointer
+                                    // from a stdlib MIR wrapper (e.g. MutexGuard_get), not a
+                                    // boxed DynamicValue. Every other Dynamic receiver is
+                                    // boxed by haxe_box_reference_ptr even when the register
+                                    // type reads Ptr(Void) after a cast.
                                     let has_class_hint =
                                         self.register_class_hints.contains_key(&receiver_reg);
                                     let receiver_mir_type =
                                         self.builder.get_register_type(receiver_reg);
-                                    // Dynamic receivers are always boxed (from haxe_box_reference_ptr),
-                                    // even if MIR register type shows Ptr(Void) due to cast.
-                                    // Always unbox for Dynamic unless it has a class hint.
                                     let should_unbox = !has_class_hint;
 
                                     let actual_receiver = if should_unbox {
-                                        // Unbox the Dynamic to get the actual object pointer
                                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                                         let unbox_func_id = self.get_or_register_extern_function(
                                             "haxe_unbox_reference_ptr",
@@ -617,7 +571,6 @@ impl<'a> HirToMirContext<'a> {
                                         receiver_reg
                                     };
 
-                                    // Lower the rest of arguments (skip receiver at index 0)
                                     let arg_regs: Vec<_> = std::iter::once(actual_receiver)
                                         .chain(
                                             args[1..]
@@ -626,7 +579,6 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                         .collect();
 
-                                    // Get the function's actual return type
                                     let actual_return_type = if let Some(func) =
                                         self.builder.module.functions.get(&func_id)
                                     {
@@ -647,27 +599,15 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // NOTE: MutexGuard method calls are handled through the general stdlib mechanism:
-            // 1. Dynamic dispatch uses find_classes_with_method() with dynamic priority
-            // 2. MutexGuard is prioritized (return-only type with no constructor)
-            // 3. MutexGuard_get MIR wrapper is called via stdlib_mapping
-
-            // NOTE: String method calls are handled through the general stdlib mechanism:
-            // 1. get_stdlib_runtime_info() maps TypeKind::String to class name "String"
-            // 2. stdlib_mapping lookup finds the correct runtime function
-            // 3. The general path handles param types and return types
-
-            // PRIORITY CHECK: For extern generic classes like Vec<T>, the receiver type
-            // may be TypeId::MAX (invalid). In this case, try to use the tracked
-            // monomorphized class from variable assignment.
+            // Extern generic classes like Vec<T> can carry a receiver type of
+            // TypeId::MAX; fall back to the monomorphized class tracked at the
+            // variable's assignment.
             if receiver_type == TypeId::from_raw(u32::MAX) {
                 debug!(
                     "[MONO VAR CHECK] receiver_type is MAX, checking monomorphized_var_types ({} entries)",
                     self.monomorphized_var_types.len()
                 );
 
-                // Try to extract the SymbolId from the receiver expression
-                // The receiver (args[0]) should be a variable reference like HirExprKind::Variable
                 let receiver_symbol = match &args[0].kind {
                     HirExprKind::Variable { symbol, .. } => Some(*symbol),
                     HirExprKind::Field { field, .. } => Some(*field),
@@ -679,10 +619,8 @@ impl<'a> HirToMirContext<'a> {
                 );
 
                 if let Some(var_symbol) = receiver_symbol {
-                    // Check if this variable has a tracked monomorphized class
                     if let Some(mono_class) = self.monomorphized_var_types.get(&var_symbol).cloned()
                     {
-                        // Get the method name
                         if let Some(method_sym) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(method_sym.name) {
                                 debug!(
@@ -693,7 +631,6 @@ impl<'a> HirToMirContext<'a> {
                                 // Build the MIR wrapper function name: VecI32_push, VecF64_get, etc.
                                 let mir_func_name = format!("{}_{}", mono_class, method_name);
 
-                                // Get the signature from get_stdlib_mir_wrapper_signature
                                 if let Some((mir_param_types, mir_return_type)) =
                                     self.get_stdlib_mir_wrapper_signature(&mir_func_name)
                                 {
@@ -702,7 +639,6 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name
                                     );
 
-                                    // Lower all arguments (including receiver)
                                     let mut arg_regs = Vec::new();
                                     for arg in args {
                                         if let Some(reg) = self.lower_expression(arg) {
@@ -710,7 +646,6 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
-                                    // Register forward reference
                                     let mir_func_id = self.register_stdlib_mir_forward_ref(
                                         &mir_func_name,
                                         mir_param_types.clone(),
@@ -722,7 +657,6 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name, mir_func_id
                                     );
 
-                                    // Generate the call
                                     let result = self.builder.build_call_direct(
                                         mir_func_id,
                                         arg_regs,
@@ -740,19 +674,17 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // GUARD: Skip instance method handling if receiver is a Class type itself
-            // This can happen when static method calls come through with is_method=true
-            // e.g., Thread.spawn(closure) might be seen as Thread(receiver).spawn(closure)
+            // Skip the instance-method path when the receiver is a class type: static
+            // calls can arrive with is_method=true, e.g. Thread.spawn(closure) seen as
+            // Thread(receiver).spawn(closure).
             let receiver_is_class_type = {
                 let type_table = self.type_table;
                 type_table.get(receiver_type)
                     .map(|ti| {
-                        // Check if the type is a class AND matches one of our MIR wrapper classes
                         if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &ti.kind {
                             self.symbol_table.get_symbol(*symbol_id)
                                 .and_then(|s| self.string_interner.get(s.name))
                                 .map(|name| {
-                                    // Use dynamic check via stdlib_mapping instead of hardcoded list
                                     let is_mir_wrapper = self.stdlib_mapping.is_mir_wrapper_class(name);
                                     if is_mir_wrapper {
                                         debug!("[GUARD] Receiver type is {} class (MIR wrapper), skipping instance method path", name);

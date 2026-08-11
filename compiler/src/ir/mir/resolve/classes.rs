@@ -78,11 +78,9 @@ impl<'a> HirToMirContext<'a> {
                 continue;
             }
 
-            // Prefer TypeIds that are known canonical class IDs:
-            // 1) Present as a typedef in the current MIR module
-            // 2) Registered via register_class_metadata (every entry in
-            //    class_type_to_symbol is — this loop iterates that map, so the
-            //    check is constant; kept as a distinct tier for the tie-break).
+            // Prefer a TypeId present as a typedef in the current MIR module.
+            // Every candidate here is registered class metadata, so the lower
+            // tier exists only for the tie-break.
             let score = if has_mir_type(*candidate_type_id) {
                 3
             } else {
@@ -155,15 +153,11 @@ impl<'a> HirToMirContext<'a> {
 
     pub(crate) fn get_return_class_hint<'b>(dispatching_class: &'b str, method: &str) -> &'b str {
         match (dispatching_class, method) {
-            // Mutex.lock() and Mutex.tryLock() return MutexGuard
             (c, "lock" | "tryLock") if c.contains("Mutex") && !c.contains("MutexGuard") => {
                 "rayzor_concurrent_MutexGuard"
             }
-            // Array.iterator() returns ArrayIterator
             ("Array", "iterator") => "ArrayIterator",
-            // Array.keyValueIterator() returns ArrayKeyValueIterator
             ("Array", "keyValueIterator") => "ArrayKeyValueIterator",
-            // Default: return value is associated with the same class
             _ => dispatching_class,
         }
     }

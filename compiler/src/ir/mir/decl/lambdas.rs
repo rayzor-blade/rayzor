@@ -28,17 +28,11 @@ impl<'a> HirToMirContext<'a> {
         params: &[HirParam],
         captures: &[HirCapture],
     ) -> LambdaContext {
-        // Allocate function ID
         let func_id = self.builder.module.alloc_function_id();
-        // Qualify the lambda name with its module. `lambda_counter` only
-        // resets per lowering instance, so a bare `<lambda_N>` is unique
-        // WITHIN a file but not across them — every file's first closure is
-        // `<lambda_0>`. The backend binds functions by name, so two identically
-        // named closures from different modules COLLAPSE: the SpinPool worker
-        // spawn closure and a user file's first closure both being `<lambda_0>`
-        // made a `Thread.spawn` capture the wrong body/env and dispatch a pool
-        // worker into `rayzor_channel_receive`. Prefix with the sanitized module
-        // name so cross-module closures never alias.
+        // The lambda name carries a sanitized module prefix: `lambda_counter`
+        // resets per lowering instance, so a bare `<lambda_N>` is unique within
+        // a file but not across them, and the backend binds functions by name —
+        // two same-named closures from different modules would collapse into one.
         let module_prefix: String = self
             .builder
             .module
@@ -88,7 +82,6 @@ impl<'a> HirToMirContext<'a> {
             next_reg_id += 1;
         }
 
-        // Create PLACEHOLDER signature
         let signature = IrFunctionSignature {
             parameters: func_params,
             return_type: IrType::Any, // PLACEHOLDER - will be inferred
@@ -98,12 +91,10 @@ impl<'a> HirToMirContext<'a> {
             uses_sret: false,
         };
 
-        // Create empty function
         let symbol_id = SymbolId::from_raw(1000000 + func_id.0);
         let lambda_function = IrFunction::new(func_id, symbol_id, lambda_name, signature);
         let entry_block = lambda_function.entry_block();
 
-        // Add to module
         self.builder.module.add_function(lambda_function);
 
         LambdaContext {
@@ -113,10 +104,6 @@ impl<'a> HirToMirContext<'a> {
             env_layout,
         }
     }
-
-    // ========================================================================
-    // Lambda Generation - Now Using Two-Pass Architecture
-    // ========================================================================
 
     /// Generate a lambda function using two-pass architecture
     ///
@@ -133,7 +120,6 @@ impl<'a> HirToMirContext<'a> {
         captures: &[HirCapture],
         _lambda_type: TypeId, // No longer needed - type inferred from MIR
     ) -> Option<IrFunctionId> {
-        // TWO-PASS LAMBDA LOWERING
         // Pass 1: Create skeleton with placeholder signature
         let context = self.generate_lambda_skeleton(params, captures);
 

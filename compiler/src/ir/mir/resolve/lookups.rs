@@ -61,46 +61,38 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Find the class name that owns a given method symbol by scanning HIR type declarations.
-    /// Returns the normalized class name (e.g., "rayzor_gpu_GPUCompute") if found.
-    /// Extract the normalized class name from an HirExpr's type by looking up
-    /// the receiver in HIR type declarations. Handles extern classes whose TypeId
-    /// may be invalid by checking all HIR types for a class with the method symbol.
+    /// Normalized class name of a receiver expression (e.g. "rayzor_gpu_GPUCompute").
+    /// Extern classes may carry an invalid TypeId, so the HIR type declarations
+    /// and the symbol's native/qualified names are consulted as well.
     pub(crate) fn find_receiver_class_name(
         &self,
         receiver: &crate::ir::hir::HirExpr,
     ) -> Option<String> {
-        // Strategy 1: Look up receiver.ty directly in current_hir_types
         if let Some(decl) = self.current_hir_types.get(&receiver.ty) {
             if let Some(name) = self.extract_class_native_name(decl) {
                 return Some(name);
             }
         }
 
-        // Strategy 2: If the receiver is a variable, get its symbol's type_id
-        // and look that up. Extern class variables may have a different TypeId
-        // than the class declaration.
+        // An extern class variable's symbol may carry a different TypeId than
+        // its class declaration, so look the symbol's own type up too.
         if let crate::ir::hir::HirExprKind::Variable { symbol, .. } = &receiver.kind {
             if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
-                // Try the symbol's type_id
                 if let Some(decl) = self.current_hir_types.get(&sym.type_id) {
                     if let Some(name) = self.extract_class_native_name(decl) {
                         return Some(name);
                     }
                 }
-                // Try the symbol's native_name → look for matching class
                 if let Some(native) = sym.native_name {
                     if let Some(native_str) = self.string_interner.get(native) {
                         return Some(native_str.replace("::", "_"));
                     }
                 }
-                // Try qualified_name (e.g. "sys.net.Host" → "sys_net_Host")
-                // This covers extern classes where native_name wasn't propagated
-                // across compilation contexts but qualified_name was set by the import resolver.
+                // qualified_name ("sys.net.Host" → "sys_net_Host") covers extern
+                // classes whose native_name did not cross compilation contexts.
                 if let Some(qn) = sym.qualified_name {
                     if let Some(qs) = self.string_interner.get(qn) {
-                        // Only use qualified name if it contains a package separator
-                        // (avoid turning "Host" into "Host" redundantly)
+                        // A separator-free name would map to itself; not worth taking.
                         if qs.contains('.') {
                             return Some(qs.replace('.', "_"));
                         }
@@ -108,9 +100,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Strategy 3: Check register_class_hints via symbol_map.
-            // This handles runtime-backed types whose stdlib class isn't loaded as HIR
-            // (e.g., ArrayIterator from arr.iterator(), ArrayKeyValueIterator).
+            // Runtime-backed types whose stdlib class is never loaded as HIR
+            // (ArrayIterator, ArrayKeyValueIterator) only exist as register hints.
             if let Some(reg) = self.symbol_map.get(symbol) {
                 if let Some(hint) = self.register_class_hints.get(reg) {
                     return Some(hint.clone());
@@ -186,22 +177,19 @@ impl<'a> HirToMirContext<'a> {
         let type_table = self.type_table;
         if let Some(type_info) = type_table.get(type_id) {
             match &type_info.kind {
-                // GenericInstance: Check if the base type is extern (e.g., Arc<T>, Channel<T>)
+                // Arc<T>, Channel<T>, … are runtime-managed via their base type.
                 TypeKind::GenericInstance { base_type, .. } => {
                     if let Some(base_info) = type_table.get(*base_type) {
                         if let Some(symbol_id) = base_info.symbol_id() {
                             if let Some(symbol) = self.symbol_table.get_symbol(symbol_id) {
-                                // Use SymbolFlags::EXTERN from the TypedAST
                                 if symbol.flags.contains(SymbolFlags::EXTERN) {
                                     return DropBehavior::RuntimeManaged;
                                 }
-                                // Fallback: Check stdlib class by native name or simple name
                                 if self.is_stdlib_class_by_symbol(symbol) {
                                     return DropBehavior::RuntimeManaged;
                                 }
                             }
                         }
-                        // Base type is a non-extern Class
                         if matches!(&base_info.kind, TypeKind::Class { .. }) {
                             return DropBehavior::AutoDrop;
                         }
@@ -209,7 +197,6 @@ impl<'a> HirToMirContext<'a> {
                     DropBehavior::NoDrop
                 }
                 TypeKind::Class { symbol_id, .. } => {
-                    // Use SymbolFlags from the TypedAST
                     if let Some(symbol) = self.symbol_table.get_symbol(*symbol_id) {
                         // @:cstruct classes are user-managed (no AutoDrop header)
                         if symbol.flags.is_cstruct() {
@@ -218,30 +205,26 @@ impl<'a> HirToMirContext<'a> {
                         if symbol.flags.contains(SymbolFlags::EXTERN) {
                             return DropBehavior::RuntimeManaged;
                         }
-                        // Fallback: Check if it's a known stdlib class by native name or simple name.
-                        // This handles cases where the EXTERN flag wasn't propagated
-                        // through the symbol table (e.g., stdlib types loaded via imports
-                        // where the local symbol doesn't carry the extern flag).
+                        // Stdlib types loaded via imports may reach here without the
+                        // EXTERN flag, so fall back to matching the class by name.
                         if self.is_stdlib_class_by_symbol(symbol) {
                             return DropBehavior::RuntimeManaged;
                         }
                     }
-                    // Check for @:derive(Drop) — user-defined destructor
+                    // @:derive(Drop) — user-defined destructor
                     if self.derive_drop_classes.contains(symbol_id) {
                         return DropBehavior::AutoDropWithDtor;
                     }
-                    // Check for @:manualDrop — user manages lifetime
+                    // @:manualDrop — user manages lifetime
                     if self.manual_drop_classes.contains(symbol_id) {
                         return DropBehavior::ManualDrop;
                     }
-                    // User-defined (non-extern) classes need AutoDrop
                     DropBehavior::AutoDrop
                 }
-                // Arrays: runtime-managed buffer, no Free needed
+                // Runtime-managed buffer, no Free needed
                 TypeKind::Array { .. } => DropBehavior::NoDrop,
-                // Dynamic: unknown ownership at compile time, no Free
+                // Ownership unknown at compile time, no Free
                 TypeKind::Dynamic => DropBehavior::NoDrop,
-                // Other types don't need drop
                 _ => DropBehavior::NoDrop,
             }
         } else {
@@ -255,11 +238,9 @@ impl<'a> HirToMirContext<'a> {
         if self.derive_drop_classes.is_empty() {
             return None;
         }
-        // First check the direct mapping
         if let Some(&class_sym) = self.ir_to_drop_class.get(&ir_id) {
             return Some(class_sym);
         }
-        // Fallback: use register_class_hints to find the class name, then resolve
         let class_name = self.register_class_hints.get(&ir_id)?;
         for &class_sym in &self.derive_drop_classes {
             if let Some(symbol) = self.symbol_table.get_symbol(class_sym) {
@@ -281,7 +262,6 @@ impl<'a> HirToMirContext<'a> {
         &self,
         name: &str,
     ) -> Option<(Vec<IrType>, IrType)> {
-        // Query the runtime_mapping.rs type registry for explicit type information
         self.stdlib_mapping.get_function_signature(name)
     }
 
@@ -293,7 +273,6 @@ impl<'a> HirToMirContext<'a> {
         match &type_ref.kind {
             TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
             TypeKind::TypeParameter { constraints, .. } => {
-                // For constrained type params, find the first interface constraint
                 for constraint_id in constraints {
                     if let Some(constraint_type) = type_table.get(*constraint_id) {
                         if let TypeKind::Interface { symbol_id, .. } = &constraint_type.kind {
@@ -303,21 +282,11 @@ impl<'a> HirToMirContext<'a> {
                 }
                 None
             }
-            // Cross-file `Array<I>` where I is declared in another file
-            // sometimes lands as a Placeholder during this file's TAST
-            // lowering. The resolved Interface symbol IS present in the
-            // shared `interface_method_names` map — look the name up
-            // there to recover the proper SymbolId so element-wrap and
-            // virtual-dispatch paths fire correctly.
-            // Cross-file `Array<I>` where I is declared in another file
-            // sometimes lands as a Placeholder during this file's TAST
-            // lowering. Resolve via:
-            //   (1) already-loaded interface_method_names (fast path), or
-            //   (2) symbol-table walk for a symbol with that name whose
-            //       kind is Interface (handles the case where the file
-            //       declaring `I` hasn't run register_interface_metadata
-            //       in *this* context yet — see also the lazy vtable
-            //       construction in `wrap_in_interface_fat_ptr`).
+            // Cross-file `Array<I>` can land as a Placeholder during this file's
+            // TAST lowering; recovering the Interface SymbolId by name keeps the
+            // element-wrap and virtual-dispatch paths working. The symbol-table
+            // walk covers contexts where `I`'s declaring file has not yet run
+            // register_interface_metadata (see `wrap_in_interface_fat_ptr`).
             TypeKind::Placeholder { name } => {
                 if let Some(&sym) = self.interface_method_names.keys().find(|sym_id| {
                     self.symbol_table
@@ -337,10 +306,8 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// Check if a qualified name + method belongs to rayzor stdlib and return the runtime function name
-    ///
-    /// For static methods like Thread.spawn, Channel.init, etc.
-    /// Uses StdlibMapping as single source of truth - no hardcoded mappings!
+    /// Runtime function name for a static stdlib call (Thread.spawn, Channel.init, …).
+    /// StdlibMapping is the single source of truth; no mappings are hardcoded here.
     pub(crate) fn get_static_stdlib_runtime_func(
         &self,
         qualified_name: &str,
@@ -372,19 +339,13 @@ impl<'a> HirToMirContext<'a> {
         method_name: &str,
         param_count: Option<usize>,
     ) -> Option<&'static str> {
-        // Parse qualified name to extract class name
-        // Patterns: "rayzor.concurrent.Thread.spawn", "test.Thread.spawn", "StringTools.startsWith"
+        // Shapes: "rayzor.concurrent.Thread.spawn", "test.Thread.spawn", "StringTools.startsWith"
         let parts: Vec<&str> = qualified_name.split('.').collect();
         let class_name = parts.iter().rev().nth(1)?; // Second-to-last part is class name
 
-        // Use StdlibMapping to find the runtime function
-        // This is the ONLY source of truth - all mappings come from the actual Rust implementations
-
-        // PRIORITY: First try qualified class name with underscore format (e.g., "sys_thread_Thread")
-        // This handles sys.thread.Thread -> sys_thread_Thread mappings and prevents
-        // conflicts between sys.thread.Thread and rayzor.concurrent.Thread
+        // The underscored qualified class name ("sys_thread_Thread") must be tried
+        // first, otherwise sys.thread.Thread and rayzor.concurrent.Thread collide.
         if parts.len() >= 2 {
-            // Build qualified class name: all parts except the last (method name), joined with underscore
             let qualified_class_name = parts[..parts.len() - 1].join("_");
             if let Some(count) = param_count {
                 if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
@@ -403,11 +364,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // FALLBACK: Try simple class name (e.g., "Thread", "Json") ONLY when the
-        // qualified name is in a stdlib namespace. Without this guard, user
-        // classes like `tink.Json` would hijack stdlib method dispatch via
-        // simple-name matching, causing `tink.Json.parse` to silently route
-        // to `haxe.Json.parse` (haxe_json_parse).
+        // The simple class name ("Thread", "Json") is only safe inside a stdlib
+        // namespace: otherwise a user class such as `tink.Json` matches by simple
+        // name and `tink.Json.parse` routes to `haxe_json_parse`.
         let in_stdlib_ns = parts.len() == 1
             || qualified_name.starts_with("haxe.")
             || qualified_name.starts_with("sys.")
@@ -445,7 +404,6 @@ impl<'a> HirToMirContext<'a> {
         &self,
         name: &str,
     ) -> Option<(Vec<IrType>, IrType)> {
-        // Query the runtime_mapping.rs type registry for explicit type information
         self.stdlib_mapping.get_function_signature(name)
     }
 
@@ -495,8 +453,6 @@ impl<'a> HirToMirContext<'a> {
         &'static str,
         &crate::stdlib::RuntimeFunctionCall,
     )> {
-        // Get the method name and optional qualified name from the symbol table
-        // Prefer @:native name over Haxe name for runtime mapping lookup
         let (method_name, qualified_name, method_is_extern) =
             if let Some(symbol) = self.symbol_table.get_symbol(method_symbol) {
                 let name = self.string_interner.get(symbol.name)?;
@@ -538,15 +494,12 @@ impl<'a> HirToMirContext<'a> {
                 in_stdlib_namespace || self.is_stdlib_class_by_symbol(symbol)
             });
 
-        // Get the class name and type args from the receiver type
         let type_table = self.type_table;
         let type_info = type_table.get(receiver_type);
 
-        // GUARD: If receiver is a user-defined class (not a known stdlib/extern class),
-        // return None immediately. User class methods are resolved by the method
-        // resolution code, not through stdlib runtime mappings. Without this guard,
-        // common method names like "add", "get", "set", "length" would incorrectly
-        // match stdlib methods (e.g., Point2D.add → sys_deque_add).
+        // A user-defined receiver must bail out here — its methods are resolved by
+        // the method-resolution code. Otherwise common names ("add", "get", "set",
+        // "length") match stdlib mappings, e.g. Point2D.add → sys_deque_add.
         if let Some(ti) = type_info {
             match &ti.kind {
                 crate::tast::core::TypeKind::Class { symbol_id, .. } => {
@@ -557,7 +510,6 @@ impl<'a> HirToMirContext<'a> {
                             let name = self.string_interner.get(s.name).unwrap_or("");
                             let is_extern = s.flags.contains(SymbolFlags::EXTERN);
                             let is_wrapper = self.stdlib_mapping.is_mir_wrapper_class(name);
-                            // Check if class is in stdlib namespace via qualified name
                             let in_stdlib_ns = s
                                 .qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
@@ -567,12 +519,9 @@ impl<'a> HirToMirContext<'a> {
                                         || qn.starts_with("rayzor.")
                                 })
                                 .unwrap_or(false);
-                            // Check if the stdlib mapping has ANY method for this class.
-                            // IMPORTANT: this must be combined with in_stdlib_ns because
-                            // class_has_any_method matches by simple name (e.g., "Json"),
-                            // and user classes like `tink.Json` have the same simple name
-                            // as stdlib `haxe.Json`. Without the namespace check, user
-                            // macros would be hijacked by stdlib method mappings.
+                            // class_has_any_method matches by simple name, so it must be
+                            // combined with in_stdlib_ns: `tink.Json` shares its simple
+                            // name with `haxe.Json` and would otherwise be hijacked.
                             let has_stdlib_methods_in_ns =
                                 self.stdlib_mapping.class_has_any_method(name) && in_stdlib_ns;
                             is_extern || is_wrapper || in_stdlib_ns || has_stdlib_methods_in_ns
@@ -583,9 +532,8 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
                 crate::tast::core::TypeKind::Placeholder { name } => {
-                    // Placeholder types arise from unresolved cross-module types.
-                    // Check if the placeholder name maps to a known stdlib class.
-                    // If not, it's a user class and we should not match stdlib methods.
+                    // Unresolved cross-module type: unless the name is a known
+                    // stdlib class it is a user class and must not match here.
                     let placeholder_name = self.string_interner.get(*name);
                     let is_known_stdlib = placeholder_name
                         .map(|n| {
@@ -611,7 +559,8 @@ impl<'a> HirToMirContext<'a> {
             qualified_name
         );
 
-        // FALLBACK: If receiver_type is invalid (extern classes like Vec), try to detect class from qualified name
+        // Extern classes (Vec, …) can carry a receiver_type absent from the type
+        // table; fall back to deriving the class from the qualified name.
         if type_info.is_none() {
             debug!(
                 "[get_stdlib_runtime_info] receiver_type {:?} not in type_table, qualified_name={:?}",
@@ -641,10 +590,8 @@ impl<'a> HirToMirContext<'a> {
                         return Some((sig.class, sig.method, mapping));
                     }
 
-                    // For unresolved extern classes in stdlib namespaces, allow a
-                    // simple-class fallback as a compatibility path.
-                    // Keep this disabled for non-stdlib namespaces to avoid user
-                    // class collisions (e.g., test.Vec, test.Thread, ...).
+                    // Simple-class fallback stays confined to stdlib namespaces;
+                    // elsewhere it collides with user classes (test.Vec, test.Thread).
                     let allow_simple_fallback = class_parts.len() == 1
                         || qualified_class_name.starts_with("rayzor_")
                         || qualified_class_name.starts_with("sys_")
@@ -686,13 +633,11 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // FALLBACK 1.5: Try to get class name from HIR type declarations.
-            // This handles extern classes (like Tensor) whose receiver_type isn't in
-            // the type_table but IS in current_hir_types.
+            // Extern classes such as Tensor are absent from the type_table but
+            // present in current_hir_types.
             if let Some(type_decl) = self.current_hir_types.get(&receiver_type) {
                 if let HirTypeDecl::Class(class) = type_decl {
                     let class_name_str = self.string_interner.get(class.name).unwrap_or("");
-                    // Try with class name directly (e.g., "Tensor")
                     if let Some((sig, mapping)) = self
                         .stdlib_mapping
                         .find_by_name(class_name_str, method_name)
@@ -713,7 +658,6 @@ impl<'a> HirToMirContext<'a> {
                                 ) = first_arg
                                 {
                                     let native_str = self.string_interner.get(*s).unwrap_or("");
-                                    // Convert "rayzor::ds::Tensor" to "rayzor_ds_Tensor"
                                     let normalized = native_str.replace("::", "_");
                                     if let Some((sig, mapping)) =
                                         self.stdlib_mapping.find_by_name(&normalized, method_name)
@@ -731,10 +675,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // FALLBACK: Use receiver_class_hint if available.
-            // This handles monomorphized extern classes like Vec<Int> -> VecI32 where
-            // the receiver TypeId is not in type_table but the New handler stored a
-            // class hint on the receiver register.
+            // Monomorphized extern classes (Vec<Int> -> VecI32) have no type_table
+            // entry, but the New handler left a class hint on the receiver register.
             if let Some(hint) = receiver_class_hint {
                 if let Some(count) = param_count {
                     if let Some((sig, mapping)) =
@@ -749,9 +691,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // No qualified name and no valid receiver type — cannot resolve stdlib method.
-            // Do NOT brute-force search all stdlib classes by bare method name, as this
-            // causes false positives (e.g., user field "current" matching Thread.current).
+            // No qualified name and no valid receiver type. Never brute-force all
+            // stdlib classes by bare method name — a user field "current" would
+            // match Thread.current.
             return None;
         }
 
@@ -763,7 +705,6 @@ impl<'a> HirToMirContext<'a> {
             TypeKind::Array { .. } => (Some("Array"), None, Vec::new()),
             TypeKind::Enum { .. } => (Some("Enum"), None, Vec::new()),
             TypeKind::Map { key_type, .. } => {
-                // Map types route to IntMap, StringMap, or ObjectMap based on key type
                 let key_kind = type_table.get(*key_type).map(|t| t.kind.clone());
                 let class = match key_kind {
                     Some(TypeKind::Int) | Some(TypeKind::Bool) => "IntMap",
@@ -777,11 +718,10 @@ impl<'a> HirToMirContext<'a> {
                 type_args,
                 ..
             } => {
-                // Get class name and qualified name from symbol
                 let (name, qname) =
                     if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                         let n = self.string_interner.get(class_info.name);
-                        // Prefer lowered @:native name, fall back to qualified name
+                        // Prefer the lowered @:native name over the qualified name.
                         let qn = if let Some(native) = class_info.native_name {
                             self.string_interner
                                 .get(native)
@@ -830,17 +770,14 @@ impl<'a> HirToMirContext<'a> {
                         TypeKind::Placeholder {
                             name: placeholder_name,
                         } => {
-                            // The typedef target wasn't resolved at compile time - try to look it up by name
-                            // This handles cases like `typedef Bytes = rayzor.Bytes` where the target was loaded
-                            // after the typedef was initially compiled
+                            // The typedef target is unresolved when it was loaded after
+                            // the typedef itself; recover it by name.
                             if let Some(target_name) = self.string_interner.get(*placeholder_name) {
-                                // Convert "rayzor.Bytes" to "rayzor_Bytes" for stdlib mapping lookup
                                 let qualified_name = target_name.replace(".", "_");
                                 if let Some((_sig, mapping)) = self
                                     .stdlib_mapping
                                     .find_by_name(&qualified_name, method_name)
                                 {
-                                    // Early return with the mapping
                                     return Some((_sig.class, _sig.method, mapping));
                                 }
                             }
@@ -857,8 +794,8 @@ impl<'a> HirToMirContext<'a> {
                 type_args,
                 ..
             } => {
-                // For abstract types like Ptr<T>, Ref<T>, Box<T>, Usize
-                // These are zero-cost abstracts over Int with methods in stdlib_mapping
+                // Ptr<T>, Ref<T>, Box<T>, Usize: zero-cost abstracts over Int whose
+                // methods live in stdlib_mapping.
                 let (name, qname) =
                     if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                         let n = self.string_interner.get(class_info.name);
@@ -883,10 +820,9 @@ impl<'a> HirToMirContext<'a> {
                 type_args,
                 ..
             } => {
-                // For generic instances like Deque<Int>, Channel<String>, Arc<T>
-                // Get the base type's class name (e.g., "Deque" from Deque<Int>)
+                // Deque<Int>, Channel<String>, Arc<T>: the class name is the base type's.
                 if let Some(base_info) = type_table.get(*base_type) {
-                    // Generic enums (e.g., Option<Int>) resolve to "Enum" class
+                    // Generic enums (e.g., Option<Int>) resolve to the "Enum" class
                     if matches!(&base_info.kind, TypeKind::Enum { .. }) {
                         return self
                             .stdlib_mapping
@@ -924,15 +860,14 @@ impl<'a> HirToMirContext<'a> {
                     (None, None, Vec::new())
                 }
             }
-            // TypeParameter / Dynamic / Placeholder: the receiver type doesn't tell us the class.
-            // Return None to let the caller's fallback chain handle resolution.
-            // The caller has context-specific handlers (Dynamic method handler, function_map, etc.)
-            // that work better than brute-force stdlib search for these cases.
+            // TypeParameter / Dynamic / Placeholder do not name the class. Returning
+            // None hands resolution to the caller's context-specific handlers
+            // (Dynamic method handler, function_map) rather than a stdlib search.
             TypeKind::Placeholder {
                 name: placeholder_name,
             } => {
-                // Use the Placeholder name to derive the class for stdlib lookup.
-                // e.g., "rayzor.Bytes" → try "rayzor_Bytes", "Bytes"
+                // Derive the class from the Placeholder name:
+                // "rayzor.Bytes" → try "rayzor_Bytes", then "Bytes".
                 let ph_name = self
                     .string_interner
                     .get(*placeholder_name)
@@ -940,7 +875,6 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(ref ph) = ph_name {
                     let underscore_name = ph.replace(".", "_");
                     let bare_name = ph.rsplit('.').next().unwrap_or(ph);
-                    // Try qualified underscore name (e.g., "rayzor_Bytes")
                     if let Some(count) = param_count {
                         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
                             &underscore_name,
@@ -969,7 +903,6 @@ impl<'a> HirToMirContext<'a> {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
-                // Fall through to qualified_name and hint lookups
                 if let Some(qname) = qualified_name {
                     let parts: Vec<&str> = qname.split('.').collect();
                     if parts.len() >= 2 {
@@ -1030,8 +963,8 @@ impl<'a> HirToMirContext<'a> {
 
         let base_class_name = base_class_name?;
 
-        // MONOMORPHIZATION: For generic extern classes like Vec<T>, monomorphize the class name
-        // based on type arguments. Vec<Int> -> VecI32, Vec<Float> -> VecF64, etc.
+        // Generic extern classes monomorphize their class name by type argument:
+        // Vec<Int> -> VecI32, Vec<Float> -> VecF64.
         let monomorphized_class_name: Option<String> =
             if allow_generic_monomorphization && !type_args.is_empty() {
                 let first_arg = type_args[0];
@@ -1042,7 +975,6 @@ impl<'a> HirToMirContext<'a> {
                         TypeKind::Bool => Some("Bool"),
                         TypeKind::String => Some("Ptr"), // Strings are reference types
                         TypeKind::Class { symbol_id, .. } => {
-                            // Check if it's Int64 (a class type representing 64-bit int)
                             if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                                 if let Some(name) = self.string_interner.get(class_info.name) {
                                     if name == "Int64" {
@@ -1077,18 +1009,17 @@ impl<'a> HirToMirContext<'a> {
                 None
             };
 
-        // Use monomorphized name if available, then receiver_class_hint, then base name.
-        // receiver_class_hint comes from the New handler (e.g., Vec<Int> -> "VecI32") and is
-        // needed when allow_generic_monomorphization is false (e.g., qualified_name is "Vec"
-        // not "rayzor.Vec" so the stdlib namespace check fails).
+        // receiver_class_hint comes from the New handler (Vec<Int> -> "VecI32") and
+        // carries the monomorphized name when allow_generic_monomorphization is
+        // false — e.g. qualified_name is "Vec", failing the stdlib namespace check.
         let class_name = monomorphized_class_name
             .as_deref()
             .or(receiver_class_hint)
             .unwrap_or(base_class_name);
 
-        // PRIORITY: If receiver_class_hint is a fully qualified name (contains '.'),
-        // normalize it and try exact lookup FIRST. This handles subclass method dispatch
-        // (e.g., sys.ssl.Socket.close should call rayzor_ssl_socket_close, not sys_net_Socket_close).
+        // A fully qualified hint must be tried before anything else, so subclass
+        // dispatch resolves exactly: sys.ssl.Socket.close is rayzor_ssl_socket_close,
+        // not sys_net_Socket_close.
         if let Some(hint) = receiver_class_hint {
             if hint.contains('.') {
                 let normalized_hint = hint.replace(".", "_");
@@ -1110,10 +1041,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Try to find this method in the stdlib mapping
-        // First try qualified name (e.g., "rayzor_Bytes"), then fall back to simple name
+        // Qualified name ("rayzor_Bytes") first, then the simple name.
         if let Some(ref qn) = qualified_class_name {
-            // Try with param_count first if available (to disambiguate overloads)
+            // param_count disambiguates overloads, so try it first.
             if let Some(count) = param_count {
                 if let Some((sig, mapping)) =
                     self.stdlib_mapping
@@ -1130,7 +1060,6 @@ impl<'a> HirToMirContext<'a> {
                     return Some((sig.class, sig.method, mapping));
                 }
             }
-            // Fallback to find_by_name without param count
             if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(qn, method_name) {
                 debug!(
                     "[get_stdlib_runtime_info] Found {}.{} via qualified name -> {}",
@@ -1139,7 +1068,6 @@ impl<'a> HirToMirContext<'a> {
                 return Some((sig.class, sig.method, mapping));
             }
         }
-        // Try with param_count first if available
         if let Some(count) = param_count {
             if let Some((sig, mapping)) =
                 self.stdlib_mapping
@@ -1152,7 +1080,6 @@ impl<'a> HirToMirContext<'a> {
                 return Some((sig.class, sig.method, mapping));
             }
         }
-        // Fallback without param count
         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
             return Some((sig.class, sig.method, mapping));
         }
@@ -1289,7 +1216,6 @@ impl<'a> HirToMirContext<'a> {
             }
             // 4. Try stdlib mapping by method name for @:coreType abstracts
             if let Some(method_name) = self.string_interner.get(sym_info.name) {
-                // Check if this is a stdlib abstract (e.g., SIMD4f)
                 let type_table = self.type_table;
                 if let Some(ti) = type_table.get(target_type) {
                     if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
@@ -1304,14 +1230,12 @@ impl<'a> HirToMirContext<'a> {
                                         .map(|n| format!("rayzor_{}", n))
                                 });
                             if let Some(class) = class_name {
-                                // Try stdlib mapping (e.g., rayzor_SIMD4f + fromArray)
                                 if let Some((_, mapping)) =
                                     self.stdlib_mapping.find_by_name(&class, method_name)
                                 {
                                     let runtime_func = mapping.runtime_name;
                                     let result_type = self.convert_type(target_type);
                                     if mapping.is_mir_wrapper {
-                                        // MIR wrapper — register as forward ref
                                         let func_id = self.register_stdlib_mir_forward_ref(
                                             runtime_func,
                                             vec![IrType::Ptr(Box::new(IrType::Void))],
@@ -1445,7 +1369,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Candidate resolution behind `resolve_field_index_by_name`, with no
-    /// error reporting — usable as a pure existence PROBE (does any class
+    /// error reporting — usable as a pure existence probe (does any class
     /// declare this field?) where ambiguity must not fail the compile.
     pub(crate) fn resolve_field_index_candidates(
         &self,
@@ -1503,16 +1427,14 @@ impl<'a> HirToMirContext<'a> {
         // Multiple classes have this field name — disambiguate by receiver type.
         //
         // Strategy 0: owner-symbol match. Candidate class TypeIds come from the
-        // MODULE THAT DECLARED the field, and TypeIds are context-local — a
-        // candidate's class_ty can numerically equal an unrelated class's
-        // TypeId in THIS context (`loop.finishReason` on a GenerationLoop
-        // receiver matched ChatResponse's entry that way and read the eos Int
-        // slot as a String). Field OWNER names are recorded per declaration
-        // symbol, which is session-global, so a single candidate whose owner
-        // is the receiver's class is the declaration itself and beats any
-        // TypeId comparison. Positive selection only: with zero or several
-        // owner matches (inherited fields carry the PARENT's owner name and
-        // must keep resolving through the type chain), fall through unchanged.
+        // module that declared the field and TypeIds are context-local, so a
+        // candidate's class_ty can numerically equal an unrelated class's TypeId
+        // here. Field owner names are recorded per declaration symbol, which is
+        // session-global, so a single candidate whose owner is the receiver's
+        // class is the declaration itself and beats any TypeId comparison.
+        // Positive selection only: zero or several owner matches fall through,
+        // since inherited fields carry the parent's owner name and must keep
+        // resolving through the type chain.
         let recv_bare = {
             let type_table = self.type_table;
             let mut resolved = self.resolve_through_aliases(receiver_ty);
@@ -1556,11 +1478,8 @@ impl<'a> HirToMirContext<'a> {
         // Strategy 1: Resolve receiver_ty through TypeAlias/GenericInstance chains to find
         // the underlying class TypeId, then match directly against candidates' class_ty.
         {
-            // Resolve receiver_ty through TypeAlias/GenericInstance/Placeholder chains
-            // to find the underlying Class type and its symbol_id
             let mut resolved = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table;
-            // Also follow GenericInstance to base type
             let mut visited = BTreeSet::new();
             loop {
                 if !visited.insert(resolved) {
@@ -1576,7 +1495,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Check if resolved type directly matches a candidate's class_type_id
             for &(class_ty, idx) in &all_matches {
                 if class_ty == resolved {
                     return FieldIndexResolution::Unique(class_ty, idx);
@@ -1633,20 +1551,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // No verified match. We can't blindly return all_matches[0] — that
-        // path lets stdlib types (e.g. `Array.length`) resolve to an
-        // unrelated entry like `List.length` (registered when @:build pulls
-        // List into the compilation), routing through GEP-based field
-        // access and producing nonsensical MIR. But we also can't always
-        // return None — generic returns (e.g. `Arc<T>::get()` returning T)
-        // give a receiver_ty that doesn't match any concrete class, and
-        // the legitimate user field would then be unreachable.
-        //
-        // Compromise: return None when the receiver is a known stdlib
-        // type (Array/String/Map/etc.) where the caller will reach the
-        // proper stdlib runtime dispatch. Otherwise fall back to the
-        // first match — this preserves the old behaviour for user-class
-        // field access via generic returns.
+        // No verified match. Returning all_matches[0] blindly would let a stdlib
+        // type (`Array.length`) resolve to an unrelated entry (`List.length`,
+        // registered when @:build pulls List in) and route through GEP field
+        // access; returning None always would make user fields unreachable behind
+        // generic returns (`Arc<T>::get()` yields a receiver_ty matching no
+        // concrete class). So: None for known stdlib receivers, where the caller
+        // reaches stdlib runtime dispatch; first match otherwise.
         let receiver_is_stdlib_property_target = self
             .type_table
             .get(receiver_ty)
@@ -1661,15 +1572,10 @@ impl<'a> HirToMirContext<'a> {
             return FieldIndexResolution::None;
         }
 
-        // If the receiver resolves to an EXTERN class (registered via @:native
-        // or an `extern class String { ... }` declaration), return None so the
-        // caller falls through to stdlib runtime dispatch instead of
-        // pretending a same-named user-class field is the right answer.
-        // Without this, a cached `StringBuf.length` entry in field_index_map
-        // (loaded from BLADE cache by a prior test) became the wrong-match
-        // answer for `s.length` where s is `String` (extern Class), and the
-        // GEP-based field access then errored with "Cannot access field
-        // 'length': class not registered or field does not exist".
+        // An extern receiver (@:native, or `extern class String { ... }`) returns
+        // None so the caller falls through to stdlib runtime dispatch rather than
+        // taking a same-named user-class field — e.g. `StringBuf.length` standing
+        // in for `String.length`.
         let receiver_is_extern_class = self
             .type_table
             .get(receiver_ty)
@@ -1807,17 +1713,13 @@ impl<'a> HirToMirContext<'a> {
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
                 Some(TypeKind::Placeholder { name }) => {
-                    // Try to resolve Placeholder by searching for a class OR a
-                    // typedef with a matching name. A cross-module structural
-                    // typedef (`typedef Loaded = { var m:Base; ... }`) decays
-                    // to a Placeholder just like a class does; without the
-                    // TypeAlias arm this loop only ever finds a same-named
-                    // Class (if one coincidentally exists) or gives up,
-                    // leaving field access on the typedef unable to recognise
-                    // it as Anonymous and falling through to class-field GEP.
+                    // Match a class OR a typedef by name: a cross-module structural
+                    // typedef (`typedef Loaded = { var m:Base; ... }`) decays to a
+                    // Placeholder exactly as a class does, and without the TypeAlias
+                    // arm field access on it never recognises it as Anonymous and
+                    // falls through to class-field GEP.
                     if let Some(name_str) = self.string_interner.get(*name) {
-                        // Search for "rayzor.Bytes" → match class "Bytes" with qualified "rayzor.Bytes"
-                        // Also try bare name: "rayzor.Bytes" → "Bytes"
+                        // Match on the qualified name ("rayzor.Bytes") or bare ("Bytes").
                         let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
                         let mut found = None;
                         let mut found_alias_target = None;
@@ -1919,14 +1821,12 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<TypeId> {
         let type_table = self.type_table;
 
-        // Check if type_param_id is actually a TypeParameter
         let param_info = type_table.get(type_param_id)?;
         let param_symbol = match &param_info.kind {
             crate::tast::TypeKind::TypeParameter { symbol_id, .. } => *symbol_id,
             _ => return None,
         };
 
-        // Get receiver's class info with concrete type_args
         let recv_info = type_table.get(receiver_type_id)?;
         let (class_symbol, concrete_args) = match &recv_info.kind {
             crate::tast::TypeKind::Class {
@@ -1938,7 +1838,6 @@ impl<'a> HirToMirContext<'a> {
                 type_args,
                 ..
             } => {
-                // Unwrap GenericInstance to get the base class's symbol_id
                 if let Some(base_info) = type_table.get(*base_type) {
                     match &base_info.kind {
                         crate::tast::TypeKind::Class { symbol_id, .. } => {
@@ -1953,10 +1852,9 @@ impl<'a> HirToMirContext<'a> {
             _ => return None,
         };
 
-        // Find the type parameter's name
         let param_name = self.symbol_table.get_symbol(param_symbol)?.name;
 
-        // Find the class declaration in HIR to get type parameter order
+        // The HIR class declaration carries the type parameter order.
         for (_tid, decl) in self.current_hir_types.iter() {
             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
                 if c.symbol_id == class_symbol {

@@ -43,14 +43,12 @@ impl<'a> HirToMirContext<'a> {
             hir_type_args
         );
 
-        // Check if this is an abstract type
         let type_table = self.type_table;
         let (is_abstract, actual_symbol_id) = if let Some(type_ref) = type_table.get(*class_type) {
             let symbol_id = match &type_ref.kind {
                 crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                 crate::tast::TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
                 crate::tast::TypeKind::GenericInstance { base_type, .. } => {
-                    // Unwrap GenericInstance to find base class symbol_id
                     if let Some(base_info) = type_table.get(*base_type) {
                         match &base_info.kind {
                             crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
@@ -65,10 +63,9 @@ impl<'a> HirToMirContext<'a> {
                     target_type,
                     ..
                 } => {
-                    // Resolve TypeAlias to find the actual class symbol
-                    // For user classes, the TypeAlias symbol_id IS the class symbol
+                    // For user classes the TypeAlias symbol_id IS the class symbol;
+                    // target_type covers deeper aliases.
                     let mut resolved = Some(*symbol_id);
-                    // Also try resolving through target_type for deeper aliases
                     if let Some(target) = type_table.get(*target_type) {
                         if let crate::tast::TypeKind::Class {
                             symbol_id: class_sym,
@@ -88,18 +85,12 @@ impl<'a> HirToMirContext<'a> {
             (false, None)
         };
 
-        // Cross-module `new C()` where C is an imported user class often
-        // arrives with `class_type` as a Placeholder (the class metadata
-        // wasn't resolved in THIS lowering context), so `actual_symbol_id`
-        // is None. That degrades the allocation to a bare 16-byte block
-        // with a ZERO class-id header, NO constructor call, and NO
-        // interface fat-ptr wrap — the exact shape that made
-        // `ArchRegistry.withDefaults`'s `new LlamaArch()` produce a
-        // headerless object whose later interface dispatch read garbage
-        // (Void-tagged receiver → SIGSEGV). Recover the class SymbolId by
-        // name (Placeholder name or the HIR class name), mirroring the
-        // interface machinery's name-based lazy resolution. This restores
-        // the proper alloc size, header id, ctor call, and iface wrap.
+        // Cross-module `new C()` on an imported user class often arrives with
+        // `class_type` as a Placeholder (its metadata is unresolved in THIS
+        // context), leaving `actual_symbol_id` None — which degrades the
+        // allocation to a bare block with a zero class-id header, no ctor call
+        // and no interface fat-ptr wrap. Recover the SymbolId by name
+        // (Placeholder name, else the HIR class name) to restore all four.
         let actual_symbol_id = actual_symbol_id.or_else(|| {
             let placeholder_name = type_table.get(*class_type).and_then(|t| {
                 if let crate::tast::TypeKind::Placeholder { name } = &t.kind {
@@ -113,13 +104,11 @@ impl<'a> HirToMirContext<'a> {
             by_name.and_then(|name| self.lookup_class_symbol_by_name(name))
         });
 
-        // SPECIAL CASE: Abstract type constructors
-        // If this is an abstract type, treat this as a simple value wrap (no allocation).
+        // An abstract type constructor is a value wrap, with no allocation.
         if is_abstract {
-            // Before treating as abstract value-wrap, check if there's a user-defined
-            // class with the same name that has a constructor registered. User classes
-            // should override stdlib abstract types with the same short name
-            // (e.g., user's `class Box<T>` vs stdlib `rayzor.Box<T>` abstract).
+            // A user class with a registered constructor overrides a stdlib
+            // abstract of the same short name (user `class Box<T>` vs stdlib
+            // `rayzor.Box<T>`), so it must not be value-wrapped.
             let has_user_constructor = hir_class_name
                 .and_then(|interned| self.string_interner.get(interned))
                 .map(|name| self.constructor_name_map.contains_key(name))
@@ -143,15 +132,13 @@ impl<'a> HirToMirContext<'a> {
             // User constructor exists - fall through to normal class construction
         }
 
-        // SPECIAL CASE: Check if this is an extern stdlib class constructor BEFORE fallback
-        // For extern stdlib classes (Channel, Thread, Arc, Mutex), we call the MIR wrapper
-        // function (e.g., Channel_init) instead of allocating and calling a constructor.
-        // This MUST come before the value-wrap fallback to prevent returning the argument value!
+        // Extern stdlib classes (Channel, Thread, Arc, Mutex) construct through a
+        // MIR wrapper (e.g. Channel_init) instead of alloc + ctor. This must run
+        // before the value-wrap fallback, which would return the argument value.
 
-        // PRIORITY #1: Use class_name from HIR if available (preserves actual class name even when TypeId is invalid)
+        // The HIR class name is preferred: it survives an invalid TypeId.
         let mut class_name = hir_class_name.and_then(|interned| self.string_interner.get(interned));
 
-        // FALLBACK #1: Try to get class name from TypeId if HIR didn't have it
         if class_name.is_none() {
             let type_table = self.type_table;
             class_name = if let Some(type_ref) = type_table.get(*class_type) {
@@ -161,7 +148,6 @@ impl<'a> HirToMirContext<'a> {
                         .get_symbol(*symbol_id)
                         .and_then(|sym| self.string_interner.get(sym.name)),
                     crate::tast::TypeKind::GenericInstance { base_type, .. } => {
-                        // Unwrap GenericInstance to get base class name
                         if let Some(base_info) = type_table.get(*base_type) {
                             if let crate::tast::TypeKind::Class { symbol_id, .. } = &base_info.kind
                             {
@@ -182,9 +168,8 @@ impl<'a> HirToMirContext<'a> {
             };
         }
 
-        // FALLBACK #2: If TypeId lookup failed (e.g., for extern stdlib classes that aren't
-        // pre-registered because Channel.hx is skipped), try getting class name from the
-        // actual_symbol_id which comes from the HIR New expression
+        // Extern stdlib classes are not pre-registered (Channel.hx is skipped), so
+        // fall back to the SymbolId carried by the HIR New expression.
         if class_name.is_none() {
             if let Some(sym_id) = actual_symbol_id {
                 class_name = self
@@ -194,14 +179,11 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // FALLBACK #3: If still no class name and TypeId is invalid (u32::MAX),
-        // try checking all stdlib registered class names to see if ANY constructor matches
-        // This is a last resort for extern stdlib classes that weren't pre-registered
+        // Last resort for un-pre-registered extern stdlib classes with an invalid
+        // TypeId: accept any stdlib class that has a registered constructor.
         if class_name.is_none() && *class_type == TypeId::from_raw(u32::MAX) {
-            // Get ALL classes that have registered constructors from the stdlib mapping
             let constructor_classes = self.stdlib_mapping.get_constructor_classes();
 
-            // Try each registered constructor class
             for potential_class in constructor_classes {
                 let method_sig = crate::stdlib::runtime_mapping::MethodSignature {
                     class: potential_class,
@@ -217,12 +199,11 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // MONOMORPHIZATION: For generic extern classes like Vec<T>, monomorphize the class name
-        // based on type arguments. Vec<Int> -> VecI32, Vec<Float> -> VecF64, etc.
-        // Use hir_type_args directly (from HIR) instead of type_table lookup (which may fail for extern classes)
+        // Generic extern classes monomorphize by type argument: Vec<Int> -> VecI32,
+        // Vec<Float> -> VecF64. hir_type_args is used directly because a
+        // type_table lookup can fail for extern classes.
         let monomorphized_class_name: Option<String> = if let Some(base_name) = class_name {
             if base_name == "Vec" && !hir_type_args.is_empty() {
-                // Get the first type argument and determine the monomorphized suffix
                 let first_arg = hir_type_args[0];
                 let type_table = self.type_table;
                 let suffix = if let Some(arg_type) = type_table.get(first_arg) {
@@ -232,7 +213,6 @@ impl<'a> HirToMirContext<'a> {
                         crate::tast::TypeKind::Bool => Some("Bool"),
                         crate::tast::TypeKind::String => Some("Ptr"),
                         crate::tast::TypeKind::Class { symbol_id, .. } => {
-                            // Check if it's Int64 (a class type representing 64-bit int)
                             if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                                 if let Some(name) = self.string_interner.get(class_info.name) {
                                     if name == "Int64" {
@@ -260,7 +240,6 @@ impl<'a> HirToMirContext<'a> {
             None
         };
 
-        // Use monomorphized name if available, otherwise use original class name
         let final_class_name = monomorphized_class_name.as_deref().or(class_name);
         debug!(
             "[NEW EXPR]: final_class_name={:?} (monomorphized from {:?})",
@@ -268,34 +247,25 @@ impl<'a> HirToMirContext<'a> {
         );
 
         if let Some(class_name) = final_class_name {
-            // Check if this class has a "new" constructor registered in the runtime mapping
-            // Use find_constructor to look up the registered constructor mapping
-            // This returns both the MethodSignature and RuntimeFunctionCall from the registry
-            // PRIORITY: Try HIR class name first (may be fully qualified, e.g., "sys.ssl.Socket")
-            // This is critical for subclasses like sys.ssl.Socket that extend sys.net.Socket,
-            // because the symbol's qualified_name resolves to the parent class.
-            // Look up constructor: extract needed data (Copy types) to avoid holding
-            // a borrow on self.stdlib_mapping while calling self.lower_expression later.
+            // Extract Copy data only, so no borrow of self.stdlib_mapping is held
+            // across the later self.lower_expression calls.
             let arg_count = args.len();
             let constructor_info: Option<(&'static str, bool, bool)> = {
                 let mut found = None;
 
-                // Helper: try constructor lookup with param count first, then without.
-                // This ensures overloaded constructors (e.g., Uncompress with 0 or 1 args)
-                // select the correct overload.
+                // Param-count-aware lookup first, then any-param, so overloaded
+                // constructors (e.g. Uncompress with 0 or 1 args) select the
+                // correct overload.
                 macro_rules! try_find_ctor {
                     ($name:expr) => {
                         if found.is_none() {
-                            // Try param-count-aware lookup first
                             if let Some((_, rc)) = self
                                 .stdlib_mapping
                                 .find_constructor_with_params($name, arg_count)
                             {
                                 found =
                                     Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
-                            }
-                            // Fall back to any-param lookup
-                            else if let Some((_, rc)) =
+                            } else if let Some((_, rc)) =
                                 self.stdlib_mapping.find_constructor($name)
                             {
                                 found =
@@ -305,9 +275,9 @@ impl<'a> HirToMirContext<'a> {
                     };
                 }
 
-                // PRIORITY #0: Try HIR class name as qualified (e.g., "sys.ssl.Socket" -> "sys_ssl_Socket")
-                // This handles subclass constructors before the symbol-based lookup (which may
-                // resolve to the parent class due to class inheritance).
+                // The qualified HIR name ("sys.ssl.Socket" -> "sys_ssl_Socket") is
+                // tried first: a subclass ctor must win over the symbol-based
+                // lookup, whose qualified_name resolves to the parent class.
                 if class_name.contains('.') {
                     let qualified_hir = class_name.replace(".", "_");
                     try_find_ctor!(&qualified_hir);
@@ -315,14 +285,13 @@ impl<'a> HirToMirContext<'a> {
                 if found.is_none() {
                     if let Some(sym_id) = actual_symbol_id {
                         if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                            // Try lowered @:native name first
+                            // @:native name, then qualified name.
                             if let Some(native) = sym.native_name {
                                 if let Some(native_str) = self.string_interner.get(native) {
                                     let native_class_name = native_str.replace("::", "_");
                                     try_find_ctor!(&native_class_name);
                                 }
                             }
-                            // Fall back to qualified name
                             if found.is_none() {
                                 if let Some(qn) = sym.qualified_name {
                                     if let Some(qual_name) = self.string_interner.get(qn) {
@@ -333,38 +302,32 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    // FALLBACK: Try simple class name
                     try_find_ctor!(class_name);
 
-                    // FALLBACK #2: Try bare class name for qualified paths
-                    // (e.g., "haxe.ds.ObjectMap" -> "ObjectMap")
+                    // Bare name for qualified paths (haxe.ds.ObjectMap -> ObjectMap).
                     if found.is_none() && class_name.contains('.') {
                         let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
                         try_find_ctor!(bare_name);
                     }
-                } // close PRIORITY #0 if found.is_none()
+                }
                 found
             };
             if let Some((wrapper_name, needs_out_param, is_mir_wrapper)) = constructor_info {
-                // Lower arguments
                 let arg_regs: Vec<_> = args
                     .iter()
                     .filter_map(|a| self.lower_expression(a))
                     .collect();
 
-                // Register forward ref if not already present
                 let param_types: Vec<IrType> = arg_regs
                     .iter()
                     .map(|reg| self.builder.get_register_type(*reg).unwrap_or(IrType::Any))
                     .collect();
 
-                // For extern classes, the return type should be a pointer (opaque handle),
-                // not the class struct itself
+                // An extern class returns an opaque handle, not the class struct.
                 let result_type = IrType::Ptr(Box::new(IrType::U8));
 
-                // MIR wrappers are compiled by Cranelift alongside user code -> use forward ref
-                // needs_out_param constructors also use MIR forward refs (legacy path)
-                // Direct extern calls are for non-wrapper, non-out-param constructors
+                // MIR wrappers (and out-param ctors) are compiled alongside user
+                // code, so they need a forward ref rather than an extern decl.
                 let wrapper_func_id = if is_mir_wrapper || needs_out_param {
                     self.register_stdlib_mir_forward_ref(
                         wrapper_name,
@@ -372,7 +335,6 @@ impl<'a> HirToMirContext<'a> {
                         result_type.clone(),
                     )
                 } else {
-                    // Simple constructors are direct extern calls
                     self.get_or_register_extern_function(
                         wrapper_name,
                         param_types,
@@ -380,7 +342,6 @@ impl<'a> HirToMirContext<'a> {
                     )
                 };
 
-                // Call the wrapper and return the result
                 let result = self
                     .builder
                     .build_call_direct(wrapper_func_id, arg_regs, result_type);
@@ -392,22 +353,15 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Check if constructor exists - try both TypeId and TypeId derived from SymbolId
         let mut constructor_type_id = *class_type;
         let mut has_constructor = self.constructor_map.contains_key(class_type);
         let mut ctor_path = if has_constructor { "typeid" } else { "none" };
 
-        // If not found and we have a SymbolId, try TypeId derived from SymbolId as fallback.
-        //
-        // SymbolId and TypeId are DIFFERENT numbering spaces sharing this
-        // map, so this lookup can land on another class's entry: `new
-        // ChatResponse` picked up GenerationLoop's ctor (cached at
-        // GenerationLoop's TypeId, numerically equal to ChatResponse's
-        // SymbolId) and the Int passed in a String slot SIGSEGV'd at
-        // runtime — host-dependent, since symbol numbering shifts with
-        // module count. Accept the pun only when the candidate's owning
-        // class matches the class being constructed; an unowned entry
-        // passes (bridge for ctors registered before owners existed).
+        // Fall back to a TypeId derived from the SymbolId. SymbolId and TypeId are
+        // DIFFERENT numbering spaces sharing this map, so the lookup can land on
+        // another class's entry: accept the pun only when the candidate's owning
+        // class matches the class being constructed. An unowned entry passes, as a
+        // bridge for constructors registered before their owners existed.
         if !has_constructor {
             if let Some(sym_id) = actual_symbol_id {
                 let type_id_from_symbol = TypeId::from_raw(sym_id.as_raw());
@@ -432,7 +386,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // If not found and this is a GenericInstance, try the base class TypeId
         if !has_constructor {
             let type_table = self.type_table;
             if let Some(type_info) = type_table.get(*class_type) {
@@ -446,8 +399,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Try constructor_name_map as final fallback before value wrap
-        // Check bare name first, then qualified name from symbol table
+        // Final fallback before the value wrap: constructor_name_map, bare name
+        // first, then the qualified name from the symbol table.
         if !has_constructor {
             if let Some(class_name) = final_class_name {
                 if let Some(&func_id) = self.constructor_name_map.get(class_name) {
@@ -461,7 +414,6 @@ impl<'a> HirToMirContext<'a> {
                         .or_insert_with(|| bare.to_string());
                 }
             }
-            // Also try qualified name (e.g., "haxe.ds.List" vs bare "List")
             if !has_constructor {
                 if let Some(sym_id) = actual_symbol_id {
                     if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
@@ -484,15 +436,14 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // If no constructor exists and we have exactly one argument, treat as value wrap
-        // This handles abstract types that weren't properly detected above
+        // No constructor plus exactly one argument is a value wrap; this catches
+        // abstract types not detected above.
         if !has_constructor && args.len() == 1 {
             let result = self.lower_expression(&args[0]);
             return result;
         }
 
-        // SPECIAL CASE: Array constructor (@:coreType extern class)
-        // Array needs special handling - call haxe_array_new() runtime function
+        // Array is a @:coreType extern class: build the HaxeArray struct inline.
         let type_table = self.type_table;
         let is_array = if let Some(type_ref) = type_table.get(*class_type) {
             matches!(type_ref.kind, crate::tast::TypeKind::Array { .. })
@@ -501,13 +452,12 @@ impl<'a> HirToMirContext<'a> {
         };
 
         if is_array {
-            // Allocate HaxeArray struct on heap (32 bytes = 4 x 8 for ptr, len, cap, elem_size)
-            // Must be heap-allocated because array pointers can escape the creating function
-            // (e.g., stored in class fields, returned from functions)
+            // 32 bytes = 4 x 8 for ptr, len, cap, elem_size. Heap, not stack:
+            // array pointers escape the creating function (stored in fields,
+            // returned from functions).
             let array_ptr = self.build_heap_alloc(32)?;
 
-            // Zero-initialize the HaxeArray struct (ptr=null, len=0, cap=0, elem_size=8)
-            // This represents an empty uninitialized array
+            // Empty array: ptr=null, len=0, cap=0, elem_size=8.
             if let Some(zero_i64) = self.builder.build_const(IrValue::I64(0)) {
                 // Zero out ptr field (offset 0)
                 if let Some(index_0) = self.builder.build_const(IrValue::I32(0)) {
@@ -549,7 +499,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Return the zero-initialized array pointer
             return Some(array_ptr);
         }
 
@@ -558,8 +507,7 @@ impl<'a> HirToMirContext<'a> {
             if let Some(layout) = self.get_or_compute_cstruct_layout(*class_type) {
                 let obj_ptr = self.build_heap_alloc(layout.total_size as u64)?;
 
-                // Zero-initialize all bytes via first field store of 0
-                // (memset-style zero init would be better but this works)
+                // Zero-initialize every field.
                 if let Some(zero) = self.builder.build_const(IrValue::I64(0)) {
                     for field in &layout.fields {
                         let offset_const = self
@@ -581,7 +529,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Call constructor if exists
                 let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
                 if let Some(constructor_func_id) = constructor_func_id {
                     let arg_regs: Vec<_> = std::iter::once(obj_ptr)
@@ -621,7 +568,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Call constructor if exists
                 let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
                 if let Some(constructor_func_id) = constructor_func_id {
                     let arg_regs: Vec<_> = std::iter::once(obj_ptr)
@@ -635,9 +581,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // CLASS TYPE CONSTRUCTOR:
-        // Allocate object on HEAP (not stack) since objects may escape the current function
-        // When a method returns `new Foo()`, the object must outlive the callee's stack frame
+        // Class instances go on the heap, not the stack: `return new Foo()` must
+        // outlive the callee's frame.
         let _class_mir_type = self.convert_type(*class_type);
 
         // Look up pre-computed allocation size from register_class_metadata.
@@ -710,31 +655,22 @@ impl<'a> HirToMirContext<'a> {
                 obj_size
             );
         }
-        // Ensure the allocation covers inherited fields: a subclass of an
-        // imported class (e.g. MyException extends haxe.Exception) can be
-        // registered with an undersized `obj_size` because the parent's
-        // fields weren't available at registration; inherited-field writes
-        // (the `stack` field at `throw`) would then overflow the heap block.
+        // Cover inherited fields: a subclass of an imported class can be
+        // registered with an undersized `obj_size` when the parent's fields
+        // weren't available, and inherited-field writes would then overflow.
         let obj_size = self.alloc_size_with_inheritance(*class_type, actual_symbol_id, obj_size);
-        // Use heap allocation (malloc) for class instances
         let obj_ptr = self.build_heap_alloc(obj_size);
         let obj_ptr = obj_ptr?;
 
-        // Store object header: runtime type_id at GEP index 0.
-        // Use the same class-id resolver as typed throw/catch (without +1000).
+        // Object header: runtime type_id at GEP index 0.
         {
-            // Store the runtime_type_id directly (no -1000 transform).
-            // The id is now a stable name-hash; cast/is checks
-            // compare with the same `runtime_type_id()` value, so
-            // any offset transformation here would just have to be
-            // mirrored on the comparison side. Keeping the id raw
-            // makes both sides agree by construction.
+            // Stored raw: the id is a stable name-hash and is/cast compare
+            // against the same `runtime_type_id()`, so no offset transform.
             //
-            // If `class_type` is a Placeholder (cross-module import),
-            // `runtime_type_id` returns 0. Prefer the name-recovered
-            // `actual_symbol_id`'s deterministic id so the header
-            // carries the real class id (needed for is/cast/vtable and
-            // for the interface fat-ptr wrap to find the vtable).
+            // A Placeholder `class_type` (cross-module import) yields 0, so fall
+            // back to the name-recovered symbol's deterministic id — the header
+            // must carry the real class id for is/cast/vtable and the interface
+            // fat-ptr wrap.
             let raw_type_id = self.runtime_type_id(*class_type);
             let runtime_type_id = if raw_type_id != 0 {
                 raw_type_id
@@ -787,7 +723,6 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Look up constructor by TypeId - use the resolved constructor_type_id
         let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
         if std::env::var("RAYZOR_CTOR_DEBUG").is_ok() {
             let cname = debug_class_name.unwrap_or("?");
@@ -797,21 +732,14 @@ impl<'a> HirToMirContext<'a> {
             );
         }
         if let Some(constructor_func_id) = constructor_func_id {
-            // Call constructor with object as first argument.
-            //
-            // Each user arg goes through `maybe_materialize_for_call`
-            // (handles anon-views, class→anon coercion, and the
-            // class→interface fat-pointer wrap). Without this,
-            // `new Holder(c)` where `Holder.new(it:I)` stores the
-            // raw class pointer into the interface-typed field and
-            // `h.slot.value()` SIGSEGVs on virtual dispatch.
+            // The object is the first argument. Every user arg goes through
+            // `maybe_materialize_for_call`, which handles anon-views, class→anon
+            // coercion and the class→interface fat-pointer wrap.
             let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len() + 1);
             arg_regs.push(obj_ptr);
-            // HIR constructor params don't include `this`, so user arg
-            // `args[i]` lines up with HIR param index `i`. Don't shift
-            // by +1 the way Call-method dispatch does — that would
-            // bias the lookup off the end of `function_param_hir_types`
-            // and silently skip Path 3 (class→interface wrap).
+            // HIR constructor params exclude `this`, so `args[i]` lines up with
+            // HIR param index `i` — do not shift by +1 the way method dispatch
+            // does, or the lookup runs off `function_param_hir_types`.
             for (i, a) in args.iter().enumerate() {
                 if let Some(reg) = self.lower_expression(a) {
                     let wrapped =
@@ -823,7 +751,6 @@ impl<'a> HirToMirContext<'a> {
             let pre_fill = arg_regs.len();
             // Coerce Int→Float at cross-module call boundaries
             self.coerce_args_for_cross_module_call(constructor_func_id, &mut arg_regs, true);
-            // Fill in default values for any missing optional parameters
             self.fill_default_args(constructor_func_id, &mut arg_regs, true);
             let post_fill = arg_regs.len();
             let sig_params = self
@@ -834,16 +761,11 @@ impl<'a> HirToMirContext<'a> {
                 .map(|f| f.signature.parameters.len())
                 .unwrap_or(0);
 
-            // Generic constructor specialization: a `new Foo<T1,T2>(...)`
-            // call must carry the concrete type args so the monomorphizer
-            // can specialize Foo.new. Untyped constructor params lower to
-            // `*void`, which defeats the monomorphizer's TypeVar-based
-            // argument inference (extract_generic_call), so without explicit
-            // type_args the generic ctor template is left un-monomorphized
-            // and trap-stubbed → SIGILL at runtime. This bit haxe.ds.TreeNode
-            // (self-referential `left`/`right` + an in-ctor method call).
-            // Prefer the explicit `new Foo<...>` args; fall back to the
-            // class_type's own type_args (GenericInstance / Class).
+            // A `new Foo<T1,T2>(...)` must carry its concrete type args so the
+            // monomorphizer can specialize Foo.new: untyped ctor params lower to
+            // `*void`, which defeats its TypeVar-based argument inference, and an
+            // un-monomorphized ctor template is trap-stubbed. Prefer the explicit
+            // `new Foo<...>` args, else class_type's own type_args.
             let ctor_type_args: Vec<IrType> = {
                 let mut ta_ids: Vec<TypeId> = hir_type_args.to_vec();
                 if ta_ids.is_empty() {
@@ -867,7 +789,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             };
 
-            // Constructor returns void, so we ignore the result
             if ctor_type_args.is_empty() {
                 self.builder
                     .build_call_direct(constructor_func_id, arg_regs, IrType::Void);
@@ -917,11 +838,9 @@ impl<'a> HirToMirContext<'a> {
         {
             // Cross-module, class compiles LATER in this import pass
             // (cycle-breaker / retry ordering), so its constructor isn't
-            // resolvable by name yet either. Emit the call against a
-            // named forward-ref stub; `fixup_stale_cross_module_refs`
-            // redirects it to the real constructor by qualified name
-            // once every module is loaded. Silently emitting NO call
-            // here left the object zero-initialized.
+            // resolvable by name yet either. Emit the call against a named
+            // forward-ref stub; `fixup_stale_cross_module_refs` redirects it to
+            // the real constructor by qualified name once all modules are loaded.
             let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len() + 1);
             arg_regs.push(obj_ptr);
             for a in args.iter() {

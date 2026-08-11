@@ -116,7 +116,6 @@ impl<'a> HirToMirContext<'a> {
                             .find_parent_enum_for_constructor(*symbol)
                             .is_some())
                 {
-                    // Find the parent enum and variant index
                     if let Some(parent_enum_id) =
                         self.symbol_table.find_parent_enum_for_constructor(*symbol)
                     {
@@ -124,7 +123,6 @@ impl<'a> HirToMirContext<'a> {
                         {
                             for (idx, variant_id) in variants.iter().enumerate() {
                                 if *variant_id == *symbol {
-                                    // Get variant field count from HIR
                                     let field_count =
                                         self.get_enum_variant_field_count(parent_enum_id, idx);
 
@@ -141,7 +139,6 @@ impl<'a> HirToMirContext<'a> {
                                     // Layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
                                     let struct_size = 8 + 8 * field_count; // 8 for tag+pad, 8 per field
 
-                                    // Allocate memory
                                     let size_const = self
                                         .builder
                                         .build_const(IrValue::I64(struct_size as i64))?;
@@ -156,9 +153,8 @@ impl<'a> HirToMirContext<'a> {
                                         IrType::Ptr(Box::new(IrType::I8)),
                                     )?;
 
-                                    // Store tag at offset 0 (as i32)
-                                    // Note: GEP multiplies index by element size, so we use I8 elements
-                                    // for byte-based addressing, then bitcast to the target type
+                                    // Store the tag at offset 0 as i32. GEP multiplies the index by
+                                    // element size, so address in I8 elements and bitcast after.
                                     let zero_offset = self.builder.build_const(IrValue::I64(0))?;
                                     let tag_ptr = self.builder.build_gep(
                                         ptr,
@@ -196,7 +192,6 @@ impl<'a> HirToMirContext<'a> {
                                             vec![field_offset],
                                             IrType::Ptr(Box::new(IrType::I8)),
                                         )?;
-                                        // Bitcast to i64 ptr for the store
                                         let field_ptr_i64 = self.builder.build_bitcast(
                                             field_ptr,
                                             IrType::Ptr(Box::new(IrType::I64)),
@@ -204,8 +199,7 @@ impl<'a> HirToMirContext<'a> {
                                         self.builder.build_store(field_ptr_i64, arg_reg)?;
                                     }
 
-                                    // Return pointer as i64 for uniform handling
-                                    // (bitcast pointer to i64)
+                                    // Return the pointer as i64 for uniform handling.
                                     return self.builder.build_bitcast(ptr, IrType::I64);
                                 }
                             }

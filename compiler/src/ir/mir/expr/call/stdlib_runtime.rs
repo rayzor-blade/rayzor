@@ -38,7 +38,7 @@ impl<'a> HirToMirContext<'a> {
             return None;
         };
         if !receiver_is_class_type {
-            // Calculate param_count for overload disambiguation: args[0] is receiver, rest are params
+            // args[0] is the receiver, the rest are params.
             let method_param_count = if args.len() > 1 { args.len() - 1 } else { 0 };
             {
                 if let Some((class_name, method_name, runtime_call)) = self.get_stdlib_runtime_info(
@@ -53,18 +53,16 @@ impl<'a> HirToMirContext<'a> {
                     let returns_raw_value = runtime_call.returns_raw_value;
                     let extend_i64_mask = runtime_call.extend_to_i64_params;
                     let needs_out_param = runtime_call.needs_out_param;
-                    let has_return = runtime_call.has_return; // Copy for use in fallback closure
+                    let has_return = runtime_call.has_return;
 
-                    // SPECIAL CASE: Instance methods that need out parameter (like Array.slice, String.split)
-                    // These have void return but write result to first out parameter
-                    // Generate inline wrapper: allocate + call runtime + return pointer
+                    // These entries return void and write the result to the first out
+                    // param, so wrap inline: allocate + call + load.
                     if needs_out_param {
                         debug!(
                             "[OUT PARAM] Instance method {}.{} needs out param inline wrapper",
                             class_name, method_name
                         );
 
-                        // Lower all arguments (receiver + method args)
                         let mut call_arg_regs = Vec::new();
                         for arg in args {
                             if let Some(reg) = self.lower_expression(arg) {
@@ -72,14 +70,12 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Allocate space for the result object
-                        // For arrays/strings, allocate an opaque pointer-sized value
+                        // Opaque pointer-sized slot for the result object.
                         let out_ptr_ty = IrType::Ptr(Box::new(IrType::Void));
                         let out_ptr = self.builder.build_alloc(out_ptr_ty.clone(), None)?;
 
-                        // Register the extern runtime function
-                        // Signature: void runtime_func(out: *Ptr(Void), receiver: Ptr(Void), ...params)
-                        let mut extern_param_types = vec![out_ptr_ty.clone()]; // out parameter
+                        // void runtime_func(out: *Ptr(Void), receiver: Ptr(Void), ...params)
+                        let mut extern_param_types = vec![out_ptr_ty.clone()];
                         for arg in args {
                             extern_param_types.push(self.convert_type(arg.ty));
                         }
@@ -90,14 +86,12 @@ impl<'a> HirToMirContext<'a> {
                             IrType::Void,
                         );
 
-                        // Call runtime function: runtime_func(out_ptr, receiver, ...args)
                         let mut runtime_args = vec![out_ptr];
                         runtime_args.extend(call_arg_regs);
 
                         self.builder
                             .build_call_direct(extern_func_id, runtime_args, IrType::Void);
 
-                        // Load the result pointer from the out parameter
                         let result_ptr = self.builder.build_load(out_ptr, out_ptr_ty)?;
 
                         debug!(
@@ -108,24 +102,20 @@ impl<'a> HirToMirContext<'a> {
                         return Some(result_ptr);
                     }
 
-                    // SPECIAL CASE: Check if this is a stdlib MIR wrapper function
-                    // MIR wrappers are functions that forward to extern runtime functions.
-                    // The wrappers handle calling convention differences and provide default arguments.
-                    // NOTE: We check runtime_call.is_mir_wrapper, not just is_mir_wrapper_class(),
-                    // because some methods on MIR wrapper classes (e.g., String.split) are
-                    // direct extern calls without wrappers.
+                    // MIR wrappers forward to extern runtime functions, absorbing
+                    // calling-convention differences and default arguments. Gate on the
+                    // mapping's is_mir_wrapper, not the class: some methods on wrapper
+                    // classes (String.split) are direct externs.
                     if runtime_call.is_mir_wrapper {
-                        // Use the runtime function name from the mapping to handle overloaded methods
-                        // For example, String.indexOf can map to String_indexOf (1-arg) or String_indexOf_2 (2-arg)
+                        // The mapping's runtime name disambiguates overloads
+                        // (String_indexOf vs String_indexOf_2).
                         let mir_func_name = runtime_func.to_string();
                         debug!(
                             "[STDLIB MIR] Detected stdlib MIR wrapper function (instance): {}",
                             mir_func_name
                         );
 
-                        // Lower all arguments and collect their types
-                        // Auto-box primitive args when MIR wrapper expects Ptr(U8)
-                        // (e.g., Channel<Int>.send(42) needs to box the Int)
+                        // Auto-box primitive args when the wrapper expects Ptr(U8).
                         let mir_wrapper_params = self
                             .get_stdlib_mir_wrapper_signature(&mir_func_name)
                             .map(|(params, _)| params);
@@ -134,7 +124,6 @@ impl<'a> HirToMirContext<'a> {
                         for (i, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
                                 let actual_ty = self.convert_type(arg.ty);
-                                // Check if MIR wrapper expects a different type (e.g., Ptr(U8) for boxed value)
                                 let expected_ty = mir_wrapper_params
                                     .as_ref()
                                     .and_then(|params| params.get(i).cloned())
@@ -155,15 +144,13 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // SPECIAL: For generic methods that return T (like Thread<T>.join() -> T,
-                        // Channel<T>.tryReceive() -> Null<T>), we need to resolve the type parameter
-                        // from the receiver's generic arguments.
-                        // Also resolve when result_type is Ptr(Void) which comes from Dynamic/unresolved generics.
+                        // Methods returning T (Thread<T>.join, Channel<T>.tryReceive) take
+                        // their return type from the receiver's type args. Any, Ptr(Void)
+                        // and I64 all mean "unresolved" here.
                         let needs_generic_resolve = result_type == IrType::Any
                             || matches!(&result_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
                             || result_type == IrType::I64;
                         let resolved_result_type = if needs_generic_resolve {
-                            // Check if the receiver is a generic class with type parameters
                             let type_table = self.type_table;
                             if let Some(receiver_info) = type_table.get(receiver_type) {
                                 if let crate::tast::TypeKind::Class { type_args, .. } =
@@ -197,9 +184,9 @@ impl<'a> HirToMirContext<'a> {
                             resolved_result_type.clone(),
                         );
 
-                        // IMPORTANT: For Void-returning functions, use the function's ACTUAL return type.
-                        // For non-void functions, trust resolved_result_type (which handles generics correctly).
-                        // This fixes the bug where void functions like Channel.send incorrectly get dest registers.
+                        // Void-returning wrappers must use the signature's return type, or
+                        // they get a dest register; otherwise resolved_result_type wins,
+                        // since it handles generics.
                         let final_return_type = if let Some(func) =
                             self.builder.module.functions.get(&mir_func_id)
                         {
@@ -233,8 +220,8 @@ impl<'a> HirToMirContext<'a> {
                         mir_func_name, mir_func_id, final_return_type
                     );
 
-                        // Generate the call with the MIR wrapper's actual return type
-                        // (which may be Ptr(U8) for generic methods returning T)
+                        // Call with the wrapper's own return type, which may be Ptr(U8) for
+                        // generic methods returning T.
                         let mir_actual_return = self
                             .get_stdlib_mir_wrapper_signature(&mir_func_name)
                             .map(|(_, ret)| ret)
@@ -245,8 +232,8 @@ impl<'a> HirToMirContext<'a> {
                             mir_actual_return.clone(),
                         )?;
 
-                        // Auto-unbox if MIR wrapper returns Ptr(U8) but caller expects primitive
-                        // (e.g., Channel<Int>.tryReceive() returns boxed int that needs unboxing)
+                        // Unbox when the wrapper returns Ptr(U8) but the caller expects a
+                        // primitive.
                         let final_result = if mir_func_name == "Channel_receive"
                             || mir_func_name == "Channel_tryReceive"
                         {
@@ -263,10 +250,9 @@ impl<'a> HirToMirContext<'a> {
                             )
                         };
 
-                        // Set class hint on the FINAL result register (after potential unboxing)
-                        // to enable disambiguation of subsequent method calls.
-                        // E.g., Array.iterator() returns ArrayIterator, so subsequent
-                        // .hasNext()/.next() calls dispatch to ArrayIterator methods.
+                        // Hint the post-unbox register so later calls dispatch on the
+                        // returned class (Array.iterator() -> ArrayIterator, so
+                        // .hasNext()/.next() reach ArrayIterator's methods).
                         if let Some(result_reg) = final_result {
                             let return_class = Self::get_return_class_hint(class_name, method_name);
                             self.register_class_hints
@@ -276,19 +262,13 @@ impl<'a> HirToMirContext<'a> {
                         return final_result;
                     }
 
-                    // println!(
-                    //     "✅ Generating runtime call to {} (receiver type path)",
-                    //     runtime_func
-                    // );
-
-                    // Lower all arguments
                     let arg_regs: Vec<_> = args
                         .iter()
                         .filter_map(|a| self.lower_expression(a))
                         .collect();
 
-                    // Apply raw value conversion for high-performance inline storage (StringMap, IntMap)
-                    // Values are cast to u64 raw bits - no boxing, no heap allocation
+                    // Raw-value params (StringMap, IntMap) are stored inline as u64 bits:
+                    // no boxing, no heap allocation.
                     let mut final_arg_regs = arg_regs.clone();
                     if raw_value_mask != 0 {
                         for i in 0..arg_regs.len() {
@@ -299,22 +279,19 @@ impl<'a> HirToMirContext<'a> {
                                     .get_register_type(arg_reg)
                                     .unwrap_or(IrType::I64);
 
-                                // Cast value to U64 raw bits - zero-cost for same-size types
                                 let raw_reg = match &arg_type {
                                     IrType::I32 => {
-                                        // Zero-extend i32 to u64
                                         self.builder.build_cast(arg_reg, IrType::I32, IrType::U64)
                                     }
                                     IrType::I64 => {
-                                        // Reinterpret i64 as u64 (same bits) - use cast
                                         self.builder.build_cast(arg_reg, IrType::I64, IrType::U64)
                                     }
                                     IrType::F64 => {
-                                        // Reinterpret f64 bits as u64 - use BitCast instruction
+                                        // Bit pattern, not a value conversion.
                                         self.builder.build_bitcast(arg_reg, IrType::U64)
                                     }
                                     IrType::F32 => {
-                                        // Extend f32 to f64, then reinterpret as u64
+                                        // Widen to f64 first so the bit pattern is canonical.
                                         let f64_reg = self
                                             .builder
                                             .build_cast(arg_reg, IrType::F32, IrType::F64)
@@ -322,11 +299,10 @@ impl<'a> HirToMirContext<'a> {
                                         self.builder.build_bitcast(f64_reg, IrType::U64)
                                     }
                                     IrType::Bool => {
-                                        // Zero-extend bool to u64
                                         self.builder.build_cast(arg_reg, IrType::Bool, IrType::U64)
                                     }
                                     IrType::Ptr(_) => {
-                                        // Pointer to u64 (address as integer)
+                                        // Address as an integer.
                                         self.builder.build_cast(
                                             arg_reg,
                                             arg_type.clone(),
@@ -334,7 +310,7 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     }
                                     _ => {
-                                        // For other types, try direct cast to U64
+                                        // Anything else: direct cast.
                                         self.builder.build_cast(
                                             arg_reg,
                                             arg_type.clone(),
@@ -349,11 +325,9 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                    // Apply pointer conversion for parameters that need it (DEPRECATED - use raw_value_params)
-                    // This creates boxed Dynamic values for legacy runtime functions.
+                    // Legacy path, superseded by raw_value_params: boxes args as Dynamic.
                     else if ptr_conversion_mask != 0 {
                         for i in 0..arg_regs.len() {
-                            // Check if bit i is set in the mask
                             if (ptr_conversion_mask & (1 << i)) != 0 {
                                 let arg_reg = arg_regs[i];
                                 let arg_type = self
@@ -361,12 +335,10 @@ impl<'a> HirToMirContext<'a> {
                                     .get_register_type(arg_reg)
                                     .unwrap_or(IrType::I64);
 
-                                // Use proper Dynamic boxing based on the argument type
-                                // This creates a tagged Dynamic value that can be unboxed later
-                                // Use the haxe_box_*_ptr wrapper functions which handle type conversion internally
+                                // haxe_box_*_ptr produces a tagged Dynamic that can be
+                                // unboxed later.
                                 let boxed_reg = match &arg_type {
                                     IrType::I32 => {
-                                        // Box int using haxe_box_int_ptr wrapper (which handles i32->i64 cast)
                                         let box_func = self.get_or_register_extern_function(
                                             "haxe_box_int_ptr",
                                             vec![IrType::I32],
@@ -379,7 +351,6 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     }
                                     IrType::I64 => {
-                                        // Box int64 - truncate to i32 and use haxe_box_int_ptr wrapper
                                         let truncated = self
                                             .builder
                                             .build_cast(arg_reg, IrType::I64, IrType::I32)
@@ -396,7 +367,6 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     }
                                     IrType::F32 | IrType::F64 => {
-                                        // Box float using haxe_box_float_ptr wrapper
                                         let float_val = if arg_type == IrType::F32 {
                                             self.builder
                                                 .build_cast(arg_reg, IrType::F32, IrType::F64)
@@ -416,7 +386,6 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     }
                                     IrType::Bool => {
-                                        // Box bool using haxe_box_bool_ptr wrapper
                                         let box_func = self.get_or_register_extern_function(
                                             "haxe_box_bool_ptr",
                                             vec![IrType::Bool],
@@ -429,11 +398,9 @@ impl<'a> HirToMirContext<'a> {
                                         )
                                     }
                                     IrType::Ptr(_) | IrType::Struct { .. } => {
-                                        // Pointer/reference types still need stack allocation for ptr_params
-                                        // because the runtime function expects a pointer TO the value,
-                                        // and the value itself is a pointer we need to pass BY REFERENCE.
-                                        // Example: haxe_array_push(arr, data) where data = &value
-                                        // For Array<Thread>, value is a pointer, so data = &pointer
+                                        // The runtime expects a pointer TO the value, so a
+                                        // pointer argument is itself passed by reference:
+                                        // haxe_array_push(arr, &value).
                                         if let Some(stack_slot) =
                                             self.builder.build_alloc(arg_type.clone(), None)
                                         {
@@ -444,8 +411,6 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
                                     _ => {
-                                        // For other types, fallback to stack allocation
-                                        // (This preserves the old behavior for edge cases)
                                         if let Some(stack_slot) =
                                             self.builder.build_alloc(arg_type.clone(), None)
                                         {
@@ -464,8 +429,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Apply i32 -> i64 extension for IntMap key parameters
-                    // This is needed because Haxe Int is 32-bit but the runtime uses 64-bit keys
+                    // Haxe Int is 32-bit but IntMap keys are 64-bit in the runtime.
                     if extend_i64_mask != 0 {
                         for i in 0..final_arg_regs.len() {
                             if (extend_i64_mask & (1 << i)) != 0 {
@@ -475,7 +439,6 @@ impl<'a> HirToMirContext<'a> {
                                     .get_register_type(arg_reg)
                                     .unwrap_or(IrType::I32);
 
-                                // Only extend i32 to i64, skip if already i64
                                 if arg_type == IrType::I32 {
                                     if let Some(extended) =
                                         self.builder.build_cast(arg_reg, IrType::I32, IrType::I64)
@@ -487,13 +450,12 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Get or register the extern runtime function
-                    // Use actual argument types from TAST, applying type conversion where needed
+                    // Param types come from TAST, adjusted for the conversions applied above.
                     let param_types: Vec<IrType> = args
                         .iter()
                         .enumerate()
                         .map(|(i, arg)| {
-                            // Raw value params are passed as U64 (high-performance inline storage)
+                            // Raw value params are passed as U64 (inline storage)
                             if raw_value_mask != 0 && (raw_value_mask & (1 << i)) != 0 {
                                 IrType::U64
                             }
@@ -512,11 +474,6 @@ impl<'a> HirToMirContext<'a> {
                         })
                         .collect();
 
-                    // For functions that return raw values (u64), we need to:
-                    // 1. Resolve the actual type parameter T from the receiver's generic args
-                    // 2. Call with U64 return type
-                    // 3. Cast the result to the resolved type
-                    //
                     // `resolved_from_type_args` records whether the resolution
                     // came from a real receiver type_arg substitution (true) or
                     // fell through to `result_type` because there were no type
@@ -546,8 +503,8 @@ impl<'a> HirToMirContext<'a> {
                             None => (result_type.clone(), false),
                         }
                     } else {
-                        // IMPORTANT: For MIR wrappers, use their actual return type instead of HIR type
-                        // HIR type may be Dynamic/Ptr(Void) but the wrapper returns a concrete type (e.g., Bool)
+                        // A MIR wrapper's own return type wins: the HIR type may be
+                        // Dynamic/Ptr(Void) while the wrapper returns something concrete.
                         let ret = self
                             .get_stdlib_mir_wrapper_signature(&runtime_func)
                             .map(|(_, ret_ty)| ret_ty)
@@ -577,17 +534,14 @@ impl<'a> HirToMirContext<'a> {
                         call_return_type.clone(),
                     );
 
-                    // Generate the call to the runtime function
                     let call_result = self.builder.build_call_direct(
                         runtime_func_id,
                         final_arg_regs,
                         call_return_type,
                     );
 
-                    // If this returns raw value, cast U64 back to the resolved type parameter
                     if returns_raw_value {
                         if let Some(raw_reg) = call_result {
-                            // Cast U64 to the resolved type parameter
                             let final_result = match &resolved_return_type {
                                 IrType::I32 => {
                                     self.builder.build_cast(raw_reg, IrType::U64, IrType::I32)
@@ -597,7 +551,6 @@ impl<'a> HirToMirContext<'a> {
                                 }
                                 IrType::F64 => self.builder.build_bitcast(raw_reg, IrType::F64),
                                 IrType::F32 => {
-                                    // Bitcast to F64, then convert to F32
                                     if let Some(f64_reg) =
                                         self.builder.build_bitcast(raw_reg, IrType::F64)
                                     {
@@ -640,8 +593,8 @@ impl<'a> HirToMirContext<'a> {
                     return call_result;
                 }
 
-                // GUARD: Check if receiver is a user-defined class (not stdlib)
-                // If so, skip all stdlib fallbacks - they would incorrectly match stdlib methods
+                // A user-defined receiver must skip the stdlib fallbacks below, which
+                // would otherwise match a same-named stdlib method.
                 let receiver_is_user_class = {
                     let type_table = self.type_table;
                     type_table
@@ -649,7 +602,7 @@ impl<'a> HirToMirContext<'a> {
                         .map(|ti| {
                             match &ti.kind {
                                 crate::tast::core::TypeKind::Class { symbol_id, .. } => {
-                                    // Check if this is a stdlib class
+                                    // User-defined is anything the stdlib doesn't claim.
                                     self.symbol_table
                                         .get_symbol(*symbol_id)
                                         .map(|s| !self.is_stdlib_class_by_symbol(s))
@@ -659,7 +612,6 @@ impl<'a> HirToMirContext<'a> {
                                 // Method calls on T should resolve through function_map, not stdlib.
                                 // (Constrained T:Interface is handled earlier by interface dispatch.)
                                 crate::tast::core::TypeKind::TypeParameter { .. } => true,
-                                // GenericInstance: check if the base type is a user class
                                 crate::tast::core::TypeKind::GenericInstance {
                                     base_type, ..
                                 } => type_table
@@ -679,7 +631,6 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     })
                                     .unwrap_or(false),
-                                // Abstract types with user-defined methods
                                 crate::tast::core::TypeKind::Abstract { symbol_id, .. } => self
                                     .symbol_table
                                     .get_symbol(*symbol_id)
@@ -691,17 +642,14 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(false)
                 };
 
-                // Skip stdlib fallbacks for user-defined classes
                 if receiver_is_user_class {
-                    // For user-defined classes, the method should be in function_map
-                    // Don't try to match stdlib methods
+                    // The method lives in function_map; stdlib matching would be wrong.
                 } else {
-                    // Fallback: Use stdlib mapping to try all possible class/method combinations
-                    // This is necessary when qualified names aren't set properly
+                    // Fallback for when qualified names aren't set: try the stdlib
+                    // mapping's class/method combinations.
                     if let Some(method_sym) = self.symbol_table.get_symbol(*symbol) {
                         if let Some(method_name) = self.string_interner.get(method_sym.name) {
                             let static_args = self.effective_static_call_args(args);
-                            // First try to use the qualified name if available
                             if let Some(qual_name) = method_sym
                                 .qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
@@ -713,12 +661,11 @@ impl<'a> HirToMirContext<'a> {
                                         static_args.len(),
                                     )
                                 {
-                                    // CHECK: Is this a MIR wrapper function or a true extern?
-                                    // The mapping's `is_mir_wrapper` flag decides — having
-                                    // explicit type info does NOT (typed extern intrinsics
-                                    // like `haxe_bytes_get` carry signatures too; routing
-                                    // them here creates a body-less forward-ref stub that
-                                    // traps at runtime).
+                                    // The mapping's `is_mir_wrapper` flag decides wrapper vs
+                                    // true extern — having explicit type info does not, since
+                                    // typed extern intrinsics like `haxe_bytes_get` carry
+                                    // signatures too and routing them here creates a
+                                    // body-less forward-ref stub that traps at runtime.
                                     if let Some((_mir_param_types, _mir_return_type)) = self
                                         .get_stdlib_mir_wrapper_signature(runtime_func)
                                         .filter(|_| {
@@ -731,7 +678,6 @@ impl<'a> HirToMirContext<'a> {
                                             runtime_func
                                         );
 
-                                        // Lower all arguments and collect their types
                                         let mut arg_regs = Vec::new();
                                         let mut param_types = Vec::new();
                                         for arg in static_args {
@@ -741,7 +687,7 @@ impl<'a> HirToMirContext<'a> {
                                             }
                                         }
 
-                                        // Register forward reference - will be provided by merged stdlib module
+                                        // Body comes from the merged stdlib module.
                                         let mir_func_id = self.register_stdlib_mir_forward_ref(
                                             runtime_func,
                                             param_types,
@@ -753,7 +699,6 @@ impl<'a> HirToMirContext<'a> {
                                         runtime_func, mir_func_id
                                     );
 
-                                        // Generate the call
                                         let result = self.builder.build_call_direct(
                                             mir_func_id,
                                             arg_regs,
@@ -766,13 +711,12 @@ impl<'a> HirToMirContext<'a> {
                                         return result;
                                     }
 
-                                    // Lower all arguments
                                     let arg_regs: Vec<_> = static_args
                                         .iter()
                                         .filter_map(|a| self.lower_expression(a))
                                         .collect();
 
-                                    // Get expected types FIRST so we can auto-box before ptr_conversion
+                                    // Expected types are needed before boxing.
                                     let (expected_param_types_qn, expected_return_type_qn) = self
                                         .get_extern_function_signature(&runtime_func)
                                         .unwrap_or_else(|| {
@@ -812,7 +756,6 @@ impl<'a> HirToMirContext<'a> {
                                         expected_return_type_qn.clone(),
                                     );
 
-                                    // Generate the call to the runtime function
                                     let call_result_qn = self.builder.build_call_direct(
                                         runtime_func_id_qn,
                                         final_arg_regs,
@@ -824,7 +767,7 @@ impl<'a> HirToMirContext<'a> {
                                         &result_type,
                                     ));
 
-                                    // DEAD CODE below (kept for reference): old ptr_conversion path
+                                    // Unreachable: superseded by the return above.
                                     #[allow(unreachable_code)]
                                     let _unused_final_arg_regs = arg_regs.clone();
                                     #[allow(unreachable_code)]
@@ -836,18 +779,17 @@ impl<'a> HirToMirContext<'a> {
                                         .unwrap_or(0);
                                     if ptr_conversion_mask != 0 {
                                         for i in 0..arg_regs.len() {
-                                            // Check if bit i is set in the mask
                                             if (ptr_conversion_mask & (1 << i)) != 0 {
                                                 let arg_reg = arg_regs[i];
-                                                // Default to I64 (pointer-sized) if type is unknown.
-                                                // This is safer than I32 since pointers and most values are 64-bit.
+                                                // Unknown type defaults to I64: pointers and
+                                                // most values are 64-bit.
                                                 let arg_type = self
                                                     .builder
                                                     .get_register_type(arg_reg)
                                                     .unwrap_or(IrType::I64);
 
-                                                // For array operations, always allocate 8 bytes (elem_size is always 8)
-                                                // and extend smaller values to 64-bit
+                                                // Array element slots are always 8 bytes, so
+                                                // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
@@ -868,23 +810,20 @@ impl<'a> HirToMirContext<'a> {
                                                     _ => (arg_type.clone(), arg_reg),
                                                 };
 
-                                                // Allocate stack space and pass a pointer to the value.
                                                 if let Some(stack_slot) = self
                                                     .builder
                                                     .build_alloc(alloc_type.clone(), None)
                                                 {
-                                                    // Store the value into the stack slot
                                                     self.builder
                                                         .build_store(stack_slot, value_to_store);
-                                                    // Use the pointer for the call
                                                     final_arg_regs[i] = stack_slot;
                                                 }
                                             }
                                         }
                                     }
 
-                                    // Use the function signature from the mapping (hlp_* introspection)
-                                    // if available; this is the authoritative source of type info.
+                                    // The mapping's signature (hlp_* introspection) is the
+                                    // authoritative source of type info when present.
                                     let (expected_param_types, expected_return_type) = self
                                         .get_extern_function_signature(&runtime_func)
                                         .unwrap_or_else(|| {
@@ -909,7 +848,6 @@ impl<'a> HirToMirContext<'a> {
                                         expected_return_type.clone(),
                                     );
 
-                                    // Generate the call to the runtime function
                                     return self.builder.build_call_direct(
                                         runtime_func_id,
                                         final_arg_regs,
@@ -918,10 +856,8 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Fallback: try each possible stdlib class (only if qualified name didn't work)
-                            // For static methods like Arc.init, Mutex.init, etc, try to infer the class from the return type
-                            // debug!("Qualified name not available, trying to infer class from return type={:?}", expr.ty);
-
+                            // No usable qualified name: infer the class from the return type
+                            // (Arc.init, Mutex.init, ...).
                             let inferred_class = {
                                 let type_table = self.type_table;
                                 debug!("[INFER CLASS] Checking return type expr.ty={:?}", expr.ty);
@@ -956,19 +892,16 @@ impl<'a> HirToMirContext<'a> {
                             };
 
                             if let Some(class_name) = inferred_class {
-                                // SPECIAL CASE: Check if this is a stdlib MIR function
                                 if self.stdlib_mapping.is_mir_wrapper_class(class_name) {
-                                    // The mapping is the source of truth for the
-                                    // wrapper's name — synthesizing it by the
-                                    // `{class.lowercase()}_{method}` convention
-                                    // produces a body-less stub whenever the real
-                                    // entry differs (`QTensor_requantQ6KToQ4KM` vs
-                                    // `qtensor_requantQ6KToQ4KM` → trap at call).
-                                    // The class here was inferred from the RETURN
-                                    // type, which differs from the declaring class
-                                    // for non-factory methods (QTensor.gatherRowsQ6K
-                                    // returns Tensor) — a globally unique method
-                                    // name still identifies the entry.
+                                    // The mapping is the source of truth for the wrapper's
+                                    // name — synthesizing it by the
+                                    // `{class.lowercase()}_{method}` convention produces a
+                                    // body-less stub whenever the real entry differs, which
+                                    // traps at the call. The class here came from the RETURN
+                                    // type, which differs from the declaring class for
+                                    // non-factory methods (QTensor.gatherRowsQ6K returns
+                                    // Tensor), so a globally unique method name is used to
+                                    // identify the entry instead.
                                     let mir_func_name = self
                                         .stdlib_mapping
                                         .find_by_name(class_name, method_name)
@@ -984,7 +917,6 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name
                                     );
 
-                                    // Lower all arguments and collect their types
                                     let mut arg_regs = Vec::new();
                                     let mut param_types = Vec::new();
                                     for arg in static_args {
@@ -994,7 +926,7 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
-                                    // Register forward reference - will be provided by merged stdlib module
+                                    // Body comes from the merged stdlib module.
                                     let mir_func_id = self.register_stdlib_mir_forward_ref(
                                         &mir_func_name,
                                         param_types,
@@ -1006,7 +938,6 @@ impl<'a> HirToMirContext<'a> {
                                         mir_func_name, mir_func_id
                                     );
 
-                                    // Generate the call
                                     let result = self.builder.build_call_direct(
                                         mir_func_id,
                                         arg_regs,
@@ -1016,7 +947,6 @@ impl<'a> HirToMirContext<'a> {
                                     return result;
                                 }
 
-                                // Try the inferred class first
                                 let fake_qual_name =
                                     format!("rayzor.concurrent.{}.{}", class_name, method_name);
                                 if let Some(runtime_func) = self
@@ -1030,17 +960,14 @@ impl<'a> HirToMirContext<'a> {
                                     "[INFERRED CLASS PATH] Got runtime_func='{}' for class={}, method={}",
                                     runtime_func, class_name, method_name
                                 );
-                                    // println!("✅ Generating runtime call to {} for {}.{} (inferred from return type)", runtime_func, class_name, method_name);
 
-                                    // Lower all arguments
                                     let arg_regs: Vec<_> = static_args
                                         .iter()
                                         .filter_map(|a| self.lower_expression(a))
                                         .collect();
 
-                                    // Apply pointer conversion for parameters that need it (metadata-driven)
-                                    // Look up the RuntimeFunctionCall metadata by runtime function name
-                                    // This means the runtime function expects a POINTER TO the value, not the value directly.
+                                    // Params flagged in the mapping are passed as a POINTER
+                                    // TO the value, not the value itself.
                                     let mut final_arg_regs = arg_regs.clone();
                                     let ptr_conversion_mask = self
                                         .stdlib_mapping
@@ -1049,18 +976,17 @@ impl<'a> HirToMirContext<'a> {
                                         .unwrap_or(0);
                                     if ptr_conversion_mask != 0 {
                                         for i in 0..arg_regs.len() {
-                                            // Check if bit i is set in the mask
                                             if (ptr_conversion_mask & (1 << i)) != 0 {
                                                 let arg_reg = arg_regs[i];
-                                                // Default to I64 (pointer-sized) if type is unknown.
-                                                // This is safer than I32 since pointers and most values are 64-bit.
+                                                // Unknown type defaults to I64: pointers and
+                                                // most values are 64-bit.
                                                 let arg_type = self
                                                     .builder
                                                     .get_register_type(arg_reg)
                                                     .unwrap_or(IrType::I64);
 
-                                                // For array operations, always allocate 8 bytes (elem_size is always 8)
-                                                // and extend smaller values to 64-bit
+                                                // Array element slots are always 8 bytes, so
+                                                // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
@@ -1081,23 +1007,20 @@ impl<'a> HirToMirContext<'a> {
                                                     _ => (arg_type.clone(), arg_reg),
                                                 };
 
-                                                // Allocate stack space and pass a pointer to the value.
                                                 if let Some(stack_slot) = self
                                                     .builder
                                                     .build_alloc(alloc_type.clone(), None)
                                                 {
-                                                    // Store the value into the stack slot
                                                     self.builder
                                                         .build_store(stack_slot, value_to_store);
-                                                    // Use the pointer for the call
                                                     final_arg_regs[i] = stack_slot;
                                                 }
                                             }
                                         }
                                     }
 
-                                    // Use the function signature from the mapping (hlp_* introspection)
-                                    // if available; this is the authoritative source of type info.
+                                    // The mapping's signature (hlp_* introspection) is the
+                                    // authoritative source of type info when present.
                                     let (expected_param_types, expected_return_type) = self
                                         .get_extern_function_signature(&runtime_func)
                                         .unwrap_or_else(|| {
@@ -1122,7 +1045,6 @@ impl<'a> HirToMirContext<'a> {
                                         expected_return_type.clone(),
                                     );
 
-                                    // Generate the call to the runtime function
                                     return self.builder.build_call_direct(
                                         runtime_func_id,
                                         final_arg_regs,
@@ -1131,21 +1053,17 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Last resort: try all stdlib classes with param count matching
-                            // NOTE: We must match by param count to disambiguate overloaded methods
-                            // (e.g., Array.join(sep) with 1 param vs Thread.join() with 0 params)
-                            let actual_arg_count = args.len().saturating_sub(1); // Subtract 1 for receiver (self)
+                            // Last resort: try all stdlib classes, matching param count to
+                            // disambiguate overloads (Array.join(sep) vs Thread.join()).
+                            let actual_arg_count = args.len().saturating_sub(1); // receiver
                             debug!(
                             "[LAST RESORT] Could not infer class for method '{}' with {} args, trying all stdlib classes",
                             method_name, actual_arg_count
                         );
-                            // Get all stdlib classes dynamically from the mapping
-                            // NOTE: We do NOT add stdlib MIR detection here because we don't know which class
-                            // to use - the fallback tries all classes and would match the wrong one
+                            // No MIR-wrapper-class detection here: this loop tries every
+                            // class and would match the wrong one.
                             let stdlib_classes = self.stdlib_mapping.get_all_classes();
                             for class_name in &stdlib_classes {
-                                // Use find_by_name_and_params to ensure param count matches
-                                // This prevents Array.join(1 param) from matching Thread.join(0 params)
                                 if let Some((sig, mapping)) =
                                     self.stdlib_mapping.find_by_name_and_params(
                                         class_name,
@@ -1155,11 +1073,10 @@ impl<'a> HirToMirContext<'a> {
                                 {
                                     let runtime_func = mapping.runtime_name;
 
-                                    // CHECK: Is this a MIR wrapper or an extern?
-                                    // Gate on the mapping's `is_mir_wrapper` flag —
-                                    // typed extern intrinsics carry signatures too,
-                                    // and a forward-ref stub for one never gets a
-                                    // body (traps at runtime).
+                                    // Wrapper vs extern is decided by the mapping's
+                                    // `is_mir_wrapper` flag: typed extern intrinsics carry
+                                    // signatures too, and a forward-ref stub for one never
+                                    // gets a body, so it traps at runtime.
                                     if let Some((mir_param_types, mir_return_type)) = self
                                         .get_stdlib_mir_wrapper_signature(&runtime_func)
                                         .filter(|_| mapping.is_mir_wrapper)
@@ -1169,7 +1086,6 @@ impl<'a> HirToMirContext<'a> {
                                             runtime_func
                                         );
 
-                                        // Lower all arguments
                                         let mut arg_regs = Vec::new();
                                         for arg in args {
                                             if let Some(reg) = self.lower_expression(arg) {
@@ -1177,7 +1093,7 @@ impl<'a> HirToMirContext<'a> {
                                             }
                                         }
 
-                                        // Register forward reference - signature comes from get_stdlib_mir_wrapper_signature
+                                        // Body comes from the merged stdlib module.
                                         let mir_func_id = self.register_stdlib_mir_forward_ref(
                                             &runtime_func,
                                             mir_param_types,
@@ -1189,7 +1105,6 @@ impl<'a> HirToMirContext<'a> {
                                         runtime_func, mir_func_id
                                     );
 
-                                        // Generate the call
                                         let result = self.builder.build_call_direct(
                                             mir_func_id,
                                             arg_regs,
@@ -1202,15 +1117,13 @@ impl<'a> HirToMirContext<'a> {
                                         return result;
                                     }
 
-                                    // Lower all arguments
                                     let arg_regs: Vec<_> = args
                                         .iter()
                                         .filter_map(|a| self.lower_expression(a))
                                         .collect();
 
-                                    // Apply pointer conversion for parameters that need it (metadata-driven)
-                                    // Look up the RuntimeFunctionCall metadata by runtime function name
-                                    // This means the runtime function expects a POINTER TO the value, not the value directly.
+                                    // Params flagged in the mapping are passed as a POINTER
+                                    // TO the value, not the value itself.
                                     let mut final_arg_regs = arg_regs.clone();
                                     let ptr_conversion_mask = self
                                         .stdlib_mapping
@@ -1219,18 +1132,17 @@ impl<'a> HirToMirContext<'a> {
                                         .unwrap_or(0);
                                     if ptr_conversion_mask != 0 {
                                         for i in 0..arg_regs.len() {
-                                            // Check if bit i is set in the mask
                                             if (ptr_conversion_mask & (1 << i)) != 0 {
                                                 let arg_reg = arg_regs[i];
-                                                // Default to I64 (pointer-sized) if type is unknown.
-                                                // This is safer than I32 since pointers and most values are 64-bit.
+                                                // Unknown type defaults to I64: pointers and
+                                                // most values are 64-bit.
                                                 let arg_type = self
                                                     .builder
                                                     .get_register_type(arg_reg)
                                                     .unwrap_or(IrType::I64);
 
-                                                // For array operations, always allocate 8 bytes (elem_size is always 8)
-                                                // and extend smaller values to 64-bit
+                                                // Array element slots are always 8 bytes, so
+                                                // widen smaller values.
                                                 let (alloc_type, value_to_store) = match arg_type {
                                                     IrType::I32 => {
                                                         let ext_val = self.builder.build_cast(
@@ -1251,28 +1163,23 @@ impl<'a> HirToMirContext<'a> {
                                                     _ => (arg_type.clone(), arg_reg),
                                                 };
 
-                                                // Allocate stack space and pass a pointer to the value.
                                                 if let Some(stack_slot) = self
                                                     .builder
                                                     .build_alloc(alloc_type.clone(), None)
                                                 {
-                                                    // Store the value into the stack slot
                                                     self.builder
                                                         .build_store(stack_slot, value_to_store);
-                                                    // Use the pointer for the call
                                                     final_arg_regs[i] = stack_slot;
                                                 }
                                             }
                                         }
                                     }
 
-                                    // Get or register the extern runtime function
-                                    // Use actual argument types from TAST, applying ptr conversion where needed
+                                    // Param types come from TAST, with ptr conversion applied.
                                     let param_types: Vec<IrType> = args
                                         .iter()
                                         .enumerate()
                                         .map(|(i, arg)| {
-                                            // If this param was converted to a pointer, the type is Ptr
                                             if ptr_conversion_mask != 0
                                                 && (ptr_conversion_mask & (1 << i)) != 0
                                             {
@@ -1288,7 +1195,6 @@ impl<'a> HirToMirContext<'a> {
                                         result_type.clone(),
                                     );
 
-                                    // Generate the call to the runtime function
                                     return self.builder.build_call_direct(
                                         runtime_func_id,
                                         final_arg_regs,
@@ -1298,12 +1204,11 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
-                } // end of else block for receiver_is_user_class
+                }
             }
         } else {
-            // receiver_is_class_type == true
-            // This is an instance method call on a MIR wrapper class (Thread, Channel, etc.)
-            // Route to the MIR wrapper function (Thread_join, Channel_send, etc.)
+            // Instance method on a MIR wrapper class: route to the wrapper function
+            // (Thread_join, Channel_send, ...).
             let receiver_is_synthetic_class = args
                 .first()
                 .map(|arg| self.is_class_symbol_expr(arg))
@@ -1311,7 +1216,6 @@ impl<'a> HirToMirContext<'a> {
             if !receiver_is_synthetic_class {
                 if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                     if let Some(method_name) = self.string_interner.get(sym_info.name) {
-                        // Get the class name from the receiver type
                         let class_name = {
                             let type_table = self.type_table;
                             type_table.get(receiver_type).and_then(|ti| {
@@ -1329,14 +1233,12 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if let Some(class_name) = class_name {
-                            // Build MIR wrapper function name: Thread_join, Channel_send, etc.
                             let mir_func_name = format!("{}_{}", class_name, method_name);
                             debug!(
                                 "[MIR WRAPPER INSTANCE] Routing {}.{} to {}",
                                 class_name, method_name, mir_func_name
                             );
 
-                            // Get the registered signature for this MIR wrapper
                             if let Some((mir_param_types, mir_return_type)) =
                                 self.get_stdlib_mir_wrapper_signature(&mir_func_name)
                             {
@@ -1347,9 +1249,7 @@ impl<'a> HirToMirContext<'a> {
                                 } else {
                                     &args[..]
                                 };
-                                // Lower all arguments (first arg is receiver/self)
-                                // Auto-box primitive args when MIR wrapper expects Ptr(U8)
-                                // (e.g., Channel<Int>.send(42) needs to box the Int)
+                                // Auto-box primitive args when the wrapper expects Ptr(U8).
                                 let mut arg_regs = Vec::new();
                                 for (i, arg) in call_args.iter().enumerate() {
                                     if let Some(reg) = self.lower_expression(arg) {
@@ -1359,7 +1259,6 @@ impl<'a> HirToMirContext<'a> {
                                             .cloned()
                                             .unwrap_or_else(|| actual_ty.clone());
 
-                                        // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive.
                                         // Channel payloads box uniformly (refs too); i==0 is the
                                         // channel handle/self (a reference) — never box it.
                                         let final_reg = if (mir_func_name == "Channel_send"
@@ -1383,7 +1282,6 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
 
-                                // Register forward reference to MIR wrapper
                                 let mir_func_id = self.register_stdlib_mir_forward_ref(
                                     &mir_func_name,
                                     mir_param_types,
@@ -1395,15 +1293,14 @@ impl<'a> HirToMirContext<'a> {
                                 mir_func_name, mir_func_id
                             );
 
-                                // Generate the call with the MIR wrapper's return type
                                 let call_result = self.builder.build_call_direct(
                                     mir_func_id,
                                     arg_regs,
                                     mir_return_type.clone(),
                                 )?;
 
-                                // Auto-unbox if MIR wrapper returns Ptr(U8) but HIR expects primitive
-                                // (e.g., Channel<Int>.tryReceive() returns boxed int)
+                                // Unbox when the wrapper returns Ptr(U8) but HIR expects a
+                                // primitive.
                                 debug!(
                                 "[MIR WRAPPER INSTANCE] call_result={:?}, mir_return_type={:?}, result_type={:?}",
                                 call_result, mir_return_type, result_type
@@ -1436,7 +1333,7 @@ impl<'a> HirToMirContext<'a> {
                     "[MIR WRAPPER INSTANCE] Skipping instance-wrapper dispatch for synthetic class receiver"
                 );
             }
-        } // end if receiver_is_class_type else block
+        }
         *fell_through = true;
         None
     }
@@ -1470,12 +1367,10 @@ impl<'a> HirToMirContext<'a> {
             let explicit_return_type = runtime_call.return_type.map(|rt| rt.to_ir_type());
             let has_self_param = runtime_call.has_self_param;
 
-            // L3: size-correct Ptr<T> wrappers. The default
-            // Ptr_offset/deref/write are size-erased (treat T as
-            // i64=8B). When the receiver's pointee is a narrow value
-            // type, redirect to the sized variant registered in
-            // systems.rs. Unknown/generic/>=8-byte pointee keeps the
-            // default name -> byte-identical to pre-L3 codegen.
+            // Size-correct Ptr<T> wrappers: the default Ptr_offset/deref/write are
+            // size-erased (T treated as 8 bytes). A narrow pointee redirects to the
+            // sized variant registered in systems.rs; unknown, generic or >=8-byte
+            // pointees keep the default name.
             if matches!(
                 runtime_func_owned.as_str(),
                 "Ptr_offset" | "Ptr_deref" | "Ptr_write"
@@ -1508,8 +1403,8 @@ impl<'a> HirToMirContext<'a> {
             }
             let runtime_func: &str = &runtime_func_owned;
 
-            // Try special runtime calls that need custom MIR lowering
-            // (e.g., Type.typeof needs to return boxed ValueType enum)
+            // Some runtime calls need custom lowering (Type.typeof returns a boxed
+            // ValueType enum).
             if let Some(special_result) = self.try_lower_special_runtime_call(
                 runtime_func,
                 args,
@@ -1518,10 +1413,9 @@ impl<'a> HirToMirContext<'a> {
             ) {
                 return special_result;
             }
-            // Method redirected via runtime mapping
 
-            // Reflect.compare: redirect to haxe_reflect_compare_typed with type tag
-            // Must be done before the generic arg boxing loop below.
+            // Reflect.compare redirects to haxe_reflect_compare_typed with a type tag.
+            // Must run before the generic arg boxing loop below.
             if runtime_func == "haxe_reflect_compare" && args.len() >= 2 {
                 let type_info = self.infer_reflect_compare_type_info(args);
                 if let Some(info) = type_info {
@@ -1567,9 +1461,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Get expected parameter types from the extern function signature
-            // This is critical for generic classes like Deque<T> where the runtime
-            // expects boxed pointers but HIR types may be primitives
+            // Generic classes like Deque<T> take boxed pointers even when the HIR
+            // types are primitives, so the signature decides, not HIR.
             let (expected_param_types, actual_return_type) = self
                 .get_stdlib_mir_wrapper_signature(runtime_func)
                 .map(|(params, ret)| (params, ret))
@@ -1577,8 +1470,7 @@ impl<'a> HirToMirContext<'a> {
                     // Fallback: derive from arguments, using stdlib mapping hints
                     let mut params = vec![IrType::Ptr(Box::new(IrType::U8))];
                     for (i, arg) in args.iter().enumerate() {
-                        // Check raw_value_params bitmask: bit (i+1) means param i+1
-                        // (bit 0 is self, bit 1 is first user arg, etc.)
+                        // In these bitmasks bit 0 is self, bit i+1 is user arg i.
                         let param_bit = 1u32 << (i + 1);
                         if raw_value_params & param_bit != 0 {
                             params.push(IrType::U64);
@@ -1588,8 +1480,7 @@ impl<'a> HirToMirContext<'a> {
                             params.push(self.convert_type(arg.ty));
                         }
                     }
-                    // Use explicit return type from types: descriptor when available,
-                    // otherwise fall back to legacy inference
+                    // An explicit descriptor return type wins over inference.
                     let ret_type = if let Some(ref rt) = explicit_return_type {
                         rt.clone()
                     } else if returns_raw_value {
@@ -1606,16 +1497,14 @@ impl<'a> HirToMirContext<'a> {
                 expected_param_types, actual_return_type
             );
 
-            // For static stdlib methods (e.g., StringTools.startsWith via `using`),
-            // the object is a class reference, NOT an instance receiver.
-            // The args already include the real receiver (first arg from `using` desugaring).
-            // Don't prepend the class reference as 'this'.
+            // For static stdlib methods (StringTools.startsWith via `using`) the object
+            // is a class reference, not a receiver, and `using` desugaring already put
+            // the real receiver in args — so don't prepend it as 'this'.
             let is_static_stdlib = !has_self_param;
 
             let mut arg_regs = if is_static_stdlib {
                 Vec::new()
             } else {
-                // Lower the object (this will be the first parameter)
                 let obj_reg = self.lower_expression(object)?;
                 vec![obj_reg] // 'this' as first arg
             };
@@ -1623,30 +1512,26 @@ impl<'a> HirToMirContext<'a> {
                 let arg_reg = self.lower_expression(arg)?;
                 let actual_ty = self.convert_type(arg.ty);
 
-                // Get expected type for this argument
-                // For instance methods, offset by 1 for 'this'
+                // Instance methods offset by 1 for 'this'.
                 let param_idx = if is_static_stdlib { i } else { i + 1 };
                 let expected_ty = expected_param_types
                     .get(param_idx)
                     .cloned()
                     .unwrap_or_else(|| actual_ty.clone());
 
-                // Auto-box if needed (e.g., Int -> Ptr(U8) for Deque<Int>.add())
+                // Auto-box if needed (Int -> Ptr(U8) for Deque<Int>.add()).
                 let final_reg =
                     self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?;
                 arg_regs.push(final_reg);
             }
 
-            // Inject hidden enum type_id arg for runtime enum helpers
-            // (enumEq, enumConstructor, enumParameters, getEnum)
+            // Runtime enum helpers (enumEq, enumConstructor, enumParameters, getEnum)
+            // take a hidden type_id argument.
             self.inject_hidden_enum_type_id_arg(runtime_func, args, &mut arg_regs);
 
-            // Use the expected parameter types for the extern function registration
-            // This ensures the signature matches what the runtime expects
             let param_types = if expected_param_types.len() == arg_regs.len() {
                 expected_param_types.clone()
             } else {
-                // Fallback if lengths don't match
                 let mut params = if is_static_stdlib {
                     Vec::new()
                 } else {
@@ -1658,7 +1543,6 @@ impl<'a> HirToMirContext<'a> {
                 params
             };
 
-            // Register and call the function (MIR wrapper or extern)
             let call_result = if is_mir_wrapper {
                 let mir_func_id = self.register_stdlib_mir_forward_ref(
                     runtime_func,
@@ -1680,9 +1564,8 @@ impl<'a> HirToMirContext<'a> {
                 )?
             };
 
-            // Auto-unbox if runtime returns Ptr(U8) but HIR expects primitive
-            // (e.g., Deque<Int>.pop() returns boxed int that needs unboxing)
-            // For generic classes like Channel<Int>, resolve T from receiver type args
+            // Unbox when the runtime returns Ptr(U8) but HIR expects a primitive; for
+            // generic classes like Channel<Int>, resolve T from the receiver's type args.
             let resolved_expected = {
                 let needs_resolve = result_type == IrType::Any
                     || matches!(&result_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
@@ -1707,28 +1590,23 @@ impl<'a> HirToMirContext<'a> {
                     result_type.clone()
                 }
             };
-            // Store class hint on result register for subsequent method dispatch.
-            // E.g., Array.iterator() returns ArrayIterator — tag the result so
-            // it.hasNext()/it.next() can find the correct stdlib mapping.
+            // Hint the result register so later calls dispatch on the returned class
+            // (Array.iterator() -> ArrayIterator for it.hasNext()/it.next()).
             //
-            // MIR wrappers return values in their declared type directly —
-            // they don't return boxed DynamicValue* pointers. Skip unboxing
-            // for MIR wrapper calls to avoid spurious dereferences
-            // (e.g., Host.localhost() returns a raw string pointer, not a boxed value).
+            // MIR wrappers return their declared type directly, not a boxed
+            // DynamicValue*, so skip unboxing for them or Host.localhost()'s raw
+            // string pointer gets dereferenced.
             let final_result = if is_mir_wrapper {
-                // MIR wrappers return values in their declared type directly.
                 // array_pop returns raw I64 — cast to Ptr(Void) for class types.
                 let expects_class_ptr = matches!(&resolved_expected, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
                 if actual_return_type == IrType::I64 && expects_class_ptr {
-                    // Raw I64 → Ptr(Void) cast
                     self.builder.build_cast(
                         call_result,
                         IrType::I64,
                         IrType::Ptr(Box::new(IrType::Void)),
                     )
                 } else if actual_return_type == IrType::I64 && result_type == IrType::I32 {
-                    // Truncate I64 → I32 for Int-returning methods
-                    // (stdlib returns usize/i64 but Haxe Int is i32)
+                    // stdlib returns usize/i64 but Haxe Int is i32.
                     self.builder
                         .build_cast(call_result, IrType::I64, IrType::I32)
                 } else {

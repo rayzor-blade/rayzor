@@ -53,7 +53,7 @@ impl<'a> HirToMirContext<'a> {
                             .unwrap_or("<unknown>");
                         debug!("[PRE-CHECK] Qualified name: '{}'", qual_name_str);
 
-                        // FIRST: Check if this function is already compiled and in the name map
+                        // An already-compiled function is in the name map.
                         if let Some(&existing_func_id) =
                             self.external_function_name_map.get(qual_name_str)
                         {
@@ -64,13 +64,11 @@ impl<'a> HirToMirContext<'a> {
                                 qual_name_str, existing_func_id
                             );
 
-                            // Lower arguments
                             let arg_regs: Vec<_> = unresolved_call_args
                                 .iter()
                                 .filter_map(|a| self.lower_expression(a))
                                 .collect();
 
-                            // Generate the call to the external function
                             return self.builder.build_call_direct(
                                 existing_func_id,
                                 arg_regs,
@@ -84,7 +82,6 @@ impl<'a> HirToMirContext<'a> {
                             qual_name_str
                         );
 
-                        // Lower arguments and collect their types
                         let mut arg_regs = Vec::new();
                         let mut param_types = Vec::new();
                         for arg in unresolved_call_args {
@@ -94,8 +91,7 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Register as a forward reference using qualified name
-                        // This will be resolved later during module linking
+                        // Keyed by qualified name; resolved during module linking.
                         let forward_func_id = self.register_stdlib_mir_forward_ref(
                             qual_name_str,
                             param_types,
@@ -107,7 +103,6 @@ impl<'a> HirToMirContext<'a> {
                             qual_name_str, forward_func_id
                         );
 
-                        // Generate the call to the forward reference
                         return self.builder.build_call_direct(
                             forward_func_id,
                             arg_regs,

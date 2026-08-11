@@ -114,10 +114,9 @@ pub struct HirToMirContext<'a> {
 
     /// Target TypeId for the next object literal lowering — set by Return /
     /// Let / Assign / call-arg handlers when they know the expected wider
-    /// typedef type, so `lower_object_literal` can compute slot indices
-    /// over the FULL field set (including optional fields not in the
-    /// literal). Without this the writer and reader sort over different
-    /// shapes and slot indices diverge — see anon-field scramble bug.
+    /// typedef type, so `lower_object_literal` computes slot indices over the
+    /// FULL field set (including optional fields absent from the literal).
+    /// Writer and reader must sort over the same shape or slot indices diverge.
     object_literal_target_ty: Option<TypeId>,
     /// Declared type of the enclosing `var x:T = <call>` — lets erased-generic
     /// returns (inferred `Channel<T>.receive()`) pick the right unbox when the
@@ -133,9 +132,8 @@ pub struct HirToMirContext<'a> {
 
     /// Qualified name -> global id for globals defined in ALREADY-LOWERED
     /// modules. Modules are lowered separately and each starts with an empty
-    /// globals table, so a static declared in an import is invisible to the
-    /// module that reads it — the read fell through to bare-name/suffix scans
-    /// over the local table, missed, and silently yielded ""/0.
+    /// globals table, so a static declared in an import is otherwise invisible
+    /// to the module that reads it.
     ///
     /// Safe to hold ids: imports are renumbered into disjoint ranges
     /// (`old_id + import_base`) BEFORE the reading module is lowered, and
@@ -160,10 +158,8 @@ pub struct HirToMirContext<'a> {
     /// body drop-scope is on `drop_scope_stack`. A symbol is loop-carried when
     /// it is declared in an ENCLOSING scope but assigned inside the loop body
     /// (so its value flows out through the loop-carried / exit phi). Its owned
-    /// heap value must NOT be freed by the loop-body `exit_drop_scope` — doing
-    /// so is a use-after-free, because the phi keeps the (freed) pointer live
-    /// past the loop (e.g. `for (x in arr) b = x; b.ifaceMethod()` where the
-    /// interface fat-pointer wrapper for `b` was freed at loop-body exit).
+    /// heap value must NOT be freed by the loop-body `exit_drop_scope`: the phi
+    /// keeps the pointer live past the loop, so freeing it is a use-after-free.
     loop_carried_symbols: Vec<BTreeSet<SymbolId>>,
 
     /// Current HIR module being processed
@@ -191,8 +187,8 @@ pub struct HirToMirContext<'a> {
     /// String interner for resolving InternedString to actual strings
     string_interner: &'a StringInterner,
 
-    /// Type table for proper type conversion (borrowed once at context creation,
-    /// eliminating 177 RefCell runtime borrow checks during MIR lowering)
+    /// Type table for type conversion. Borrowed once at context creation;
+    /// lowering never mutates it.
     type_table: &'a TypeTable,
 
     /// Track closure registers and their environment pointers
@@ -306,7 +302,6 @@ pub struct HirToMirContext<'a> {
     /// Counter for generating unique wrapper function names
     next_wrapper_id: u32,
 
-    // === Drop Tracking (Rust-style implicit drop semantics) ===
     /// Maps variable SymbolId to the IrId holding its current heap-allocated value
     /// When a variable is reassigned, we free its old value before assigning the new one
     owned_heap_values: BTreeMap<SymbolId, IrId>,
@@ -372,10 +367,9 @@ pub struct HirToMirContext<'a> {
     /// interface-typed parameter. Such wrappers may escape via the callee
     /// (e.g. pushed into a long-lived `Array<I>`), so callers must NOT add
     /// them to `temp_heap_values` — auto-freeing them after the call would
-    /// cause a use-after-free for the array reference. Best-effort: this
-    /// trades a transient leak for correctness; refining the lifetime
-    /// analysis (only retain when the call returns the fat ptr or stores
-    /// it) is a follow-up.
+    /// be a use-after-free for the array reference. Trades a transient leak
+    /// for correctness.
+    /// TODO: retain only when the call returns or stores the fat pointer.
     interface_wrapped_args: std::collections::BTreeSet<IrId>,
 
     /// Class method lookup: maps (class_symbol, method_name) → method SymbolId
@@ -441,7 +435,6 @@ pub struct HirToMirContext<'a> {
     /// Maps field SymbolId → class name string for BLADE cache serialization.
     field_class_names: BTreeMap<SymbolId, String>,
 
-    // === Class Virtual Method Dispatch ===
     /// (child_class_symbol, method_name) for methods with is_override=true
     override_methods: BTreeSet<(SymbolId, InternedString)>,
 
@@ -556,7 +549,7 @@ pub struct HirToMirContext<'a> {
     class_instance_fields: BTreeMap<SymbolId, Vec<(SymbolId, TypeId, u32)>>,
     /// Debug-only: how many times register_type_metadata ran in THIS context.
     /// Distinguishes "registration never ran here" from "ran but saw no classes"
-    /// when class_instance_fields comes up empty at a field access (E0100).
+    /// when class_instance_fields comes up empty at a field access.
     dbg_type_meta_calls: usize,
 
     /// Field default value expressions — from @:default(value) metadata or field initializers.
@@ -693,20 +686,15 @@ pub(crate) struct SavedLoweringState {
 /// Process-global class field layouts, keyed by NAME.
 ///
 /// `class_instance_fields` is per-lowering-context and populated only from that
-/// context's own `hir_module.types`. Measured (RAYZOR_E0100_DEBUG): the context
-/// that lowers a field access frequently holds 1-2 non-class type decls and NO
-/// class layouts at all — `cif_len=0` while the receiver resolves to a valid
-/// `Class{symbol_id}` whose name recovers cleanly. The TYPE crosses the module
-/// boundary; the LAYOUT does not. That is the whole E0100
-/// "class not registered or field does not exist" family.
+/// context's own `hir_module.types`, so a class TYPE crosses the module
+/// boundary while its LAYOUT does not. This map carries the layout across.
 ///
 /// Stores only (field name -> GEP index). Deliberately NOT TypeId: type ids are
 /// per-context indices and are meaningless in a consumer. The access site
 /// already knows the field's own type, so only the index has to travel.
 /// Keyed by name because SymbolIds drift across contexts (both the class's and
-/// the field's — verified by two failed id/name hybrid fixes).
-/// Layouts keyed by CANONICAL class name — the fully-qualified name when the
-/// symbol has one (`nue.arch.LlamaModel`), the bare name otherwise.
+/// the field's). The key is the CANONICAL class name — the fully-qualified name
+/// when the symbol has one (`nue.arch.LlamaModel`), the bare name otherwise.
 static CLASS_FIELD_LAYOUTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>>,
 > = std::sync::OnceLock::new();
@@ -714,10 +702,9 @@ static CLASS_FIELD_LAYOUTS: std::sync::OnceLock<
 /// Bare-name alias: `LlamaModel` -> Some(canonical), or None once two DIFFERENT
 /// canonical classes have claimed the same bare name (poisoned). A consumer
 /// context often only knows the bare name (its forwarded stub may carry no
-/// qualified name), so bare lookups must work — but a bare name that has become
-/// ambiguous must FAIL LOUDLY (fall through to the E0100 error) rather than
-/// resolve to whichever class registered first: a wrong GEP index is silent
-/// memory corruption, strictly worse than a compile error.
+/// qualified name), so bare lookups must work — but an ambiguous bare name must
+/// fail loudly rather than resolve to whichever class registered first: a wrong
+/// GEP index is silent memory corruption, strictly worse than a compile error.
 static CLASS_NAME_ALIAS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 > = std::sync::OnceLock::new();
@@ -733,10 +720,8 @@ fn class_name_alias() -> &'static std::sync::Mutex<std::collections::HashMap<Str
 }
 
 /// Record one field's index under its class's canonical name. Called from the
-/// same loop that populates `field_index_map` — the loop that provably runs for
-/// every registered class ([reg-class] traced 88 executions while the
-/// class_instance_fields insert never fired once). Idempotent: re-registration
-/// writes the same layout.
+/// same loop that populates `field_index_map`, which runs for every registered
+/// class. Idempotent: re-registration writes the same layout.
 fn record_class_field(qualified: Option<&str>, bare: &str, field_name: &str, idx: u32) {
     let canonical = qualified.unwrap_or(bare);
     if let Ok(mut m) = class_field_layouts().lock() {
@@ -848,8 +833,7 @@ pub fn lower_hir_to_mir_with_externals(
     symbol_table: &SymbolTable,
     external_functions: BTreeMap<SymbolId, IrFunctionId>,
 ) -> Result<IrModule, Vec<LoweringError>> {
-    // Borrow type_table once — hir_to_mir never mutates it (0 borrow_mut calls),
-    // so holding a single Ref eliminates 177 runtime borrow checks.
+    // Borrow once: lowering never mutates the type table.
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
@@ -861,7 +845,6 @@ pub fn lower_hir_to_mir_with_externals(
         StdlibMapping::new(),
     );
 
-    // Set the external function map
     context.external_function_map = external_functions;
 
     context.lower_module(hir_module)
@@ -907,10 +890,9 @@ pub struct MirLoweringResult {
     pub interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
     /// HIR-level param types per function id. Captured here so the BLADE
     /// cache can persist them by qualified name and rebuild the map for
-    /// imported functions in a future compilation context — without it,
-    /// `maybe_materialize_for_call` Path 3 silently skips the
-    /// class→interface fat-pointer wrap for any imported constructor
-    /// (see [[nue-tiny-transformer-smoke]]).
+    /// imported functions in a future compilation context. Without it,
+    /// `maybe_materialize_for_call` Path 3 skips the class→interface
+    /// fat-pointer wrap for imported constructors.
     pub function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
     /// Non-fatal diagnostics from the lowering pass (e.g., exhaustiveness warnings)
     pub diagnostics: Vec<diagnostics::Diagnostic>,
@@ -960,18 +942,15 @@ pub fn lower_hir_to_mir_with_function_map(
     );
     context.static_sig_index = static_sig_index;
 
-    // Set the external function maps (by SymbolId and by qualified name)
     context.external_function_map = external_functions;
     context.external_function_name_map = external_functions_by_name;
     context.external_globals = external_globals;
 
-    // Seed field_index_map and property_access_map from previously compiled imports
     context.field_index_map = external_field_index_map;
     context.property_access_map = external_property_access_map;
 
-    // Seed constructor_name_map from previously compiled imports; the key is
-    // the owning class's name, which also seeds the owner map used to verify
-    // pun-derived candidates.
+    // The constructor_name_map key is the owning class's name, which also seeds
+    // the owner map used to verify pun-derived candidates.
     for (class_name, func_id) in &external_constructor_name_map {
         let bare = class_name.rsplit('.').next().unwrap_or(class_name);
         context
@@ -981,33 +960,25 @@ pub fn lower_hir_to_mir_with_function_map(
     }
     context.constructor_name_map = external_constructor_name_map;
 
-    // Seed class_alloc_sizes from previously compiled imports
     context.class_alloc_sizes = external_class_alloc_sizes;
-
-    // Seed class_method_symbols from previously compiled imports
     context.class_method_symbols = external_class_method_symbols;
-
-    // Seed class_type_to_symbol from previously compiled imports
     context.class_type_to_symbol = external_class_type_to_symbol;
-
-    // Seed name-keyed alloc sizes from previously compiled imports (stable across contexts)
     context.class_alloc_sizes_by_name = external_class_alloc_sizes_by_name;
 
-    // Seed per-function HIR param qualified names so Path 3 of
-    // `maybe_materialize_for_call` can recover class→interface wrap
-    // decisions for imported constructors.
+    // Per-function HIR param qualified names let Path 3 of
+    // `maybe_materialize_for_call` recover class→interface wrap decisions
+    // for imported constructors.
     context.external_function_param_iface_names = external_function_param_iface_names;
 
-    // Seed interface metadata from previously compiled imports so cross-file
-    // interface dispatch (assignment to interface-typed var, vtable-based call,
-    // fat-pointer wrap) can find the method ordering and vtable for interfaces
-    // declared in other files.
+    // Interface metadata from imports, so cross-file interface dispatch
+    // (assignment to interface-typed var, vtable-based call, fat-pointer wrap)
+    // finds the method ordering and vtable for interfaces declared elsewhere.
     context.interface_method_names = external_interface_method_names;
     context.interface_method_return_types = external_interface_method_return_types;
     context.interface_extends = external_interface_extends;
     context.interface_vtables = external_interface_vtables;
-    // Seed imported field→owner-class names so the property-getter name-based
-    // fallback in `lower_field_access` can reject cross-class matches (e.g.
+    // Imported field→owner-class names let the property-getter name-based
+    // fallback in `lower_field_access` reject cross-class matches (e.g.
     // `Bytes.length` must not resolve to `StringBuf.get_length`).
     context.field_class_names = external_field_class_names;
 
@@ -1026,17 +997,15 @@ pub fn lower_hir_to_mir_with_function_map(
         }
     }
 
-    // Seed constructor param counts for fill_default_args fallback
+    // Both feed fill_default_args for cross-module optional params.
     context.external_constructor_param_counts = external_constructor_param_counts;
-
-    // Seed function param types for fill_default_args (cross-module optional params)
     context.external_function_param_types = external_function_param_types;
 
     let mut module = context.lower_module(hir_module)?;
 
-    // Build reverse map: func_id -> qualified_name for all external functions.
-    // This enables blade cache to resolve cross-module references when function IDs
-    // change between sessions (different renumbering bases).
+    // Reverse map func_id -> qualified_name for external functions: lets the
+    // blade cache resolve cross-module references when function ids change
+    // between sessions (different renumbering bases).
     {
         let mut ext_id_to_name: BTreeMap<IrFunctionId, String> = BTreeMap::new();
         for (name, &func_id) in &context.external_function_name_map {
@@ -1044,7 +1013,6 @@ pub fn lower_hir_to_mir_with_function_map(
                 .entry(func_id)
                 .or_insert_with(|| name.clone());
         }
-        // Scan module for references to external functions
         for func in module.functions.values() {
             for block in func.cfg.blocks.values() {
                 for inst in &block.instructions {
@@ -1149,7 +1117,6 @@ impl<'a> HirToMirContext<'a> {
             iface_diag_seen: BTreeSet::new(),
             enums_for_registration: BTreeMap::new(),
             next_wrapper_id: 0,
-            // Drop tracking initialization
             owned_heap_values: BTreeMap::new(),
             drop_scope_stack: Vec::new(),
             temp_heap_values: Vec::new(),
@@ -1214,9 +1181,9 @@ impl<'a> HirToMirContext<'a> {
             debug_format_strings: BTreeMap::new(),
         };
 
-        // Pre-declare malloc so it's available for heap allocations during lowering
+        // Must exist before any body is lowered: allocation and drop emission
+        // reference them directly.
         ctx.declare_malloc();
-        // Pre-declare free so it's available for drop semantics
         ctx.declare_free();
 
         ctx
