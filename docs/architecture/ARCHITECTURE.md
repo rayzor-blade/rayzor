@@ -61,13 +61,8 @@ the cheapest way to see what each IR actually holds.
 `CompilationUnit` is the entry point every command goes through: it discovers
 dependencies, orders compilation across files, and drives each stage above.
 
-Two things about that path are worth knowing before you go looking for them.
 **Type checking is not a separate phase** — it is folded into AST lowering, so
-inference and constraint solving live there rather than in a checker of their
-own. And the semantic-graph layer is **gated off** for a normal build: the CLI
-asks for analysis to be skipped, which disables lifetime, ownership, borrow
-checking, HIR validation and flow analysis. Macro expansion is deliberately
-exempt from that switch — it is a correctness feature, not analysis.
+inference and constraint solving live there.
 
 ---
 
@@ -86,10 +81,7 @@ versa.
   type unification. Consumers gate on `is_valid_ssa()` before reading anything.
 
 MIR's SSA is independent of this layer: MIR builds its own with
-`IrInstruction::Phi`, and the analysis graphs are never consulted during
-lowering. The SSA optimization-hint channel that carries HIR attributes down to
-lowering is scaffolding — it is wired end to end, but its only reader is itself
-unreachable, so nothing acts on the hints.
+`IrInstruction::Phi`.
 
 ### What actually rejects unsafe code
 
@@ -103,12 +95,6 @@ an `OwnershipGraph`, calls `check_use_after_move()`, then filters through
 | Type is `@:move` | hard **error**, fails compilation; takes precedence over Copy |
 | Type is Copy and not `@:move` | dropped — the graph records every reference as a move, so this removes false positives |
 | otherwise | warning (E0382) with a "consider cloning" help |
-
-MIR declares ownership vocabulary — `Move`, `BorrowImmutable`, `BorrowMutable`,
-`Clone`, and an `OwnershipMode` per call argument — but nothing in lowering
-emits `Move` or either borrow, and nothing populates the per-argument ownership
-mode. It is
-reserved vocabulary, not a live encoding.
 
 ---
 
@@ -283,19 +269,14 @@ execution counter to drain to zero (one-second timeout, then cancel), swaps
 pointers under a write lock, and returns to `Idle`. Installs are monotonic — a
 pointer for a function already at a higher tier is dropped.
 
-Two behaviours worth knowing before you benchmark:
+Every promotion compiles **all** loaded modules into a fresh backend, extracts
+the target pointer, and leaks the backend so its JIT memory outlives the swap.
+Compiling whole modules is what keeps cross-module calls resolvable: every callee
+is an internal symbol in the same compilation unit rather than an import to be
+satisfied at finalize.
 
-- Every promotion compiles **all** modules into a fresh backend and leaks it.
-  This is deliberate: per-function backends failed on cross-module calls, because
-  compiling one module declares its callees as imports that cannot be resolved at
-  finalize. Whole-module compiles make them internal symbols.
-- **Only zero-argument functions actually run through a JIT pointer.** Argument
-  marshalling from interpreter values to native types is unimplemented, so any
-  function with parameters falls back to the interpreter even when a compiled
-  pointer exists.
-
-The MIR interpreter also cannot execute vector instructions; functions using SIMD
-are pre-promoted to Baseline to avoid the bailout path.
+Functions that use SIMD are promoted to Baseline on first call, so vector work
+runs compiled from the start.
 
 Presets (`script`, `application`, `server`, `benchmark`, `development`,
 `embedded`) select whole configurations, including whether promotion happens at
@@ -437,8 +418,7 @@ never calls does not ship. It runs outside the pass pipeline.
 
 `rayzor debug` is a shipped toolkit: forensic run, multi-run bench, A/B compare
 across git refs, PC-to-Haxe-function resolution, an lldb wrapper, and a live
-metrics server with a browser dashboard. Neither backend emits DWARF debug
-info.
+metrics server with a browser dashboard.
 
 Tier transitions can be traced with `RAYZOR_PROFILE_TIER_EVENTS`; see the
 [CLI reference](../CLI.md) for the full environment-variable surface, and
