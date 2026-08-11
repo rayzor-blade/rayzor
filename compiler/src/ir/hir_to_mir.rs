@@ -19453,7 +19453,17 @@ impl<'a> HirToMirContext<'a> {
                     let callee_type = type_table.get(callee.ty);
                     if let Some(type_ref) = callee_type {
                         if let crate::tast::TypeKind::Function { params, .. } = &type_ref.kind {
-                            params.iter().map(|p| self.convert_type(*p)).collect()
+                            // `Void -> T` is Haxe's spelling for "takes nothing",
+                            // so a Void entry is notation rather than a slot. Left
+                            // in, the signature has a parameter no call site can
+                            // fill: LLVM rejects a Void parameter outright, and
+                            // Cranelift asserts on the argument count once the
+                            // closure is called with its environment.
+                            params
+                                .iter()
+                                .map(|p| self.convert_type(*p))
+                                .filter(|t| !matches!(t, IrType::Void))
+                                .collect()
                         } else {
                             // Fallback: infer from actual argument types
                             args.iter().map(|a| self.convert_type(a.ty)).collect()
@@ -26240,21 +26250,19 @@ impl<'a> HirToMirContext<'a> {
                         // itself (`nc(9)` dereferenced address 9), and at -O the
                         // register typed Ptr(U8) actually held a float, which
                         // crashed codegen comparing it against null.
-                        let param_is_optional_scalar = match type_table
-                            .get(resolved_param)
-                            .map(|t| &t.kind)
-                        {
-                            Some(TypeKind::Optional { inner_type }) => type_table
-                                .get(*inner_type)
-                                .map(|t| {
-                                    matches!(
-                                        t.kind,
-                                        TypeKind::Int | TypeKind::Float | TypeKind::Bool
-                                    )
-                                })
-                                .unwrap_or(false),
-                            _ => false,
-                        };
+                        let param_is_optional_scalar =
+                            match type_table.get(resolved_param).map(|t| &t.kind) {
+                                Some(TypeKind::Optional { inner_type }) => type_table
+                                    .get(*inner_type)
+                                    .map(|t| {
+                                        matches!(
+                                            t.kind,
+                                            TypeKind::Int | TypeKind::Float | TypeKind::Bool
+                                        )
+                                    })
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
                         matches!(
                             type_table.get(resolved_param).map(|t| &t.kind),
                             Some(TypeKind::Dynamic)
