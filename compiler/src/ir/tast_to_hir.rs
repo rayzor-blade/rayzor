@@ -1898,12 +1898,28 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
 
+                // `Class.method(..)` reaches here as a FunctionCall over a
+                // StaticFieldAccess. The callee lowers to a bare
+                // `Variable{field_symbol}`, which drops the class, so record it
+                // in the target — it is the one piece HIR could not otherwise
+                // represent.
+                let target = match &function.kind {
+                    TypedExpressionKind::StaticFieldAccess {
+                        class_symbol,
+                        field_symbol,
+                    } => CallTarget::Static {
+                        class: *class_symbol,
+                        method: *field_symbol,
+                    },
+                    _ => CallTarget::Function,
+                };
+
                 HirExprKind::Call {
-                    target: CallTarget::Function,
+                    target,
                     callee: Box::new(self.lower_expression(function)),
                     type_args: type_arguments.clone(),
                     args: arguments.iter().map(|a| self.lower_expression(a)).collect(),
-                    is_method: false, // TODO: Determine from context
+                    is_method: false,
                 }
             }
             TypedExpressionKind::MethodCall {
