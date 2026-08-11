@@ -1,14 +1,17 @@
-//! HIR to MIR Lowering
+//! HIR to MIR lowering.
 //!
-//! This module converts High-level IR (HIR) to Mid-level IR (MIR).
+//! MIR is SSA with phi nodes; HIR is not. Lowering therefore does three things
+//! at once: it flattens control flow into basic blocks, resolves HIR names to
+//! MIR ids, and inserts the boxing, drops and dispatch that the source leaves
+//! implicit.
 //!
-//! According to the architecture plan:
-//! - HIR: Close to source, with high-level constructs preserved
-//! - MIR: SSA form with phi nodes, ready for optimization
-//! - LIR: Target-specific, close to machine code
+//! `HirToMirContext` carries the whole of that state and is implemented across
+//! this directory:
 //!
-//! The existing IR implementation (with IrBuilder, optimization passes, etc.)
-//! serves as our MIR level.
+//! - `decl` — what must exist before any body is lowered: signatures, metadata, vtables
+//! - `stmt`, `expr`, `field` — the lowering itself
+//! - `resolve` — HIR names and symbols to MIR ids
+//! - `helpers` — shared utilities: boxing, drops, allocation, type ids
 
 use crate::ir::drop_analysis::{DropBehavior, DropPointAnalyzer, DropPoints};
 use crate::ir::hir::*;
@@ -34,7 +37,7 @@ use std::rc::Rc;
 /// MIR value as a `DynamicValue*`. Keeps the runtime-symbol names
 /// centralised in `box_primitive_as_dynamic`.
 #[derive(Clone, Copy, Debug)]
-enum PrimBoxKind {
+pub(crate) enum PrimBoxKind {
     Int,
     Float,
     Bool,
@@ -42,7 +45,7 @@ enum PrimBoxKind {
 
 /// Layout information for a single field in a @:cstruct class
 #[derive(Debug, Clone)]
-struct CStructFieldLayout {
+pub(crate) struct CStructFieldLayout {
     symbol_id: SymbolId,
     name: String,
     byte_offset: u32,
@@ -52,7 +55,7 @@ struct CStructFieldLayout {
 
 /// Precomputed C-compatible layout for a @:cstruct class
 #[derive(Debug, Clone)]
-struct CStructLayout {
+pub(crate) struct CStructLayout {
     fields: Vec<CStructFieldLayout>,
     total_size: u32,
     alignment: u32,
@@ -67,7 +70,7 @@ struct CStructLayout {
 
 /// Layout information for a single field in a @:gpuStruct class
 #[derive(Debug, Clone)]
-struct GpuStructFieldLayout {
+pub(crate) struct GpuStructFieldLayout {
     symbol_id: SymbolId,
     name: String,
     byte_offset: u32,
@@ -84,7 +87,7 @@ struct GpuStructFieldLayout {
 
 /// Precomputed GPU-compatible layout for a @:gpuStruct class
 #[derive(Debug, Clone)]
-struct GpuStructLayout {
+pub(crate) struct GpuStructLayout {
     fields: Vec<GpuStructFieldLayout>,
     total_size: u32,
     alignment: u32,
@@ -569,7 +572,7 @@ pub struct HirToMirContext<'a> {
 /// Used for deferred structural subtyping: the variable holds the original value
 /// (class pointer or wider anon handle), and field access is redirected at compile time.
 #[derive(Debug, Clone)]
-enum AnonBacking {
+pub(crate) enum AnonBacking {
     /// Value is a class pointer. Access fields via GEP at mapped indices.
     Class {
         class_symbol: SymbolId,
@@ -587,7 +590,7 @@ enum AnonBacking {
 
 /// TCC runtime function IDs for __c__ inline code lowering
 #[derive(Debug, Clone, Copy)]
-struct TccFuncIds {
+pub(crate) struct TccFuncIds {
     create: IrFunctionId,           // rayzor_tcc_create() -> I64
     compile: IrFunctionId,          // rayzor_tcc_compile(I64, PtrString) -> I32
     add_value_symbol: IrFunctionId, // rayzor_tcc_add_value_symbol(I64, PtrString, I64) -> I64
@@ -606,7 +609,7 @@ struct TccFuncIds {
 /// SSA-derived optimization hints from DFG analysis
 /// These guide MIR generation and optimization without rebuilding SSA
 #[derive(Debug, Default)]
-struct SsaOptimizationHints {
+pub(crate) struct SsaOptimizationHints {
     /// Functions that are inline candidates (small, simple control flow)
     inline_candidates: BTreeSet<SymbolId>,
 
@@ -621,7 +624,7 @@ struct SsaOptimizationHints {
 }
 
 #[derive(Debug)]
-struct LoopContext {
+pub(crate) struct LoopContext {
     continue_block: IrBlockId,
     break_block: IrBlockId,
     label: Option<SymbolId>,
@@ -644,14 +647,14 @@ pub struct LoweringError {
 /// Outcome of resolving a field's (class, slot) by bare name. `Ambiguous`
 /// carries candidates that DISAGREE on the slot — consuming callers must
 /// hard-fail rather than pick one; existence probes may treat it as "found".
-enum FieldIndexResolution {
+pub(crate) enum FieldIndexResolution {
     None,
     Unique(TypeId, u32),
     Ambiguous(Vec<(TypeId, u32)>),
 }
 
 /// Context for lambda function generation (Two-Pass Architecture)
-struct LambdaContext {
+pub(crate) struct LambdaContext {
     /// The function ID of the lambda
     func_id: IrFunctionId,
     /// Entry block of the lambda
@@ -663,7 +666,7 @@ struct LambdaContext {
 }
 
 /// Saved state for restoring after lambda generation
-struct SavedLoweringState {
+pub(crate) struct SavedLoweringState {
     current_function: Option<IrFunctionId>,
     current_block: Option<IrBlockId>,
     symbol_map: BTreeMap<SymbolId, IrId>,
@@ -775,11 +778,17 @@ fn lookup_class_field_gep(class_name: &str, field_name: &str) -> Option<u32> {
         .map(|(_, idx)| *idx)
 }
 
+mod decl;
+mod expr;
+mod expr_inner;
+mod field;
+mod helpers;
 /// `HirToMirContext`'s methods, split out to keep this file navigable.
-mod impl_all;
+mod resolve;
+mod stmt;
+mod types;
 
-
-enum MirBinaryOp {
+pub(crate) enum MirBinaryOp {
     Binary(BinaryOp),
     Compare(CompareOp),
 }
@@ -1080,4 +1089,137 @@ pub fn lower_hir_to_mir_with_function_map(
         function_param_hir_types: context.function_param_hir_types,
         diagnostics: context.diagnostics,
     })
+}
+
+impl<'a> HirToMirContext<'a> {
+    /// Create a new lowering context
+    pub fn new(
+        module_name: String,
+        source_file: String,
+        string_interner: &'a StringInterner,
+        type_table: &'a TypeTable,
+        hir_types: &'a indexmap::IndexMap<TypeId, HirTypeDecl>,
+        symbol_table: &'a SymbolTable,
+        stdlib_mapping: StdlibMapping,
+    ) -> Self {
+        let mut ctx = Self {
+            builder: IrBuilder::new(module_name.clone(), source_file),
+            symbol_map: BTreeMap::new(),
+            symbol_ir_types: BTreeMap::new(),
+            symbol_type_ids: BTreeMap::new(),
+            object_literal_target_ty: None,
+            let_target_type_hint: None,
+            function_map: BTreeMap::new(),
+            global_symbol_map: BTreeMap::new(),
+            external_globals: BTreeMap::new(),
+            external_function_map: BTreeMap::new(),
+            external_function_name_map: BTreeMap::new(),
+            block_map: BTreeMap::new(),
+            loop_stack: Vec::new(),
+            loop_carried_symbols: Vec::new(),
+            current_module: Some(module_name),
+            current_class_symbol: None,
+            errors: Vec::new(),
+            diagnostics: Vec::new(),
+            ssa_hints: SsaOptimizationHints::default(),
+            lambda_counter: 0,
+            dynamic_globals: Vec::new(),
+            string_interner,
+            type_table,
+            closure_environments: BTreeMap::new(),
+            field_index_map: BTreeMap::new(),
+            fields_by_type_cache: None,
+            typedef_field_map: BTreeMap::new(),
+            property_access_map: BTreeMap::new(),
+            constructor_map: BTreeMap::new(),
+            constructor_reflect_wrappers: BTreeMap::new(),
+            method_ref_thunks: BTreeMap::new(),
+            vtable_dispatch_thunks: BTreeMap::new(),
+            constructor_name_map: BTreeMap::new(),
+            constructor_owner_map: BTreeMap::new(),
+            current_hir_types: hir_types,
+            stdlib_mapping,
+            symbol_table,
+            current_env_layout: None,
+            current_this_type: None,
+            monomorphized_var_types: BTreeMap::new(),
+            register_class_hints: BTreeMap::new(),
+            interface_call_result_types: BTreeMap::new(),
+            boxed_value_regs: BTreeSet::new(),
+            var_concrete_overrides: BTreeMap::new(),
+            iface_diag_seen: BTreeSet::new(),
+            enums_for_registration: BTreeMap::new(),
+            next_wrapper_id: 0,
+            // Drop tracking initialization
+            owned_heap_values: BTreeMap::new(),
+            drop_scope_stack: Vec::new(),
+            temp_heap_values: Vec::new(),
+            current_drop_points: None,
+            current_stmt_index: 0,
+            reassigned_in_scope: BTreeSet::new(),
+            cstruct_layouts: BTreeMap::new(),
+            gpu_struct_layouts: BTreeMap::new(),
+            tcc_func_ids: None,
+            current_function_symbol: None,
+            anonymous_shapes: BTreeMap::new(),
+            next_anon_shape_id: 0,
+            interface_method_names: BTreeMap::new(),
+            interface_method_return_types: BTreeMap::new(),
+            interface_vtables: BTreeMap::new(),
+            interface_extends: BTreeMap::new(),
+            interface_wrapped_args: std::collections::BTreeSet::new(),
+            class_method_symbols: BTreeMap::new(),
+            constrained_param_interfaces: BTreeMap::new(),
+            abstract_from_rules: BTreeMap::new(),
+            abstract_to_rules: BTreeMap::new(),
+            abstract_forward_rules: BTreeMap::new(),
+            boxed_dynamic_symbols: BTreeSet::new(),
+            value_type_symbols: BTreeSet::new(),
+            raw_anon_symbols: BTreeSet::new(),
+            class_alloc_sizes: BTreeMap::new(),
+            class_alloc_sizes_by_name: BTreeMap::new(),
+            static_sig_index: None,
+            class_type_to_symbol: BTreeMap::new(),
+            field_class_names: BTreeMap::new(),
+            override_methods: BTreeSet::new(),
+            class_parent_map: BTreeMap::new(),
+            class_method_by_name: BTreeMap::new(),
+            class_virtual_slots: BTreeMap::new(),
+            class_vtables: BTreeMap::new(),
+            virtual_dispatch_info: BTreeMap::new(),
+            function_param_defaults: BTreeMap::new(),
+            external_constructor_param_counts: BTreeMap::new(),
+            external_function_param_types: BTreeMap::new(),
+            function_param_hir_types: BTreeMap::new(),
+            external_function_param_iface_names: BTreeMap::new(),
+            current_function_return_type: None,
+            anon_views: BTreeMap::new(),
+            async_result_registers: BTreeSet::new(),
+            derive_partial_eq_classes: BTreeSet::new(),
+            derive_partial_ord_classes: BTreeSet::new(),
+            derive_hash_classes: BTreeSet::new(),
+            derive_clone_classes: BTreeSet::new(),
+            derive_move_classes: BTreeSet::new(),
+            derive_shared_classes: BTreeSet::new(),
+            strict_move_locals: BTreeSet::new(),
+            derive_clone_extern_fns: BTreeMap::new(),
+            derive_copy_classes: BTreeSet::new(),
+            derive_drop_classes: BTreeSet::new(),
+            ir_to_drop_class: BTreeMap::new(),
+            manual_drop_classes: BTreeSet::new(),
+            derive_debug_classes: BTreeSet::new(),
+            derive_default_classes: BTreeSet::new(),
+            class_instance_fields: BTreeMap::new(),
+            dbg_type_meta_calls: 0,
+            field_default_exprs: BTreeMap::new(),
+            debug_format_strings: BTreeMap::new(),
+        };
+
+        // Pre-declare malloc so it's available for heap allocations during lowering
+        ctx.declare_malloc();
+        // Pre-declare free so it's available for drop semantics
+        ctx.declare_free();
+
+        ctx
+    }
 }
