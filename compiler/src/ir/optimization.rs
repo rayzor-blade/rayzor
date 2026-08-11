@@ -1400,10 +1400,17 @@ impl OptimizationPass for CSEPass {
 
 /// Global Load Caching pass
 ///
-/// Within each function, if the same global is loaded multiple times and never
-/// stored to, replace all loads after the first with the cached value.
-/// This eliminates expensive runtime BTreeMap lookups (rayzor_global_load) in
-/// hot loops that repeatedly access static class fields.
+/// If the same global is loaded multiple times and is never stored to, replace
+/// all loads after the first with the cached value. This eliminates expensive
+/// runtime BTreeMap lookups (rayzor_global_load) in hot loops that repeatedly
+/// access static class fields.
+///
+/// "Never stored to" means never stored ANYWHERE, and a call counts as a
+/// clobber. Both conditions are load-bearing: judging read-only-ness from the
+/// loading function alone silently miscompiled `buf = grow(buf, n)` — the store
+/// lives inside `grow`, so the caller saw a global it never wrote, cached the
+/// pre-call value, and every later read of that static returned its initial
+/// value forever while `grow` saw the new one. A `static var` read as two.
 pub struct GlobalLoadCachingPass;
 
 impl GlobalLoadCachingPass {
@@ -1422,33 +1429,71 @@ impl OptimizationPass for GlobalLoadCachingPass {
 
         let mut result = OptimizationResult::unchanged();
 
+        // "Never stored to" has to mean never stored ANYWHERE, not merely in the
+        // function doing the loading. Computed per-function, a callee's store
+        // went unseen: `buf = grow(buf, n)` stores inside `grow`, so the caller
+        // saw a global it never wrote itself, judged it read-only, and reused
+        // the pre-call value for every later read. The static then appeared to
+        // hold its initial value forever, while the function that assigned it
+        // saw the new one — one `static var` reading as two.
+        let module_stored_globals: BTreeSet<IrGlobalId> = module
+            .functions
+            .values()
+            .flat_map(|f| f.cfg.blocks.values())
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|inst| match inst {
+                IrInstruction::StoreGlobal { global_id, .. } => Some(*global_id),
+                _ => None,
+            })
+            .collect();
+
         for function in module.functions.values_mut() {
-            // Find all globals that are stored to in this function
-            let mut stored_globals: BTreeSet<IrGlobalId> = BTreeSet::new();
-            for block in function.cfg.blocks.values() {
-                for inst in &block.instructions {
-                    if let IrInstruction::StoreGlobal { global_id, .. } = inst {
-                        stored_globals.insert(*global_id);
-                    }
-                }
-            }
+            // A call is a clobber barrier on its own, independently of the set
+            // above: the callee may store this global, and it may live in a
+            // module this pass never sees (imported globals are merged into the
+            // table, so a store made by the DEFINING module is not in
+            // `module_stored_globals`). Forward only across call-free stretches.
+            let call_indices: BTreeMap<IrBlockId, Vec<usize>> = function
+                .cfg
+                .blocks
+                .iter()
+                .map(|(&block_id, block)| {
+                    let calls = block
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, inst)| {
+                            matches!(
+                                inst,
+                                IrInstruction::CallDirect { .. }
+                                    | IrInstruction::CallIndirect { .. }
+                            )
+                        })
+                        .map(|(idx, _)| idx)
+                        .collect();
+                    (block_id, calls)
+                })
+                .collect();
+            let call_free_function = call_indices.values().all(|c| c.is_empty());
 
             // Collect all LoadGlobal instructions with their locations
             let domtree = DominatorTree::compute(function);
 
-            // Map: global_id -> Vec<(block_id, dest_id)> for read-only globals
-            let mut global_loads: BTreeMap<IrGlobalId, Vec<(IrBlockId, IrId)>> = BTreeMap::new();
+            // Map: global_id -> Vec<(block_id, inst_index, dest_id)> for
+            // globals nothing in the module stores.
+            let mut global_loads: BTreeMap<IrGlobalId, Vec<(IrBlockId, usize, IrId)>> =
+                BTreeMap::new();
             for (&block_id, block) in &function.cfg.blocks {
-                for inst in &block.instructions {
+                for (inst_idx, inst) in block.instructions.iter().enumerate() {
                     if let IrInstruction::LoadGlobal {
                         dest, global_id, ..
                     } = inst
                     {
-                        if !stored_globals.contains(global_id) {
+                        if !module_stored_globals.contains(global_id) {
                             global_loads
                                 .entry(*global_id)
                                 .or_default()
-                                .push((block_id, *dest));
+                                .push((block_id, inst_idx, *dest));
                         }
                     }
                 }
@@ -1480,14 +1525,37 @@ impl OptimizationPass for GlobalLoadCachingPass {
                 // For each pair, if the first load's block dominates the second's
                 // AND dominates all blocks where the second's value is used,
                 // then it's safe to replace.
+                // Reusing an earlier load is only valid if no call could have
+                // run in between. With calls present, dominance says nothing
+                // about what a callee did to the global, so fall back to
+                // straight-line reuse inside one block with no call between the
+                // two loads.
+                let reachable_without_call =
+                    |ba: IrBlockId, ia: usize, bb: IrBlockId, ib: usize| {
+                        if call_free_function {
+                            return true;
+                        }
+                        if ba != bb {
+                            return false;
+                        }
+                        let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                        call_indices
+                            .get(&ba)
+                            .map(|calls| !calls.iter().any(|&c| c > lo && c < hi))
+                            .unwrap_or(true)
+                    };
+
                 for i in 0..loads.len() {
-                    let (block_a, dest_a) = loads[i];
+                    let (block_a, idx_a, dest_a) = loads[i];
                     if all_replacements.contains_key(&dest_a) {
                         continue; // Already replaced
                     }
                     for j in (i + 1)..loads.len() {
-                        let (block_b, dest_b) = loads[j];
+                        let (block_b, idx_b, dest_b) = loads[j];
                         if all_replacements.contains_key(&dest_b) {
+                            continue;
+                        }
+                        if !reachable_without_call(block_a, idx_a, block_b, idx_b) {
                             continue;
                         }
                         // Check if block_a dominates block_b
