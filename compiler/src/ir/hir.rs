@@ -285,6 +285,21 @@ pub struct HirExpr {
     pub source_location: SourceLocation,
 }
 
+/// How the type checker resolved a call.
+///
+/// TAST distinguishes `FunctionCall`, `MethodCall` and `StaticMethodCall` and
+/// carries the resolved symbols; this preserves that through HIR instead of
+/// making lowering re-derive it from the callee expression's shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallTarget {
+    /// Callee is an arbitrary expression that yields something callable.
+    Function,
+    /// `receiver.method(..)` with the method resolved.
+    Method { method: SymbolId },
+    /// `Class.method(..)` with both resolved.
+    Static { class: SymbolId, method: SymbolId },
+}
+
 /// HIR Expression kinds
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
@@ -315,6 +330,10 @@ pub enum HirExprKind {
         type_args: Vec<TypeId>,
         args: Vec<HirExpr>,
         is_method: bool,
+        /// Which call form the type checker resolved this to. Lowering used to
+        /// recover this by matching on the shape of `callee`; carrying it here
+        /// keeps the answer TAST already had.
+        target: CallTarget,
     },
 
     // === Constructor call ===

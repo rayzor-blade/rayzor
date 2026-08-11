@@ -1899,6 +1899,7 @@ impl<'a> TastToHirContext<'a> {
                 }
 
                 HirExprKind::Call {
+                    target: CallTarget::Function,
                     callee: Box::new(self.lower_expression(function)),
                     type_args: type_arguments.clone(),
                     args: arguments.iter().map(|a| self.lower_expression(a)).collect(),
@@ -1950,6 +1951,9 @@ impl<'a> TastToHirContext<'a> {
                     call_args.extend(arguments.iter().map(|a| self.lower_expression(a)));
                     let then_expr = HirExpr::new(
                         HirExprKind::Call {
+                            target: CallTarget::Method {
+                                method: *method_symbol,
+                            },
                             callee: Box::new(HirExpr::new(
                                 HirExprKind::Variable {
                                     symbol: *method_symbol,
@@ -2046,6 +2050,9 @@ impl<'a> TastToHirContext<'a> {
                 }
 
                 HirExprKind::Call {
+                    target: CallTarget::Method {
+                        method: *method_symbol,
+                    },
                     callee: Box::new(HirExpr::new(
                         HirExprKind::Variable {
                             symbol: *method_symbol,
@@ -2990,6 +2997,10 @@ impl<'a> TastToHirContext<'a> {
                         .unwrap_or(expr.expr_type);
 
                     HirExprKind::Call {
+                        target: CallTarget::Static {
+                            class: *class_symbol,
+                            method: *method_symbol,
+                        },
                         callee: Box::new(HirExpr::new(
                             HirExprKind::Field {
                                 object: Box::new(HirExpr::new(
@@ -3130,6 +3141,7 @@ impl<'a> TastToHirContext<'a> {
             } => {
                 // Macro expression — lower as a function call
                 HirExprKind::Call {
+                    target: CallTarget::Function,
                     callee: Box::new(HirExpr::new(
                         HirExprKind::Variable {
                             symbol: *macro_symbol,
@@ -5181,6 +5193,9 @@ impl<'a> TastToHirContext<'a> {
 
                 HirExpr::new(
                     HirExprKind::Call {
+                        target: CallTarget::Method {
+                            method: *method_symbol,
+                        },
                         callee: Box::new(HirExpr::new(
                             HirExprKind::Variable {
                                 symbol: *method_symbol,
