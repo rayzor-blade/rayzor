@@ -124,8 +124,6 @@ This document tracks major features, enhancements, and technical debt for the Ra
 - [x] Placeholder type resolution for extern class field access — resolve_through_aliases handles TypeKind::Placeholder by searching type_table for matching class names. Placeholder-specific handler in get_stdlib_runtime_info routes extern fields (e.g., Bytes.length) through stdlib mapping (2026-03-12)
 - [x] Failed function tracking in cranelift_backend — functions with unresolved type_params or calling failed functions are skipped with trap stubs, preventing ABI assertion panics (2026-03-12)
 
-**Reference:** Based on Zyntax proven approach - see GENERICS_DESIGN.md
-
 ### 1.6 Standard Library Generics
 
 **Status:** 🟢 Complete
