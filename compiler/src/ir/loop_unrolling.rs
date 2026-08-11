@@ -502,6 +502,12 @@ fn fully_unroll_loop(
     // in the simple unrolling case — the body block has the useful work.
     let _ = header_block;
 
+    // Every body instruction has to survive register remapping, or the copies
+    // share registers with each other and with the original.
+    if !body_instructions.iter().all(is_remappable) {
+        return false;
+    }
+
     // Generate unrolled instructions
     let mut unrolled_instructions: Vec<IrInstruction> = Vec::new();
     let mut reg_id = function.next_reg_id;
@@ -734,9 +740,51 @@ fn remap_instruction(
             dest: alloc_new(*dest, next_reg, reg_map, register_types),
             func_id: *func_id,
         },
-        // For other instruction types, clone as-is (conservative)
+        IrInstruction::LoadGlobal {
+            dest,
+            global_id,
+            ty,
+        } => IrInstruction::LoadGlobal {
+            dest: alloc_new(*dest, next_reg, reg_map, register_types),
+            global_id: *global_id,
+            ty: ty.clone(),
+        },
+        IrInstruction::StoreGlobal { global_id, value } => IrInstruction::StoreGlobal {
+            global_id: *global_id,
+            value: map_use(*value, reg_map),
+        },
+        // Unreachable: `is_remappable` gates unrolling on the arms above, so an
+        // instruction that would be cloned unchanged never reaches here. Cloning
+        // as-is would keep the original dest and operands, giving every copy the
+        // same register.
         other => other.clone(),
     }
+}
+
+/// Whether `remap_instruction` can faithfully clone this instruction.
+///
+/// Cloning an unhandled instruction unchanged reuses its dest across every
+/// unrolled copy and leaves its operands pointing at the original iteration's
+/// registers, so a loop containing one must not be unrolled at all.
+fn is_remappable(inst: &IrInstruction) -> bool {
+    matches!(
+        inst,
+        IrInstruction::Const { .. }
+            | IrInstruction::BinOp { .. }
+            | IrInstruction::UnOp { .. }
+            | IrInstruction::Load { .. }
+            | IrInstruction::Store { .. }
+            | IrInstruction::GetElementPtr { .. }
+            | IrInstruction::CallDirect { .. }
+            | IrInstruction::CallIndirect { .. }
+            | IrInstruction::Cast { .. }
+            | IrInstruction::BitCast { .. }
+            | IrInstruction::PtrAdd { .. }
+            | IrInstruction::Cmp { .. }
+            | IrInstruction::FunctionRef { .. }
+            | IrInstruction::LoadGlobal { .. }
+            | IrInstruction::StoreGlobal { .. }
+    )
 }
 
 /// Replace a block target in a terminator.
