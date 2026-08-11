@@ -9938,6 +9938,26 @@ impl<'a> HirToMirContext<'a> {
                 // target themselves until they are replaced by a match on this.
                 target: _resolved_target,
             } => {
+                // RAYZOR_PROBE_CALLTARGET=1 tabulates (target, callee shape) so
+                // the carried target can be checked against what the shape
+                // probes below discriminate on, before anything dispatches on it.
+                if std::env::var_os("RAYZOR_PROBE_CALLTARGET").is_some() {
+                    let t = match _resolved_target {
+                        crate::ir::hir::CallTarget::Function => "Function",
+                        crate::ir::hir::CallTarget::Method { .. } => "Method",
+                        crate::ir::hir::CallTarget::Static { .. } => "Static",
+                    };
+                    let shape = match &callee.kind {
+                        HirExprKind::Field { object, .. } => match &object.kind {
+                            HirExprKind::Variable { .. } => "Field(Variable)",
+                            _ => "Field(other)",
+                        },
+                        HirExprKind::Variable { .. } => "Variable",
+                        HirExprKind::Super => "Super",
+                        _ => "other",
+                    };
+                    eprintln!("[calltarget] {} {} is_method={}", t, shape, is_method);
+                }
                 // @:shader wgsl() — intercept at Call entry point
                 if let HirExprKind::Field { object, field } = &callee.kind {
                     let field_name_check = self
