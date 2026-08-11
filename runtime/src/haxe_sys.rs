@@ -3350,6 +3350,58 @@ pub extern "C" fn haxe_bytes_length(bytes: *const HaxeBytes) -> i32 {
 #[no_mangle]
 pub extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// Return freed-but-retained pages to the OS.
+///
+/// `free()` hands memory back to the allocator, NOT to the kernel, and the
+/// pages stay dirty and stay counted in the process footprint. Measured on
+/// Mistral-7B mid-decode: `MALLOC_LARGE (empty)` held 139 MB — entirely
+/// freed allocations, 139 MB dirty, 0 swapped — on top of a 4.1 GB model. So
+/// releasing a large scratch buffer does not by itself reduce residency;
+/// something has to ask the allocator to give the pages up.
+///
+/// Call this after a phase that frees something big (prefill scratch, a
+/// finished request), NOT per token: on macOS it walks the zone's free
+/// regions, which costs time proportional to how much it can return.
+///
+/// `goal_kb` is how much to try to reclaim, in KiB; 0 means "as much as
+/// possible". A no-op, never an error, where the platform offers no such call.
+/// `RAYZOR_DBG_TRIM=1` reports what the allocator actually gave up — the call
+/// is advisory, so a silent zero is a normal outcome worth being able to see.
+#[no_mangle]
+pub extern "C" fn rayzor_mem_release_free_pages(goal_kb: i32) {
+    let goal_bytes = if goal_kb <= 0 {
+        0usize
+    } else {
+        (goal_kb as usize).saturating_mul(1024)
+    };
+    let _ = goal_bytes;
+    #[cfg(target_os = "macos")]
+    {
+        // Zone NULL = every zone.
+        let freed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), goal_bytes) };
+        if std::env::var_os("RAYZOR_DBG_TRIM").is_some() {
+            eprintln!("[trim] released {} KB", freed / 1024);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let rc = unsafe { malloc_trim(0) };
+        if std::env::var_os("RAYZOR_DBG_TRIM").is_some() {
+            eprintln!("[trim] malloc_trim -> {rc}");
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn haxe_bytes_data_address(bytes: *const HaxeBytes) -> i64 {
     if bytes.is_null() {
