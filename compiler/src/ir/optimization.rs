@@ -206,10 +206,22 @@ impl PassManager {
         let mut total_result = OptimizationResult::unchanged();
         let max_pipeline_iterations = 5;
 
+        // Comma-separated pass names to skip, for bisecting a miscompile down to
+        // the pass that causes it without a rebuild per candidate.
+        let disabled = std::env::var("RAYZOR_DISABLE_PASSES").unwrap_or_default();
+        let disabled: Vec<&str> = disabled
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         for _pipeline_iter in 0..max_pipeline_iterations {
             let mut transformative_change = false;
 
             for pass in &mut self.passes {
+                if disabled.contains(&pass.name()) {
+                    continue;
+                }
                 let result = pass.run_on_module(module);
                 if result.modified {
                     // Only re-iterate if a transformative pass (not just cleanup) changed things
@@ -932,7 +944,44 @@ fn collect_terminator_uses(terminator: &IrTerminator, set: &mut BTreeSet<IrId>) 
 /// - Are themselves loop-invariant
 pub struct LICMPass;
 
+/// What a loop body can write, so a memory read inside it can be judged.
+#[derive(Default)]
+struct LoopClobbers {
+    any_call: bool,
+    any_store: bool,
+    stored_globals: BTreeSet<IrGlobalId>,
+}
+
 impl LICMPass {
+    /// Collect what the loop writes. A call is treated as writing everything:
+    /// the callee may store any global or through any pointer, possibly from a
+    /// module this pass never sees.
+    fn loop_clobbers(
+        cfg: &super::IrControlFlowGraph,
+        loop_blocks: &BTreeSet<IrBlockId>,
+    ) -> LoopClobbers {
+        let mut c = LoopClobbers::default();
+        for &block_id in loop_blocks {
+            let Some(block) = cfg.get_block(block_id) else {
+                continue;
+            };
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. } => {
+                        c.any_call = true;
+                    }
+                    IrInstruction::StoreGlobal { global_id, .. } => {
+                        c.stored_globals.insert(*global_id);
+                    }
+                    IrInstruction::Store { .. } => {
+                        c.any_store = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        c
+    }
     pub fn new() -> Self {
         Self
     }
@@ -943,10 +992,30 @@ impl LICMPass {
         loop_blocks: &BTreeSet<IrBlockId>,
         def_block: &BTreeMap<IrId, IrBlockId>,
         invariant_defs: &BTreeSet<IrId>,
+        clobbers: &LoopClobbers,
     ) -> bool {
         // Instructions with side effects are not loop-invariant
         if inst.has_side_effects() {
             return false;
+        }
+
+        // A read has no operands to disqualify it and no side effects, so the
+        // operand walk below would call it invariant even when the loop writes
+        // the very location being read. Judge it against what the body writes:
+        // a call can write anything, including through a module this pass never
+        // sees.
+        match inst {
+            IrInstruction::LoadGlobal { global_id, .. } => {
+                if clobbers.any_call || clobbers.stored_globals.contains(global_id) {
+                    return false;
+                }
+            }
+            IrInstruction::Load { .. } => {
+                if clobbers.any_call || clobbers.any_store {
+                    return false;
+                }
+            }
+            _ => {}
         }
 
         // Check if all uses are defined outside the loop or are invariant
@@ -1102,6 +1171,7 @@ impl OptimizationPass for LICMPass {
 
             // Process loops from innermost to outermost
             for loop_data in loop_info.loops_innermost_first() {
+                let clobbers = Self::loop_clobbers(&function.cfg, &loop_data.blocks);
                 let mut invariant_defs: BTreeSet<IrId> = BTreeSet::new();
                 let mut to_hoist: Vec<(IrBlockId, usize, IrInstruction)> = Vec::new();
 
@@ -1127,6 +1197,7 @@ impl OptimizationPass for LICMPass {
                                         &loop_data.blocks,
                                         &def_block,
                                         &invariant_defs,
+                                        &clobbers,
                                     ) && Self::is_safe_to_hoist(
                                         inst, block_id, loop_data, &domtree,
                                     ) {
