@@ -92,7 +92,6 @@
      - Lambda function generation working
      - Cranelift codegen implemented
      - Test passing: [test_closure_infrastructure.rs](examples/test_closure_infrastructure.rs)
-     - Docs: [CLOSURE_IMPLEMENTATION.md](CLOSURE_IMPLEMENTATION.md)
    - [x] ~~Complete lambda body lowering~~ ✅ **COMPLETED 2025-01-13**
      - Lambda bodies now contain actual executable code (not stubs)
      - Parameters accessible within lambda bodies
