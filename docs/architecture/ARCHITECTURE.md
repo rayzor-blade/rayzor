@@ -58,22 +58,16 @@ every backend — that is the whole reason for the split.
 `rayzor compile --stage {ast,tast,hir,mir,native}` stops at any level, which is
 the cheapest way to see what each IR actually holds.
 
-### Two pipeline drivers — know which one you are reading
+`CompilationUnit` is the entry point every command goes through: it discovers
+dependencies, orders compilation across files, and drives each stage above.
 
-`Pipeline` has tidy numbered stages and reads like the reference
-implementation. **It is not what the CLI runs.** Every command drives
-`CompilationUnit` instead.
-
-Three consequences that will otherwise cost you an afternoon:
-
-- **Type checking is inline in AST lowering**, not a separate phase. The
-  standalone `TypeCheckingPhase` has no caller outside `Pipeline` and its tests.
-- **Semantic graphs are not built on the production path.** `CompilationUnit`
-  passes `None` into HIR lowering. The layer is reached only through `Pipeline`
-  and the ownership check.
-- Every CLI entry calls `skip_analysis()`, which disables lifetime, ownership,
-  borrow checking, semantic analysis, HIR validation and flow analysis. Macro expansion is deliberately **not** disabled — it is a
-  correctness feature, not analysis.
+Two things about that path are worth knowing before you go looking for them.
+**Type checking is not a separate phase** — it is folded into AST lowering, so
+inference and constraint solving live there rather than in a checker of their
+own. And the semantic-graph layer is **gated off** for a normal build: the CLI
+asks for analysis to be skipped, which disables lifetime, ownership, borrow
+checking, HIR validation and flow analysis. Macro expansion is deliberately
+exempt from that switch — it is a correctness feature, not analysis.
 
 ---
 
@@ -83,21 +77,19 @@ User-facing diagnostics and compiler-internal analysis are different
 subsystems, so error quality does not depend on optimizer internals or vice
 versa.
 
-- `TypeFlowGuard` orchestrates the CFG analyzer plus
-  the lifetime and ownership analyzers, producing `FlowSafetyError`s
-  (uninitialized variable, null dereference, dead code) that become user-visible
-  warnings or errors.
-- The semantic-graph layer is compiler-internal: TAST → CFG → DFG, plus a call graph and
-  an ownership graph. The DFG is textbook SSA: dominance tree, phi placement from
-  dominance frontiers, renaming, then phi-operand completion with type
-  unification. Consumers gate on `is_valid_ssa()` before reading anything.
+- `TypeFlowGuard` drives the CFG analyzer plus the lifetime and ownership
+  analyzers, producing flow-safety errors — uninitialized variable, null
+  dereference, dead code — that surface as user-visible warnings or errors.
+- The semantic-graph layer is compiler-internal: TAST → CFG → DFG, plus a call
+  graph and an ownership graph. The DFG is textbook SSA — dominance tree, phi
+  placement from dominance frontiers, renaming, then phi-operand completion with
+  type unification. Consumers gate on `is_valid_ssa()` before reading anything.
 
-Two corrections to older documentation. MIR's SSA does **not** come from the
-semantic-graph layer — MIR builds its own with `IrInstruction::Phi`, and the
-analysis layer is never consulted during lowering. And the SSA optimization-hint
-channel (HIR attributes → `SsaOptimizationHints`) exists end to end but is
-inert: its only reader is a lowering entry point that is itself dead code. Treat
-it as scaffolding.
+MIR's SSA is independent of this layer: MIR builds its own with
+`IrInstruction::Phi`, and the analysis graphs are never consulted during
+lowering. The SSA optimization-hint channel that carries HIR attributes down to
+lowering is scaffolding — it is wired end to end, but its only reader is itself
+unreachable, so nothing acts on the hints.
 
 ### What actually rejects unsafe code
 
