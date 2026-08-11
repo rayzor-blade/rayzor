@@ -9934,6 +9934,9 @@ impl<'a> HirToMirContext<'a> {
                 args,
                 is_method,
                 type_args: hir_type_args,
+                // Carried from TAST; the shape probes below still derive the
+                // target themselves until they are replaced by a match on this.
+                target: _resolved_target,
             } => {
                 // @:shader wgsl() — intercept at Call entry point
                 if let HirExprKind::Field { object, field } = &callee.kind {
