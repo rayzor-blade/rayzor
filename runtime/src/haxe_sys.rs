@@ -3353,6 +3353,13 @@ pub extern "C" fn rayzor_mem_prefetch(_addr: i64) {}
 #[cfg(target_os = "macos")]
 extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+    fn malloc_default_zone() -> *mut std::ffi::c_void;
+    fn malloc_get_all_zones(
+        task: u32,
+        reader: *mut std::ffi::c_void,
+        addresses: *mut *mut *mut std::ffi::c_void,
+        count: *mut u32,
+    ) -> i32;
 }
 
 #[cfg(target_os = "linux")]
@@ -3375,6 +3382,14 @@ extern "C" {
 ///
 /// `goal_kb` is how much to try to reclaim, in KiB; 0 means "as much as
 /// possible". A no-op, never an error, where the platform offers no such call.
+///
+/// MEASURED, macOS 26.6: this reclaims NOTHING. 0 KB returned both with 250 MB
+/// of freed pooled 64 KB blocks outstanding and mid-decode on a 7B with 153 MB
+/// in freed-but-dirty regions — via a NULL zone, the default zone, and every
+/// zone from malloc_get_all_zones alike. libmalloc already munmaps large blocks
+/// on free() and simply will not hand the small-object pool back, so on macOS
+/// the only way to shrink that pool is to stop filling it. Kept for glibc,
+/// which retains far more aggressively and does honour malloc_trim.
 /// `RAYZOR_DBG_TRIM=1` reports what the allocator actually gave up — the call
 /// is advisory, so a silent zero is a normal outcome worth being able to see.
 #[no_mangle]
@@ -3387,10 +3402,36 @@ pub extern "C" fn rayzor_mem_release_free_pages(goal_kb: i32) {
     let _ = goal_bytes;
     #[cfg(target_os = "macos")]
     {
-        // Zone NULL = every zone.
-        let freed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), goal_bytes) };
+        // The header says a NULL zone means "every zone", but it measured as a
+        // no-op here (macOS 26.6): 0 KB returned with 250 MB of freed, pooled
+        // 64 KB blocks outstanding. Walk the zones explicitly instead, and keep
+        // the NULL call as a first attempt in case a future libmalloc honours
+        // it. Zone 0 is the default zone.
+        let mut freed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), goal_bytes) };
+        let dz = unsafe { malloc_default_zone() };
+        if !dz.is_null() {
+            freed += unsafe { malloc_zone_pressure_relief(dz, goal_bytes) };
+        }
+        let mut zones: *mut *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        // task 0 = mach_task_self, NULL reader = read our own memory directly.
+        if unsafe { malloc_get_all_zones(0, std::ptr::null_mut(), &mut zones, &mut count) } == 0
+            && !zones.is_null()
+        {
+            for i in 0..count as isize {
+                let z = unsafe { *zones.offset(i) };
+                if z.is_null() || z == dz {
+                    continue;
+                }
+                freed += unsafe { malloc_zone_pressure_relief(z, goal_bytes) };
+            }
+        }
         if std::env::var_os("RAYZOR_DBG_TRIM").is_some() {
-            eprintln!("[trim] released {} KB", freed / 1024);
+            eprintln!(
+                "[trim] released {} KB across {} zone(s)",
+                freed / 1024,
+                count
+            );
         }
     }
     #[cfg(target_os = "linux")]
