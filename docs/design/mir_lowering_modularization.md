@@ -179,6 +179,78 @@ Do this DURING the mechanical move (step 2), not as a separate pass: the diff
 is already being reviewed line by line at that point, and a comment-only pass
 over 42k lines afterwards is a second full review for no additional safety.
 
+## Can HIR fold into MIR?
+
+In principle yes — HIR is a re-representation, not a desugaring layer. It keeps
+`ArrayComprehension`, `MapComprehension`, `StringInterpolation`,
+`MacroExpansion` and `Reification` as first-class nodes, so it does not lower
+the high-level constructs; `hir_to_mir` does. Layer sizes:
+
+    hir.rs          800 lines   (node definitions)
+    tast_to_hir.rs  6,186
+    hir_to_mir.rs   42,727
+
+But folding is the wrong FIRST move, because the pain attributed to "two
+lowerings" is really one specific information loss.
+
+### HIR erases the call resolution TAST already computed
+
+    TAST                                        HIR
+    FunctionCall     { function, .. }
+    MethodCall       { receiver,                Call { callee, args,
+                       method_symbol: SymbolId,        is_method: bool,
+                       .. }                            type_args }
+    StaticMethodCall { class_symbol: SymbolId,
+                       method_symbol: SymbolId, .. }
+
+TAST distinguishes three call forms and carries the RESOLVED `method_symbol`
+and `class_symbol`. HIR collapses all three into one node and replaces the
+symbols with a bool. `hir_to_mir` then spends its 9,555-line `Call` arm
+recovering that information by pattern-matching on the *shape* of the callee —
+`if let Field { object, field }` for something method-like, `if let Variable
+{ symbol }` for something function-like — eight probes deep, re-resolving
+through the symbol table and the stdlib mapping each time.
+
+That is the single highest-value change available in this area, and it is far
+smaller than folding two IRs: **carry the resolution through**. Either keep the
+three TAST forms in HIR, or give `HirExprKind::Call` a resolved target:
+
+```rust
+enum CallTarget {
+    Function(Box<HirExpr>),
+    Method { receiver: Box<HirExpr>, method: SymbolId },
+    Static { class: SymbolId, method: SymbolId },
+}
+```
+
+The eight shape probes then become a match on a known enum, and most of the
+9,555 lines becomes unnecessary rather than merely relocated. Doing the
+modularisation first would move that code into files; doing this first means
+there is much less of it to move.
+
+### If the fold is still wanted afterwards
+
+The 42,727 lines live in `hir_to_mir` and do not shrink because TAST feeds it
+instead of HIR — folding deletes `tast_to_hir.rs` (6,186) and `hir.rs` (800)
+and removes one IR to keep in sync, which is real but smaller than it looks.
+The cost is the HIR-level consumers, which would each need a new home:
+`drop_analysis.rs` (506), `optimizable.rs` (588), and `wgsl_transpiler.rs`.
+Order of operations: restore call resolution, then modularise, then decide
+whether the remaining HIR still earns its 7k lines.
+
+## Housekeeping found on the way
+
+Four stale editor backups are sitting in the source tree, and two of them are
+TRACKED IN GIT:
+
+    compiler/src/ir/hir_to_mir.rs.bak       235 KB   tracked
+    compiler/src/ir/hir_to_mir.rs.bak2      235 KB   tracked
+    compiler/src/tast/ast_lowering.rs.backup
+    compiler/src/tast/type_flow_guard.rs.backup
+
+They date from Nov 2025. They should be deleted, and `*.bak*`/`*.backup` added
+to `.gitignore` so a copy-before-edit habit stops landing in the repo.
+
 ## What NOT to do
 
 - Do not convert methods to free functions taking `&mut HirToMirContext`. The
