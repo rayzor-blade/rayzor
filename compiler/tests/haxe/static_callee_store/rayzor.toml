@@ -1,0 +1,6 @@
+[project]
+name = "static_callee_store"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]
