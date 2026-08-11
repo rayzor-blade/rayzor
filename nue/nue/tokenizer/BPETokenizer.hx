@@ -23,14 +23,13 @@ import haxe.ds.StringMap;
  * through the inverse byte alphabet and reinterpret the byte sequence
  * as UTF-8.
  *
- * **Pre-tokenization (v1).** llama.cpp / OpenAI tokenize prompts
- * after a regex-based pre-split (separating contractions, runs of
- * letters, digits, punctuation). We don't apply that split yet — BPE
- * runs over the whole byte-encoded prompt as a single chunk. Outputs
- * usually match for short prompts because the same merges fire, but
- * complex prompts (mixed punctuation, contractions) can diverge from
- * a llama.cpp-encoded reference by 1-2 tokens. Plenty good for a
- * functional pipeline; flagged for a follow-up pass.
+ * **Pre-tokenization (v1).** Byte-level BPE is normally applied after a
+ * regex pre-split (separating contractions, runs of letters, digits,
+ * punctuation). We don't apply that split yet — BPE runs over the whole
+ * byte-encoded prompt as a single chunk. Short prompts come out the same
+ * because the identical merges fire; prompts with mixed punctuation or
+ * contractions can differ by 1-2 tokens. Fine for a functional pipeline;
+ * flagged for a follow-up pass.
  *
  * **Special tokens** are stored on top of the merged vocab via
  * `addSpecial(name, id)`. The encode loop checks for special-token

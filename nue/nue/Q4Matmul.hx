@@ -434,13 +434,12 @@ class Q4Matmul {
         var wBase = w.dataPtr();
         var oBase = out.address();
 
-        // Per-WORKER bitcast scratch, allocated once per call: `f32ToF16` goes
+        // Per-WORKER bitcast scratch, one allocation per call: `f32ToF16` goes
         // through memory, so a shared buffer would race across pool workers.
         // Each slice holds a 4-byte bitcast slot plus the 16-entry per-sub-block
-        // value LUT (64 bytes); the stride pads that to a cache line so
-        // neighbouring workers do not write into one another's line. Allocating
-        // inside the band instead costs one malloc per CLAIMED CHUNK, and the
-        // `.address()` below makes it escape, so insert_free never releases it.
+        // value LUT (64 bytes), padded to a cache line so neighbouring workers
+        // never share one. Allocating inside the band instead costs one malloc
+        // per claimed chunk, and none of them are freed.
         var scratchWorkers = (sp != null ? sp.workers() : 1);
         if (scratchWorkers < 1) scratchWorkers = 1;
         var scratchBuf = Bytes.alloc(scratchWorkers * 128);
@@ -521,8 +520,8 @@ class Q4Matmul {
         tail. */
     static function narrowToF16(xBase:Usize, dst:Usize, rows:Int, k:Int, ?sp:SpinPool):Void {
         // Same shape as dequantQ4KToF16: one per-worker slice per call, not one
-        // malloc per claimed chunk. Cache-line stride for a 4-byte slot that is
-        // written on every single conversion.
+        // malloc per claimed chunk. Cache-line stride, since the 4-byte slot is
+        // written on every conversion.
         var scratchWorkers = (sp != null ? sp.workers() : 1);
         if (scratchWorkers < 1) scratchWorkers = 1;
         var scratchBuf = Bytes.alloc(scratchWorkers * 128);
@@ -559,21 +558,20 @@ class Q4Matmul {
         return Bytes.alloc(need);
     }
 
-    /** Hand back the prefill-only f16 scratch.
+    /** Release the prefill-only f16 scratch.
 
-        `_w16` is weight-sized — 112 MB for Mistral-7B's 14336x4096 FFN weight —
-        and only the AMX prefill path ever reads it. Being a `static var` it is
-        permanently reachable, so no escape analysis can reclaim it; the
-        lifetime is a policy choice, and the policy is that decode should not
-        pay for prefill. Measured: holding it costs 150 MB of peak footprint
-        (679 -> 529 MB of non-model overhead with AMX prefill disabled).
-
-        Re-growing it on a later prefill is close to free: the buffer is
-        allocated with calloc, so the pages arrive lazily, and the dequant
-        overwrites every one of them regardless. */
+        `_w16` is weight-sized (112 MB at 7B) and only the AMX prefill path
+        reads it. It is a `static var`, so its lifetime is a policy choice:
+        decode should not carry prefill's working set. Re-growing it on a later
+        prefill is cheap — the buffer is calloc'd, so its pages arrive lazily,
+        and the dequant overwrites all of them anyway. */
     public static function releasePrefillScratch():Void {
+        var had = _w16 != null || _x16 != null;
         if (_w16 != null) { _w16.free(); _w16 = null; }
         if (_x16 != null) { _x16.free(); _x16 = null; }
+        // free() returns pages to the allocator, not the OS. Ask once, here;
+        // never per token.
+        if (had) Mem.releaseFreePages(0);
     }
 
     /** Haxe-owned AMX prefill: `out[batch,n] = x[batch,K] · dequant(qw)[n,K]^T`.
@@ -756,7 +754,7 @@ class Q4Matmul {
     /** One 32-weight sub-block dot, taking ALREADY-64-BIT addresses.
         `Int` is 32 bits and an address is 64, so every `Usize.fromInt` in a
         loop emits a `movsxd`; disassembly showed 288 of them and 52% of this
-        kernel in scalar address arithmetic (llama.cpp: 21%). Taking Usize
+        kernel in scalar address arithmetic. Taking Usize
         cursors and stepping them keeps the offset arithmetic in 64-bit, so the
         conversions happen once per block instead of once per access. */
     /** Both nibble halves of one 32-byte weight group, scaled and summed.
@@ -813,7 +811,7 @@ class Q4Matmul {
         from the 16-byte header — no shared pre-decode buffer, so it is safe to
         call concurrently across output-row bands. */
     static inline function q4DotMA4(wBase:Usize, wBlk:Int, aBase:Usize, aBlk:Int, bsAddr:Usize, bsBase:Int, xd:Float):Float {
-        // Header decode via four u32 loads + shifts (the llama.cpp kmask
+        // Header decode via four u32 loads + shifts (the kmask
         // shape) instead of 16 SIMD lane extracts — same bit math, fewer
         // and cheaper ops on the ~4M headers decoded per token.
         var w0 = Mem.loadI32(wBase + Usize.fromInt(wBlk));       // d | dmin<<16
@@ -1260,8 +1258,7 @@ class Q4Matmul {
         if (batch < 1) batch = 1;
 
         // Decode reached: prefill is over, so give the weight-sized f16 scratch
-        // back rather than holding 112 MB for the rest of the process. A server
-        // handling another prompt re-grows it on the next prefill.
+        // back. A server handling another prompt re-grows it next prefill.
         if (batch == 1) releasePrefillScratch();
 
         // Opt-in AMX prefill experiment: compute-bound Q4_K_M batches hand off

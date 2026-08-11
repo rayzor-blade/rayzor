@@ -3070,16 +3070,11 @@ fn mem_facts() -> Option<MemFacts> {
 ///     healthy 16GB box), so any "available < X" rule fires permanently; and
 ///     `kern.memorystatus_vm_pressure_level` is unreliable at load time —
 ///     it reads NORMAL right up to the run that then stalls.
-///     So gate on the MAPPING instead, which is a signal we do trust. The
-///     earlier A/B that found wiring pointless (median 86.7 vs 87.2 tok/s,
-///     ~900MB footprint) was a 770MB Llama-1B — 4.8% of RAM, which the host
-///     absorbs either way. A model that is a large fraction of RAM is the
-///     opposite case: it is the cheapest reclaim target the kernel has, and
-///     losing it mid-run costs a re-fault on every decode step. Measured on a
-///     16GB box against a churning 7GB working set, Mistral-7B Q4_K_M
-///     (4.07GB, 25% of RAM): unwired never finished a 24-token run (2/2, 120s
-///     timeout), wired completed both at 11.0 / 11.6 tok/s. On a quiet box
-///     wiring is free (10.22 vs 10.17 tok/s, stddev 3.8/3.3, n=6 each).
+///     So gate on the MAPPING instead. A model that is a large fraction of RAM
+///     is the kernel's cheapest reclaim target, and losing it mid-run costs a
+///     re-fault on every decode step; a small one the host absorbs either way,
+///     which is why wiring bought nothing at 770MB but decides completion at
+///     4GB. Wiring is free on a quiet box.
 ///   - Linux: wire only under real distress — little left to allocate, or the
 ///     box already leaning on swap. That is the regime the win was measured in.
 ///
@@ -3383,13 +3378,10 @@ extern "C" {
 /// `goal_kb` is how much to try to reclaim, in KiB; 0 means "as much as
 /// possible". A no-op, never an error, where the platform offers no such call.
 ///
-/// MEASURED, macOS 26.6: this reclaims NOTHING. 0 KB returned both with 250 MB
-/// of freed pooled 64 KB blocks outstanding and mid-decode on a 7B with 153 MB
-/// in freed-but-dirty regions — via a NULL zone, the default zone, and every
-/// zone from malloc_get_all_zones alike. libmalloc already munmaps large blocks
-/// on free() and simply will not hand the small-object pool back, so on macOS
-/// the only way to shrink that pool is to stop filling it. Kept for glibc,
-/// which retains far more aggressively and does honour malloc_trim.
+/// Advisory, and on macOS currently returns nothing: libmalloc munmaps large
+/// blocks on free() already and will not hand its small-object pool back.
+/// glibc retains far more and does honour malloc_trim. `RAYZOR_DBG_TRIM=1`
+/// reports what was actually released.
 /// `RAYZOR_DBG_TRIM=1` reports what the allocator actually gave up — the call
 /// is advisory, so a silent zero is a normal outcome worth being able to see.
 #[no_mangle]

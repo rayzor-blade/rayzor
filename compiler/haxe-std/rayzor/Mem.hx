@@ -55,17 +55,13 @@ extern class Mem {
     public static function prefetch(addr:Usize):Void;
 
     /** Return freed-but-retained pages to the OS. `goalKb` is how much to try
-        to reclaim in KiB, 0 meaning as much as possible. Advisory: the
-        allocator may give up nothing. `RAYZOR_DBG_TRIM=1` prints what it did.
+        to reclaim in KiB, 0 meaning as much as possible. Advisory — the
+        allocator may give up nothing; `RAYZOR_DBG_TRIM=1` prints what it did.
 
-        `free()` returns memory to the allocator, not to the kernel: the pages
-        stay dirty and keep counting against the process footprint. Freeing a
-        large buffer therefore does not reduce residency on its own — measured
-        mid-decode on a 7B model, 139 MB sat in already-freed regions.
-
-        Call after a phase that releases something big (prefill scratch, a
-        finished request). NOT per token: it walks the allocator's free
-        regions, so it costs time in proportion to what it can return. */
+        `free()` hands memory back to the allocator, not the kernel, so the
+        pages stay dirty and keep counting against the process footprint.
+        Call after a phase releases something big, never per token: the call
+        walks the allocator's free regions. */
     @:native("releaseFreePages")
     public static function releaseFreePages(goalKb:Int):Void;
 }

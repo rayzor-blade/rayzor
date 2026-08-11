@@ -158,17 +158,11 @@ class GenerationLoop {
         if (_profileOn) _pPrefillSample = Sys.time() - _tPrefill;
         if (lr0 != logits) lr0.free();
 
-        // Prefill peaks the heap: it works in batch-sized activations that
-        // decode never touches again, and they have just been freed. free()
-        // returns those pages to the allocator, not the OS, so ask for them
-        // back once here, on the transition into decode — never inside the
-        // token loop, since the call walks the allocator's free regions.
-        //
-        // On macOS this currently reclaims NOTHING (measured: 0 KB with 153 MB
-        // sitting in freed-but-dirty regions), because libmalloc already
-        // munmaps large blocks on free and declines to give the small-object
-        // pool back. It is kept for glibc, which retains far more aggressively
-        // and does honour malloc_trim. See rayzor_mem_release_free_pages.
+        // Prefill works in batch-sized activations decode never touches again,
+        // and they have just been freed. free() returns those pages to the
+        // allocator rather than the OS, so ask for them back once here, on the
+        // transition into decode — never inside the token loop, since the call
+        // walks the allocator's free regions.
         Mem.releaseFreePages(0);
 
         // Streaming decode: O(|piece|) per token, O(N) over a generation. The

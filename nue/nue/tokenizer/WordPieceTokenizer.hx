@@ -41,7 +41,7 @@ class WordPieceTokenizer implements Tokenizer {
         this.maxChars = 100;
 
         // Two vocab encodings map to the same ids: HF WordPiece marks word-start
-        // pieces bare and continuations with `##`; llama.cpp's bert GGUF marks
+        // pieces bare and continuations with `##`; bert GGUF vocabs mark
         // word-start with `▁` (U+2581) and continuations bare. Detect which by
         // probing for a `▁`-prefixed common word.
         if (vocab.lookup("▁the") >= 0 || vocab.lookup("▁a") >= 0) {
