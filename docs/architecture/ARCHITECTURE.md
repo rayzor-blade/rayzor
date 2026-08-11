@@ -252,9 +252,8 @@ three.
 
 ## Tiered execution
 
-Five tiers. The first four rungs are Cranelift; **`Maximum` is LLVM** — an
-in-source comment claiming all JIT tiers are Cranelift is stale, contradicted by
-`uses_llvm()` and by the LLVM queue that installs it.
+Five tiers. The interpreter is tier 0, the next three rungs are Cranelift, and
+**`Maximum` is LLVM**.
 
 ```mermaid
 flowchart LR
@@ -438,8 +437,8 @@ never calls does not ship. It runs outside the pass pipeline.
 
 `rayzor debug` is a shipped toolkit: forensic run, multi-run bench, A/B compare
 across git refs, PC-to-Haxe-function resolution, an lldb wrapper, and a live
-metrics server with a browser dashboard. DWARF emission from Cranelift or LLVM is
-**not** implemented — do not claim it.
+metrics server with a browser dashboard. Neither backend emits DWARF debug
+info.
 
 Tier transitions can be traced with `RAYZOR_PROFILE_TIER_EVENTS`; see the
 [CLI reference](../CLI.md) for the full environment-variable surface, and
