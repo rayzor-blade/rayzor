@@ -274,7 +274,6 @@ To complete full closure support:
 
 - HIR definition: `compiler/src/ir/hir.rs`
 - MIR module system: `compiler/src/ir/mod.rs`
-- Function pointers: `compiler/FUNCTION_POINTERS.md`
 - Roadmap: `compiler/IMPLEMENTATION_ROADMAP.md`
 
 ## Conclusion
