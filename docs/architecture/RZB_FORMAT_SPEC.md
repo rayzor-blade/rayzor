@@ -183,9 +183,7 @@ impl RayzorBundle {
 
 ```bash
 # Compile source to bundle
-cargo run --release --package compiler --bin preblade -- \
-    --bundle app.rzb \
-    Main.hx
+rayzor bundle Main.hx -o app.rzb
 
 # Output:
 #   Compiling Main.hx...
@@ -237,11 +235,8 @@ class Main {
 ```
 
 ```bash
-# Create bundle
-preblade --bundle app.rzb Main.hx
-
-# Run bundle (13x faster than compiling)
-cargo run --example test_bundle_loading -- app.rzb
+rayzor bundle Main.hx -o app.rzb
+rayzor run app.rzb
 ```
 
 ### Performance
@@ -297,12 +292,15 @@ pub enum BladeError {
 
 ### Future Enhancements
 
-1. **Compression** - zstd compression for smaller bundles
-2. **Signing** - Cryptographic signatures for integrity
-3. **Lazy Loading** - Load modules on demand
-4. **Streaming** - Stream large bundles without full load
-5. **Incremental Updates** - Patch bundles instead of full rebuild
-6. **AOT Hints** - Embed profiling data for better JIT decisions
+1. **Signing** - Cryptographic signatures for integrity
+2. **Lazy Loading** - Load modules on demand
+3. **Streaming** - Stream large bundles without full load
+4. **Incremental Updates** - Patch bundles instead of full rebuild
+5. **AOT Hints** - Embed profiling data for better JIT decisions
+
+Bundles are zstd-compressed by default; the `compressed` flag records it and the
+loader detects it from the zstd magic bytes. `rayzor bundle --no-compress`
+turns it off.
 
 ### Related Formats
 
