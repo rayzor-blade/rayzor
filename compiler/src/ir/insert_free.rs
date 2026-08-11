@@ -985,6 +985,17 @@ fn pointer_escapes_ex(
                 }
 
                 // Pointer stored to global → escapes
+                // Captured into a closure environment, which can outlive this
+                // frame — the closure owns it from here.
+                IrInstruction::MakeClosure {
+                    captured_values, ..
+                } => {
+                    for v in captured_values {
+                        if *v == alloc_id || derived.contains(v) {
+                            return true;
+                        }
+                    }
+                }
                 IrInstruction::StoreGlobal { value, .. } => {
                     if *value == alloc_id || derived.contains(value) {
                         return true;
