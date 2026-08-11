@@ -21,6 +21,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+mod call;
+mod casts;
+mod conditionals;
+mod construction;
 mod derives;
 mod dispatch;
 mod exceptions;
@@ -29,3 +33,4 @@ mod lambda;
 mod literals;
 mod operators;
 mod reflect;
+mod variables;

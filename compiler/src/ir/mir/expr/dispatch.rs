@@ -740,4 +740,107 @@ impl<'a> HirToMirContext<'a> {
 
         Some(field_value)
     }
+
+    pub(crate) fn lower_expression_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
+        // DEBUG: Check if this is Field expression being lowered
+        if matches!(&expr.kind, HirExprKind::Field { .. }) {
+            debug!("[lower_expression] START - Field expression");
+        }
+
+        // Set source location for debugging
+        self.builder
+            .set_source_location(self.convert_source_location(&expr.source_location));
+
+        let result = match &expr.kind {
+            HirExprKind::Literal(lit) => self.lower_literal(lit, expr.ty),
+
+            HirExprKind::Variable { .. } => self.lower_variable_expr(expr),
+            HirExprKind::Field { .. } => self.lower_field_expr(expr),
+            HirExprKind::Index { .. } => self.lower_index_expr(expr),
+            HirExprKind::Call { .. } => self.lower_call(expr),
+            HirExprKind::New { .. } => self.lower_new(expr),
+            HirExprKind::Unary { .. } => self.lower_unary(expr),
+            HirExprKind::Binary { .. } => self.lower_binary(expr),
+            HirExprKind::Cast { .. } => self.lower_cast(expr),
+            HirExprKind::TypeCheck { .. } => self.lower_type_check(expr),
+            HirExprKind::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => self.lower_conditional_typed(condition, then_expr, else_expr, Some(expr.ty)),
+
+            HirExprKind::Block(block) => self.lower_block_expr(block),
+
+            HirExprKind::Lambda {
+                params,
+                body,
+                captures,
+            } => {
+                debug!(
+                    "Lowering lambda with {} params, {} captures",
+                    params.len(),
+                    captures.len()
+                );
+                self.lower_lambda(params, body, captures, expr.ty)
+            }
+
+            HirExprKind::MethodReference {
+                receiver,
+                method_symbol,
+            } => self.lower_method_reference(receiver, *method_symbol),
+
+            HirExprKind::Array { elements } => self.lower_array_literal(elements, expr.ty),
+
+            HirExprKind::Map { entries } => self.lower_map_literal(entries),
+
+            HirExprKind::ObjectLiteral { fields } => self.lower_object_literal(fields, expr.ty),
+
+            HirExprKind::ArrayComprehension { .. } => {
+                // Array comprehensions are desugared to loops
+                self.add_error(
+                    "Array comprehensions not yet implemented in MIR",
+                    expr.source_location,
+                );
+                None
+            }
+
+            HirExprKind::StringInterpolation { parts } => self.lower_string_interpolation(parts),
+
+            HirExprKind::This => {
+                // 'this' is typically passed as first parameter
+                self.symbol_map.get(&SymbolId::from_raw(0)).copied()
+            }
+
+            HirExprKind::Super => {
+                // 'super' should only appear in constructor super calls, which are handled
+                // specially in lower_constructor_body. If we reach here, it's likely being
+                // used incorrectly (e.g., super.method() which isn't supported yet)
+                // eprintln!("WARNING: HirExprKind::Super encountered in expression lowering");
+                // eprintln!("  This might be super.field or super.method() which isn't implemented yet");
+                // For now, treat it like 'this' (same object, but calling parent methods)
+                self.symbol_map.get(&SymbolId::from_raw(0)).copied()
+            }
+
+            HirExprKind::Null => self.builder.build_null(),
+
+            HirExprKind::Untyped(inner) => {
+                // Untyped expressions bypass type checking
+                self.lower_expression(inner)
+            }
+
+            HirExprKind::InlineCode { target, code, args } => {
+                // Platform-specific inline code (__c__, __js__, etc.)
+                self.lower_inline_code(target, code, args)
+            }
+
+            HirExprKind::TryCatch { .. } => self.lower_try_catch_expr(expr),
+            _ => {
+                self.add_error("Unsupported expression type in MIR", expr.source_location);
+                None
+            }
+        };
+
+        // debug!("lower_expression result: {:?}", result);
+        result
+    }
 }
