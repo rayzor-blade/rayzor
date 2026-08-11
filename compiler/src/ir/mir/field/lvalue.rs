@@ -515,6 +515,32 @@ impl<'a> HirToMirContext<'a> {
                                                     .builder
                                                     .build_bitcast(value, IrType::I64)
                                                     .unwrap_or(value),
+                                                // A `*void` source is either a boxed scalar
+                                                // or a reference: the same lowered store
+                                                // serves every instantiation of an erased
+                                                // type parameter. Unwrap only a real scalar
+                                                // box and let a reference keep its bits;
+                                                // casting the pointer would store the box
+                                                // address as the value.
+                                                IrType::Ptr(ref inner)
+                                                    if matches!(**inner, IrType::Void) =>
+                                                {
+                                                    let coerce = self
+                                                        .get_or_register_extern_function(
+                                                            "haxe_unbox_scalar_or_addr",
+                                                            vec![IrType::Ptr(Box::new(
+                                                                IrType::Void,
+                                                            ))],
+                                                            IrType::I64,
+                                                        );
+                                                    self.builder
+                                                        .build_call_direct(
+                                                            coerce,
+                                                            vec![value],
+                                                            IrType::I64,
+                                                        )
+                                                        .unwrap_or(value)
+                                                }
                                                 _ => self
                                                     .builder
                                                     .build_cast(value, val_ty, IrType::I64)

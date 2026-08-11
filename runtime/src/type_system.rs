@@ -2599,6 +2599,33 @@ pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
     addr as i64
 }
 
+/// Unwrap a boxed scalar, or pass a non-box pointer through unchanged.
+///
+/// A field whose type is an erased type parameter is a scalar slot, but the
+/// value reaching it is `*void` for every instantiation: a boxed number for
+/// `<Int>`, an object reference for `<String>`. Only a `DynamicValue` carrying
+/// a primitive tag is unwrapped; anything else keeps its bits, so a reference
+/// survives the round trip. This is deliberately stricter than
+/// `haxe_coerce_dynamic_to_int`, which accepts class ids as boxes.
+#[no_mangle]
+pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let addr = ptr as usize;
+    // A DynamicValue is heap-allocated and 8-aligned; a small erased integer is
+    // neither, and falls through to the raw-value path below.
+    if addr >= 0x1000 && (addr & 7) == 0 {
+        unsafe {
+            let dynamic = *(ptr as *const DynamicValue);
+            if dynamic.type_id == TYPE_INT || dynamic.type_id == TYPE_BOOL {
+                return haxe_unbox_int(dynamic);
+            }
+        }
+    }
+    addr as i64
+}
+
 /// Safely coerce a Dynamic-typed value to a float.
 /// Same heuristic as haxe_coerce_dynamic_to_int.
 #[no_mangle]
