@@ -9136,11 +9136,34 @@ impl<'a> AstLowering<'a> {
                     // cast(expr, Type) — safe/explicit cast
                     (self.lower_type(hint)?, CastKind::Explicit)
                 } else {
-                    // cast expr — unsafe cast (no type check, reinterpret)
-                    (
-                        self.context.type_table.borrow().dynamic_type(),
-                        CastKind::Unsafe,
-                    )
+                    // `cast expr` takes its type from the context — `var a:A =
+                    // cast e` is a cast to A. Typing it Dynamic instead loses
+                    // that, and every later use of the binding then takes the
+                    // Dynamic path: a field read would unbox a value that was
+                    // never boxed and dereference the result.
+                    // Only a class or interface target is adopted. An abstract
+                    // reached this way would be routed through its @:from
+                    // conversions, which is a different operation than
+                    // reinterpreting the value.
+                    let from_context = self
+                        .expected_arg_type_stack
+                        .last()
+                        .copied()
+                        .flatten()
+                        .or(self.context.expected_return_type)
+                        .filter(|ty| {
+                            matches!(
+                                self.context.type_table.borrow().get(*ty).map(|t| &t.kind),
+                                Some(TypeKind::Class { .. }) | Some(TypeKind::Interface { .. })
+                            )
+                        });
+                    match from_context {
+                        Some(ty) => (ty, CastKind::Unsafe),
+                        None => (
+                            self.context.type_table.borrow().dynamic_type(),
+                            CastKind::Unsafe,
+                        ),
+                    }
                 };
                 TypedExpressionKind::Cast {
                     expression: Box::new(typed_expr),
