@@ -185,6 +185,14 @@ impl Default for InliningCostModel {
     }
 }
 
+/// A self-recursive body larger than this is not worth duplicating; naive
+/// fib is ~20 instructions.
+const SELF_INLINE_MAX_BODY: usize = 96;
+
+/// Expanding more self-call sites than this multiplies code size without
+/// improving the recurrence; naive fib has 2.
+const SELF_INLINE_MAX_SITES: usize = 4;
+
 impl InliningCostModel {
     /// Calculate the cost of inlining a function at a call site.
     pub fn should_inline(
@@ -193,9 +201,38 @@ impl InliningCostModel {
         call_site: &CallSite,
         call_graph: &CallGraph,
     ) -> bool {
-        // Never inline recursive functions (for now)
+        // Recursion: expanding a self-call once replaces two calls with the
+        // work of three smaller ones, so the recurrence grows more slowly —
+        // for naive fib, base 1.618 becomes 1.380. LLVM will not do this
+        // itself (its inliner skips self-recursive sites by construction),
+        // and it is what GCC's recursive inliner does at -O2.
+        //
+        // Only DIRECT self-recursion, and only once per function: the pass
+        // driver holds that budget, since expanding an already-expanded body
+        // compounds exponentially. Mutual recursion, found through
+        // `can_reach`, is never expanded — the budget cannot bound it.
         if call_graph.is_recursive(call_site.callee) {
-            return false;
+            if call_site.caller != call_site.callee {
+                return false;
+            }
+            let body: usize = callee
+                .cfg
+                .blocks
+                .values()
+                .map(|b| b.instructions.len())
+                .sum();
+            if body > SELF_INLINE_MAX_BODY {
+                return false;
+            }
+            let sites = call_graph
+                .call_sites
+                .iter()
+                .filter(|s| s.caller == call_site.caller && s.callee == call_site.callee)
+                .count();
+            if sites > SELF_INLINE_MAX_SITES {
+                return false;
+            }
+            return true;
         }
 
         // Can't inline if entry block doesn't exist (extern/declaration)
@@ -733,6 +770,11 @@ impl OptimizationPass for InliningPass {
     fn run_on_module(&mut self, module: &mut IrModule) -> OptimizationResult {
         let mut result = OptimizationResult::unchanged();
 
+        // A self-call expanded once leaves fresh self-calls behind, so without
+        // a budget the next iteration expands those too and the body doubles
+        // every round. One expansion per function is where the win is.
+        let mut self_inlined: BTreeSet<IrFunctionId> = BTreeSet::new();
+
         for _iteration in 0..self.max_iterations {
             let call_graph = CallGraph::build(module);
 
@@ -740,10 +782,18 @@ impl OptimizationPass for InliningPass {
             let mut candidates: Vec<CallSite> = Vec::new();
 
             for site in &call_graph.call_sites {
+                if site.caller == site.callee && self_inlined.contains(&site.caller) {
+                    continue;
+                }
                 if let Some(callee) = module.functions.get(&site.callee) {
                     if self.cost_model.should_inline(callee, site, &call_graph) {
                         candidates.push(site.clone());
                     }
+                }
+            }
+            for c in &candidates {
+                if c.caller == c.callee {
+                    self_inlined.insert(c.caller);
                 }
             }
 
