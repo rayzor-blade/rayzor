@@ -553,10 +553,27 @@ fn insert_free_for_function(
         }
     }
 
+    // Loop-carried rotations are released at the latch instead. The same object
+    // must not also be released by the return-block or confined-block rules
+    // below, or the second release is a double free.
+    //
+    // These allocs are absent from `allocs_needing_free` by construction: a
+    // rotation phi merges two different allocations, which the general phi rule
+    // reads as an escape. The rotation analysis re-tests them with that one phi
+    // excused, so it takes the full alloc list rather than the filtered set.
+    let rotations = find_rotation_releases(function, &alloc_ids, &ids, param_retention);
+    let rotation_handled: BTreeSet<IrId> = rotations
+        .iter()
+        .flat_map(|(_, _, carried)| carried.iter().copied())
+        .collect();
+
     // Partition allocs into entry-block vs inner-block
     let mut entry_allocs = Vec::new();
     let mut inner_allocs = Vec::new();
     for &alloc_id in &allocs_needing_free {
+        if rotation_handled.contains(&alloc_id) {
+            continue;
+        }
         if alloc_def_block.get(&alloc_id) == Some(&entry_block) {
             entry_allocs.push(alloc_id);
         } else {
@@ -713,7 +730,225 @@ fn insert_free_for_function(
         }
     }
 
+    // Loop-carried rotations: release the carried value at the latch.
+    if std::env::var_os("RZT_DBG_ROT").is_some() && !rotations.is_empty() {
+        for (latch, carried, allocs) in &rotations {
+            eprintln!(
+                "[rot] {} latch={latch:?} carried={carried:?} incoming={allocs:?}",
+                function.name
+            );
+        }
+    }
+    for (latch, carried, _) in &rotations {
+        if let Some(block) = function.cfg.blocks.get_mut(latch) {
+            block
+                .instructions
+                .push(IrInstruction::Free { ptr: *carried });
+            inserted += 1;
+        }
+    }
+
     inserted
+}
+
+/// Loop-carried rotation: a header phi whose incoming values are all fresh,
+/// non-escaping allocations. The body builds a new object each iteration and
+/// the phi carries the *previous* one, so by the time the latch runs the
+/// carried value is dead — releasing it there pairs one free with each
+/// iteration's alloc, holding the loop to a constant footprint. The value that
+/// leaves the loop is selected by a later re-entry of the header, never the one
+/// released here.
+///
+/// Conservative on every axis that could expose a released object: a single
+/// backedge, a latch that falls straight through to the header, and every use
+/// of the carried value confined to the loop body.
+///
+/// Returns `(latch, phi result, carried allocs)`. The carried allocs must be
+/// excluded from the other release rules — releasing an object twice is a
+/// double free.
+fn find_rotation_releases(
+    function: &IrFunction,
+    alloc_ids: &[IrId],
+    ids: &AllocFuncIds,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> Vec<(IrBlockId, IrId, Vec<IrId>)> {
+    let mut out: Vec<(IrBlockId, IrId, Vec<IrId>)> = Vec::new();
+    let alloc_set: BTreeSet<IrId> = alloc_ids.iter().copied().collect();
+    let dbg = std::env::var_os("RZT_DBG_ROT").is_some();
+
+    for (&header, header_block) in &function.cfg.blocks {
+        if header_block.phi_nodes.is_empty() {
+            continue;
+        }
+
+        // A backedge is a predecessor the header can itself reach.
+        let backedges: Vec<IrBlockId> = function
+            .cfg
+            .blocks
+            .iter()
+            .filter(|(_, b)| b.successors().contains(&header))
+            .map(|(&id, _)| id)
+            .filter(|&p| reaches(function, header, p))
+            .collect();
+        if backedges.len() != 1 {
+            continue;
+        }
+        let latch = backedges[0];
+
+        // A conditional exit at the latch could carry the released value out.
+        let Some(latch_block) = function.cfg.blocks.get(&latch) else {
+            continue;
+        };
+        if !matches!(latch_block.terminator, IrTerminator::Branch { .. }) {
+            continue;
+        }
+
+        let body = loop_body(function, header, latch);
+
+        for phi in &header_block.phi_nodes {
+            if phi.incoming.len() < 2 {
+                continue;
+            }
+            // Every incoming must be a fresh allocation that escapes by no
+            // route other than this phi.
+            if !phi.incoming.iter().all(|(_, v)| alloc_set.contains(v)) {
+                if dbg {
+                    let which: Vec<bool> = phi
+                        .incoming
+                        .iter()
+                        .map(|(_, v)| alloc_set.contains(v))
+                        .collect();
+                    eprintln!(
+                        "[rot-rej] {} phi={:?} not-all-allocs incoming={:?} is_alloc={:?}",
+                        function.name, phi.dest, phi.incoming, which
+                    );
+                }
+                continue;
+            }
+            if !phi.incoming.iter().any(|(pred, _)| *pred == latch) {
+                if dbg {
+                    eprintln!(
+                        "[rot-rej] {} phi={:?} no-latch-incoming",
+                        function.name, phi.dest
+                    );
+                }
+                continue;
+            }
+            if !uses_confined_to_body(function, phi.dest, &body) {
+                if dbg {
+                    eprintln!(
+                        "[rot-rej] {} phi={:?} uses-escape-body",
+                        function.name, phi.dest
+                    );
+                }
+                continue;
+            }
+            // The pass runs more than once per module; without this the second
+            // run appends a second release of the same pointer at the latch.
+            let already_released = function.cfg.blocks.values().any(|b| {
+                b.instructions
+                    .iter()
+                    .any(|i| matches!(i, IrInstruction::Free { ptr } if *ptr == phi.dest))
+            });
+            if already_released {
+                continue;
+            }
+            let all_local = phi.incoming.iter().all(|(_, v)| {
+                let derived = build_derived_set(*v, function);
+                !pointer_escapes_ex(
+                    *v,
+                    &derived,
+                    function,
+                    &ids.array_safe_ids,
+                    &ids.anon_setter_ids,
+                    &ids.copy_only_ids,
+                    param_retention,
+                    false,
+                    Some(phi.dest),
+                )
+            });
+            if !all_local {
+                if dbg {
+                    eprintln!(
+                        "[rot-rej] {} phi={:?} incoming-escapes",
+                        function.name, phi.dest
+                    );
+                }
+                continue;
+            }
+            out.push((
+                latch,
+                phi.dest,
+                phi.incoming.iter().map(|(_, v)| *v).collect(),
+            ));
+        }
+    }
+
+    out
+}
+
+/// Forward reachability over the CFG.
+fn reaches(function: &IrFunction, from: IrBlockId, to: IrBlockId) -> bool {
+    let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
+    let mut stack = vec![from];
+    while let Some(b) = stack.pop() {
+        if b == to {
+            return true;
+        }
+        if !seen.insert(b) {
+            continue;
+        }
+        if let Some(block) = function.cfg.blocks.get(&b) {
+            stack.extend(block.successors());
+        }
+    }
+    false
+}
+
+/// Blocks the header reaches that can in turn reach the latch — the iteration's
+/// span, and the only place a carried value may legally be observed.
+fn loop_body(function: &IrFunction, header: IrBlockId, latch: IrBlockId) -> BTreeSet<IrBlockId> {
+    let mut forward: BTreeSet<IrBlockId> = BTreeSet::new();
+    let mut stack = vec![header];
+    while let Some(b) = stack.pop() {
+        if !forward.insert(b) {
+            continue;
+        }
+        if let Some(block) = function.cfg.blocks.get(&b) {
+            stack.extend(block.successors());
+        }
+    }
+    forward
+        .into_iter()
+        .filter(|&b| b == latch || b == header || reaches(function, b, latch))
+        .collect()
+}
+
+/// True iff every read of `value` sits inside the loop body — no block outside
+/// it reads the carried object, and no terminator carries it out.
+fn uses_confined_to_body(function: &IrFunction, value: IrId, body: &BTreeSet<IrBlockId>) -> bool {
+    for (&block_id, block) in &function.cfg.blocks {
+        let inside = body.contains(&block_id);
+        if !inside {
+            for inst in &block.instructions {
+                if inst.uses().contains(&value) {
+                    return false;
+                }
+            }
+            // A phi elsewhere would carry the object out of the loop.
+            for phi in &block.phi_nodes {
+                if phi.incoming.iter().any(|(_, v)| *v == value) {
+                    return false;
+                }
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if *v == value {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// True iff every use of the alloc (and its derived set) sits in the
@@ -872,12 +1107,19 @@ fn pointer_escapes(
         copy_only_ids,
         param_retention,
         false,
+        None,
     )
 }
 
 /// `ignore_returns` drops the "returned → escapes" arms so the returns-fresh
 /// analysis can ask "does this alloc escape by any route OTHER than being
 /// handed to the caller?".
+///
+/// `ignore_phi` names one phi whose merge is not treated as an escape, so the
+/// rotation analysis can ask "does this alloc escape by any route OTHER than
+/// being carried by this loop?". A rotation phi merges two DIFFERENT fresh
+/// allocations (the preheader's and the body's), which the general rule below
+/// must reject — the release that owns that phi is what makes it safe.
 #[allow(clippy::too_many_arguments)]
 fn pointer_escapes_ex(
     alloc_id: IrId,
@@ -888,6 +1130,7 @@ fn pointer_escapes_ex(
     copy_only_ids: &BTreeSet<IrFunctionId>,
     param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
     ignore_returns: bool,
+    ignore_phi: Option<IrId>,
 ) -> bool {
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
@@ -1023,6 +1266,9 @@ fn pointer_escapes_ex(
         // edge) is just the alloc threaded through a loop — it's in the derived
         // set and its uses are checked directly, so it is not an escape.
         for phi in &block.phi_nodes {
+            if ignore_phi == Some(phi.dest) {
+                continue;
+            }
             let touches = phi
                 .incoming
                 .iter()
@@ -1282,6 +1528,7 @@ fn returns_fresh_string(
                 &ids.copy_only_ids,
                 param_retention,
                 true,
+                None,
             ) {
                 continue;
             }
@@ -1374,6 +1621,7 @@ fn returns_fresh_array(
                 &ids.copy_only_ids,
                 param_retention,
                 true,
+                None,
             ) {
                 continue;
             }
