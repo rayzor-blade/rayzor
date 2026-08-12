@@ -3192,6 +3192,9 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
     if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
         // Slot values are FunctionRef closures {fn_ptr, env}; symbolize the
         // inner fn_ptr, which is the dispatch thunk (or the method itself).
+        // dladdr is Unix-only; on Windows the address itself is the best this
+        // diagnostic can offer without a symbol-handler dependency.
+        #[cfg(unix)]
         let symbolize = |addr: i64| -> String {
             unsafe {
                 let mut info: libc::Dl_info = std::mem::zeroed();
@@ -3206,6 +3209,8 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
                 }
             }
         };
+        #[cfg(not(unix))]
+        let symbolize = |addr: i64| -> String { format!("0x{:x}", addr) };
         let inner_fn = if closure_ptr > 0x1000 {
             unsafe { *(closure_ptr as *const i64) }
         } else {

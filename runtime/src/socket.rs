@@ -579,14 +579,25 @@ pub extern "C" fn rayzor_host_reverse(handle: *const u8) -> *mut u8 {
 /// Get the local hostname.
 #[no_mangle]
 pub extern "C" fn rayzor_host_localhost() -> *mut u8 {
-    let mut buf = [0u8; 256];
-    let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-    if ret == 0 {
-        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        let s = String::from_utf8_lossy(&buf[..len]);
-        rust_string_to_haxe(&s)
-    } else {
-        rust_string_to_haxe("localhost")
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+        if ret == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let s = String::from_utf8_lossy(&buf[..len]);
+            rust_string_to_haxe(&s)
+        } else {
+            rust_string_to_haxe("localhost")
+        }
+    }
+    // Windows has no gethostname in libc; COMPUTERNAME carries the same value.
+    #[cfg(windows)]
+    {
+        match std::env::var("COMPUTERNAME") {
+            Ok(name) if !name.is_empty() => rust_string_to_haxe(&name),
+            _ => rust_string_to_haxe("localhost"),
+        }
     }
 }
 
