@@ -68,7 +68,10 @@ fn read_topology() -> Topology {
         }
         // SAFETY: the OS just told us this record is the NumaNode union arm.
         let numa = unsafe { (*rec_ptr).Anonymous.NumaNode };
-        let aff: GROUP_AFFINITY = numa.GroupMask[0];
+        // windows-sys 0.59 moved this into an anonymous union: `GroupMask` is a
+        // single GROUP_AFFINITY, `GroupMasks` the array form. The module takes
+        // the first group only, which is exactly the single-group arm.
+        let aff: GROUP_AFFINITY = unsafe { numa.Anonymous.GroupMask };
 
         let mut cpus = Vec::new();
         for bit in 0..64 {
