@@ -180,7 +180,7 @@ fn main() {
                 Ok(hir) => {
                     println!(
                         "   ✓ Lowered {} to HIR ({} types)",
-                        &typed_file.metadata.file_path,
+                        typed_file.metadata.file_path,
                         hir.types.len()
                     );
                     Some(hir)

@@ -393,7 +393,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     span: token.span,
                 })
             }
-            TokenKind::Ident => {
+            // `is` is contextual: an operator only after a left operand,
+            // so in expression-start position it is an ordinary name.
+            TokenKind::Ident | TokenKind::KwIs => {
                 let name = token.text(self.source).to_string();
                 // Compiler-specific code block: __js__("code"), __cpp__("code", arg0, ...).
                 // Some intrinsics take zero args (e.g. `__resources__()` in

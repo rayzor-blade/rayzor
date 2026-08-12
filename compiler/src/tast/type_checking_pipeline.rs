@@ -2587,10 +2587,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 self.check_statement(body)?;
             }
             TypedStatement::For {
-                condition,
-                body,
-                source_location: _,
-                ..
+                condition, body, ..
             } => {
                 // Check optional condition is boolean
                 if let Some(cond_expr) = condition {
@@ -2614,12 +2611,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 // Check loop body
                 self.check_statement(body)?;
             }
-            TypedStatement::ForIn {
-                iterable,
-                body,
-                source_location: _,
-                ..
-            } => {
+            TypedStatement::ForIn { iterable, body, .. } => {
                 // Check iterable type
                 let iterable_type = self.check_expression(iterable)?;
 

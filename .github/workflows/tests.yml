@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
 
 jobs:
   lint:
@@ -23,6 +22,7 @@ jobs:
           sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
           sudo apt-get update
           sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,22 +33,49 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Most lints here are cfg-gated, so linting one architecture cannot see
+      # the others. Linux is the gate; check a second target before assuming a
+      # clean local run means anything.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: Unit & Integration Tests
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM 21
+      - name: Install LLVM 21 (Linux)
+        if: runner.os == 'Linux'
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
           sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
           sudo apt-get update
           sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 21 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@21
+          echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 21 (Windows)
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "21"
+          env: true
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Point llvm-sys at it (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LLVM_SYS_211_PREFIX=${{ runner.temp }}/llvm" >> $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@stable
 

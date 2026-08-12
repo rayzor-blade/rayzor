@@ -1091,13 +1091,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
             // Benchmark runs
             for _ in 0..BENCH_RUNS {
-                match run_tiered_iteration(&mut state) {
-                    Ok(exec) => {
-                        compile_times.push(compile_time);
-                        exec_times.push(exec);
-                    }
-                    Err(e) => return Err(e),
-                }
+                let exec = run_tiered_iteration(&mut state)?;
+                compile_times.push(compile_time);
+                exec_times.push(exec);
             }
 
             // Beadie counter summary suppressed in bench runs to keep
@@ -1119,13 +1115,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
             // Benchmark runs
             for _ in 0..BENCH_RUNS {
-                match run_llvm_iteration(&mut state) {
-                    Ok(exec) => {
-                        compile_times.push(compile_time);
-                        exec_times.push(exec);
-                    }
-                    Err(e) => return Err(e),
-                }
+                let exec = run_llvm_iteration(&mut state)?;
+                compile_times.push(compile_time);
+                exec_times.push(exec);
             }
         }
 
@@ -1141,13 +1133,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
             // Benchmark runs
             for _ in 0..BENCH_RUNS {
-                match run_precompiled_iteration(&mut state) {
-                    Ok(exec) => {
-                        compile_times.push(load_time);
-                        exec_times.push(exec);
-                    }
-                    Err(e) => return Err(e),
-                }
+                let exec = run_precompiled_iteration(&mut state)?;
+                compile_times.push(load_time);
+                exec_times.push(exec);
             }
         }
 
@@ -1178,13 +1166,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
             // Benchmark runs at highest tier
             for _ in 0..BENCH_RUNS {
-                match run_precompiled_tiered_iteration(&mut state) {
-                    Ok(exec) => {
-                        compile_times.push(load_time); // Load time = "compile time"
-                        exec_times.push(exec);
-                    }
-                    Err(e) => return Err(e),
-                }
+                let exec = run_precompiled_tiered_iteration(&mut state)?;
+                compile_times.push(load_time); // Load time = "compile time"
+                exec_times.push(exec);
             }
         }
 

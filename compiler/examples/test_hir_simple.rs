@@ -211,7 +211,7 @@ class Simple {
                     for inst in &block.instructions {
                         println!("           - {:?}", inst);
                     }
-                    println!("           → {:?}", &block.terminator);
+                    println!("           → {:?}", block.terminator);
                 }
             }
         }

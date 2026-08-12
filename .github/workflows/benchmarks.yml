@@ -83,13 +83,23 @@ jobs:
 
       - name: Install HashLink
         run: |
+          # Build the VM only. `make` also builds the optional bindings, and the
+          # SDL one now needs SDL3 headers that the runner image does not carry —
+          # that is what used to fail here. The benchmarks execute .hl bytecode
+          # and load no .hdll, so LIBS= is enough.
           sudo apt-get update
-          sudo apt-get install -y libpng-dev libturbojpeg-dev libvorbis-dev libopenal-dev libsdl2-dev libmbedtls-dev libuv1-dev
-          git clone https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink
+          sudo apt-get install -y libpcre2-dev
+          git clone --depth 1 https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink
           cd /tmp/hashlink
-          make
-          sudo make install
+          make LIBS= -j"$(nproc)"
+          # `make install` copies *.hdll unconditionally and fails when none were
+          # built, so place the pieces directly.
+          sudo cp hl /usr/local/bin/
+          sudo cp libhl.so /usr/local/lib/
+          sudo mkdir -p /usr/local/include
+          sudo cp src/hl.h src/hl_ffi.h src/hlc.h src/hlc_main.c /usr/local/include/
           sudo ldconfig
+          hl --version
 
       - name: Install hxcpp
         run: |

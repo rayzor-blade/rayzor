@@ -81,7 +81,7 @@ class Main {
                     for instr in &block.instructions {
                         println!("  {:?}", instr);
                     }
-                    println!("  TERM: {:?}", &block.terminator);
+                    println!("  TERM: {:?}", block.terminator);
                 }
             }
         }
