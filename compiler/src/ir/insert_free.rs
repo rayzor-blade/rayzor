@@ -834,11 +834,31 @@ fn find_rotation_releases(
                 }
                 continue;
             }
-            if !uses_confined_to_body(function, phi.dest, &body) {
+            // Not just the carried value: every name for the incoming objects
+            // must die inside the loop too. `pointer_escapes` only answers
+            // "does this leave the function", which was enough while releases
+            // sat at return blocks — a point after every use. Releasing inside
+            // the loop needs the stronger property, or an object aliased by a
+            // second local and read after the loop is freed on iteration one.
+            // The incoming allocations themselves, NOT their derived sets: the
+            // derived walk runs through the phi and would swallow the carried
+            // value along with every pointer computed from it. A second local
+            // naming one of these objects reads it through the raw id.
+            //
+            // Reads BEFORE the loop are initialization — a constructor's field
+            // stores sit in their own preheader blocks, not in the block that
+            // holds the malloc — so only what the loop exits into is forbidden.
+            let mut incoming: BTreeSet<IrId> = BTreeSet::new();
+            incoming.insert(phi.dest);
+            for (_, v) in &phi.incoming {
+                incoming.extend(build_alias_set_no_phi(*v, function));
+            }
+            let after = blocks_after_loop(function, &body);
+            if !no_uses_in(function, &incoming, &after) {
                 if dbg {
                     eprintln!(
-                        "[rot-rej] {} phi={:?} uses-escape-body",
-                        function.name, phi.dest
+                        "[rot-rej] {} phi={:?} incoming-read-after-loop after={:?}",
+                        function.name, phi.dest, after
                     );
                 }
                 continue;
@@ -887,6 +907,71 @@ fn find_rotation_releases(
     out
 }
 
+/// Blocks the loop exits into, and everything reachable from them — where a
+/// released object must never be read again.
+fn blocks_after_loop(function: &IrFunction, body: &BTreeSet<IrBlockId>) -> BTreeSet<IrBlockId> {
+    let mut stack: Vec<IrBlockId> = Vec::new();
+    for b in body {
+        if let Some(block) = function.cfg.blocks.get(b) {
+            stack.extend(block.successors().into_iter().filter(|s| !body.contains(s)));
+        }
+    }
+    let mut after: BTreeSet<IrBlockId> = BTreeSet::new();
+    while let Some(b) = stack.pop() {
+        if body.contains(&b) || !after.insert(b) {
+            continue;
+        }
+        if let Some(block) = function.cfg.blocks.get(&b) {
+            stack.extend(block.successors());
+        }
+    }
+    after
+}
+
+/// True iff none of `values` is read anywhere in `blocks`.
+fn no_uses_in(
+    function: &IrFunction,
+    values: &BTreeSet<IrId>,
+    blocks: &BTreeSet<IrBlockId>,
+) -> bool {
+    for b in blocks {
+        let Some(block) = function.cfg.blocks.get(b) else {
+            continue;
+        };
+        if block
+            .instructions
+            .iter()
+            .any(|i| i.uses().iter().any(|u| values.contains(u)))
+        {
+            return false;
+        }
+        if block
+            .phi_nodes
+            .iter()
+            .any(|p| p.incoming.iter().any(|(_, v)| values.contains(v)))
+        {
+            return false;
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if values.contains(v) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The block defining `value`, if any instruction there produces it.
+fn def_block_of(function: &IrFunction, value: IrId) -> Option<IrBlockId> {
+    function.cfg.blocks.iter().find_map(|(&bid, block)| {
+        block
+            .instructions
+            .iter()
+            .any(|i| i.dest() == Some(value))
+            .then_some(bid)
+    })
+}
+
 /// Forward reachability over the CFG.
 fn reaches(function: &IrFunction, from: IrBlockId, to: IrBlockId) -> bool {
     let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
@@ -926,29 +1011,42 @@ fn loop_body(function: &IrFunction, header: IrBlockId, latch: IrBlockId) -> BTre
 
 /// True iff every read of `value` sits inside the loop body — no block outside
 /// it reads the carried object, and no terminator carries it out.
-fn uses_confined_to_body(function: &IrFunction, value: IrId, body: &BTreeSet<IrBlockId>) -> bool {
+fn uses_confined_to_body(
+    function: &IrFunction,
+    values: &BTreeSet<IrId>,
+    body: &BTreeSet<IrBlockId>,
+) -> bool {
+    first_escaping_use(function, values, body).is_none()
+}
+
+/// The first (value, block) pair that reads one of `values` outside `body`.
+fn first_escaping_use(
+    function: &IrFunction,
+    values: &BTreeSet<IrId>,
+    body: &BTreeSet<IrBlockId>,
+) -> Option<(IrId, IrBlockId)> {
     for (&block_id, block) in &function.cfg.blocks {
         let inside = body.contains(&block_id);
         if !inside {
             for inst in &block.instructions {
-                if inst.uses().contains(&value) {
-                    return false;
+                if let Some(u) = inst.uses().iter().find(|u| values.contains(u)) {
+                    return Some((*u, block_id));
                 }
             }
             // A phi elsewhere would carry the object out of the loop.
             for phi in &block.phi_nodes {
-                if phi.incoming.iter().any(|(_, v)| *v == value) {
-                    return false;
+                if let Some((_, v)) = phi.incoming.iter().find(|(_, v)| values.contains(v)) {
+                    return Some((*v, block_id));
                 }
             }
         }
         if let IrTerminator::Return { value: Some(v) } = &block.terminator {
-            if *v == value {
-                return false;
+            if values.contains(v) {
+                return Some((*v, block_id));
             }
         }
     }
-    true
+    None
 }
 
 /// True iff every use of the alloc (and its derived set) sits in the
@@ -996,6 +1094,54 @@ fn array_confined_to_block(
 
 /// Build the set of all IrIds derived from an allocation pointer.
 /// Includes the alloc_id itself plus any GEP, Cast, BitCast, or Copy that uses it.
+/// Aliases of `alloc_id` reached WITHOUT crossing a phi — `var b = a` lowers to
+/// a Copy with a fresh id, so a second name for the object is only visible
+/// through this walk. Stopping at phis keeps the rotation's carried value out
+/// of the set; that value is checked in its own right.
+fn build_alias_set_no_phi(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
+    let mut derived = BTreeSet::new();
+    derived.insert(alloc_id);
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::GetElementPtr { dest, ptr, .. } => {
+                        if derived.contains(ptr) && derived.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Cast { dest, src, .. }
+                    | IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::SsaBarrier { dest, src, .. }
+                    | IrInstruction::Copy { dest, src } => {
+                        if derived.contains(src) && derived.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Select {
+                        dest,
+                        true_val,
+                        false_val,
+                        ..
+                    } => {
+                        if (derived.contains(true_val) || derived.contains(false_val))
+                            && derived.insert(*dest)
+                        {
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    derived
+}
+
 fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
     let mut derived = BTreeSet::new();
     derived.insert(alloc_id);
