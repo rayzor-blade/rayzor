@@ -491,6 +491,15 @@ pub fn should_drop_at_statement(
             return false;
         }
 
+        // A last use inside a loop is only the last use of ONE iteration. The
+        // backedge carries the value round again, so dropping there frees an
+        // object the next iteration still reads — statement indices do not
+        // model the back edge. Reclaiming these is InsertFree's job, where the
+        // CFG is available; here it would be a use-after-free.
+        if last_use.in_loop {
+            return false;
+        }
+
         // Drop after last use
         return current_stmt_idx == last_use.statement_index;
     }
