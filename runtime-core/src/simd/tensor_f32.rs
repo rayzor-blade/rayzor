@@ -370,7 +370,7 @@ pub fn dot_slice_f32(a: &[f32], b: &[f32]) -> f32 {
         for i in (chunks * 4)..len {
             sum += a[i] * b[i];
         }
-        return sum;
+        sum
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]

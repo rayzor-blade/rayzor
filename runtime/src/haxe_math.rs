@@ -60,6 +60,12 @@ pub extern "C" fn haxe_math_round(x: f64) -> i32 {
     x.round() as i32
 }
 
+/// Round to nearest integer, keeping the Float type (Haxe's Math.fround)
+#[no_mangle]
+pub extern "C" fn haxe_math_fround(x: f64) -> f64 {
+    x.round()
+}
+
 // ============================================================================
 // Trigonometric Functions
 // ============================================================================
