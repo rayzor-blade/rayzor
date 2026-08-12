@@ -28,6 +28,16 @@ webpki-roots = "0.26"
 rustls-pemfile = "2"
 ariadne = "0.4"
 
+
+# topology/windows.rs has always used these bindings; the dependency was never
+# declared, so the crate could not build for Windows at all.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 cc = { version = "1", optional = true }
 
