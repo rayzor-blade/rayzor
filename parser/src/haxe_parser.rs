@@ -95,7 +95,27 @@ pub fn parse_haxe_file_with_config(
     // process — files like Math.hx get parsed dozens of times during
     // compilation and we don't want to drown the user in repeats.
     match crate::rd::rd_parse(&preprocessed, file_name, is_import_file, debug) {
-        Ok(file) => return Ok(file),
+        // The import.hx restriction is enforced here rather than inside each
+        // parser: whichever one produced the file, only imports and using
+        // statements may survive in it.
+        // https://haxe.org/manual/type-system-import-defaults.html
+        Ok(file) => {
+            if is_import_file {
+                if file.package.is_some() {
+                    return Err("import.hx files cannot contain package declarations".to_string());
+                }
+                if !file.declarations.is_empty() {
+                    return Err(
+                        "import.hx files cannot contain type declarations (class, interface, enum, etc.)"
+                            .to_string(),
+                    );
+                }
+                if !file.module_fields.is_empty() {
+                    return Err("import.hx files cannot contain module-level fields".to_string());
+                }
+            }
+            return Ok(file);
+        }
         Err(rd_errors) => {
             use std::sync::Mutex;
             static SEEN: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =

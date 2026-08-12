@@ -3006,10 +3006,10 @@ impl MirInterpreter {
                 if args.len() >= 2 {
                     let left = self
                         .interp_value_to_haxe_string(&args[0])?
-                        .unwrap_or_else(|| format!("{:?}", &args[0]));
+                        .unwrap_or_else(|| format!("{:?}", args[0]));
                     let right = self
                         .interp_value_to_haxe_string(&args[1])?
-                        .unwrap_or_else(|| format!("{:?}", &args[1]));
+                        .unwrap_or_else(|| format!("{:?}", args[1]));
                     return Ok(InterpValue::String(format!("{}{}", left, right)));
                 }
                 Ok(InterpValue::String(String::new()))

@@ -10,7 +10,10 @@
 //! "not supported here" message and exits non-zero.
 
 use super::DebugCommands;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+// The `anyhow!` macro is only reached by the macOS implementation below.
+#[cfg(target_os = "macos")]
+use anyhow::anyhow;
 
 #[cfg(not(target_os = "macos"))]
 pub fn execute(_cmd: DebugCommands) -> Result<()> {
