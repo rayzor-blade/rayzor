@@ -27,6 +27,13 @@ cargo build --release -p rayzor 2>&1 | tail -3
 rm -f .rayzor/blade/cache/*.blade 2>/dev/null || true
 rm -f .rayzor/cache/*.mir.cache 2>/dev/null || true
 
+# The build above can change the compiler's build id, which is one of the BLADE
+# cache's invalidation keys. Whoever runs first then compiles the whole stdlib
+# inside the per-test timeout and is recorded as a crash, so pay that cost here
+# instead — untimed, and not attributed to a test.
+echo "Warming stdlib cache..."
+"$RAYZOR" run "$TESTS_DIR/test_hello.hx" >/dev/null 2>&1 || true
+
 echo ""
 echo "Running all .hx tests in $TESTS_DIR"
 echo "Results written to $RESULTS_FILE"

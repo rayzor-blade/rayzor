@@ -362,13 +362,24 @@ impl<'a> HirToMirContext<'a> {
                 // The Let handler cannot do this: SafeCast's result type is the
                 // interface type, so Let would see Interface→Interface.
                 //
-                // `interface_vtables` is only the fast check — cross-module the
-                // eager (class, iface) pair is often missing, and
-                // `wrap_in_interface_fat_ptr` can build it lazily by name. So
-                // attempt the wrap whenever the interface has known methods here
-                // and fall back to null only when no vtable can be built at all.
-                let known_implements = self.interface_vtables.contains_key(&(src_sym, tgt_sym))
-                    || self.interface_method_names.contains_key(&tgt_sym);
+                // The question is whether THIS CLASS implements the interface.
+                // Asking whether the interface is known here instead is true of
+                // every interface in the module, so it wraps any class as any
+                // interface — a cast that must fail then yields a fat pointer
+                // whose slots are filled with unreachable stubs.
+                //
+                // `interface_vtables` answers directly, but only for classes it
+                // has entries for; cross-module the pairs may never have been
+                // built. So it is authoritative only once we know SOMETHING
+                // about this class, and a class we know nothing about keeps the
+                // permissive path that builds a vtable lazily by name.
+                let implements = self.interface_vtables.contains_key(&(src_sym, tgt_sym));
+                let class_known_here = self
+                    .interface_vtables
+                    .keys()
+                    .any(|(class_sym, _)| *class_sym == src_sym);
+                let known_implements = implements
+                    || (!class_known_here && self.interface_method_names.contains_key(&tgt_sym));
                 if known_implements {
                     let value_reg = self.lower_expression(expr)?;
                     match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
@@ -376,10 +387,13 @@ impl<'a> HirToMirContext<'a> {
                             self.interface_wrapped_args.insert(fat_ptr);
                             Some(fat_ptr)
                         }
-                        None => Some(value_reg),
+                        // No vtable could be built, so there is no interface
+                        // value to hand back. The raw class pointer is not one:
+                        // call sites would read its fields as vtable slots.
+                        None => self.builder.build_const(IrValue::Null),
                     }
                 } else {
-                    // Not known to implement at compile time — return null
+                    // Does not implement it — a failed cast is null
                     self.builder.build_const(IrValue::Null)
                 }
             }
