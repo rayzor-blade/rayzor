@@ -33,7 +33,7 @@ impl<'a> HirToMirContext<'a> {
                 .and_then(|sy| self.string_interner.get(sy.name))
             {
                 if n.starts_with("PLAIN") {
-                    eprintln!("[globals] VAR-ARM entry: {}", n);
+                    debug!("[globals] VAR-ARM entry: {}", n);
                 }
             }
         }
@@ -42,8 +42,18 @@ impl<'a> HirToMirContext<'a> {
         if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
             use crate::tast::SymbolKind;
             if sym.kind == SymbolKind::Class {
-                // Class runtime type_id = SymbolId.as_raw() (matches TypeId::from_raw in tast_to_hir)
-                let runtime_type_id = sym.id.as_raw() as i64;
+                // A class used as a value must carry the same id its object
+                // headers carry, because that is the key the RTTI and
+                // constructor registries are built under. A raw SymbolId is
+                // per-context and would miss every lookup.
+                let (class_sym, class_ty) = (sym.id, sym.type_id);
+                let runtime_type_id =
+                    self.deterministic_class_type_id(class_sym)
+                        .unwrap_or_else(|| {
+                            self.resolve_runtime_class_type_id(class_ty, class_sym)
+                                .as_raw()
+                                + 1000
+                        }) as i64;
                 return self.builder.build_const(IrValue::I64(runtime_type_id));
             }
             if sym.kind == SymbolKind::Enum {
@@ -284,7 +294,7 @@ impl<'a> HirToMirContext<'a> {
                     .and_then(|sy| self.string_interner.get(sy.name))
                 {
                     if n.starts_with("PLAIN") {
-                        eprintln!("[globals] VAR-ARM reached global check: {}", n);
+                        debug!("[globals] VAR-ARM reached global check: {}", n);
                     }
                 }
             }
@@ -310,7 +320,7 @@ impl<'a> HirToMirContext<'a> {
                         .get(&global_id)
                         .map(|g| g.name.clone())
                         .unwrap_or_else(|| "<not-in-table>".to_string());
-                    eprintln!("[globals] READ {} -> @g{} ({})", nm, global_id.0, gname);
+                    debug!("[globals] READ {} -> @g{} ({})", nm, global_id.0, gname);
                 }
                 let global_type = self
                     .builder
@@ -342,7 +352,7 @@ impl<'a> HirToMirContext<'a> {
                 for global in self.builder.module.globals.values() {
                     if global.name == qn {
                         if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
-                            eprintln!("[globals] RESOLVED-FQN {} -> @g{}", qn, global.id.0);
+                            debug!("[globals] RESOLVED-FQN {} -> @g{}", qn, global.id.0);
                         }
                         return self.builder.build_load_global(global.id, global.ty.clone());
                     }
@@ -353,7 +363,7 @@ impl<'a> HirToMirContext<'a> {
                     // has no entry, so a local lookup would yield IrType::Any
                     // and load e.g. a String as an untyped slot.
                     if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
-                        eprintln!(
+                        debug!(
                             "[globals] RESOLVED-EXTERNAL {} -> @g{} : {:?}",
                             qn, gid.0, gty
                         );
@@ -368,7 +378,7 @@ impl<'a> HirToMirContext<'a> {
                         .values()
                         .map(|g| format!("@g{}={}", g.id.0, g.name))
                         .collect();
-                    eprintln!(
+                    debug!(
                         "[globals] FQN-MISS qualified={:?} — table has {} entry(ies): {:?}",
                         qn,
                         have.len(),
@@ -383,7 +393,7 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(gname) = self.string_interner.get(gsym_info.name) {
                             if gname == name_str {
                                 if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
-                                    eprintln!(
+                                    debug!(
                                         "[globals] RESOLVED-BARENAME {} -> @g{}",
                                         name_str, gid.0
                                     );
@@ -407,7 +417,7 @@ impl<'a> HirToMirContext<'a> {
                 for global in self.builder.module.globals.values() {
                     if global.name.ends_with(&format!(".{}", name_str)) || global.name == name_str {
                         if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
-                            eprintln!(
+                            debug!(
                                 "[globals] RESOLVED-SUFFIX {} -> @g{} ({})",
                                 name_str, global.id.0, global.name
                             );
@@ -421,7 +431,7 @@ impl<'a> HirToMirContext<'a> {
             // Gated because benign stdlib internals (`i64`, `base`, ...) also
             // land here and are resolved by other means downstream.
             if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
-                eprintln!(
+                debug!(
                     "[globals] unresolved variable {:?} (name={:?}, qualified={:?}) \
                      — this read will produce an empty/zero value. If it names a \
                      static in another module, that module's globals were not \
