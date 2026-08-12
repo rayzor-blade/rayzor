@@ -2789,6 +2789,24 @@ impl CompilationUnit {
             }
         }
 
+        // A type this file declares itself is not a dependency. Leaving it in
+        // sends an undotted name to the import loader, which guesses a package
+        // for it — so a file with its own `Resource` pulls in `haxe.Resource`
+        // and reports that an unrelated module failed to compile.
+        let own_types: std::collections::BTreeSet<String> = ast
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                TypeDeclaration::Class(c) => Some(c.name.clone()),
+                TypeDeclaration::Interface(i) => Some(i.name.clone()),
+                TypeDeclaration::Enum(e) => Some(e.name.clone()),
+                TypeDeclaration::Abstract(a) => Some(a.name.clone()),
+                TypeDeclaration::Typedef(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .collect();
+        deps.retain(|d| !own_types.contains(d));
+
         let mut result: Vec<String> = deps.into_iter().collect();
         result.sort();
         result
