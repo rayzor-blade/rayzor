@@ -118,7 +118,6 @@ impl<'a> HirToMirContext<'a> {
 
             // Add implicit return if needed
             self.ensure_terminator();
-        } else {
         }
 
         self.builder.finish_function();
