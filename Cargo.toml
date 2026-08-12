@@ -109,3 +109,11 @@ cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev =
 cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
 cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
 cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
+
+# inkwell 0.7.1 still calls LLVMConstMul and its NSW/NUW variants, which LLVM 21
+# removed. Nothing here references those methods, so a normal build never links
+# them — but a test binary pulls in the object file that contains them and the
+# link fails on an undefined symbol. Thin LTO lets the optimizer drop the dead
+# code before the linker looks for it.
+[profile.test]
+lto = "thin"
