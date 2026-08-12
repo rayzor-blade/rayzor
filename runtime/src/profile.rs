@@ -516,7 +516,6 @@ pub unsafe fn ensure_alloc_dump_hooks() {
             extern "C" fn dump_all() {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
-                crate::tensor::rayzor_dump_tensor_alloc_stats();
             }
             atexit(dump_all);
             // SA_SIGINFO so the handler receives ucontext_t and we can
@@ -533,7 +532,6 @@ pub unsafe fn ensure_alloc_dump_hooks() {
             ) {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
-                crate::tensor::rayzor_dump_tensor_alloc_stats();
 
                 let mut pcs64 = [0u64; 8];
                 let n = unsafe {
@@ -607,7 +605,6 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                 extern "C" fn sig_dump(sig: i32) {
                     rayzor_dump_alloc_stats();
                     rayzor_dump_alloc_graph();
-                    crate::tensor::rayzor_dump_tensor_alloc_stats();
                     unsafe {
                         extern "C" {
                             fn _exit(s: i32) -> !;
