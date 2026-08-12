@@ -99,6 +99,8 @@ use half::f16;
 // resolving without touching every call site. Migration plan:
 // docs/design/runtime_core_extraction.md.
 use rayon::prelude::*;
+#[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+use rayzor_runtime_core::quant::q8_k::x_q8_cache_get;
 use rayzor_runtime_core::quant::{
     int8::{dot_i8_i8, int8_matmul_f32, quantise_int8_row},
     matmul::{dot_f32_simd, prepare_x_q8k_blocks_into},
@@ -107,7 +109,7 @@ use rayzor_runtime_core::quant::{
         quantize_block_q4_k_m,
     },
     q6_k::dequant_q6_k_block,
-    q8_k::{quantize_row_q8_K, x_q8_cache_get},
+    q8_k::quantize_row_q8_K,
 };
 pub use rayzor_runtime_core::quant::{
     Q4KBlock, Q4KMBlock, Q8Block, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE,
@@ -1997,6 +1999,7 @@ unsafe fn amx_gemm_f16(
 /// the second copy is what stopped the model being resident (peak RSS 4930 vs
 /// 6382 MB), and within one prefill each weight is used exactly once, so the
 /// cache bought nothing for the case that matters.
+#[cfg(target_os = "macos")]
 fn narrow_f16_weight_f32(w_ptr: usize, len: usize, out: &mut Vec<u16>) -> bool {
     let src = unsafe { std::slice::from_raw_parts(w_ptr as *const f32, len) };
     out.resize(len, 0);
@@ -2709,6 +2712,7 @@ fn sdot_enabled_runtime() -> bool {
 /// `std::env::var` in the per-chunk matmul workers — ~490 environment
 /// lock acquisitions per decoded token across the fork-join fan-out.
 #[inline]
+#[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
 fn fast_kernel_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
@@ -3151,7 +3155,9 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
     // bench, document failure if not.
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     let use_sdot_q6k = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K;
+    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     let mut x_q8_cache: Vec<Q8Block> = Vec::new();
+    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     let mut x_q8_init: Vec<bool> = Vec::new();
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     if use_sdot || use_sdot_q6k {

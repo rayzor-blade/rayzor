@@ -3309,7 +3309,7 @@ fn ensure_flat_vtable() {
                 })
                 .collect();
             // First pass: copy all vtable data
-            for (_type_id, vtable) in map.iter() {
+            for vtable in map.values() {
                 owned_slots.push(vtable.clone());
             }
             // Store owned slots and build flat table pointing into them

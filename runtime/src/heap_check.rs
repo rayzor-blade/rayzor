@@ -60,6 +60,8 @@ pub fn check_heap(label: &str) {
 /// Drop-guard wrapper. `let _g = HeapCheckGuard::new("kernel_x");` at the
 /// top of a function runs `check_heap` on every exit path automatically.
 pub struct HeapCheckGuard {
+    // Only read by the macOS zone check; the guard is inert elsewhere.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     label: &'static str,
 }
 
