@@ -359,8 +359,8 @@ unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
     let scale_bits = core::ptr::read_unaligned(src as *const u16);
     let scale = f16::from_bits(scale_bits).to_f32();
     let q_ptr = src.add(2) as *const i8;
-    for i in 0..Q8_0_BLOCK_SIZE {
-        dst[i] = scale * (*q_ptr.add(i) as f32);
+    for (i, d) in dst.iter_mut().enumerate().take(Q8_0_BLOCK_SIZE) {
+        *d = scale * (*q_ptr.add(i) as f32);
     }
 }
 
@@ -572,8 +572,8 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_dequant_view(handle: i64, current_le
 #[inline]
 unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
     let mut s = 0.0f32;
-    for i in 0..Q8_0_BLOCK_SIZE {
-        s += *q.add(i) * k[i];
+    for (i, kv) in k.iter().enumerate().take(Q8_0_BLOCK_SIZE) {
+        s += *q.add(i) * kv;
     }
     s
 }
@@ -624,8 +624,8 @@ unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
 #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
 #[inline]
 unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
-    for i in 0..Q8_0_BLOCK_SIZE {
-        *out.add(i) += w * v[i];
+    for (i, vv) in v.iter().enumerate().take(Q8_0_BLOCK_SIZE) {
+        *out.add(i) += w * vv;
     }
 }
 

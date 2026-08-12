@@ -155,6 +155,11 @@ pub extern "C" fn rayzor_pool_spin_default() -> i32 {
         let iters_per_us = spin_iters_per_us();
         let park_wake_us = park_wake_latency_us();
         let budget = (iters_per_us * park_wake_us).round();
+        // Only the Apple-silicon branch below raises this floor.
+        #[cfg_attr(
+            not(all(target_arch = "aarch64", target_os = "macos")),
+            allow(unused_mut)
+        )]
         let mut clamped = (budget as i64).clamp(200, 50_000) as i32;
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
