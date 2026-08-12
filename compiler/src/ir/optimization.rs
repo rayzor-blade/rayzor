@@ -2024,6 +2024,11 @@ impl PassManager {
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new());
+                // Again once inlining has exposed the factories: before it, a
+                // `new` behind a helper call reads as an escape at both ends,
+                // so nothing owns it. Re-runs are idempotent — every release
+                // rule skips a value that already has one.
+                manager.add_pass(super::insert_free::InsertFreePass::new());
             }
             OptimizationLevel::O1 => {
                 // Fast, low-overhead optimizations
@@ -2034,6 +2039,7 @@ impl PassManager {
                 manager.add_pass(ConstantFoldingPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
+                manager.add_pass(super::insert_free::InsertFreePass::new());
             }
             OptimizationLevel::O2 => {
                 // Standard optimizations
@@ -2060,6 +2066,7 @@ impl PassManager {
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new()); // Cleanup after other passes
+                manager.add_pass(super::insert_free::InsertFreePass::new());
             }
             OptimizationLevel::O3 => {
                 // Aggressive optimizations
@@ -2085,6 +2092,7 @@ impl PassManager {
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new()); // Cleanup
+                manager.add_pass(super::insert_free::InsertFreePass::new());
             }
         }
 
