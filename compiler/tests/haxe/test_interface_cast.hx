@@ -36,13 +36,13 @@ class Main {
         if (d != null) {
             trace(d.draw());  // draw:box
         } else {
-            trace("fail1");
+            Sys.println("FAIL interface-cast case 1");
         }
 
         // Test 2: Class → Interface (fail - Widget does NOT implement IClickable)
         var c:IClickable = cast(w, IClickable);
         if (c != null) {
-            trace("fail2");
+            Sys.println("FAIL interface-cast case 2");
         } else {
             trace("null");  // null
         }
@@ -53,7 +53,7 @@ class Main {
         if (c2 != null) {
             trace(c2.click());  // click:submit
         } else {
-            trace("fail3");
+            Sys.println("FAIL interface-cast case 3");
         }
 
         // Test 4: Subclass → parent Interface (success - Button inherits IDrawable from Widget)
@@ -61,7 +61,7 @@ class Main {
         if (d2 != null) {
             trace(d2.draw());  // button-draw:submit
         } else {
-            trace("fail4");
+            Sys.println("FAIL interface-cast case 4");
         }
 
         trace("done");
