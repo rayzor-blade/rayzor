@@ -99,6 +99,13 @@ struct Cli {
     /// see the target loop in `main`.
     #[arg(long, hide = true)]
     single_target: Option<String>,
+
+    /// Regenerate the chart from the results file on disk without running any
+    /// benchmark. With one kernel per CI runner, each runner's chart covers
+    /// only its own kernel; the collect step merges the results and then calls
+    /// this to draw a chart of all of them.
+    #[arg(long)]
+    charts_only: bool,
 }
 
 const WARMUP_RUNS: usize = 15; // Increased to ensure LLVM promotion during warmup
@@ -1735,6 +1742,47 @@ fn main() {
         if java_available() {
             all_targets_list.push(Target::HaxeJvm);
         }
+    }
+
+    // Charts-only: read the merged results file back and redraw, no benchmark.
+    if cli.charts_only {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/results");
+        let newest = fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .max_by_key(|p| p.file_name().map(|n| n.to_os_string()));
+        let Some(path) = newest else {
+            eprintln!("no results file in {}", dir.display());
+            std::process::exit(2);
+        };
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("read {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        };
+        let suite: BenchmarkSuite = match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("parse {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        };
+        let names: Vec<&str> = suite.benchmarks.iter().map(|b| b.name.as_str()).collect();
+        if let Err(e) = generate_chart_html(&suite) {
+            eprintln!("Failed to generate charts: {e}");
+            std::process::exit(1);
+        }
+        println!(
+            "charts regenerated from {} ({})",
+            path.display(),
+            names.join(", ")
+        );
+        std::process::exit(0);
     }
 
     // Child mode: one target, one process. The result goes to stdout as JSON so
