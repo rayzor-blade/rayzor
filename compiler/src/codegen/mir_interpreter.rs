@@ -3047,16 +3047,11 @@ impl MirInterpreter {
                 }
                 Ok(InterpValue::Void)
             }
-            _ => {
-                // Check if we have a registered symbol (call without signature info)
-                if let Some(&ptr) = self.runtime_symbols.get(name) {
-                    // Without signature info, we can only handle simple cases
-                    return self.call_ffi_ptr_simple(ptr as usize, args);
-                }
-                // Unknown extern - return void
-                tracing::warn!("Unknown extern function: {}", name);
-                Ok(InterpValue::Void)
-            }
+            // Not implemented here. Both callers hold the declared signature
+            // and make the FFI call themselves; calling it from here would
+            // have to guess the types, and guessing an integer return is what
+            // made every float-returning extern hand back its own argument.
+            _ => Err(InterpError::NotABuiltin),
         }
     }
 
@@ -3066,26 +3061,19 @@ impl MirInterpreter {
         func: &IrFunction,
         args: &[InterpValue],
     ) -> Result<InterpValue, InterpError> {
-        // First check built-ins
-        let builtin_result = self.call_extern(&func.name, args);
-        if let Ok(ref val) = builtin_result {
-            if !matches!(val, InterpValue::Void) || func.signature.return_type == IrType::Void {
-                // If we got a non-void result, or the function is supposed to return void,
-                // use the builtin result
-                if !func.name.starts_with("Unknown") {
-                    return builtin_result;
-                }
-            }
+        match self.call_extern(&func.name, args) {
+            Err(InterpError::NotABuiltin) => {}
+            result => return result,
         }
 
-        // Check if we have a registered symbol
         if let Some(&ptr) = self.runtime_symbols.get(&func.name) {
             return self.call_ffi_with_signature(ptr as usize, args, &func.signature);
         }
 
-        // No symbol found - return default value (warning already logged by builtin check)
-        tracing::warn!("Function symbol not found for FFI: {}", func.name);
-        Ok(self.default_value_for_type(&func.signature.return_type))
+        Err(InterpError::RuntimeError(format!(
+            "no implementation for extern function `{}`",
+            func.name
+        )))
     }
 
     /// Call an extern function with its full signature for proper FFI
@@ -3094,27 +3082,19 @@ impl MirInterpreter {
         extern_fn: &IrExternFunction,
         args: &[InterpValue],
     ) -> Result<InterpValue, InterpError> {
-        // First check built-ins
-        let builtin_result = self.call_extern(&extern_fn.name, args);
-        if let Ok(ref val) = builtin_result {
-            if !matches!(val, InterpValue::Void) || extern_fn.signature.return_type == IrType::Void
-            {
-                // If we got a non-void result, or the function is supposed to return void,
-                // use the builtin result
-                if !extern_fn.name.starts_with("Unknown") {
-                    return builtin_result;
-                }
-            }
+        match self.call_extern(&extern_fn.name, args) {
+            Err(InterpError::NotABuiltin) => {}
+            result => return result,
         }
 
-        // Check if we have a registered symbol
         if let Some(&ptr) = self.runtime_symbols.get(&extern_fn.name) {
             return self.call_ffi_with_signature(ptr as usize, args, &extern_fn.signature);
         }
 
-        // No symbol found
-        tracing::warn!("Extern function not found: {}", extern_fn.name);
-        Ok(self.default_value_for_type(&extern_fn.signature.return_type))
+        Err(InterpError::RuntimeError(format!(
+            "no implementation for extern function `{}`",
+            extern_fn.name
+        )))
     }
 
     /// Call a function through a raw pointer with signature (proper FFI)
@@ -3404,7 +3384,18 @@ impl MirInterpreter {
         }
     }
 
-    /// Call a native function pointer with given arguments
+    /// Call a native function pointer with given arguments.
+    ///
+    /// Integer-class and float-class arguments travel in separate register
+    /// files under both AAPCS and SysV, and each class is assigned in its own
+    /// order. Passing a `f64` as a `u64` therefore put it in an integer
+    /// register and left the callee reading an untouched `d0`, which is why
+    /// every `Math.*` call returned nonsense at tier 0.
+    ///
+    /// So partition the arguments by class, keep the order within each, and
+    /// call through one signature that declares the maximum of both. Extra
+    /// registers the callee never reads are harmless, and a callee that does
+    /// read one finds its own argument there.
     ///
     /// # Safety
     /// The caller must ensure:
@@ -3417,245 +3408,74 @@ impl MirInterpreter {
         args: &[NativeValue],
         return_type: &IrType,
     ) -> Result<NativeValue, InterpError> {
-        // Convert arguments to u64 for the trampoline
-        let arg_values: Vec<u64> = args.iter().map(|a| a.to_u64()).collect();
+        const MAX_PER_CLASS: usize = 8;
 
-        // Dispatch based on arity (0-8 arguments supported)
-        let result = match arg_values.len() {
-            0 => self.call_fn_0(ptr, return_type),
-            1 => self.call_fn_1(ptr, arg_values[0], return_type),
-            2 => self.call_fn_2(ptr, arg_values[0], arg_values[1], return_type),
-            3 => self.call_fn_3(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                return_type,
-            ),
-            4 => self.call_fn_4(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                arg_values[3],
-                return_type,
-            ),
-            5 => self.call_fn_5(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                arg_values[3],
-                arg_values[4],
-                return_type,
-            ),
-            6 => self.call_fn_6(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                arg_values[3],
-                arg_values[4],
-                arg_values[5],
-                return_type,
-            ),
-            7 => self.call_fn_7(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                arg_values[3],
-                arg_values[4],
-                arg_values[5],
-                arg_values[6],
-                return_type,
-            ),
-            8 => self.call_fn_8(
-                ptr,
-                arg_values[0],
-                arg_values[1],
-                arg_values[2],
-                arg_values[3],
-                arg_values[4],
-                arg_values[5],
-                arg_values[6],
-                arg_values[7],
-                return_type,
-            ),
-            n => {
-                return Err(InterpError::RuntimeError(format!(
-                    "FFI calls with {} arguments not supported (max 8)",
-                    n
-                )));
+        let mut ints: Vec<u64> = Vec::with_capacity(args.len());
+        let mut floats: Vec<f64> = Vec::with_capacity(args.len());
+        for arg in args {
+            match arg {
+                // An `f32` parameter is read from the low half of the vector
+                // register, so hand over a double carrying those same bits
+                // rather than the widened value.
+                NativeValue::F32(n) => floats.push(f64::from_bits(n.to_bits() as u64)),
+                NativeValue::F64(n) => floats.push(*n),
+                other => ints.push(other.to_u64()),
             }
-        };
-
-        result
-    }
-
-    // FFI trampoline functions for different arities
-    // These use the system C calling convention (extern "C")
-
-    unsafe fn call_fn_0(&self, ptr: usize, ret_ty: &IrType) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn() -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f()))
-        } else {
-            let f: extern "C" fn() -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f()))
         }
-    }
 
-    unsafe fn call_fn_1(
-        &self,
-        ptr: usize,
-        a0: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0)))
-        } else {
-            let f: extern "C" fn(u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0)))
+        if ints.len() > MAX_PER_CLASS || floats.len() > MAX_PER_CLASS {
+            return Err(InterpError::RuntimeError(format!(
+                "FFI call with {} integer and {} float arguments not supported (max {} per class)",
+                ints.len(),
+                floats.len(),
+                MAX_PER_CLASS
+            )));
         }
-    }
+        ints.resize(MAX_PER_CLASS, 0);
+        floats.resize(MAX_PER_CLASS, 0.0);
 
-    unsafe fn call_fn_2(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1)))
-        } else {
-            let f: extern "C" fn(u64, u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1)))
-        }
-    }
+        let (i0, i1, i2, i3, i4, i5, i6, i7) = (
+            ints[0], ints[1], ints[2], ints[3], ints[4], ints[5], ints[6], ints[7],
+        );
+        let (f0, f1, f2, f3, f4, f5, f6, f7) = (
+            floats[0], floats[1], floats[2], floats[3], floats[4], floats[5], floats[6], floats[7],
+        );
 
-    unsafe fn call_fn_3(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2)))
+        macro_rules! call_returning {
+            ($ret:ty) => {{
+                let f: extern "C" fn(
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                    f64,
+                ) -> $ret = std::mem::transmute(ptr);
+                f(
+                    i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7,
+                )
+            }};
         }
-    }
 
-    unsafe fn call_fn_4(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64, u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2, a3)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2, a3)))
-        }
-    }
-
-    unsafe fn call_fn_5(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        a4: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64, u64, u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2, a3, a4)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2, a3, a4)))
-        }
-    }
-
-    unsafe fn call_fn_6(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        a4: u64,
-        a5: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> f64 = std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2, a3, a4, a5)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2, a3, a4, a5)))
-        }
-    }
-
-    unsafe fn call_fn_7(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        a4: u64,
-        a5: u64,
-        a6: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> f64 =
-                std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2, a3, a4, a5, a6)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64 =
-                std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2, a3, a4, a5, a6)))
-        }
-    }
-
-    unsafe fn call_fn_8(
-        &self,
-        ptr: usize,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        a4: u64,
-        a5: u64,
-        a6: u64,
-        a7: u64,
-        ret_ty: &IrType,
-    ) -> Result<NativeValue, InterpError> {
-        if ret_ty.is_float() {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> f64 =
-                std::mem::transmute(ptr);
-            Ok(NativeValue::F64(f(a0, a1, a2, a3, a4, a5, a6, a7)))
-        } else {
-            let f: extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
-                std::mem::transmute(ptr);
-            Ok(NativeValue::U64(f(a0, a1, a2, a3, a4, a5, a6, a7)))
-        }
+        Ok(match return_type {
+            IrType::F32 => NativeValue::F32(call_returning!(f32)),
+            IrType::F64 => NativeValue::F64(call_returning!(f64)),
+            IrType::Void => {
+                call_returning!(());
+                NativeValue::Void
+            }
+            _ => NativeValue::U64(call_returning!(u64)),
+        })
     }
 }
 
@@ -3753,6 +3573,9 @@ pub enum InterpError {
     Exception(String),
     /// Hot loop detected - signal to promote function to JIT
     JitBailout(IrFunctionId),
+    /// The name is not interpreter-implemented; the caller should call it as
+    /// FFI using the signature it holds. Never surfaces to user code.
+    NotABuiltin,
 }
 
 impl std::fmt::Display for InterpError {
@@ -3763,6 +3586,7 @@ impl std::fmt::Display for InterpError {
             InterpError::StackOverflow => write!(f, "Stack overflow"),
             InterpError::TypeError(msg) => write!(f, "Type error: {}", msg),
             InterpError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            InterpError::NotABuiltin => write!(f, "Not an interpreter builtin"),
             InterpError::Panic(msg) => write!(f, "Panic: {}", msg),
             InterpError::Exception(msg) => write!(f, "Exception: {}", msg),
             InterpError::JitBailout(id) => write!(f, "JIT bailout requested for {:?}", id),
