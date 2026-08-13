@@ -131,12 +131,22 @@ jobs:
         run: |
           haxelib install hxjava
 
+      # The HL/C target is refused by the Haxe compiler without this, even
+      # though the generated code needs only HashLink's C headers.
+      - name: Install hashlink haxelib
+        run: |
+          haxelib install hashlink
+
       - name: Verify Haxe installation
         run: |
           haxe --version
           hl --version || true
           echo "hxcpp installed: $(haxelib path hxcpp 2>/dev/null | head -1)"
           echo "hxjava installed: $(haxelib path hxjava 2>/dev/null | head -1)"
+          echo "hashlink installed: $(haxelib path hashlink 2>/dev/null | head -1)"
+          # The HL/C target is skipped unless these exist, and a skipped target
+          # reads the same as a passing one in the results.
+          ls -la /usr/local/include/hlc.h /usr/local/lib/libhl.so
 
       # --- Install LLVM 21 for Rayzor ---
       - name: Install LLVM 21
