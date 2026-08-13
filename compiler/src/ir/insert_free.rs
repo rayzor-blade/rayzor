@@ -223,7 +223,6 @@ impl OptimizationPass for InsertFreePass {
         // ...and likewise for fresh caller-owned strings (chains through
         // StringBuf.toString → encodeUtf8-style wrappers).
         let fresh_string_fns = compute_returns_fresh_strings(module, &ids, &param_retention);
-
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
@@ -773,50 +772,88 @@ fn find_rotation_releases(
     param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> Vec<(IrBlockId, IrId, Vec<IrId>)> {
     let mut out: Vec<(IrBlockId, IrId, Vec<IrId>)> = Vec::new();
-    let alloc_set: BTreeSet<IrId> = alloc_ids.iter().copied().collect();
+    // A phi incoming is usually a CAST of the allocation, not the allocation
+    // itself: a class local whose slot is `*void` takes the pointer through
+    // `cast *u8 -> *void`. Map every alias back to the allocation it names, so
+    // the checks below run against the allocation.
+    let mut alias_root: BTreeMap<IrId, IrId> = BTreeMap::new();
+    for &a in alloc_ids {
+        for id in build_alias_set_no_phi(a, function) {
+            alias_root.entry(id).or_insert(a);
+        }
+    }
     let dbg = std::env::var_os("RZT_DBG_ROT").is_some();
 
-    for (&header, header_block) in &function.cfg.blocks {
+    // Natural loops from the dominator tree. Reachability alone cannot identify
+    // a back edge: in a nested loop the inner preheader is reachable from the
+    // inner header via the OUTER back edge, so it reads as a second back edge
+    // and every nested loop is rejected. A back edge is an edge whose target
+    // DOMINATES its source.
+    let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+    let loop_info = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+
+    for natural in loop_info.loops_by_depth() {
+        let header = natural.header;
+        let Some(header_block) = function.cfg.blocks.get(&header) else {
+            continue;
+        };
         if header_block.phi_nodes.is_empty() {
             continue;
         }
 
-        // A backedge is a predecessor the header can itself reach.
-        let backedges: Vec<IrBlockId> = function
+        // One latch only: a second edge back to the header would reach it
+        // without running the release.
+        let latches: Vec<IrBlockId> = function
             .cfg
             .blocks
             .iter()
-            .filter(|(_, b)| b.successors().contains(&header))
+            .filter(|(id, b)| natural.blocks.contains(id) && b.successors().contains(&header))
             .map(|(&id, _)| id)
-            .filter(|&p| reaches(function, header, p))
             .collect();
-        if backedges.len() != 1 {
+        if latches.len() != 1 || latches[0] != natural.back_edge_source {
+            if dbg {
+                eprintln!(
+                    "[rot-rej] {} header={header:?} latches={:?}",
+                    function.name, latches
+                );
+            }
             continue;
         }
-        let latch = backedges[0];
+        let latch = natural.back_edge_source;
 
         // A conditional exit at the latch could carry the released value out.
         let Some(latch_block) = function.cfg.blocks.get(&latch) else {
             continue;
         };
         if !matches!(latch_block.terminator, IrTerminator::Branch { .. }) {
+            if dbg {
+                eprintln!(
+                    "[rot-rej] {} header={header:?} latch={latch:?} latch-not-unconditional",
+                    function.name
+                );
+            }
             continue;
         }
 
-        let body = loop_body(function, header, latch);
+        let body = natural.blocks.clone();
 
         for phi in &header_block.phi_nodes {
             if phi.incoming.len() < 2 {
                 continue;
             }
-            // Every incoming must be a fresh allocation that escapes by no
+            // Every incoming must name a fresh allocation that escapes by no
             // route other than this phi.
-            if !phi.incoming.iter().all(|(_, v)| alloc_set.contains(v)) {
+            let roots: Option<Vec<IrId>> = phi
+                .incoming
+                .iter()
+                .map(|(_, v)| alias_root.get(v).copied())
+                .collect();
+            let Some(roots) = roots else {
                 if dbg {
                     let which: Vec<bool> = phi
                         .incoming
                         .iter()
-                        .map(|(_, v)| alloc_set.contains(v))
+                        .map(|(_, v)| alias_root.contains_key(v))
                         .collect();
                     eprintln!(
                         "[rot-rej] {} phi={:?} not-all-allocs incoming={:?} is_alloc={:?}",
@@ -824,7 +861,7 @@ fn find_rotation_releases(
                     );
                 }
                 continue;
-            }
+            };
             if !phi.incoming.iter().any(|(pred, _)| *pred == latch) {
                 if dbg {
                     eprintln!(
@@ -850,15 +887,19 @@ fn find_rotation_releases(
             // holds the malloc — so only what the loop exits into is forbidden.
             let mut incoming: BTreeSet<IrId> = BTreeSet::new();
             incoming.insert(phi.dest);
-            for (_, v) in &phi.incoming {
+            for v in &roots {
                 incoming.extend(build_alias_set_no_phi(*v, function));
             }
-            let after = blocks_after_loop(function, &body);
+            let redefines: BTreeSet<IrBlockId> = roots
+                .iter()
+                .filter_map(|v| def_block_of(function, *v))
+                .collect();
+            let after = blocks_after_loop(function, &body, &redefines);
             if !no_uses_in(function, &incoming, &after) {
                 if dbg {
                     eprintln!(
-                        "[rot-rej] {} phi={:?} incoming-read-after-loop after={:?}",
-                        function.name, phi.dest, after
+                        "[rot-rej] {} phi={:?} incoming-read-after-loop roots={:?}",
+                        function.name, phi.dest, roots
                     );
                 }
                 continue;
@@ -873,7 +914,7 @@ fn find_rotation_releases(
             if already_released {
                 continue;
             }
-            let all_local = phi.incoming.iter().all(|(_, v)| {
+            let all_local = roots.iter().all(|v| {
                 let derived = build_derived_set(*v, function);
                 !pointer_escapes_ex(
                     *v,
@@ -896,11 +937,7 @@ fn find_rotation_releases(
                 }
                 continue;
             }
-            out.push((
-                latch,
-                phi.dest,
-                phi.incoming.iter().map(|(_, v)| *v).collect(),
-            ));
+            out.push((latch, phi.dest, roots));
         }
     }
 
@@ -909,7 +946,11 @@ fn find_rotation_releases(
 
 /// Blocks the loop exits into, and everything reachable from them — where a
 /// released object must never be read again.
-fn blocks_after_loop(function: &IrFunction, body: &BTreeSet<IrBlockId>) -> BTreeSet<IrBlockId> {
+fn blocks_after_loop(
+    function: &IrFunction,
+    body: &BTreeSet<IrBlockId>,
+    redefines: &BTreeSet<IrBlockId>,
+) -> BTreeSet<IrBlockId> {
     let mut stack: Vec<IrBlockId> = Vec::new();
     for b in body {
         if let Some(block) = function.cfg.blocks.get(b) {
@@ -919,6 +960,13 @@ fn blocks_after_loop(function: &IrFunction, body: &BTreeSet<IrBlockId>) -> BTree
     let mut after: BTreeSet<IrBlockId> = BTreeSet::new();
     while let Some(b) = stack.pop() {
         if body.contains(&b) || !after.insert(b) {
+            continue;
+        }
+        // Stop where the allocation is produced again. Around an OUTER loop,
+        // "after the inner loop" wraps back to before it, and those blocks
+        // reuse the same SSA ids for the next iteration's fresh object — a
+        // different object, not a read of the released one.
+        if redefines.contains(&b) {
             continue;
         }
         if let Some(block) = function.cfg.blocks.get(&b) {
