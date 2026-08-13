@@ -3413,6 +3413,128 @@ impl MirInterpreter {
         args: &[NativeValue],
         return_type: &IrType,
     ) -> Result<NativeValue, InterpError> {
+        #[cfg(windows)]
+        {
+            self.call_native_fn_win64(ptr, args, return_type)
+        }
+        #[cfg(not(windows))]
+        {
+            self.call_native_fn_sysv(ptr, args, return_type)
+        }
+    }
+
+    /// Windows x64: the first four arguments are assigned BY POSITION — the
+    /// first goes in RCX or XMM0, the second in RDX or XMM1, and so on, with
+    /// the two register files sharing one slot counter. Passing the integers
+    /// first and the floats after, which is exactly right under SysV and
+    /// AAPCS, would therefore spend all four register slots on the integers
+    /// and push every float onto the stack.
+    ///
+    /// So describe the first four arguments in their real order and with their
+    /// real types. From the fifth onward everything travels on the stack in
+    /// 8-byte slots where the class no longer changes placement, so those go
+    /// as raw bits.
+    ///
+    /// # Safety
+    /// See `call_native_fn`.
+    #[cfg(windows)]
+    unsafe fn call_native_fn_win64(
+        &self,
+        ptr: usize,
+        args: &[NativeValue],
+        return_type: &IrType,
+    ) -> Result<NativeValue, InterpError> {
+        const MAX_ARGS: usize = 8;
+        if args.len() > MAX_ARGS {
+            return Err(InterpError::RuntimeError(format!(
+                "FFI call with {} arguments not supported (max {})",
+                args.len(),
+                MAX_ARGS
+            )));
+        }
+
+        let is_float = |idx: usize| {
+            matches!(
+                args.get(idx),
+                Some(NativeValue::F32(_)) | Some(NativeValue::F64(_))
+            )
+        };
+        // An `f32` is read from the low half of the register, so hand over a
+        // double carrying those bits rather than the widened value.
+        let float_at = |idx: usize| -> f64 {
+            match args.get(idx) {
+                Some(NativeValue::F32(n)) => f64::from_bits(n.to_bits() as u64),
+                Some(NativeValue::F64(n)) => *n,
+                _ => 0.0,
+            }
+        };
+        let int_at = |idx: usize| -> u64 { args.get(idx).map(|a| a.to_u64()).unwrap_or(0) };
+
+        let (i0, i1, i2, i3) = (int_at(0), int_at(1), int_at(2), int_at(3));
+        let (f0, f1, f2, f3) = (float_at(0), float_at(1), float_at(2), float_at(3));
+        let (r4, r5, r6, r7) = (int_at(4), int_at(5), int_at(6), int_at(7));
+
+        macro_rules! call_win64 {
+            ($t0:ty, $t1:ty, $t2:ty, $t3:ty, $v0:expr, $v1:expr, $v2:expr, $v3:expr) => {
+                match return_type {
+                    IrType::F32 => NativeValue::F32({
+                        let f: extern "C" fn($t0, $t1, $t2, $t3, u64, u64, u64, u64) -> f32 =
+                            std::mem::transmute(ptr);
+                        f($v0, $v1, $v2, $v3, r4, r5, r6, r7)
+                    }),
+                    IrType::F64 => NativeValue::F64({
+                        let f: extern "C" fn($t0, $t1, $t2, $t3, u64, u64, u64, u64) -> f64 =
+                            std::mem::transmute(ptr);
+                        f($v0, $v1, $v2, $v3, r4, r5, r6, r7)
+                    }),
+                    IrType::Void => {
+                        let f: extern "C" fn($t0, $t1, $t2, $t3, u64, u64, u64, u64) =
+                            std::mem::transmute(ptr);
+                        f($v0, $v1, $v2, $v3, r4, r5, r6, r7);
+                        NativeValue::Void
+                    }
+                    _ => NativeValue::U64({
+                        let f: extern "C" fn($t0, $t1, $t2, $t3, u64, u64, u64, u64) -> u64 =
+                            std::mem::transmute(ptr);
+                        f($v0, $v1, $v2, $v3, r4, r5, r6, r7)
+                    }),
+                }
+            };
+        }
+
+        Ok(match (is_float(0), is_float(1), is_float(2), is_float(3)) {
+            (false, false, false, false) => call_win64!(u64, u64, u64, u64, i0, i1, i2, i3),
+            (true, false, false, false) => call_win64!(f64, u64, u64, u64, f0, i1, i2, i3),
+            (false, true, false, false) => call_win64!(u64, f64, u64, u64, i0, f1, i2, i3),
+            (true, true, false, false) => call_win64!(f64, f64, u64, u64, f0, f1, i2, i3),
+            (false, false, true, false) => call_win64!(u64, u64, f64, u64, i0, i1, f2, i3),
+            (true, false, true, false) => call_win64!(f64, u64, f64, u64, f0, i1, f2, i3),
+            (false, true, true, false) => call_win64!(u64, f64, f64, u64, i0, f1, f2, i3),
+            (true, true, true, false) => call_win64!(f64, f64, f64, u64, f0, f1, f2, i3),
+            (false, false, false, true) => call_win64!(u64, u64, u64, f64, i0, i1, i2, f3),
+            (true, false, false, true) => call_win64!(f64, u64, u64, f64, f0, i1, i2, f3),
+            (false, true, false, true) => call_win64!(u64, f64, u64, f64, i0, f1, i2, f3),
+            (true, true, false, true) => call_win64!(f64, f64, u64, f64, f0, f1, i2, f3),
+            (false, false, true, true) => call_win64!(u64, u64, f64, f64, i0, i1, f2, f3),
+            (true, false, true, true) => call_win64!(f64, u64, f64, f64, f0, i1, f2, f3),
+            (false, true, true, true) => call_win64!(u64, f64, f64, f64, i0, f1, f2, f3),
+            (true, true, true, true) => call_win64!(f64, f64, f64, f64, f0, f1, f2, f3),
+        })
+    }
+
+    /// SysV (x86-64) and AAPCS (aarch64): the integer and float classes are
+    /// assigned from independent counters, so every argument reaches its
+    /// register as long as the order within each class is kept.
+    ///
+    /// # Safety
+    /// See `call_native_fn`.
+    #[cfg(not(windows))]
+    unsafe fn call_native_fn_sysv(
+        &self,
+        ptr: usize,
+        args: &[NativeValue],
+        return_type: &IrType,
+    ) -> Result<NativeValue, InterpError> {
         const MAX_PER_CLASS: usize = 8;
 
         let mut ints: Vec<u64> = Vec::with_capacity(args.len());

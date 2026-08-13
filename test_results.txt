@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Thu Aug 13 23:58:34 BST 2026
+  Fri Aug 14 00:27:55 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -814,8 +814,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-2
 1
+2
 100
 200
 300
@@ -1048,7 +1048,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{world => 99, hello => 42}
+{hello => 42, world => 99}
 42
 99
 true
@@ -1578,8 +1578,8 @@ temp:   0
 
 [load] reading GGUF (k-quants stay quantized; zero-copy)...
 [kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)
-[warm] model warmed in 1.9449970722198486s
-[load] done in 3.313s
+[warm] model warmed in 1.0297889709472656s
+[load] done in 2.205s
 [meta] qwen2 hidden=896 layers=24 heads=14/2 ffn=4864 vocab=151936 ctx=2048 headDim=64 ropeBase=1000000 normEps=0.0000009999999974752427
 [pool] workers=8
 [tok]  vocab=151936
@@ -1591,7 +1591,7 @@ rep-penalty: 1.3  + no-repeat-8gram
 [gen] streaming...
 A compiler is a software program that translates
 
-[done] 8 tokens in 0.962s (8.319 tok/s, ttft=0.719s, finish=length)
+[done] 8 tokens in 0.549s (14.567 tok/s, ttft=0.316s, finish=length)
 
 
 =========================================
