@@ -145,25 +145,32 @@ fn run_sra_on_function(
 ) -> OptimizationResult {
     let mut result = OptimizationResult::unchanged();
 
-    let constants = build_constant_map(&function.cfg);
-    let candidates = find_candidates_in_function(&function.cfg, &constants, malloc_ids, free_ids);
-
-    // Process only ONE candidate per pass to avoid stale data issues.
-    // When we apply SRA to one candidate, it removes/replaces instructions,
-    // which shifts indices and invalidates the pre-computed free_locations
-    // and alloc_location for other candidates. By processing one at a time
-    // and letting the optimizer loop re-run this pass, we ensure each
-    // candidate is analyzed on the current function state.
-    if let Some(candidate) = candidates.first() {
+    // One candidate at a time: applying SRA removes and replaces instructions,
+    // which shifts indices and invalidates the pre-computed free_locations and
+    // alloc_location for every other candidate. Re-analyse after each and keep
+    // going — the pass manager runs this once per level, so a function with
+    // several promotable allocations would otherwise keep all but the first.
+    let max_rounds = {
+        let constants = build_constant_map(&function.cfg);
+        find_candidates_in_function(&function.cfg, &constants, malloc_ids, free_ids).len()
+    };
+    for _ in 0..max_rounds {
+        let constants = build_constant_map(&function.cfg);
+        let candidates =
+            find_candidates_in_function(&function.cfg, &constants, malloc_ids, free_ids);
+        let Some(candidate) = candidates.first() else {
+            break;
+        };
         let eliminated = apply_sra(function, candidate);
-        if eliminated > 0 {
-            result.modified = true;
-            result.instructions_eliminated += eliminated;
-            *result
-                .stats
-                .entry("allocs_replaced".to_string())
-                .or_insert(0) += 1;
+        if eliminated == 0 {
+            break;
         }
+        result.modified = true;
+        result.instructions_eliminated += eliminated;
+        *result
+            .stats
+            .entry("allocs_replaced".to_string())
+            .or_insert(0) += 1;
     }
 
     result
@@ -1435,8 +1442,30 @@ fn try_build_candidate_function_wide(
                             // Check for type conflict: same index with different element types
                             if let Some(existing_ty) = gep_element_types.get(&field_idx) {
                                 if existing_ty != ty {
-                                    // Type conflict at this field index - reject candidate
-                                    return None;
+                                    // The zero-init in `build_heap_alloc` walks the
+                                    // object in I64-sized slots, so every field is
+                                    // ALSO reached by an I64 GEP — the same 8-byte
+                                    // storage the typed access uses. Treating that as
+                                    // a type conflict rejects every class instance
+                                    // whose fields are not I64, which is what kept
+                                    // Complex out of SRA. Prefer the field's real
+                                    // type; only a genuine width mismatch rejects.
+                                    let is_word = |t: &IrType| {
+                                        matches!(
+                                            t,
+                                            IrType::I64
+                                                | IrType::U64
+                                                | IrType::F64
+                                                | IrType::Ptr(_)
+                                        )
+                                    };
+                                    if is_word(existing_ty) && is_word(ty) {
+                                        if matches!(existing_ty, IrType::I64) {
+                                            gep_element_types.insert(field_idx, ty.clone());
+                                        }
+                                    } else {
+                                        return None;
+                                    }
                                 }
                             } else {
                                 gep_element_types.insert(field_idx, ty.clone());
