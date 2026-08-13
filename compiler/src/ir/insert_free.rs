@@ -669,20 +669,21 @@ fn insert_free_for_function(
         }
     }
 
-    // Inner-block ARRAY allocs (own or received): free at the end of the
-    // DEFINING block when every use is confined to that block. Such an alloc
-    // is fresh on every execution of the block and dead at its terminator, so
-    // an end-of-block release pairs alloc+free per iteration (the discarded
-    // `embedText(s)` in a bench loop). Loop-carried values are excluded
-    // structurally: anything threaded through a phi or read by another block
-    // is not confined. Non-array inner allocs keep the historical skip —
-    // freeing at "last use" is unsound for loop-carried allocations, and SRA
-    // usually promotes them anyway.
+    // Inner-block allocs (own or received): free at the end of the DEFINING
+    // block when every use is confined to that block. Such an alloc is fresh on
+    // every execution of the block and dead at its terminator, so an end-of-block
+    // release pairs alloc+free per iteration (the discarded `embedText(s)` in a
+    // bench loop). Loop-carried values are excluded structurally: anything
+    // threaded through a phi or read by another block is not confined, which is
+    // what makes releasing here safe — the old "free at last use" hazard only
+    // arises for values that survive the iteration.
+    //
+    // Class instances are included. The comment here used to say SRA promotes
+    // them anyway; measured on the mandelbrot inner loop, it does not — the
+    // per-iteration temporary (`complexSquare(val)` feeding `complexAdd`) is
+    // block-confined, non-escaping, and was never reclaimed.
     for &alloc_id in &inner_allocs {
         let is_string = string_alloc_ids.contains(&alloc_id);
-        if !is_string && !array_alloc_ids.contains(&alloc_id) {
-            continue;
-        }
         let Some(&def_block) = alloc_def_block.get(&alloc_id) else {
             continue;
         };
@@ -711,7 +712,12 @@ fn insert_free_for_function(
                     inserted += 1;
                 }
             }
-        } else if let Some(free_id) = array_free_id {
+        } else if array_alloc_ids.contains(&alloc_id) {
+            // An array owns a separate data buffer, so the header release has
+            // to go through haxe_array_free first.
+            let Some(free_id) = array_free_id else {
+                continue;
+            };
             if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
                 block.instructions.push(IrInstruction::CallDirect {
                     dest: None,
@@ -726,6 +732,38 @@ fn insert_free_for_function(
                     .push(IrInstruction::Free { ptr: alloc_id });
                 inserted += 1;
             }
+        } else if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
+            // A class instance is a single allocation: a plain release, never
+            // the array routine, which would also free a buffer it does not own.
+            block
+                .instructions
+                .push(IrInstruction::Free { ptr: alloc_id });
+            inserted += 1;
+        }
+    }
+
+    // Per-iteration temporaries: release at the latch of the loop they live in.
+    let temp_handled: BTreeSet<IrId> = rotations
+        .iter()
+        .flat_map(|(_, _, carried)| carried.iter().copied())
+        .collect();
+    let needing_free_set: BTreeSet<IrId> = allocs_needing_free.iter().copied().collect();
+    for (latch, alloc_id) in
+        find_iteration_temporaries(function, &needing_free_set, &temp_handled, &derived_sets)
+    {
+        let already = function.cfg.blocks.values().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, IrInstruction::Free { ptr } if *ptr == alloc_id))
+        });
+        if already {
+            continue;
+        }
+        if let Some(block) = function.cfg.blocks.get_mut(&latch) {
+            block
+                .instructions
+                .push(IrInstruction::Free { ptr: alloc_id });
+            inserted += 1;
         }
     }
 
@@ -1018,6 +1056,90 @@ fn def_block_of(function: &IrFunction, value: IrId) -> Option<IrBlockId> {
             .any(|i| i.dest() == Some(value))
             .then_some(bid)
     })
+}
+
+/// Per-iteration temporaries: an allocation made inside a loop whose every use
+/// stays inside that loop and which no phi carries out of it. It is fresh on
+/// each iteration and dead by the end of one, so releasing it at the latch
+/// pairs one free with each allocation and holds the loop to a constant
+/// footprint.
+///
+/// This is the confined-to-a-block rule widened to the iteration: a loop body
+/// with a short-circuit condition spans several blocks, so a temporary that is
+/// plainly dead at the end of the iteration is not confined to any single one.
+///
+/// The defining block must dominate the latch, or a path that skipped the
+/// allocation would reach the release with an undefined register. Anything a
+/// phi carries is excluded — that is a rotation, released by its own rule.
+fn find_iteration_temporaries(
+    function: &IrFunction,
+    needing_free: &BTreeSet<IrId>,
+    handled: &BTreeSet<IrId>,
+    derived_sets: &BTreeMap<IrId, BTreeSet<IrId>>,
+) -> Vec<(IrBlockId, IrId)> {
+    let mut out: Vec<(IrBlockId, IrId)> = Vec::new();
+    if needing_free.is_empty() {
+        return out;
+    }
+    let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+    let loop_info = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+
+    for natural in loop_info.loops_by_depth() {
+        let latch = natural.back_edge_source;
+        let Some(latch_block) = function.cfg.blocks.get(&latch) else {
+            continue;
+        };
+        // A conditional latch could leave the loop without running the release.
+        if !matches!(latch_block.terminator, IrTerminator::Branch { .. }) {
+            continue;
+        }
+        for &alloc_id in needing_free {
+            if handled.contains(&alloc_id) {
+                continue;
+            }
+            let Some(def_block) = def_block_of(function, alloc_id) else {
+                continue;
+            };
+            if !natural.blocks.contains(&def_block) || !domtree.dominates(def_block, latch) {
+                continue;
+            }
+            let Some(derived) = derived_sets.get(&alloc_id) else {
+                continue;
+            };
+            // Every read must sit inside the loop, and no phi may carry it.
+            let mut escapes_iteration = false;
+            for (&bid, block) in &function.cfg.blocks {
+                if !natural.blocks.contains(&bid)
+                    && block
+                        .instructions
+                        .iter()
+                        .any(|i| i.uses().iter().any(|u| derived.contains(u)))
+                {
+                    escapes_iteration = true;
+                    break;
+                }
+                if block
+                    .phi_nodes
+                    .iter()
+                    .any(|p| p.incoming.iter().any(|(_, v)| derived.contains(v)))
+                {
+                    escapes_iteration = true;
+                    break;
+                }
+                if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+                    if derived.contains(v) {
+                        escapes_iteration = true;
+                        break;
+                    }
+                }
+            }
+            if escapes_iteration {
+                continue;
+            }
+            out.push((latch, alloc_id));
+        }
+    }
+    out
 }
 
 /// Forward reachability over the CFG.
