@@ -659,36 +659,27 @@ impl<'a> HirToMirContext<'a> {
         // registered with an undersized `obj_size` when the parent's fields
         // weren't available, and inherited-field writes would then overflow.
         let obj_size = self.alloc_size_with_inheritance(*class_type, actual_symbol_id, obj_size);
-        let obj_ptr = self.build_heap_alloc(obj_size);
+        // Object header: the runtime type_id occupies slot 0, so hand it to the
+        // allocator rather than zeroing that slot and overwriting it.
+        //
+        // Stored raw: the id is a stable name-hash and is/cast compare against
+        // the same `runtime_type_id()`, so no offset transform.
+        //
+        // A Placeholder `class_type` (cross-module import) yields 0, so fall
+        // back to the name-recovered symbol's deterministic id — the header
+        // must carry the real class id for is/cast/vtable and the interface
+        // fat-ptr wrap.
+        let raw_type_id = self.runtime_type_id(*class_type);
+        let runtime_type_id = if raw_type_id != 0 {
+            raw_type_id
+        } else {
+            actual_symbol_id
+                .and_then(|sid| self.deterministic_class_type_id(sid))
+                .unwrap_or(raw_type_id)
+        } as i64;
+        let header = self.builder.build_const(IrValue::I64(runtime_type_id));
+        let obj_ptr = self.build_heap_alloc_with_header(obj_size, header);
         let obj_ptr = obj_ptr?;
-
-        // Object header: runtime type_id at GEP index 0.
-        {
-            // Stored raw: the id is a stable name-hash and is/cast compare
-            // against the same `runtime_type_id()`, so no offset transform.
-            //
-            // A Placeholder `class_type` (cross-module import) yields 0, so fall
-            // back to the name-recovered symbol's deterministic id — the header
-            // must carry the real class id for is/cast/vtable and the interface
-            // fat-ptr wrap.
-            let raw_type_id = self.runtime_type_id(*class_type);
-            let runtime_type_id = if raw_type_id != 0 {
-                raw_type_id
-            } else {
-                actual_symbol_id
-                    .and_then(|sid| self.deterministic_class_type_id(sid))
-                    .unwrap_or(raw_type_id)
-            } as i64;
-            if let Some(type_id_const) = self.builder.build_const(IrValue::I64(runtime_type_id)) {
-                if let Some(index_0) = self.builder.build_const(IrValue::I32(0)) {
-                    if let Some(header_ptr) =
-                        self.builder.build_gep(obj_ptr, vec![index_0], IrType::I64)
-                    {
-                        self.builder.build_store(header_ptr, type_id_const);
-                    }
-                }
-            }
-        }
 
         // @:derive(Default): initialize all fields before constructor call.
         // Uses @:default(value) metadata if present, else type-based defaults.
