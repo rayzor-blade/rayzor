@@ -932,7 +932,14 @@ fn find_rotation_releases(
                 .iter()
                 .filter_map(|v| def_block_of(function, *v))
                 .collect();
-            let after = blocks_after_loop(function, &body, &redefines);
+            let mut after = blocks_after_loop(function, &body, &redefines);
+            // A block that dominates the header runs before the loop, so what
+            // it does to the incoming object is initialization — the header
+            // and zero-fill stores of the allocation itself — not a read of a
+            // released one. Around an outer loop those blocks are reachable
+            // from the inner loop's exit, which is why they land here at all.
+            after.retain(|b| !domtree.dominates(*b, header));
+            let after = after;
             if !no_uses_in(function, &incoming, &after) {
                 if dbg {
                     eprintln!(
