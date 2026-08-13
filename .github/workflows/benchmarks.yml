@@ -69,9 +69,23 @@ jobs:
           retention-days: 1
 
   benchmark:
-    name: Benchmark Suite
+    name: bench (${{ matrix.kernel }})
     needs: build
     runs-on: ubuntu-latest
+    # One kernel per runner. Run in sequence on a single machine and the heavy
+    # kernels leave it warm, so whichever runs last is measured on a throttled
+    # CPU. A fresh runner per kernel also keeps one kernel's failure from
+    # cancelling the rest of the sweep.
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - nbody
+          - fibonacci
+          # deltablue disabled: rayzor-gcc hangs (C backend CallIndirect
+          # doesn't dereference the closure struct for vtable dispatch).
+          # Re-enable after fix.
+          - mandelbrot
     steps:
       - uses: actions/checkout@v4
 
@@ -152,19 +166,73 @@ jobs:
       - name: Build compiler for benchmark runner
         run: cargo build --release --package compiler --features all-backends
 
-      - name: Run nbody benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- nbody --json --disable-trace
+      - name: Run ${{ matrix.kernel }} benchmark
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- ${{ matrix.kernel }} --json --disable-trace
 
-      - name: Run fibonacci benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- fibonacci --json --disable-trace
+      # Each runner produces only its own kernel; `collect` merges them back
+      # into the single results file downstream consumers expect.
+      - name: Upload partial results (${{ matrix.kernel }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-partial-${{ matrix.kernel }}
+          path: compiler/benchmarks/results/
+          retention-days: 90
 
-      # deltablue disabled: rayzor-gcc hangs (C backend CallIndirect doesn't
-      # dereference closure struct for vtable dispatch). Re-enable after fix.
-      # - name: Run deltablue benchmark
-      #   run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json --disable-trace
+      - name: Upload partial charts (${{ matrix.kernel }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-charts-${{ matrix.kernel }}
+          path: compiler/benchmarks/charts/
+          retention-days: 90
 
-      - name: Run mandelbrot benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- mandelbrot --json --disable-trace
+  collect:
+    name: Collect results
+    needs: benchmark
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download partial results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-partial-*
+          path: partials
+
+      - name: Download partial charts
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-charts-*
+          path: chart-partials
+
+      # `save_results` merges a kernel into the dated file it finds, but each
+      # runner starts from a clean checkout and so writes only its own. Union
+      # the `benchmarks` arrays back into one file, keyed by name so a rerun
+      # replaces rather than duplicates.
+      - name: Merge into one results file
+        run: |
+          mkdir -p compiler/benchmarks/results compiler/benchmarks/charts
+          python3 - <<'EOF'
+          import json, pathlib
+          merged, date, sysinfo = {}, None, None
+          for f in sorted(pathlib.Path('partials').rglob('*.json')):
+              d = json.loads(f.read_text())
+              date = d.get('date') or date
+              sysinfo = d.get('system_info') or sysinfo
+              for b in d.get('benchmarks', []):
+                  merged[b['name']] = b
+          if not merged:
+              raise SystemExit('no benchmark results to merge')
+          out = {'date': date, 'system_info': sysinfo,
+                 'benchmarks': [merged[k] for k in sorted(merged)]}
+          p = pathlib.Path('compiler/benchmarks/results') / f'results_{date}.json'
+          p.write_text(json.dumps(out, indent=2))
+          print(f'merged {len(merged)} kernels -> {p}: {", ".join(sorted(merged))}')
+          EOF
+          find chart-partials -type f -exec cp {} compiler/benchmarks/charts/ \; 2>/dev/null || true
 
       - name: Upload benchmark results
         if: always()
