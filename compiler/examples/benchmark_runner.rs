@@ -110,6 +110,9 @@ struct Cli {
 
 const WARMUP_RUNS: usize = 15; // Increased to ensure LLVM promotion during warmup
 const BENCH_RUNS: usize = 10;
+/// Ceiling on the iterations spent waiting for a background tier promotion.
+/// Generous: it only runs until the promotion is observed.
+const TIER_PROMOTION_ITERATION_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchmarkResult {
@@ -119,6 +122,13 @@ struct BenchmarkResult {
     runtime_ms: f64,
     total_time_ms: f64,
     iterations: u32,
+    /// Spread of the measured runs behind `runtime_ms`. A median on its own
+    /// cannot distinguish a noisy machine from a real change, which is what
+    /// makes a run-to-run comparison across CI unreadable.
+    #[serde(default)]
+    runtime_min_ms: f64,
+    #[serde(default)]
+    runtime_max_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +146,10 @@ struct SystemInfo {
     cpu_cores: usize,
     ram_mb: u64,
     hostname: String,
+    /// The CPU this ran on. Hosted CI pools mix processor models, so without
+    /// it two runs of the same commit are not known to be comparable.
+    #[serde(default)]
+    cpu_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -589,6 +603,37 @@ fn setup_tiered_benchmark(
     })
 }
 
+/// The tier beadie's broker installs, and so the one a tiered measurement is
+/// waiting on. `Baseline` is reached during warmup on the calling thread and
+/// says nothing about whether the background compile has landed.
+const TIER_PROMOTION_TARGET: compiler::codegen::tiered_backend::OptimizationTier =
+    compiler::codegen::tiered_backend::OptimizationTier::Standard;
+
+/// Iterate until the function reaches `TIER_PROMOTION_TARGET`, or give up.
+///
+/// Returns whether promotion was observed. Polling the backend's own tier map
+/// replaces guessing a fixed iteration count for work another thread is doing.
+fn wait_for_tier_promotion(state: &mut TieredBenchmarkState, limit: usize) -> bool {
+    for _ in 0..limit {
+        if state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET {
+            return true;
+        }
+        let _ = run_tiered_iteration(state);
+    }
+    state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET
+}
+
+/// As `wait_for_tier_promotion`, for the bundle-loading state.
+fn wait_for_precompiled_tier_promotion(state: &mut PrecompiledTieredState, limit: usize) -> bool {
+    for _ in 0..limit {
+        if state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET {
+            return true;
+        }
+        let _ = run_precompiled_tiered_iteration(state);
+    }
+    state.backend.get_function_tier(state.main_id) >= TIER_PROMOTION_TARGET
+}
+
 fn run_tiered_iteration(state: &mut TieredBenchmarkState) -> Result<Duration, String> {
     let exec_start = Instant::now();
     state
@@ -669,6 +714,8 @@ struct LLVMBenchmarkState<'ctx> {
     backend: LLVMJitBackend<'ctx>,
     mir_modules: Vec<std::sync::Arc<compiler::ir::IrModule>>,
     compile_time: Duration,
+    /// Index of the module carrying `main`, resolved on the first iteration.
+    main_module_idx: Option<usize>,
 }
 
 #[cfg(feature = "llvm-backend")]
@@ -730,17 +777,38 @@ fn setup_llvm_benchmark<'ctx>(
         backend,
         mir_modules,
         compile_time,
+        main_module_idx: None,
     })
 }
 
 #[cfg(feature = "llvm-backend")]
 fn run_llvm_iteration(state: &mut LLVMBenchmarkState) -> Result<Duration, String> {
-    let exec_start = Instant::now();
-    for module in state.mir_modules.iter().rev() {
-        if state.backend.call_main(module).is_ok() {
-            break;
+    // Which module carries `main` does not change between iterations, so find
+    // it once. Searching every iteration put each failed `call_main` inside
+    // the timed region, and `call_main` re-runs a module's `__vtable_init__`
+    // and `__init__` before it can discover it has no main — so the reported
+    // figure carried the initialisation of every stdlib module the search
+    // touched, which is not what any other target measures.
+    let idx = match state.main_module_idx {
+        Some(idx) => idx,
+        None => {
+            let mut found = None;
+            for idx in (0..state.mir_modules.len()).rev() {
+                let module = state.mir_modules[idx].clone();
+                if state.backend.call_main(&module).is_ok() {
+                    found = Some(idx);
+                    break;
+                }
+            }
+            let idx = found.ok_or("no module with a main function")?;
+            state.main_module_idx = Some(idx);
+            idx
         }
-    }
+    };
+
+    let module = state.mir_modules[idx].clone();
+    let exec_start = Instant::now();
+    state.backend.call_main(&module)?;
     Ok(exec_start.elapsed())
 }
 
@@ -1134,14 +1202,25 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 let _ = run_tiered_iteration(&mut state);
             }
 
-            // Step 6: legacy `process_queue_sync` is gone. Beadie owns
-            // Standard + Optimized promotion via its own broker
-            // thread; the install lands inline with `execute_function`
-            // via `maybe_install_compiled_beadie_pointer`. The extra
-            // iterations below give beadie's broker time to compile +
-            // the main thread time to observe + install.
-            for _ in 0..3 {
-                let _ = run_tiered_iteration(&mut state);
+            // Beadie owns Standard + Optimized promotion from its own broker
+            // thread, and the install lands inline with `execute_function`.
+            // A fixed number of extra iterations is a guess about when another
+            // thread finishes: on a loaded machine the promotion can land
+            // after the measurement starts, and because the reported figure is
+            // the median of BENCH_RUNS, a handful of unpromoted iterations
+            // moves it to a different tier entirely. That is the shape of the
+            // run-to-run inconsistency in CI — bimodal, not noisy. So wait for
+            // the tier the run is supposed to measure, and say so when it
+            // never arrives rather than quietly measuring something else.
+            let promoted = wait_for_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
+            if !promoted {
+                eprintln!(
+                    "  [tier] warning: {} never left {:?} after {} iterations — \
+                     this measurement is not comparable to a promoted run",
+                    bench.name,
+                    state.backend.get_function_tier(state.main_id),
+                    TIER_PROMOTION_ITERATION_LIMIT
+                );
             }
 
             // Upgrade to LLVM tier for maximum performance
@@ -1213,12 +1292,18 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 let _ = run_precompiled_tiered_iteration(&mut state);
             }
 
-            // Step 6: legacy `process_queue_sync` is gone. Beadie owns
-            // Standard + Optimized promotion; install lands inline
-            // with `execute_function`. Extra iterations give beadie's
-            // broker time to compile + observe + install.
-            for _ in 0..3 {
-                let _ = run_precompiled_tiered_iteration(&mut state);
+            // Wait for the promotion rather than assume a fixed number of
+            // iterations covers it; see `wait_for_tier_promotion`.
+            let promoted =
+                wait_for_precompiled_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
+            if !promoted {
+                eprintln!(
+                    "  [tier] warning: {} never left {:?} after {} iterations — \
+                     this measurement is not comparable to a promoted run",
+                    bench.name,
+                    state.backend.get_function_tier(state.main_id),
+                    TIER_PROMOTION_ITERATION_LIMIT
+                );
             }
 
             // Upgrade to LLVM tier for maximum performance
@@ -1385,9 +1470,11 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
     compile_times.sort();
     exec_times.sort();
 
-    let median_compile = compile_times[BENCH_RUNS / 2];
-    let median_exec = exec_times[BENCH_RUNS / 2];
+    let median_compile = compile_times[compile_times.len() / 2];
+    let median_exec = exec_times[exec_times.len() / 2];
     let total = median_compile + median_exec;
+    let min_exec = exec_times.first().copied().unwrap_or(median_exec);
+    let max_exec = exec_times.last().copied().unwrap_or(median_exec);
 
     Ok(BenchmarkResult {
         name: bench.name.clone(),
@@ -1395,7 +1482,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         compile_time_ms: median_compile.as_secs_f64() * 1000.0,
         runtime_ms: median_exec.as_secs_f64() * 1000.0,
         total_time_ms: total.as_secs_f64() * 1000.0,
-        iterations: BENCH_RUNS as u32,
+        iterations: exec_times.len() as u32,
+        runtime_min_ms: min_exec.as_secs_f64() * 1000.0,
+        runtime_max_ms: max_exec.as_secs_f64() * 1000.0,
     })
 }
 
@@ -1441,6 +1530,35 @@ fn get_system_info() -> SystemInfo {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let cpu_model = {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/cpuinfo")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("model name"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .map(|v| v.trim().to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("sysctl")
+                .args(["-n", "machdep.cpu.brand_string"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            "unknown".to_string()
+        }
+    };
+
     SystemInfo {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -1449,6 +1567,7 @@ fn get_system_info() -> SystemInfo {
             .unwrap_or(1),
         ram_mb,
         hostname,
+        cpu_model,
     }
 }
 
@@ -1459,6 +1578,7 @@ fn print_system_info(info: &SystemInfo) {
     println!("  CPU cores: {}", info.cpu_cores);
     println!("  RAM:       {:.1} GB", info.ram_mb as f64 / 1024.0);
     println!("  Host:      {}", info.hostname);
+    println!("  CPU:       {}", info.cpu_model);
     println!();
 }
 
