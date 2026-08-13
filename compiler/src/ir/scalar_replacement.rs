@@ -459,10 +459,26 @@ fn try_build_phi_candidate(
                     // Track ALL field indices including index 0 (__type_id header).
                     // See comment in try_build_candidate_function_wide for rationale.
 
-                    // Check for type conflict: same index with different element types
+                    // Same-slot type conflict: the zero-init walks the object in
+                    // I64-sized slots, so every field is reached by an I64 GEP as
+                    // well as by its own typed one. Both address the same 8-byte
+                    // slot, so the field's real type wins; only a genuine width
+                    // mismatch rejects. Mirrors the rule in
+                    // `try_build_candidate_function_wide`.
                     if let Some(existing_ty) = gep_element_types.get(&field_idx) {
                         if existing_ty != ty {
-                            return None;
+                            let is_word = |t: &IrType| {
+                                matches!(
+                                    t,
+                                    IrType::I64 | IrType::U64 | IrType::F64 | IrType::Ptr(_)
+                                )
+                            };
+                            if !is_word(existing_ty) || !is_word(ty) {
+                                return None;
+                            }
+                            if matches!(existing_ty, IrType::I64) {
+                                gep_element_types.insert(field_idx, ty.clone());
+                            }
                         }
                     } else {
                         gep_element_types.insert(field_idx, ty.clone());
@@ -885,6 +901,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
         }
 
         let sorted_scan = sorted_blocks(&function.cfg);
+        let value_types = build_value_type_map(&function.cfg);
         for &field_idx in &accessed_fields {
             let phi_geps_for_field: Vec<IrId> = candidate
                 .phi_gep_map
@@ -899,7 +916,24 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
                 for inst in &block.instructions {
                     if let IrInstruction::Store { ptr, value, .. } = inst {
                         if phi_geps_for_field.contains(ptr) {
-                            back_edge_values.insert(field_idx, *value);
+                            // A field is written twice in the body: the
+                            // allocation's I64 zero-init and the real typed
+                            // store. Block order is not execution order, so
+                            // taking the last one seen can carry the zero into
+                            // the scalar phi and lose the value. Keep only a
+                            // store whose type matches the field being
+                            // promoted; when the type is unknown, keep the last
+                            // store as before.
+                            let matches_field = match (
+                                value_types.get(value),
+                                candidate.field_types.get(&field_idx),
+                            ) {
+                                (Some(vt), Some(ft)) => vt == ft,
+                                _ => true,
+                            };
+                            if matches_field {
+                                back_edge_values.insert(field_idx, *value);
+                            }
                         }
                     }
                 }

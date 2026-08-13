@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Aug 11 20:57:42 BST 2026
+  Thu Aug 13 20:59:41 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -30,7 +30,7 @@ x=8 iter=4 r=1 g=253 b=2 sum=2304
 x=9 iter=4 r=1 g=253 b=2 sum=2560
 
 === Full Checksum ===
-Full Checksum: 112798515
+Full Checksum: 112798288
 
 --- debug_array_index [PASS] ---
 Running compiler/tests/haxe/debug_array_index.hx [debug] [preset: Application]...
@@ -121,7 +121,7 @@ x=8 iter=4 r=1 g=253 b=2 sum=2304
 x=9 iter=4 r=1 g=253 b=2 sum=2560
 
 === Full Checksum ===
-Full Checksum: 112798515
+Full Checksum: 112798288
 
 --- debug_division [PASS] ---
 Running compiler/tests/haxe/debug_division.hx [debug] [preset: Application]...
@@ -766,8 +766,28 @@ Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Applicati
  [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
 [38;5;246m────╯[0m
 [33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:23:17[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m23 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[31mc[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m   │[0m                 [31m┬[0m  
+ [38;5;240m   │[0m                 [31m╰[0m[31m─[0m[31m─[0m missing variants: Blue
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mNote[0m: add case for `Blue`
+[38;5;246m────╯[0m
 
 [33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:42:17[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m42 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[31mo[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m   │[0m                 [31m┬[0m  
+ [38;5;240m   │[0m                 [31m╰[0m[31m─[0m[31m─[0m missing variants: None
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
+[38;5;246m────╯[0m
 
 red
 red
@@ -796,9 +816,9 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 2
 1
-300
 100
 200
+300
 done
 
 --- test_forward [PASS] ---
@@ -824,9 +844,9 @@ Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
 caught
 done
 
---- test_generic_ctor_untyped_selfref [FAIL(self-reported)] ---
+--- test_generic_ctor_untyped_selfref [PASS] ---
 Running compiler/tests/haxe/test_generic_ctor_untyped_selfref.hx [debug] [preset: Application]...
-FAIL h_leaf=1 h_parent=2
+PASS
 
 --- test_generic_std_string [PASS] ---
 Running compiler/tests/haxe/test_generic_std_string.hx [debug] [preset: Application]...
@@ -911,7 +931,7 @@ Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]
  [38;5;240m   │[0m                   [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
 [38;5;246m────╯[0m
 draw:box
-fail2
+null
 click:submit
 button-draw:submit
 done
@@ -983,6 +1003,10 @@ PASS llvm-bitcast-i32-i64
 Running compiler/tests/haxe/test_loop_counter_from_param.hx [debug] [preset: Application]...
 PASS loop-counter-from-param while=44 for=44 closure=44
 
+--- test_loop_reassigned_alias_use [PASS] ---
+Running compiler/tests/haxe/test_loop_reassigned_alias_use.hx [debug] [preset: Application]...
+loop reassigned alias ok
+
 --- test_loop_unroll_register_remap [PASS] ---
 Running compiler/tests/haxe/test_loop_unroll_register_remap.hx [debug] [preset: Application]...
 PASS: unrolled iterations keep distinct registers
@@ -1043,11 +1067,6 @@ false
 
 --- test_map_value_iteration [PASS] ---
 Running compiler/tests/haxe/test_map_value_iteration.hx [debug] [preset: Application]...
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1347: expected expression, found 'is'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1420: expected field declaration, found 'for'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1575: expected field declaration, found 'kv'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1644: expected field declaration, found 'for'; falling back to legacy parser
-warning: RD parser failed in compiler/tests/haxe/test_map_value_iteration.hx at offset 1762: expected field declaration, found 'Sys'; falling back to legacy parser
 PASS
 
 --- test_method_named_free [PASS] ---
@@ -1109,6 +1128,10 @@ true
 false
 30
 done
+
+--- test_onearg_cast_call_result [PASS] ---
+Running compiler/tests/haxe/test_onearg_cast_call_result.hx [debug] [preset: Application]...
+PASS onearg-cast
 
 --- test_option_enum [PASS] ---
 Running compiler/tests/haxe/test_option_enum.hx [debug] [preset: Application]...
@@ -1228,6 +1251,10 @@ TFunction
 false
 false
 
+--- test_rotation_alias_live_out [PASS] ---
+Running compiler/tests/haxe/test_rotation_alias_live_out.hx [debug] [preset: Application]...
+rotation alias live-out ok
+
 --- test_rtti [PASS] ---
 Running compiler/tests/haxe/test_rtti.hx [debug] [preset: Application]...
 true
@@ -1255,8 +1282,6 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
-error[IMPORT]: imported module `Resource` failed to compile (1 error(s)); calls into it will trap at runtime. First errors:
-    Cannot find name '__resources__' (78:21)
 42
 42
 
@@ -1438,9 +1463,7 @@ test_trycatch_merge_phi OK
 
 --- test_type_api [PASS] ---
 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
-null
-null
-Dog
+PASS type-api
 
 --- test_type_create_empty_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_empty_instance.hx [debug] [preset: Application]...
@@ -1555,8 +1578,8 @@ temp:   0
 
 [load] reading GGUF (k-quants stay quantized; zero-copy)...
 [kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)
-[warm] model warmed in 0.8407049179077148s
-[load] done in 1.632112979888916s
+[warm] model warmed in 1.0207228660583496s
+[load] done in 2.031229019165039s
 [meta] qwen2 hidden=896 layers=24 heads=14/2 ffn=4864 vocab=151936 ctx=2048 headDim=64 ropeBase=1000000 normEps=0.0000009999999974752427
 [pool] workers=8
 [tok]  vocab=151936
@@ -1568,12 +1591,12 @@ rep-penalty: 1.3  + no-repeat-8gram
 [gen] streaming...
 A compiler is a software program that translates
 
-[done] 8 tokens in 0.8011839389801025s (9.98522263212603 tok/s, ttft=0.5615379810333252s, finish=length)
+[done] 8 tokens in 0.9808881282806396s (8.15587401799111 tok/s, ttft=0.4536411762237549s, finish=length)
 
 
 =========================================
-  TOTAL:        180
-  PASSED:       179
-  FAILED:       1
+  TOTAL:        183
+  PASSED:       183
+  FAILED:       0
   CRASHED:      0
 =========================================
