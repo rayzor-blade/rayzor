@@ -3254,15 +3254,20 @@ impl MirInterpreter {
             IrType::I8 => Ok(NativeValue::I8(val.to_i64()? as i8)),
             IrType::I16 => Ok(NativeValue::I16(val.to_i64()? as i16)),
             IrType::I32 => Ok(NativeValue::I32(val.to_i64()? as i32)),
-            IrType::I64 => Ok(NativeValue::I64(
-                val.to_function_bits().unwrap_or(val.to_i64()?),
-            )),
+            // `unwrap_or` evaluates its argument, so `to_i64()?` would report
+            // a function value as unconvertible before the function-bits path
+            // is ever consulted.
+            IrType::I64 => Ok(NativeValue::I64(match val.to_function_bits() {
+                Some(bits) => bits,
+                None => val.to_i64()?,
+            })),
             IrType::U8 => Ok(NativeValue::U8(val.to_i64()? as u8)),
             IrType::U16 => Ok(NativeValue::U16(val.to_i64()? as u16)),
             IrType::U32 => Ok(NativeValue::U32(val.to_i64()? as u32)),
-            IrType::U64 => Ok(NativeValue::U64(
-                val.to_function_bits().unwrap_or(val.to_i64()?) as u64,
-            )),
+            IrType::U64 => Ok(NativeValue::U64(match val.to_function_bits() {
+                Some(bits) => bits,
+                None => val.to_i64()?,
+            } as u64)),
             IrType::F32 => Ok(NativeValue::F32(val.to_f64()? as f32)),
             IrType::F64 => Ok(NativeValue::F64(val.to_f64()?)),
             IrType::Ptr(_) | IrType::Ref(_) => Ok(NativeValue::Ptr(val.to_usize()?)),
