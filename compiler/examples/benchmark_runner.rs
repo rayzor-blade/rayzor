@@ -790,9 +790,12 @@ fn hashlink_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Check if HashLink/C compilation is available (requires gcc and hl --hlc support)
+/// Check if HashLink/C compilation is available.
+///
+/// It needs gcc, the `hashlink` haxelib (the Haxe compiler refuses the target
+/// without it) and HashLink's own headers, which the generated code includes.
+/// It does not need the `hl` VM: the output is a native binary.
 fn hashlink_c_available() -> bool {
-    // HashLink/C requires gcc
     if !Command::new("gcc")
         .arg("--version")
         .output()
@@ -801,8 +804,16 @@ fn hashlink_c_available() -> bool {
     {
         return false;
     }
-    // Also requires hl with hlc support - some builds may not have it
-    hashlink_available()
+    if !Command::new("haxelib")
+        .arg("path")
+        .arg("hashlink")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    std::path::Path::new("/usr/local/include/hlc.h").exists()
 }
 
 fn java_available() -> bool {
@@ -889,8 +900,14 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
         }
 
         Target::HaxeHashLinkC => {
-            // Step 1: Compile to .hl bytecode
-            let hl_path = tmp_dir.join(format!("{}.hl", bench_name));
+            // The C is emitted by the Haxe compiler when `-hl` names a `.c`
+            // path; the `hl` VM has no mode that turns bytecode into C. It
+            // writes a tree of ~40 files, of which main.c is a unity build that
+            // includes the rest, so gcc is handed main.c alone.
+            let c_out_dir = tmp_dir.join("hlc_out");
+            std::fs::create_dir_all(&c_out_dir).ok();
+            let main_c = c_out_dir.join("main.c");
+
             let compile_start = Instant::now();
             let output = Command::new("haxe")
                 .arg("--main")
@@ -898,37 +915,15 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
                 .arg("-cp")
                 .arg(&haxe_dir)
                 .arg("-hl")
-                .arg(&hl_path)
+                .arg(&main_c)
                 .output()
-                .map_err(|e| format!("Failed to compile to HL: {}", e))?;
+                .map_err(|e| format!("Failed to generate HL/C: {}", e))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("haxe -hl compile failed: {}", stderr));
+                return Err(format!("haxe HL/C generation failed: {}", stderr));
             }
 
-            // Step 2: Compile HL bytecode to C with hlc, then gcc
-            let c_out_dir = tmp_dir.join("hlc_out");
-            std::fs::create_dir_all(&c_out_dir).ok();
-
-            let hlc_output = Command::new("hl")
-                .arg(&hl_path)
-                .arg("--hlc")
-                .arg(&c_out_dir)
-                .output()
-                .map_err(|e| format!("Failed to run hlc: {}", e))?;
-
-            if !hlc_output.status.success() {
-                let stderr = String::from_utf8_lossy(&hlc_output.stderr);
-                let stdout = String::from_utf8_lossy(&hlc_output.stdout);
-                return Err(format!(
-                    "hlc compilation failed:\nstderr: {}\nstdout: {}",
-                    stderr, stdout
-                ));
-            }
-
-            // Verify that main.c was created
-            let main_c = c_out_dir.join("main.c");
             if !main_c.exists() {
                 // List what files were actually created for debugging
                 let files: Vec<_> = std::fs::read_dir(&c_out_dir)
@@ -939,7 +934,7 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
                     })
                     .unwrap_or_default();
                 return Err(format!(
-                    "hlc did not create main.c. Files in {}: {:?}",
+                    "HL/C generation did not create main.c. Files in {}: {:?}",
                     c_out_dir.display(),
                     files
                 ));
@@ -957,6 +952,8 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
                 .arg(&c_out_dir)
                 .arg("-I")
                 .arg("/usr/local/include")
+                .arg("-L")
+                .arg("/usr/local/lib")
                 .arg("-lhl")
                 .arg("-lm")
                 .arg("-lpthread")
@@ -1732,11 +1729,13 @@ fn main() {
     all_targets_list.push(Target::RayzorGCC);
 
     if haxe_available() {
+        // Independent: the bytecode target needs the VM, the C target needs
+        // gcc and the headers, and a machine can carry either without the other.
         if hashlink_available() {
             all_targets_list.push(Target::HaxeHashLink);
-            if hashlink_c_available() {
-                all_targets_list.push(Target::HaxeHashLinkC);
-            }
+        }
+        if hashlink_c_available() {
+            all_targets_list.push(Target::HaxeHashLinkC);
         }
         all_targets_list.push(Target::HaxeCpp);
         if java_available() {
