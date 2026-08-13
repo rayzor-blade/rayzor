@@ -1300,6 +1300,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .basic()
             .ok_or("Intrinsic returned void unexpectedly")?;
 
+        // `Math.floor`/`ceil`/`round` return `Int`, so the wrapper is narrower
+        // than the intrinsic it calls. Convert rather than return an f64 from
+        // an integer-typed function.
+        let result = match fn_type.get_return_type() {
+            Some(ret) if ret.is_int_type() && result.is_float_value() => builder
+                .build_float_to_signed_int(result.into_float_value(), ret.into_int_type(), "trunc")
+                .map_err(|e| format!("Failed to narrow intrinsic result: {}", e))?
+                .into(),
+            _ => result,
+        };
+
         builder
             .build_return(Some(&result))
             .map_err(|e| format!("Failed to build return: {}", e))?;
