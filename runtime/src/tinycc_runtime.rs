@@ -33,11 +33,46 @@ extern "C" {
     fn tcc_relocate(s: *mut TCCState) -> i32;
     fn tcc_get_symbol(s: *mut TCCState, name: *const c_char) -> *mut std::ffi::c_void;
 
-    // dlopen for loading frameworks and shared libraries at runtime
+}
+
+// Loading a shared library so TCC can resolve its symbols during relocation.
+// `dlopen` is POSIX; Windows spells it `LoadLibraryA`, and referencing the
+// POSIX name there fails the link outright.
+#[cfg(unix)]
+extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut std::ffi::c_void;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryA(filename: *const c_char) -> *mut std::ffi::c_void;
+}
+
+#[cfg(unix)]
 const RTLD_LAZY: i32 = 0x1;
+
+/// Load a shared library by path. Returns null on failure; callers only test
+/// the handle, since TCC looks symbols up across everything the process has
+/// already loaded rather than through this handle.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string.
+unsafe fn load_shared_library(path: *const c_char) -> *mut std::ffi::c_void {
+    #[cfg(unix)]
+    {
+        dlopen(path, RTLD_LAZY)
+    }
+    #[cfg(windows)]
+    {
+        LoadLibraryA(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        std::ptr::null_mut()
+    }
+}
 
 const TCC_OUTPUT_MEMORY: i32 = 1;
 
@@ -68,6 +103,7 @@ fn discover_macos_sdk() -> &'static Option<String> {
 fn discover_system_include_paths() -> &'static Vec<String> {
     static PATHS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     PATHS.get_or_init(|| {
+        #[allow(unused_mut)] // only the platform blocks below push
         let mut paths = Vec::new();
 
         #[cfg(target_os = "macos")]
@@ -371,7 +407,7 @@ pub extern "C" fn rayzor_tcc_add_framework(state: *mut TCCState, name: *const Ha
         {
             let fw_dylib = format!("/System/Library/Frameworks/{}.framework/{}", fw_str, fw_str);
             if let Ok(c_path) = CString::new(fw_dylib.as_str()) {
-                let handle = dlopen(c_path.as_ptr(), RTLD_LAZY);
+                let handle = load_shared_library(c_path.as_ptr());
                 if !handle.is_null() {
                     // Framework loaded — add its Headers/ dir as include path.
                     // Use #include <Accelerate.h> (not <Accelerate/Accelerate.h>)
@@ -399,7 +435,7 @@ pub extern "C" fn rayzor_tcc_add_framework(state: *mut TCCState, name: *const Ha
         let lib_path = format!("lib{}.so", fw_str);
 
         if let Ok(c_path) = CString::new(lib_path.as_str()) {
-            let handle = dlopen(c_path.as_ptr(), RTLD_LAZY);
+            let handle = load_shared_library(c_path.as_ptr());
             if !handle.is_null() {
                 return 1;
             }
@@ -534,7 +570,7 @@ pub extern "C" fn rayzor_tcc_add_clib(state: *mut TCCState, name: *const HaxeStr
                     let full_path = format!("{}/lib{}.so", dir, l);
 
                     if let Ok(c_path) = CString::new(full_path.as_str()) {
-                        let handle = unsafe { dlopen(c_path.as_ptr(), RTLD_LAZY) };
+                        let handle = unsafe { load_shared_library(c_path.as_ptr()) };
                         if !handle.is_null() {
                             loaded = true;
                             break;
@@ -550,7 +586,7 @@ pub extern "C" fn rayzor_tcc_add_clib(state: *mut TCCState, name: *const HaxeStr
 
                     if let Ok(c_path) = CString::new(default_name.as_str()) {
                         unsafe {
-                            dlopen(c_path.as_ptr(), RTLD_LAZY);
+                            load_shared_library(c_path.as_ptr());
                         }
                     }
                 }

@@ -3686,9 +3686,10 @@ mod tests {
         a * b * c
     }
 
-    extern "C" fn test_f64_add(a: u64, b: u64) -> f64 {
-        let a = f64::from_bits(a);
-        let b = f64::from_bits(b);
+    // Takes doubles, like the runtime functions this path actually calls.
+    // Declaring them `u64` and bit-casting only works if the caller puts a
+    // double in an integer register, which is the defect this exercises.
+    extern "C" fn test_f64_add(a: f64, b: f64) -> f64 {
         a + b
     }
 
