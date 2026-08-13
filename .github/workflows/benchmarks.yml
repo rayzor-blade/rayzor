@@ -42,6 +42,12 @@ jobs:
       - name: Build rayzor CLI
         run: cargo build --release --features llvm-backend
 
+      # Built here so the kernel runners and `collect` only execute it. Their
+      # cargo caches are keyed per job, so building it there costs a full
+      # compiler rebuild on every kernel.
+      - name: Build benchmark runner
+        run: cargo build --release --package compiler --features all-backends --example benchmark_runner
+
       - name: Generate precompiled bundles and stdlib symbol cache
         run: |
           ./target/release/rayzor bundle compiler/benchmarks/src/deltablue.hx -o compiler/benchmarks/precompiled/deltablue.rzb --strip
@@ -66,6 +72,7 @@ jobs:
           path: |
             target/release/rayzor
             target/release/librayzor_runtime.a
+            target/release/examples/benchmark_runner
           retention-days: 1
 
   benchmark:
@@ -139,10 +146,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Download precompiled bundles and stdlib cache
         uses: actions/download-artifact@v4
         with:
@@ -161,13 +164,10 @@ jobs:
           path: target/release
 
       - name: Fix binary permissions
-        run: chmod +x target/release/rayzor
-
-      - name: Build compiler for benchmark runner
-        run: cargo build --release --package compiler --features all-backends
+        run: chmod +x target/release/rayzor target/release/examples/benchmark_runner
 
       - name: Run ${{ matrix.kernel }} benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- ${{ matrix.kernel }} --json --disable-trace
+        run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
 
       # Each runner produces only its own kernel; `collect` merges them back
       # into the single results file downstream consumers expect.
@@ -195,17 +195,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM 21
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
-          sudo apt-get update
-          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
-          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+      - name: Download rayzor binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: rayzor-binaries
+          path: target/release
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Fix binary permissions
+        run: chmod +x target/release/examples/benchmark_runner
 
       - name: Download partial results
         uses: actions/download-artifact@v4
@@ -244,7 +241,7 @@ jobs:
       # so copying the partials just leaves whichever landed last. Redraw from
       # the merged results instead.
       - name: Regenerate charts from merged results
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- --charts-only
+        run: ./target/release/examples/benchmark_runner --charts-only
 
       - name: Upload benchmark results
         if: always()
