@@ -30,16 +30,37 @@ fn build_tcc() {
         .define("CONFIG_TCCDIR", tcc_dir_quoted.as_str())
         .warnings(false);
 
-    if cfg!(target_arch = "x86_64") {
-        build.define("TCC_TARGET_X86_64", "1");
-    } else if cfg!(target_arch = "aarch64") {
-        build.define("TCC_TARGET_ARM64", "1");
-    } else if cfg!(target_arch = "x86") {
-        build.define("TCC_TARGET_I386", "1");
+    // Describe the TARGET, not the host. A build script is compiled for the
+    // host, so `cfg!` here answers the wrong question the moment anyone
+    // cross-compiles.
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    match target_arch.as_str() {
+        "x86_64" => {
+            build.define("TCC_TARGET_X86_64", "1");
+        }
+        "aarch64" => {
+            build.define("TCC_TARGET_ARM64", "1");
+        }
+        "x86" => {
+            build.define("TCC_TARGET_I386", "1");
+        }
+        _ => {}
     }
 
-    if cfg!(target_os = "macos") {
-        build.define("TCC_TARGET_MACHO", "1");
+    // The object format. Without it TCC assumes ELF, and on Windows that also
+    // means it does not consider itself native — so `ONE_SOURCE` never pulls in
+    // tccrun.c and `tcc_relocate`, the entry point the JIT is built on, simply
+    // does not exist to link against.
+    match target_os.as_str() {
+        "macos" => {
+            build.define("TCC_TARGET_MACHO", "1");
+        }
+        "windows" => {
+            build.define("TCC_TARGET_PE", "1");
+        }
+        _ => {}
     }
 
     build.compile("tcc");
