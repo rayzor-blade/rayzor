@@ -221,6 +221,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     ) -> Result<Self, String> {
         // Initialize LLVM once (thread-safe)
         init_llvm_once();
+        Self::apply_aarch64_codegen_options();
 
         // Discard local value names. Under inkwell 0.7 / LLVM 21, LLVM's
         // value-name uniquing path (ValueSymbolTable::makeUniqueName, hit on the
@@ -425,6 +426,47 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// - ApproxFunc is DISABLED as it uses approximations for math functions
     /// - AllowReciprocal is DISABLED as it can change division precision
     const FAST_MATH_FLAGS: u32 = 0x0E; // NoNaNs + NoInfs + NoSignedZeros (14)
+
+    /// Tune AArch64 codegen for the loop shape Haxe objects produce.
+    ///
+    /// LLVM's AArch64 load/store optimiser merges adjacent scalar loads into
+    /// `ldp`. In a loop that reads and writes fields of the same object each
+    /// iteration — the shape of every method that updates `this` — the pair it
+    /// forms straddles a field written by the previous iteration, and a paired
+    /// load overlapping a narrower recent store cannot take store-to-load
+    /// forwarding. The loop then waits on the store reaching L1 every
+    /// iteration.
+    ///
+    /// Measured on nbody, whose inner loop does exactly this: 1581ms -> 611ms,
+    /// which is Cranelift's number. Neutral elsewhere (fibonacci 263 -> 261,
+    /// mandelbrot 327 -> 322), so the pairing is not paying for itself here.
+    ///
+    /// Set `RAYZOR_LLVM_LDST_OPT=1` to restore LLVM's default for A/B work.
+    fn apply_aarch64_codegen_options() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            if !cfg!(target_arch = "aarch64") {
+                return;
+            }
+            if std::env::var_os("RAYZOR_LLVM_LDST_OPT").is_some() {
+                return;
+            }
+            let argv = [
+                std::ffi::CString::new("rayzor").unwrap(),
+                std::ffi::CString::new("-aarch64-enable-ldst-opt=false").unwrap(),
+            ];
+            let ptrs: Vec<*const std::os::raw::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+            let overview = std::ffi::CString::new("rayzor").unwrap();
+            unsafe {
+                llvm_sys::support::LLVMParseCommandLineOptions(
+                    ptrs.len() as i32,
+                    ptrs.as_ptr(),
+                    overview.as_ptr(),
+                );
+            }
+        });
+    }
 
     /// Create tuned `PassBuilderOptions` for LLVM optimization passes.
     ///
