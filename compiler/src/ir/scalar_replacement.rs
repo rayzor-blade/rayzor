@@ -178,24 +178,34 @@ fn run_phi_sra_on_function(
 ) -> OptimizationResult {
     let mut result = OptimizationResult::unchanged();
 
-    let constants = build_constant_map(&function.cfg);
-    let candidates = find_phi_sra_candidates(&function.cfg, &constants, malloc_ids, free_ids);
-
-    // Process only ONE candidate per pass to avoid stale data issues.
-    // When we apply phi-SRA to one candidate, it modifies the function structure,
-    // which can invalidate the analysis for other candidates. By processing one
-    // at a time and letting the optimizer loop re-run this pass, we ensure each
-    // candidate is analyzed on the current function state.
-    if let Some(candidate) = candidates.into_iter().next() {
+    // One candidate at a time: applying phi-SRA rewrites the function, which
+    // invalidates the analysis for every other candidate. Re-analyse after each
+    // one and keep going, so a loop carrying several allocations is fully
+    // promoted rather than losing all but the first — the pass manager runs
+    // this once per level, so anything left behind here stays allocated.
+    //
+    // Bounded by the number of candidates seen at entry: each round promotes
+    // one allocation, so the count cannot grow.
+    let max_rounds = {
+        let constants = build_constant_map(&function.cfg);
+        find_phi_sra_candidates(&function.cfg, &constants, malloc_ids, free_ids).len()
+    };
+    for _ in 0..max_rounds {
+        let constants = build_constant_map(&function.cfg);
+        let candidates = find_phi_sra_candidates(&function.cfg, &constants, malloc_ids, free_ids);
+        let Some(candidate) = candidates.into_iter().next() else {
+            break;
+        };
         let eliminated = apply_phi_sra(function, &candidate);
-        if eliminated > 0 {
-            result.modified = true;
-            result.instructions_eliminated += eliminated;
-            *result
-                .stats
-                .entry("phi_allocs_replaced".to_string())
-                .or_insert(0) += 1;
+        if eliminated == 0 {
+            break;
         }
+        result.modified = true;
+        result.instructions_eliminated += eliminated;
+        *result
+            .stats
+            .entry("phi_allocs_replaced".to_string())
+            .or_insert(0) += 1;
     }
 
     result
