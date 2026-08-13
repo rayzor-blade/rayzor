@@ -195,18 +195,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install LLVM 21
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Download partial results
         uses: actions/download-artifact@v4
         with:
           pattern: benchmark-partial-*
           path: partials
 
-      - name: Download partial charts
-        if: always()
-        uses: actions/download-artifact@v4
-        with:
-          pattern: benchmark-charts-*
-          path: chart-partials
 
       # `save_results` merges a kernel into the dated file it finds, but each
       # runner starts from a clean checkout and so writes only its own. Union
@@ -232,7 +238,13 @@ jobs:
           p.write_text(json.dumps(out, indent=2))
           print(f'merged {len(merged)} kernels -> {p}: {", ".join(sorted(merged))}')
           EOF
-          find chart-partials -type f -exec cp {} compiler/benchmarks/charts/ \; 2>/dev/null || true
+
+
+      # Every runner writes its own charts/index.html covering only its kernel,
+      # so copying the partials just leaves whichever landed last. Redraw from
+      # the merged results instead.
+      - name: Regenerate charts from merged results
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- --charts-only
 
       - name: Upload benchmark results
         if: always()
