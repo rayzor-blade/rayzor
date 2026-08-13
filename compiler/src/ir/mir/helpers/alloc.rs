@@ -99,6 +99,20 @@ impl<'a> HirToMirContext<'a> {
     /// Build a heap allocation (via malloc) for class instances
     /// This is used for class instances that may escape the current function
     pub(crate) fn build_heap_alloc(&mut self, size: u64) -> Option<IrId> {
+        self.build_heap_alloc_with_header(size, None)
+    }
+
+    /// As `build_heap_alloc`, but writes `header` into slot 0 instead of a zero.
+    ///
+    /// A class instance's slot 0 is its runtime type id, written immediately
+    /// after the allocation. Zeroing it first and overwriting it costs a store,
+    /// a GEP and a constant on every `new` — in a loop that allocates per
+    /// iteration those are millions of instructions that compute nothing.
+    pub(crate) fn build_heap_alloc_with_header(
+        &mut self,
+        size: u64,
+        header: Option<IrId>,
+    ) -> Option<IrId> {
         // malloc lives in extern_functions, where declare_malloc puts it.
         let malloc_id = self
             .builder
@@ -124,9 +138,14 @@ impl<'a> HirToMirContext<'a> {
         let zero = self.builder.build_const(IrValue::I64(0))?;
         let lanes = size / 8;
         for lane in 0..lanes {
+            let value = if lane == 0 {
+                header.unwrap_or(zero)
+            } else {
+                zero
+            };
             let idx = self.builder.build_const(IrValue::I32(lane as i32))?;
             let slot = self.builder.build_gep(obj_ptr, vec![idx], IrType::I64)?;
-            self.builder.build_store(slot, zero)?;
+            self.builder.build_store(slot, value)?;
         }
         Some(obj_ptr)
     }
