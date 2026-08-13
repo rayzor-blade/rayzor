@@ -174,6 +174,15 @@ pub struct LLVMJitBackend<'ctx> {
     /// Extern function IDs (no hidden env parameter)
     extern_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
+    /// Externs whose LLVM intrinsic wrapper is kept out of hot loops.
+    ///
+    /// `Math.sqrt` inlines to one `fsqrt`, but letting it into a loop that also
+    /// stores to the object it reads lets LLVM pair those loads; the pair then
+    /// straddles a field written on the previous iteration and store-to-load
+    /// forwarding fails every iteration. Calling the runtime is measurably
+    /// faster there. AOT keeps the wrapper — it has no runtime address to call.
+    math_intrinsic_ids: std::collections::BTreeSet<IrFunctionId>,
+
     /// Functions that use sret (struct return via hidden pointer parameter)
     sret_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
@@ -272,6 +281,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             target_data: Some(target_data),
             runtime_symbols: BTreeMap::new(),
             extern_function_ids: std::collections::BTreeSet::new(),
+            math_intrinsic_ids: std::collections::BTreeSet::new(),
             sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
             current_env_param: None,
@@ -543,6 +553,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
     /// Address of a registered runtime symbol backing an LLVM extern.
     fn runtime_addr_for_llvm_func(&self, func: FunctionValue<'ctx>) -> Option<u64> {
+        // A function we emitted a body for is an inline intrinsic wrapper
+        // (`haxe_math_sqrt` → `llvm.sqrt.f64`, `haxe_array_length` → a load),
+        // and it carries the runtime symbol's name so that callers resolve to
+        // it. Calling the runtime address instead would discard the wrapper and
+        // put an opaque indirect call where one instruction belongs.
+        if func.count_basic_blocks() > 0 {
+            return None;
+        }
         let name = func.get_name().to_string_lossy();
         if let Some(addr) = self.runtime_addr(name.as_ref()) {
             return Some(addr);
@@ -1155,6 +1173,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Enabled for both JIT and AOT modes.
         if let Some(llvm_func) = self.try_create_math_intrinsic(&func_name, &fn_type)? {
             self.function_map.insert(func_id, llvm_func);
+            self.math_intrinsic_ids.insert(func_id);
             return Ok(llvm_func);
         }
 
@@ -2332,6 +2351,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // (e.g. haxe_math_sqrt → @llvm.sqrt.f64 → single fsqrt instruction)
             if let Some(llvm_func) = self.try_create_math_intrinsic(&func_name, &fn_type)? {
                 self.function_map.insert(func_id, llvm_func);
+                self.math_intrinsic_ids.insert(func_id);
                 return Ok(llvm_func);
             }
 
@@ -7239,7 +7259,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             );
         }
         let call_site = if self.extern_function_ids.contains(&func_id) {
-            if let Some(addr) = self.runtime_addr_for_llvm_func(*llvm_func) {
+            let runtime_addr = if self.math_intrinsic_ids.contains(&func_id) {
+                self.runtime_addr(llvm_func.get_name().to_string_lossy().as_ref())
+            } else {
+                self.runtime_addr_for_llvm_func(*llvm_func)
+            };
+            if let Some(addr) = runtime_addr {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let fp = self
                     .builder
