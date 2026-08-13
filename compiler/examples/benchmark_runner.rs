@@ -93,6 +93,12 @@ struct Cli {
     /// List available benchmarks and targets, then exit
     #[arg(long)]
     list: bool,
+
+    /// Internal: run exactly one target and print its result as JSON, then
+    /// exit. The parent uses this to give every target a fresh address space —
+    /// see the target loop in `main`.
+    #[arg(long, hide = true)]
+    single_target: Option<String>,
 }
 
 const WARMUP_RUNS: usize = 15; // Increased to ensure LLVM promotion during warmup
@@ -1051,6 +1057,60 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
     }
 }
 
+/// Run one target in a child process and read its result back.
+///
+/// The child is this executable with `--single-target`; it prints its
+/// `BenchmarkResult` as JSON on a marked line. Timings are taken inside the
+/// child, so process startup is never attributed to the benchmark.
+fn run_benchmark_isolated(
+    bench: &Benchmark,
+    target: Target,
+    disable_trace: bool,
+) -> Result<BenchmarkResult, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg(&bench.name)
+        .arg("--single-target")
+        .arg(target.name());
+    if disable_trace {
+        cmd.arg("--disable-trace");
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("spawning {}: {e}", target.name()))?;
+
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+        use std::os::unix::process::ExitStatusExt;
+        return Err(match (out.status.code(), out.status.signal()) {
+            (Some(c), _) => format!("child exited {c}: {last}"),
+            // SIGKILL here is almost always the OS reclaiming memory: a target
+            // runs the benchmark WARMUP_RUNS + BENCH_RUNS times in one process,
+            // so anything it leaks is multiplied by that count.
+            (None, Some(9)) => format!("child killed (SIGKILL, likely out of memory): {last}"),
+            (None, Some(sig)) => format!("child killed by signal {sig}: {last}"),
+            (None, None) => format!("child terminated abnormally: {last}"),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Echo the child's own output so a run reads the same as it always did.
+    for line in stdout.lines().filter(|l| !l.starts_with("__RESULT_JSON__")) {
+        println!("{line}");
+    }
+    let json = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("__RESULT_JSON__"))
+        .ok_or_else(|| format!("{} produced no result", target.name()))?;
+    serde_json::from_str(json).map_err(|e| format!("decoding result: {e}"))
+}
+
 fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, String> {
     let symbols = get_runtime_symbols();
     let mut compile_times = Vec::new();
@@ -1677,6 +1737,36 @@ fn main() {
         }
     }
 
+    // Child mode: one target, one process. The result goes to stdout as JSON so
+    // the parent can collect it without sharing this process's heap.
+    if let Some(ref target_name) = cli.single_target {
+        if cli.disable_trace {
+            rayzor_runtime::haxe_sys::set_trace_enabled(false);
+        }
+        let Some(target) = all_targets_list.iter().find(|t| t.name() == target_name) else {
+            eprintln!("unknown target: {target_name}");
+            std::process::exit(2);
+        };
+        let Some(bench_name) = cli.benchmark.as_ref() else {
+            eprintln!("--single-target requires a benchmark");
+            std::process::exit(2);
+        };
+        let Some(bench) = load_benchmark(bench_name) else {
+            eprintln!("failed to load benchmark: {bench_name}");
+            std::process::exit(2);
+        };
+        match run_benchmark(&bench, *target) {
+            Ok(result) => {
+                println!("__RESULT_JSON__{}", serde_json::to_string(&result).unwrap());
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // --list: show available benchmarks and targets, then exit
     if cli.list {
         let available = list_benchmarks();
@@ -1842,13 +1932,12 @@ fn main() {
         for target in &targets {
             println!("  Running {} ...", target.name());
 
-            // Reset LLVM global state before each target to ensure fresh compilation.
-            // This prevents targets from reusing stale pointers from previous compilations
-            // (e.g., precompiled-tiered reusing non-SRA pointers from rayzor-llvm).
-            #[cfg(feature = "llvm-backend")]
-            reset_llvm_global_state();
-
-            let result = run_benchmark(&bench, *target);
+            // Each target gets its own process. Run in-process and every
+            // target's heap is still resident when the next one starts, so
+            // several backends' worth of whatever a benchmark leaks accumulate
+            // in one address space. A child bounds the suite to a single
+            // target, and isolates a crash in one backend from the rest.
+            let result = run_benchmark_isolated(&bench, *target, cli.disable_trace);
             match result {
                 Ok(bench_result) => {
                     println!("  [DONE] {} ({})", target.name(), target.description());
