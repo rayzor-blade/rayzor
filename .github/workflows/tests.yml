@@ -49,14 +49,23 @@ jobs:
         include:
           - os: ubuntu-latest
             toolchain: stable
+            compiler_features: ""
           # runtime-core gates the NEON dotprod intrinsics behind
           # `feature(stdarch_neon_dotprod)`, still unstable in 1.97, and the
           # macOS runners are arm64 — so this target needs nightly to build at
           # all. Drop back to stable once vdotq_s32 and friends land.
           - os: macos-latest
             toolchain: nightly
+            compiler_features: ""
+          # Cranelift only. llvm-sys drives `llvm-config` and links the
+          # component archives, and the official LLVM release for Windows is
+          # built toolchain-only: it ships neither, so no value of
+          # LLVM_SYS_211_PREFIX can satisfy it. Restoring the LLVM tier here
+          # needs a distribution that carries the development files — the
+          # conda-forge `llvmdev` package, or MSYS2 with the gnu toolchain.
           - os: windows-latest
             toolchain: stable
+            compiler_features: "--no-default-features --features cranelift-backend"
     steps:
       - uses: actions/checkout@v4
 
@@ -75,17 +84,6 @@ jobs:
           brew install llvm@21
           echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
 
-      - name: Install LLVM 21 (Windows)
-        if: runner.os == 'Windows'
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "21"
-          env: true
-          directory: ${{ runner.temp }}/llvm
-
-      - name: Point llvm-sys at it (Windows)
-        if: runner.os == 'Windows'
-        run: echo "LLVM_SYS_211_PREFIX=${{ runner.temp }}/llvm" >> $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -103,10 +101,10 @@ jobs:
         run: cargo test -p rayzor-runtime --lib
 
       - name: Compiler lib tests
-        run: cargo test -p compiler --lib -- --skip "type_arena"
+        run: cargo test -p compiler --lib ${{ matrix.compiler_features }} -- --skip "type_arena"
 
       - name: Compiler integration tests
-        run: cargo test -p compiler --tests
+        run: cargo test -p compiler --tests ${{ matrix.compiler_features }}
 
       - name: Diagnostics tests
         run: cargo test -p diagnostics
