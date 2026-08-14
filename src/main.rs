@@ -2038,8 +2038,15 @@ fn run_file(
                     h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
                 }
             }
-        } else if fast_interpreter_start && verbose {
-            eprintln!("[compile] skipping MIR optimize for interpreter-first startup");
+        } else {
+            // Skipping optimization must not skip the passes correctness
+            // depends on; see `PassManager::required_only`.
+            use compiler::ir::optimization::PassManager;
+            let mut pass_manager = PassManager::required_only();
+            let _ = pass_manager.run(&mut mir_module);
+            if fast_interpreter_start && verbose {
+                eprintln!("[compile] MIR optimize reduced to required passes for startup");
+            }
         }
 
         if let Some(ref h) = progress_handle {
