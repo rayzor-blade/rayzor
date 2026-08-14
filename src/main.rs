@@ -1740,11 +1740,11 @@ fn run_file(
     //      changing an imported file's *own* imports (e.g. `Foo.hx` adds
     //      `import nue.Bar;`) leaves the entry source unchanged and the
     //      cache replays a stale MIR graph against today's `.blade`s.
-    //   4. **Compiler `BUILD_ID`** — matches the per-module `.blade`
-    //      cache guard in `compilation.rs`. Without this, rebuilding the
-    //      compiler (parser/lowerer/MIR shape changes) keeps the top-level
-    //      `.mir.cache` valid while every per-module `.blade` is correctly
-    //      invalidated, producing replay-vs-fresh-graph drift.
+    //   4. **Compiler `BUILD_ID`** — content-derived cache ABI id matching
+    //      the per-module `.blade` guard in `compilation.rs`. Without this,
+    //      compiler/parser/stdlib changes can keep the top-level `.mir.cache`
+    //      valid while every per-module `.blade` is invalidated, producing
+    //      replay-vs-fresh-graph drift.
     let source_hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};

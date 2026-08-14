@@ -2,6 +2,8 @@ package nue.arch;
 
 import sys.io.File;
 import nue.loader.GGUFLoader;
+import nue.loader.GGUFReader;
+import nue.loader.GGUFReader.MetaValue;
 import nue.tokenizer.WordPieceTokenizer;
 import rayzor.ds.Tensor;
 import nue.engine.BertGraph;
@@ -19,11 +21,13 @@ class BertEmbedder {
 
     public function new(ggufPath:String) {
         var loader = new GGUFLoader();
+        loader.registry = BuiltinArchRegistry.withDefaults();
         // Two-arg CHECKED cast — the one-arg `cast x` unsafe form does not
         // recover the concrete object layout from a Module return, so field
         // reads come back zero. llama-chat uses cast(loaded.model, LlamaModel)
         // for the same reason.
         this.model = cast(loader.load(ggufPath), BertModel);
+        this.model.clsPool = readPoolingType(ggufPath) == 2;
         this.dim = model.meta.hiddenSize;
         // GGUFLoader.tokenizer dispatches on tokenizer.ggml.model, so a bert
         // GGUF yields WordPiece; recover the concrete type for encodeWithSpecials.
@@ -49,6 +53,21 @@ class BertEmbedder {
             Sys.putEnv("NUE_INT8", "1");
         }
         Sys.println("[embed] engine=" + engineName(engine));
+    }
+
+    static function readPoolingType(ggufPath:String):Int {
+        var bytes = File.getBytes(ggufPath);
+        var reader = new GGUFReader(bytes);
+        var v = reader.findMeta("bert.pooling_type");
+        var pooling = 1;
+        if (v != null) {
+            pooling = switch (v) {
+                case U8(x) | I8(x) | U16(x) | I16(x) | U32(x) | I32(x) | U64(x) | I64(x): x;
+                case _: 1;
+            };
+        }
+        bytes.free();
+        return pooling;
     }
 
     /** Resolved encode engine for this embedder instance. */

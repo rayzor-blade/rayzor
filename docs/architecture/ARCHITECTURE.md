@@ -401,12 +401,14 @@ Full layouts: [BLADE_FORMAT_SPEC.md](BLADE_FORMAT_SPEC.md) and
 [RZB_FORMAT_SPEC.md](RZB_FORMAT_SPEC.md).
 
 Two design points are worth stating here. **Cache invalidation uses three
-independent keys**: a source content hash, the compiler semver, and a build id
-stamped at compiler build time — the last exists because parser or MIR-shape
-changes do not bump the semver, and without it a rebuilt compiler happily reads
-caches whose layout it no longer understands. **Cached maps are keyed by name,
-never by `SymbolId`/`TypeId`**, because ids are reassigned per compilation; this
-is the same invariant that governs cross-module resolution generally.
+independent keys**: a source content hash, the compiler semver, and a
+content-derived compiler cache ABI id. The last exists because parser or
+MIR-shape changes do not bump the semver, and without it a changed compiler can
+read caches whose layout it no longer understands; because it is content-derived,
+redundant relinks of identical sources keep the cache warm. **Cached maps are
+keyed by name, never by `SymbolId`/`TypeId`**, because ids are reassigned per
+compilation; this is the same invariant that governs cross-module resolution
+generally.
 
 The tree shaker walks the call graph from the entry point and drops
 unreachable functions, externs and globals before bundling, so stdlib the program

@@ -74,20 +74,24 @@ class LlamaBlock {
         var hiddenSize = attn.numQHeads * attn.headDim;
         var label:String = this.blockName;
         if (checkShapes) checkShape(label, "enter x=", x, hiddenSize, traceShapes);
-        // Per-bucket decode timing; buckets live on Q4Matmul (see there).
-        var _t0 = nue.Q4Matmul.splitNow();
-        var _rows = x.shape()[0];
+        // Per-bucket decode timing; completely skipped unless the profiler is
+        // explicitly enabled. The old path called into Q4Matmul.splitNow()
+        // several times per block even with profiling off, which made decode
+        // pay for diagnostic plumbing in production runs.
+        var profileSplit = nue.Q4Matmul.decodeSplitEnabled();
+        var _t0 = profileSplit ? Sys.time() : 0.0;
+        var _rows = profileSplit ? x.shape()[0] : 0;
         var xClone1 = x.clone();
         var t = attnNorm.forward(xClone1);
         xClone1.free();
-        var _tNorm1 = nue.Q4Matmul.splitNow();
+        var _tNorm1 = profileSplit ? Sys.time() : 0.0;
         if (checkShapes) {
             checkShape(label, "after_attn_norm x=", x, hiddenSize, traceShapes);
             checkShape(label, "after_attn_norm norm=", t, hiddenSize, traceShapes);
         }
         var attnOut = attn.forward(t);
         t.free();
-        var _tAttn = nue.Q4Matmul.splitNow();
+        var _tAttn = profileSplit ? Sys.time() : 0.0;
         if (checkShapes) {
             checkShape(label, "before_attn_residual x=", x, hiddenSize, traceShapes);
             checkShape(label, "before_attn_residual attn=", attnOut, hiddenSize, traceShapes);
@@ -95,19 +99,19 @@ class LlamaBlock {
         x.addInto(attnOut);
         attnOut.free();
         var h1 = x;
-        var _tResid1 = nue.Q4Matmul.splitNow();
+        var _tResid1 = profileSplit ? Sys.time() : 0.0;
 
         var xClone2 = h1.clone();
         var t2 = ffnNorm.forward(xClone2);
         xClone2.free();
-        var _tNorm2 = nue.Q4Matmul.splitNow();
+        var _tNorm2 = profileSplit ? Sys.time() : 0.0;
         if (checkShapes) {
             checkShape(label, "after_ffn_norm h=", h1, hiddenSize, traceShapes);
             checkShape(label, "after_ffn_norm norm=", t2, hiddenSize, traceShapes);
         }
         var ffnOut = ffn.forward(t2);
         t2.free();
-        var _tFfn = nue.Q4Matmul.splitNow();
+        var _tFfn = profileSplit ? Sys.time() : 0.0;
         if (checkShapes) {
             checkShape(label, "before_ffn_residual h=", h1, hiddenSize, traceShapes);
             checkShape(label, "before_ffn_residual ffn=", ffnOut, hiddenSize, traceShapes);
@@ -117,8 +121,8 @@ class LlamaBlock {
         // Decode only: a prefill pass batches the whole prompt and has a
         // different cost shape, so folding it in reports prefill under a
         // decode heading.
-        if (_rows == 1) {
-            var _tEnd = nue.Q4Matmul.splitNow();
+        if (profileSplit && _rows == 1) {
+            var _tEnd = Sys.time();
             nue.Q4Matmul.noteBlockSplit(
                 (_tNorm1 - _t0) + (_tNorm2 - _tResid1),
                 _tAttn - _tNorm1,

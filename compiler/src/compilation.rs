@@ -988,9 +988,9 @@ impl CompilationUnit {
 
         match load_blade(&blade_path) {
             Ok((mir, metadata, _symbols, _cached_maps)) => {
-                // Validate cache by checking source hash AND compiler
-                // build-id — see save_to_cache / matching check at the
-                // other load site for why both are required.
+                // Validate cache by checking source hash AND compiler cache
+                // ABI id — see save_to_cache / matching check at the other
+                // load site for why both are required.
                 let current_hash = self.hash_source_for_config(source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
                 if metadata.source_hash != current_hash {
@@ -1777,14 +1777,30 @@ impl CompilationUnit {
             self.register_method_from_blade(ctor, symbol_id, class_scope, false);
         }
 
-        // Register fields
+        // Register fields, and seed the same per-class field table that a
+        // fresh AstLowering pass would export. BLADE symbol restore registers
+        // fields into the class scope, but static field lowering consults
+        // `global_class_fields` when a later file is lowered. Without this,
+        // manifest-restored externs such as Math expose methods but not
+        // constants like Math.POSITIVE_INFINITY.
+        let mut restored_fields = Vec::new();
         for field in &class_info.fields {
-            self.register_field_from_blade(field, symbol_id, class_scope);
+            let field_symbol = self.register_field_from_blade(field, symbol_id, class_scope);
+            let field_name = self.string_interner.intern(&field.name);
+            restored_fields.push((field_name, field_symbol, field.is_static));
         }
 
         // Register static fields
         for field in &class_info.static_fields {
-            self.register_field_from_blade(field, symbol_id, class_scope);
+            let field_symbol = self.register_field_from_blade(field, symbol_id, class_scope);
+            let field_name = self.string_interner.intern(&field.name);
+            restored_fields.push((field_name, field_symbol, field.is_static));
+        }
+
+        if !restored_fields.is_empty() {
+            self.global_class_fields
+                .entry(symbol_id)
+                .or_insert_with(|| restored_fields.clone());
         }
 
         trace!(
@@ -7104,12 +7120,11 @@ impl CompilationUnit {
             return None;
         }
 
-        // Check compiler build-id matches. Parser/lowerer/MIR-shape
-        // changes within the same semver bump the build-id (see
-        // compiler/build.rs) and silently shift function IDs or AST
-        // structure for the same source — without this guard, MIR
-        // cached by an older binary loads into a newer compiler and
-        // surfaces as SIGILL at unrelated call sites.
+        // Check compiler cache ABI id matches. Parser/lowerer/MIR-shape
+        // changes within the same semver bump the id (see compiler/build.rs)
+        // and can silently shift function IDs or AST structure for the same
+        // source — without this guard, MIR cached by an older compiler loads
+        // into a newer compiler and surfaces as SIGILL at unrelated call sites.
         let current_build_id = env!("RAYZOR_BUILD_ID");
         if metadata.build_id != current_build_id {
             if self.config.enable_cache {
