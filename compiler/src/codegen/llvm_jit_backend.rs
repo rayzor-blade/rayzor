@@ -174,6 +174,16 @@ pub struct LLVMJitBackend<'ctx> {
     /// Extern function IDs (no hidden env parameter)
     extern_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
+    /// Byte offset each GEP names within the object it starts from, when that
+    /// is decidable. Feeds the TBAA tags; see `tbaa_tag_for_offset`.
+    gep_byte_offsets: BTreeMap<IrId, i64>,
+    /// GEP results, so a GEP off another GEP is never given an offset — the
+    /// two would name one address under two different tags.
+    gep_results: std::collections::BTreeSet<IrId>,
+    tbaa_root: Option<inkwell::values::MetadataValue<'ctx>>,
+    tbaa_tags: BTreeMap<i64, inkwell::values::MetadataValue<'ctx>>,
+    tbaa_kind_id: u32,
+
     /// Externs whose LLVM intrinsic wrapper is kept out of hot loops.
     ///
     /// `Math.sqrt` inlines to one `fsqrt`, but letting it into a loop that also
@@ -208,6 +218,13 @@ pub struct LLVMJitBackend<'ctx> {
 }
 
 #[cfg(feature = "llvm-backend")]
+/// Which alias family an access belongs to. See `tbaa_tag_for_offset`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TbaaFamily {
+    Fp,
+    Word,
+}
+
 impl<'ctx> LLVMJitBackend<'ctx> {
     /// Create a new LLVM JIT backend with aggressive optimization (Tier 3)
     pub fn new(context: &'ctx Context) -> Result<Self, String> {
@@ -283,6 +300,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             runtime_symbols: BTreeMap::new(),
             extern_function_ids: std::collections::BTreeSet::new(),
             math_intrinsic_ids: std::collections::BTreeSet::new(),
+            gep_byte_offsets: BTreeMap::new(),
+            gep_results: std::collections::BTreeSet::new(),
+            tbaa_root: None,
+            tbaa_tags: BTreeMap::new(),
+            tbaa_kind_id: context.get_kind_id("tbaa"),
             sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
             current_env_param: None,
@@ -426,6 +448,90 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// - ApproxFunc is DISABLED as it uses approximations for math functions
     /// - AllowReciprocal is DISABLED as it can change division precision
     const FAST_MATH_FLAGS: u32 = 0x0E; // NoNaNs + NoInfs + NoSignedZeros (14)
+
+    /// Alias tag for an access at `byte_offset` within an object.
+    ///
+    /// Two accesses at different offsets cannot be the same address: within one
+    /// object the offsets differ, and two objects are distinct allocations.
+    /// Keying on the OFFSET rather than on the class is what makes this hold
+    /// under inheritance — a subclass keeps its parent's slots, so `Parent.x`
+    /// and `Child.x` land on one tag and are correctly allowed to alias.
+    ///
+    /// Everything this cannot attribute is left untagged, which LLVM must treat
+    /// as aliasing anything.
+    fn tbaa_tag_for_offset(
+        &mut self,
+        byte_offset: i64,
+        family: TbaaFamily,
+    ) -> inkwell::values::MetadataValue<'ctx> {
+        let key = match family {
+            TbaaFamily::Fp => byte_offset * 2,
+            TbaaFamily::Word => byte_offset * 2 + 1,
+        };
+        if let Some(&tag) = self.tbaa_tags.get(&key) {
+            return tag;
+        }
+        let root = match self.tbaa_root {
+            Some(r) => r,
+            None => {
+                let r = self
+                    .context
+                    .metadata_node(&[self.context.metadata_string("rayzor.tbaa.root").into()]);
+                self.tbaa_root = Some(r);
+                r
+            }
+        };
+        // Two families under the root. When LLVM merges adjacent accesses it
+        // keeps their nearest common ancestor, so siblings under a single root
+        // collapse to "anything" and the separation is lost — which is what
+        // happens when two `Float` field stores are vectorised into one. Give
+        // the families their own parents and the merged store stays
+        // distinguishable from a pointer field read.
+        //
+        // The split is by access type rather than by field because a slot can
+        // be read as a pointer in one place and as an integer in another; both
+        // live in `word` so they keep aliasing each other. `Float` fields are
+        // not punned that way.
+        let family_name = match family {
+            TbaaFamily::Fp => "rayzor.fp",
+            TbaaFamily::Word => "rayzor.word",
+        };
+        let family_node = self.context.metadata_node(&[
+            self.context.metadata_string(family_name).into(),
+            root.into(),
+        ]);
+        let name = self
+            .context
+            .metadata_string(&format!("{}.slot.{}", family_name, byte_offset));
+        let ty_node = self
+            .context
+            .metadata_node(&[name.into(), family_node.into()]);
+        let zero = self.context.i64_type().const_int(0, false);
+        let tag = self
+            .context
+            .metadata_node(&[ty_node.into(), ty_node.into(), zero.into()]);
+        self.tbaa_tags.insert(key, tag);
+        tag
+    }
+
+    /// Attach the alias tag for `ptr`, when `ptr` is a GEP whose offset is known.
+    fn tag_memory_access(
+        &mut self,
+        ptr: IrId,
+        ty: &IrType,
+        inst: Option<inkwell::values::InstructionValue<'ctx>>,
+    ) {
+        let Some(inst) = inst else { return };
+        let Some(&offset) = self.gep_byte_offsets.get(&ptr) else {
+            return;
+        };
+        let family = match ty {
+            IrType::F32 | IrType::F64 => TbaaFamily::Fp,
+            _ => TbaaFamily::Word,
+        };
+        let tag = self.tbaa_tag_for_offset(offset, family);
+        let _ = inst.set_metadata(tag, self.tbaa_kind_id);
+    }
 
     /// Tune AArch64 codegen for the loop shape Haxe objects produce.
     ///
@@ -3091,7 +3197,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, src_value);
             }
 
-            IrInstruction::Load { dest, ptr, ty } => {
+            IrInstruction::Load {
+                dest,
+                ptr: ptr_id,
+                ty,
+            } => {
+                let ptr = ptr_id;
                 // Skip void loads - insert placeholder
                 if *ty == IrType::Void {
                     let placeholder = self.context.i8_type().const_int(0, false).into();
@@ -3118,6 +3229,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         .builder
                         .build_load(load_ty, ptr, &format!("load_{}", dest.as_u32()))
                         .map_err(|e| format!("Failed to build load: {}", e))?;
+                    self.tag_memory_access(*ptr_id, ty, loaded.as_instruction_value());
                     self.value_map.insert(*dest, loaded);
                 }
             }
@@ -3163,9 +3275,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         }
                     }
                 }
-                self.builder
+                let store_inst = self
+                    .builder
                     .build_store(ptr_val, value_val)
                     .map_err(|e| format!("Failed to build store: {}", e))?;
+                let stored_ty = if value_val.is_float_value() {
+                    IrType::F64
+                } else {
+                    IrType::I64
+                };
+                self.tag_memory_access(*ptr, &stored_ty, Some(store_inst));
             }
 
             IrInstruction::BinOp {
@@ -3406,6 +3525,25 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     },
                     _ => 8,
                 };
+
+                // Remember which object slot this names, for the alias tags.
+                // A GEP off another GEP is skipped: the two would describe one
+                // address under two different offsets.
+                if indices.len() == 1 && !self.gep_results.contains(ptr) {
+                    if let Some(idx_val) = self.value_map.get(&indices[0]) {
+                        if idx_val.is_int_value() {
+                            let iv = idx_val.into_int_value();
+                            if iv.is_const() {
+                                if let Some(raw) = iv.get_zero_extended_constant() {
+                                    if let Some(off) = (raw as i64).checked_mul(elem_size as i64) {
+                                        self.gep_byte_offsets.insert(*dest, off);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.gep_results.insert(*dest);
 
                 let mut index_vals = Vec::new();
                 for &id in indices {
