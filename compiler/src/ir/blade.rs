@@ -749,7 +749,12 @@ pub fn load_symbol_manifest(path: impl AsRef<Path>) -> Result<BladeSymbolManifes
     // mmap for zero-copy deserialization of symbol manifest
     let file = std::fs::File::open(path.as_ref())?;
     let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BladeError::Io(e))?;
-    let manifest: BladeSymbolManifest = postcard::from_bytes(&mmap)?;
+    load_symbol_manifest_from_bytes(&mmap)
+}
+
+/// Load a symbol manifest from in-memory bytes.
+pub fn load_symbol_manifest_from_bytes(bytes: &[u8]) -> Result<BladeSymbolManifest, BladeError> {
+    let manifest: BladeSymbolManifest = postcard::from_bytes(bytes)?;
 
     if &manifest.magic != SYMBOL_MAGIC {
         return Err(BladeError::InvalidMagic);

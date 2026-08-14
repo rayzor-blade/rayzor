@@ -20,6 +20,38 @@ use log::{debug, trace, warn};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::OnceLock;
+use std::time::Instant;
+
+fn profile_mir_functions_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RAYZOR_PROFILE_MIR_FUNCTIONS").is_some())
+}
+
+fn mir_function_profile_record(
+    module: Option<&str>,
+    func: &IrFunction,
+    start: Instant,
+    statements: usize,
+    has_expr: bool,
+    kind: &str,
+) {
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let blocks = func.cfg.blocks.len();
+    let instructions: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
+    let name = func.qualified_name.as_deref().unwrap_or(&func.name);
+    eprintln!(
+        "  mir-function: total={:.2}ms blocks={} insts={} stmts={} expr={} kind={} module={} fn={}",
+        elapsed_ms,
+        blocks,
+        instructions,
+        statements,
+        has_expr,
+        kind,
+        module.unwrap_or("?"),
+        name
+    );
+}
 
 impl<'a> HirToMirContext<'a> {
     /// Lower a HIR function to MIR (Legacy - combines Pass 1 and Pass 2)
@@ -141,6 +173,23 @@ impl<'a> HirToMirContext<'a> {
         this_type: Option<TypeId>,
         class_symbol: Option<SymbolId>,
     ) {
+        let profile_fn = profile_mir_functions_enabled();
+        let profile_start = if profile_fn {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let profile_statements = hir_func
+            .body
+            .as_ref()
+            .map(|body| body.statements.len())
+            .unwrap_or(0);
+        let profile_has_expr = hir_func
+            .body
+            .as_ref()
+            .map(|body| body.expr.is_some())
+            .unwrap_or(false);
+
         // The function already exists from Pass 1, we just need to fill in the body
         let func_id = self
             .function_map
@@ -385,6 +434,19 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.finish_function();
+
+        if let Some(start) = profile_start {
+            if let Some(func) = self.builder.module.functions.get(&func_id) {
+                mir_function_profile_record(
+                    self.current_module.as_deref(),
+                    func,
+                    start,
+                    profile_statements,
+                    profile_has_expr,
+                    "function",
+                );
+            }
+        }
 
         self.symbol_map.clear();
 
@@ -744,6 +806,17 @@ impl<'a> HirToMirContext<'a> {
         type_id: TypeId,
         parent_type: Option<TypeId>,
     ) {
+        let profile_fn = profile_mir_functions_enabled();
+        let profile_start = if profile_fn {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let profile_statements = constructor.pre_super_stmts.len()
+            + constructor.field_inits.len()
+            + constructor.body.statements.len();
+        let profile_has_expr = constructor.body.expr.is_some();
+
         let func_id = self
             .constructor_map
             .get(&type_id)
@@ -959,6 +1032,19 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.finish_function();
+
+        if let Some(start) = profile_start {
+            if let Some(func) = self.builder.module.functions.get(&func_id) {
+                mir_function_profile_record(
+                    self.current_module.as_deref(),
+                    func,
+                    start,
+                    profile_statements,
+                    profile_has_expr,
+                    "constructor",
+                );
+            }
+        }
 
         self.symbol_map.clear();
 

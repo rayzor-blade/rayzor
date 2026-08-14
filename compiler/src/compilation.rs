@@ -7,10 +7,10 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo, BladeAccessor,
-        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
-        BladeMetadata, BladeMethodInfo, BladePropertyEntry, BladeSymbolManifest,
-        BladeTypeAliasInfo, BladeTypeInfo,
+        load_blade, load_symbol_manifest, load_symbol_manifest_from_bytes, save_blade_with_state,
+        BladeAbstractInfo, BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo,
+        BladeFieldEntry, BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
+        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrInstruction, IrModule, Monomorphizer,
 };
@@ -31,7 +31,103 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypecheckStageTimings {
+    pub hdll_ms: f64,
+    pub dependency_ms: f64,
+    pub import_scan_ms: f64,
+    pub import_load_ms: f64,
+    pub import_hx_ms: f64,
+    pub user_files_ms: f64,
+    pub result_stdlib_ms: f64,
+    pub file_parse_ms: f64,
+    pub macro_ms: f64,
+    pub ast_lower_ms: f64,
+    pub send_sync_ms: f64,
+    pub ownership_ms: f64,
+    pub hir_ms: f64,
+    pub extern_check_ms: f64,
+    pub mir_prep_ms: f64,
+    pub mir_lower_core_ms: f64,
+    pub mir_ms: f64,
+    pub stdlib_merge_ms: f64,
+    pub monomorphize_ms: f64,
+    pub files_seen: usize,
+    pub macro_skipped_files: usize,
+    pub imports_collected: usize,
+    pub import_cache_hits: usize,
+    pub import_cache_misses: usize,
+    pub import_fresh_compiles: usize,
+    pub import_typedef_fresh: usize,
+    pub import_already_compiled: usize,
+    pub import_extern_skips: usize,
+}
+
+#[inline]
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+#[inline]
+fn profile_timer(enabled: bool) -> Option<Instant> {
+    enabled.then(Instant::now)
+}
+
+#[inline]
+fn add_profile_ms(slot: &mut f64, start: Option<Instant>) {
+    if let Some(start) = start {
+        *slot += elapsed_ms(start);
+    }
+}
+
+#[inline]
+fn finish_profile_ms(slot: &mut f64, start: Option<Instant>) -> f64 {
+    if let Some(start) = start {
+        let ms = elapsed_ms(start);
+        *slot += ms;
+        ms
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn is_stdtypes_ambient_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Void"
+            | "Float"
+            | "Int"
+            | "Single"
+            | "Null"
+            | "Bool"
+            | "Dynamic"
+            | "Iterator"
+            | "Iterable"
+            | "KeyValueIterator"
+            | "KeyValueIterable"
+            | "ArrayAccess"
+    )
+}
+
+#[inline]
+fn is_stdtypes_ambient_import(path: &str) -> bool {
+    is_stdtypes_ambient_name(path)
+        || path == "StdTypes"
+        || path
+            .strip_prefix("StdTypes.")
+            .is_some_and(is_stdtypes_ambient_name)
+}
+
+#[inline]
+fn is_extern_only_stdlib_base(base: &str) -> bool {
+    matches!(
+        base,
+        "Math" | "Array" | "String" | "Std" | "Class" | "Enum" | "EnumValue" | "Any"
+    )
+}
 
 /// Represents a complete compilation unit with multiple source files
 pub struct CompilationUnit {
@@ -183,6 +279,19 @@ pub struct CompilationUnit {
     /// class/interface (primitive, anonymous, etc.).
     import_function_param_iface_names: BTreeMap<crate::ir::IrFunctionId, Vec<Option<String>>>,
 
+    /// Accumulated constructor arity for imported functions, keyed by the
+    /// renumbered MIR function id. Kept incrementally so each import/user MIR
+    /// lowering does not rescan every previously lowered import module.
+    import_constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize>,
+
+    /// Accumulated lowered parameter types for imported functions, keyed by the
+    /// renumbered MIR function id. Used for optional/default argument fill and
+    /// kept incrementally to avoid O(imports^2) MIR-prep work.
+    import_function_param_types: BTreeMap<crate::ir::IrFunctionId, Vec<crate::ir::IrType>>,
+
+    /// Accumulated imported globals keyed by qualified name.
+    import_external_globals: BTreeMap<String, (crate::ir::IrGlobalId, crate::ir::IrType)>,
+
     /// Accumulated class allocation sizes from imported files (SymbolId -> byte size).
     /// Keyed by the class declaration's SymbolId — stable across module contexts,
     /// unlike TypeIds. Passed to user file's MIR lowering so it knows how much
@@ -252,6 +361,11 @@ pub struct CompilationUnit {
     /// to native symbol name (e.g. "rayzor_gpu_gfx_surface_get_format").
     /// Used by WASM backend to resolve stub wrapper functions to their imports.
     pub qualified_method_map: BTreeMap<String, String>,
+
+    /// Last `lower_to_tast` timing breakdown. This is deliberately coarse enough
+    /// to stay cheap, but detailed enough to keep "typecheck" from hiding HIR,
+    /// MIR, merge, and macro-expansion work.
+    typecheck_timings: TypecheckStageTimings,
 }
 
 /// Configuration for compilation
@@ -295,6 +409,10 @@ pub struct CompilationConfig {
     /// Extra preprocessor defines (e.g., "wasm" for WASM target builds).
     /// Added to the default set ("rayzor", "sys").
     pub extra_defines: Vec<String>,
+
+    /// Collect detailed typecheck timing breakdowns. Off by default because the
+    /// probes sit on cold-start paths and should only exist during profiling.
+    pub profile_typecheck: bool,
 }
 
 impl Default for CompilationConfig {
@@ -327,6 +445,7 @@ impl Default for CompilationConfig {
             hdll_search_paths: vec![PathBuf::from(".")],
             emit_safety_warnings: true,
             extra_defines: Vec::new(),
+            profile_typecheck: false,
         }
     }
 }
@@ -575,6 +694,9 @@ impl CompilationUnit {
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
             import_function_param_iface_names: BTreeMap::new(),
+            import_constructor_param_counts: BTreeMap::new(),
+            import_function_param_types: BTreeMap::new(),
+            import_external_globals: BTreeMap::new(),
             import_class_alloc_sizes: BTreeMap::new(),
             import_class_alloc_sizes_by_name: BTreeMap::new(),
             import_class_type_to_symbol: BTreeMap::new(),
@@ -593,6 +715,7 @@ impl CompilationUnit {
             cached_stdlib_mir: None,
             extern_js_module_map: BTreeMap::new(),
             qualified_method_map: BTreeMap::new(),
+            typecheck_timings: TypecheckStageTimings::default(),
         }
     }
 
@@ -678,15 +801,12 @@ impl CompilationUnit {
             false
         };
 
-        // Load default stdlib imports (Math, Std, Array, String, etc.)
-        // When bsym loaded, skip parsing the .hx files — just collect the file entries
-        // for source map and cache path resolution. Symbols already registered from bsym.
+        // Load default stdlib imports (StdTypes, etc.) only when we have not
+        // already registered them from the BLADE symbol manifest. StdTypes are
+        // top-level compiler-visible types, not a user import; parsing the file
+        // here on the bsym path was cold-start work with no semantic payload.
         if bsym_loaded {
-            // Lightweight load: get file paths without reading/parsing content
-            let default_files = loader.load_default_imports();
-            for file in default_files {
-                self.stdlib_files.push(file);
-            }
+            debug!("BLADE symbols loaded; skipping default stdlib source parse");
         } else {
             let default_files = loader.load_default_imports();
             for file in default_files {
@@ -1435,15 +1555,17 @@ impl CompilationUnit {
     /// Returns true if symbols were loaded successfully
     pub fn load_stdlib_symbols(&mut self) -> bool {
         let manifest_path = PathBuf::from(".rayzor/blade/stdlib/stdlib.bsym");
-        if !manifest_path.exists() {
+        let manifest = if manifest_path.exists() {
+            load_symbol_manifest(&manifest_path)
+        } else {
             debug!(
-                "[BLADE] No symbol manifest found at {}",
+                "[BLADE] No symbol manifest found at {}; using bundled stdlib manifest",
                 manifest_path.display()
             );
-            return false;
-        }
+            load_symbol_manifest_from_bytes(include_bytes!("../assets/stdlib.bsym"))
+        };
 
-        match load_symbol_manifest(&manifest_path) {
+        match manifest {
             Ok(manifest) => {
                 info!(
                     "[BLADE] Loading {} modules from symbol manifest",
@@ -2257,7 +2379,9 @@ impl CompilationUnit {
                     // Only add if it looks like a class name (starts with uppercase)
                     if path.package.is_empty() && !path.name.is_empty() {
                         let first_char = path.name.chars().next();
-                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false) {
+                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false)
+                            && !is_stdtypes_ambient_name(&path.name)
+                        {
                             deps.insert(path.name.clone());
                         }
                     } else if !path.package.is_empty() {
@@ -2335,7 +2459,9 @@ impl CompilationUnit {
                     // Extract class name from new expression
                     if type_path.package.is_empty() && !type_path.name.is_empty() {
                         let first_char = type_path.name.chars().next();
-                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false) {
+                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false)
+                            && !is_stdtypes_ambient_name(&type_path.name)
+                        {
                             deps.insert(type_path.name.clone());
                         }
                     } else if !type_path.package.is_empty() {
@@ -2368,6 +2494,7 @@ impl CompilationUnit {
                             .next()
                             .map(|c| c.is_uppercase())
                             .unwrap_or(false)
+                            && !is_stdtypes_ambient_name(name)
                         {
                             deps.insert(name.clone());
                         }
@@ -2601,7 +2728,9 @@ impl CompilationUnit {
                     // Constructor patterns reference enum/class types
                     if path.package.is_empty() && !path.name.is_empty() {
                         let first_char = path.name.chars().next();
-                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false) {
+                        if first_char.map(|c| c.is_uppercase()).unwrap_or(false)
+                            && !is_stdtypes_ambient_name(&path.name)
+                        {
                             deps.insert(path.name.clone());
                         }
                     } else if !path.package.is_empty() {
@@ -2769,6 +2898,11 @@ impl CompilationUnit {
             }
         }
 
+        // StdTypes.hx contributes top-level prelude types. They are not files
+        // the user imports, so do not feed bare `Iterator`, `Null`, `Bool`, etc.
+        // into load_imports_efficiently where they become failed path guesses.
+        deps.retain(|d| !Self::is_bare_stdtypes_prelude_dependency(d));
+
         // Qualify bare type names with the file's package.
         // e.g., if File.hx has `package sys.io;` and references `FileInput`,
         // also add `sys.io.FileInput` so the import loader can find it.
@@ -2806,6 +2940,7 @@ impl CompilationUnit {
             })
             .collect();
         deps.retain(|d| !own_types.contains(d));
+        deps.retain(|d| !Self::is_bare_stdtypes_prelude_dependency(d));
 
         let mut result: Vec<String> = deps.into_iter().collect();
         result.sort();
@@ -2822,11 +2957,15 @@ impl CompilationUnit {
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
-        let mut to_process: VecDeque<String> = imports.iter().cloned().collect();
+        let mut to_process: VecDeque<String> = imports
+            .iter()
+            .filter(|name| !is_stdtypes_ambient_import(name))
+            .cloned()
+            .collect();
         let mut visited: BTreeSet<String> = BTreeSet::new();
 
         while let Some(qualified_path) = to_process.pop_front() {
-            if visited.contains(&qualified_path) {
+            if is_stdtypes_ambient_import(&qualified_path) || visited.contains(&qualified_path) {
                 continue;
             }
             visited.insert(qualified_path.clone());
@@ -2879,6 +3018,22 @@ impl CompilationUnit {
                 continue;
             }
 
+            // BLADE manifests register extern-only stdlib classes up front.
+            // They have no Haxe bodies we need to lower, so do not spend cold
+            // start time reading/parsing them just to skip them later.
+            let base = std::path::Path::new(&file_path_str)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if self.namespace_resolver.is_file_loaded(&file_path)
+                && is_extern_only_stdlib_base(base)
+            {
+                if self.config.profile_typecheck {
+                    self.typecheck_timings.import_extern_skips += 1;
+                }
+                continue;
+            }
+
             // Read and parse to extract imports
             let source = match std::fs::read_to_string(&file_path) {
                 Ok(s) => s,
@@ -2892,7 +3047,7 @@ impl CompilationUnit {
             };
             // Queue dependencies for processing
             for dep in &deps {
-                if !visited.contains(dep) {
+                if !is_stdtypes_ambient_import(dep) && !visited.contains(dep) {
                     to_process.push_back(dep.clone());
                 }
             }
@@ -2906,6 +3061,9 @@ impl CompilationUnit {
                 "[IMPORT_LOAD] Collected {} files for import",
                 all_files.len()
             );
+        }
+        if self.config.profile_typecheck {
+            self.typecheck_timings.imports_collected += all_files.len();
         }
 
         // Step 2: Topological sort using Kahn's algorithm
@@ -3152,6 +3310,9 @@ impl CompilationUnit {
 
         // Skip if already compiled
         if self.compiled_files.contains_key(&filename) {
+            if self.config.profile_typecheck {
+                self.typecheck_timings.import_already_compiled += 1;
+            }
             return true;
         }
 
@@ -3160,16 +3321,6 @@ impl CompilationUnit {
         // via MIR wrappers. Compiling them produces 0 MIR functions.
         // Files with real code (Exception, StringTools, BalancedTree, etc.) must still
         // be compiled to get field indices, constructors, and MIR.
-        const EXTERN_ONLY_STDLIB: &[&str] = &[
-            "Math",
-            "Array",
-            "String",
-            "Std",
-            "Class",
-            "Enum",
-            "EnumValue",
-            "Any",
-        ];
         let is_loaded = self
             .namespace_resolver
             .is_file_loaded(&file_path.to_path_buf());
@@ -3178,7 +3329,10 @@ impl CompilationUnit {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
-            if EXTERN_ONLY_STDLIB.contains(&base) {
+            if is_extern_only_stdlib_base(base) {
+                if self.config.profile_typecheck {
+                    self.typecheck_timings.import_extern_skips += 1;
+                }
                 return true;
             }
         }
@@ -3199,13 +3353,21 @@ impl CompilationUnit {
             }
         }
 
-        // Try BLADE cache first
-        // Skip BLADE cache for typedef files — they produce no MIR functions and
-        // need fresh compilation to properly resolve their target types (e.g.,
-        // `typedef Bytes = rayzor.Bytes;` must resolve rayzor.Bytes in current session).
+        // Try BLADE cache first. Typedef-only modules are cacheable now that
+        // BLADE restores type aliases as first-class type-system symbols; their
+        // dependencies are still walked by the import loader before consumers
+        // resolve the alias target in the current compilation context.
         let source_has_typedef = source.contains("typedef ");
-        let cache_hit = if self.config.enable_cache && !source_has_typedef {
-            self.try_load_import_from_cache(&filename, source)
+        let cache_hit = if self.config.enable_cache {
+            let hit = self.try_load_import_from_cache(&filename, source);
+            if self.config.profile_typecheck {
+                if hit {
+                    self.typecheck_timings.import_cache_hits += 1;
+                } else {
+                    self.typecheck_timings.import_cache_misses += 1;
+                }
+            }
+            hit
         } else {
             false
         };
@@ -3248,6 +3410,12 @@ impl CompilationUnit {
             skip_stdlib_merge,
         ) {
             Ok(typed_file) => {
+                if self.config.profile_typecheck {
+                    self.typecheck_timings.import_fresh_compiles += 1;
+                    if source_has_typedef {
+                        self.typecheck_timings.import_typedef_fresh += 1;
+                    }
+                }
                 // Extract inline var constants before consuming the TypedFile.
                 // These are stored in BLADE cache and in global_inline_vars for
                 // cross-file static inline var resolution (e.g., Key.ESCAPE).
@@ -3300,6 +3468,25 @@ impl CompilationUnit {
                     }
 
                     self.renumber_and_push_import_mir((*mir_arc).clone());
+                } else if self.config.enable_cache {
+                    let type_info = self.last_compiled_type_info.take();
+                    let _ = self.last_compiled_cached_maps.take();
+                    if let Some(type_info) = type_info {
+                        let module_name = std::path::Path::new(&filename)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("stdlib")
+                            .to_string();
+                        let empty_mir = crate::ir::IrModule::new(module_name, filename.clone());
+                        self.save_blade_cached(
+                            &filename,
+                            source,
+                            &empty_mir,
+                            deps,
+                            Some(type_info),
+                            None,
+                        );
+                    }
                 }
                 true
             }
@@ -3383,9 +3570,13 @@ impl CompilationUnit {
                 None => return false,
             };
 
-        // We need both type info and cached maps for a full cache restore
+        // We need both type info and cached maps for a full cache restore.
+        // Typedef/extern-only imports can produce no MIR at all; for those,
+        // symbols-only + empty MIR is enough to avoid redoing TAST/HIR work
+        // when the entry module recompiles.
         let (symbols, cached_maps) = match (symbols, cached_maps) {
-            (Some(s), Some(m)) => (s, m),
+            (Some(s), Some(m)) => (s, Some(m)),
+            (Some(s), None) if mir.functions.is_empty() => (s, None),
             _ => {
                 debug!("[BLADE] Cache hit but missing type info/maps: {}", filename);
                 return false;
@@ -3395,13 +3586,20 @@ impl CompilationUnit {
         debug!(
             "[BLADE] Import cache hit: {} ({} functions, {} fields, {} class sizes)",
             filename,
-            cached_maps.functions.len(),
-            cached_maps.fields.len(),
-            cached_maps.class_sizes.len()
+            cached_maps.as_ref().map(|m| m.functions.len()).unwrap_or(0),
+            cached_maps.as_ref().map(|m| m.fields.len()).unwrap_or(0),
+            cached_maps
+                .as_ref()
+                .map(|m| m.class_sizes.len())
+                .unwrap_or(0)
         );
 
         // Step 1: Register symbols from type info (restores type system state)
         let registered = self.register_symbols_from_type_info(&symbols);
+
+        let Some(cached_maps) = cached_maps else {
+            return true;
+        };
 
         // Step 2: Rebuild MIR-level maps from cached maps using fresh IDs
         self.restore_cached_maps(&cached_maps, &registered);
@@ -4225,6 +4423,15 @@ impl CompilationUnit {
             let qualified = format!("{}.new", class_name);
             if let Some(&current_id) = map_snapshot.get(&qualified) {
                 if *func_id != current_id {
+                    if let Some(count) = self.import_constructor_param_counts.remove(func_id) {
+                        self.import_constructor_param_counts
+                            .entry(current_id)
+                            .or_insert(count);
+                    } else if let Some(params) = self.import_function_param_types.get(&current_id) {
+                        self.import_constructor_param_counts
+                            .entry(current_id)
+                            .or_insert(params.len());
+                    }
                     *func_id = current_id;
                 }
             }
@@ -4421,6 +4628,33 @@ impl CompilationUnit {
             self.import_function_param_iface_names.insert(new_id, names);
         }
 
+        // Keep MIR-lowering lookup inputs incrementally accumulated. The old
+        // path rebuilt these maps by scanning every previous import module for
+        // every next import/user file, which made cold source compilation scale
+        // quadratically on large graphs like nue/llama-chat.
+        let constructor_ids: std::collections::BTreeSet<_> =
+            self.import_constructor_name_map.values().copied().collect();
+        for (func_id, func) in &import_mir.functions {
+            self.import_function_param_types.insert(
+                *func_id,
+                func.signature
+                    .parameters
+                    .iter()
+                    .map(|p| p.ty.clone())
+                    .collect(),
+            );
+            if constructor_ids.contains(func_id) {
+                self.import_constructor_param_counts
+                    .entry(*func_id)
+                    .or_insert(func.signature.parameters.len());
+            }
+        }
+        for global in import_mir.globals.values() {
+            self.import_external_globals
+                .entry(global.name.clone())
+                .or_insert((global.id, global.ty.clone()));
+        }
+
         // Populate `stdlib_function_name_map` with this import's functions so
         // downstream callers can resolve them by qualified name. The cache-hit
         // path in `try_load_blade_cached_full` already does this (line ~2988);
@@ -4512,8 +4746,6 @@ impl CompilationUnit {
         if self.namespace_resolver.is_file_loaded(&file_path) {
             return Ok(());
         }
-
-        let load_start = std::time::Instant::now();
 
         // Mark as loaded BEFORE compiling to prevent recursive loading
         self.namespace_resolver.mark_file_loaded(file_path.clone());
@@ -4853,18 +5085,19 @@ impl CompilationUnit {
         {
             return true;
         }
-        // Common generic parameter patterns
-        matches!(
-            type_name,
-            "Key"
-                | "Value"
-                | "Item"
-                | "Element"
-                | "Iterator"
-                | "KeyValueIterator"
-                | "Iterable"
-                | "KeyValueIterable"
-        )
+        // Common generic parameter patterns and StdTypes prelude names.
+        if Self::is_stdtypes_prelude_type_name(type_name) {
+            return true;
+        }
+        matches!(type_name, "Key" | "Value" | "Item" | "Element")
+    }
+
+    fn is_stdtypes_prelude_type_name(type_name: &str) -> bool {
+        is_stdtypes_ambient_name(type_name)
+    }
+
+    fn is_bare_stdtypes_prelude_dependency(dep: &str) -> bool {
+        !dep.contains('.') && Self::is_stdtypes_prelude_type_name(dep)
     }
 
     /// Pre-register type declarations from a file without full compilation
@@ -5175,6 +5408,7 @@ impl CompilationUnit {
         }
 
         // Parse the file
+        let t_parse = profile_timer(self.config.profile_typecheck);
         let haxe_file = self.parse_file(filename, source).map_err(|e| {
             vec![CompilationError {
                 message: format!("Parse error: {}", e),
@@ -5184,6 +5418,7 @@ impl CompilationUnit {
                 related_errors: Vec::new(),
             }]
         })?;
+        add_profile_ms(&mut self.typecheck_timings.file_parse_ms, t_parse);
         // Wrap in ParseResult-like struct for compatibility
         struct ParseResultShim {
             file: parser::HaxeFile,
@@ -5208,6 +5443,17 @@ impl CompilationUnit {
         skip_stdlib_merge: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use crate::tast::ast_lowering::AstLowering;
+        if self.config.profile_typecheck {
+            self.typecheck_timings.files_seen += 1;
+        }
+        let profile_file_detail = self.config.profile_typecheck
+            && std::env::var_os("RAYZOR_PROFILE_TYPECHECK_FILES").is_some();
+        let file_total = profile_timer(profile_file_detail);
+        let mut file_ast_ms = 0.0;
+        let mut file_hir_ms = 0.0;
+        let mut file_mir_prep_ms = 0.0;
+        let mut file_mir_ms = 0.0;
+        let mut file_merge_ms = 0.0;
 
         // Allocate (or look up) a compilation-level file_id for this file.
         // Previously hardcoded to FileId(0), which caused every TypedExpression
@@ -5239,8 +5485,11 @@ impl CompilationUnit {
         }
 
         // Stage 1.5: Macro expansion (if enabled)
+        let t_macro = profile_timer(self.config.profile_typecheck);
+        let macro_expansion_needed = self.config.pipeline_config.enable_macro_expansion
+            && self.macro_expansion_may_apply(ast_file);
         let ast_file_owned;
-        let ast_file = if self.config.pipeline_config.enable_macro_expansion {
+        let ast_file = if macro_expansion_needed {
             let mut class_registry = crate::macro_system::ClassRegistry::new();
             class_registry.register_files(&self.stdlib_files);
             class_registry.register_files(&self.import_hx_files);
@@ -5321,8 +5570,12 @@ impl CompilationUnit {
             ast_file_owned = expansion.file;
             &ast_file_owned
         } else {
+            if self.config.profile_typecheck && self.config.pipeline_config.enable_macro_expansion {
+                self.typecheck_timings.macro_skipped_files += 1;
+            }
             ast_file
         };
+        add_profile_ms(&mut self.typecheck_timings.macro_ms, t_macro);
 
         // Lower to TAST using the SHARED state
         // NOTE: AstLowering needs an Rc<RefCell<StringInterner>> for TypedFile
@@ -5376,9 +5629,11 @@ impl CompilationUnit {
             filename.to_string(),
         );
 
+        let t_ast_lower = profile_timer(self.config.profile_typecheck);
         let typed_file = lowering
             .lower_file(ast_file)
             .map_err(|e| vec![e.to_compilation_error()])?;
+        file_ast_ms = finish_profile_ms(&mut self.typecheck_timings.ast_lower_ms, t_ast_lower);
 
         // Export class_fields for subsequent compilations
         for (class_sym, fields) in lowering.export_class_fields() {
@@ -5419,6 +5674,7 @@ impl CompilationUnit {
 
         // Send/Sync validation — check thread safety constraints (user files only)
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
+        let t_send_sync = profile_timer(self.config.profile_typecheck);
         if !is_stdlib {
             use crate::tast::send_sync_validator::SendSyncValidator;
             let validator = SendSyncValidator::new(
@@ -5454,13 +5710,16 @@ impl CompilationUnit {
                 }
             }
             if !send_sync_errors.is_empty() {
+                add_profile_ms(&mut self.typecheck_timings.send_sync_ms, t_send_sync);
                 return Err(send_sync_errors);
             }
         } // end if !is_stdlib
+        add_profile_ms(&mut self.typecheck_timings.send_sync_ms, t_send_sync);
 
         // Ownership analysis: use-after-move detection (user files only)
         // Skip if any class has @:safety annotation — opted out of ownership tracking
         let has_safety_opt_out = typed_file.classes.iter().any(|c| c.has_safety_annotation());
+        let t_ownership = profile_timer(self.config.profile_typecheck);
         if !is_stdlib && self.config.emit_safety_warnings && !has_safety_opt_out {
             let ownership_diagnostics = self.check_ownership_violations(&typed_file);
             if !ownership_diagnostics.is_empty() {
@@ -5485,10 +5744,12 @@ impl CompilationUnit {
                     })
                     .collect();
                 if !strict_errors.is_empty() {
+                    add_profile_ms(&mut self.typecheck_timings.ownership_ms, t_ownership);
                     return Err(strict_errors);
                 }
             }
         }
+        add_profile_ms(&mut self.typecheck_timings.ownership_ms, t_ownership);
 
         // Lower to HIR — pass loaded stdlib typed files so cross-file
         // static inline var references can be resolved
@@ -5496,7 +5757,8 @@ impl CompilationUnit {
         let import_refs: Vec<&crate::tast::node::TypedFile> =
             self.loaded_stdlib_typed_files.iter().collect();
         // (import_refs passed for inline var seeding)
-        let hir_module = lower_tast_to_hir_with_imports(
+        let t_hir = profile_timer(self.config.profile_typecheck);
+        let hir_module = match lower_tast_to_hir_with_imports(
             &typed_file,
             &self.symbol_table,
             &self.type_table,
@@ -5504,19 +5766,23 @@ impl CompilationUnit {
             None, // No semantic graphs for now
             &import_refs,
             &self.global_inline_vars,
-        )
-        .map_err(|errors| {
-            errors
-                .into_iter()
-                .map(|e| CompilationError {
-                    message: e.message,
-                    location: e.location,
-                    category: ErrorCategory::TypeError,
-                    suggestion: None,
-                    related_errors: Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        })?;
+        ) {
+            Ok(module) => module,
+            Err(errors) => {
+                add_profile_ms(&mut self.typecheck_timings.hir_ms, t_hir);
+                return Err(errors
+                    .into_iter()
+                    .map(|e| CompilationError {
+                        message: e.message,
+                        location: e.location,
+                        category: ErrorCategory::TypeError,
+                        suggestion: None,
+                        related_errors: Vec::new(),
+                    })
+                    .collect::<Vec<_>>());
+            }
+        };
+        file_hir_ms = finish_profile_ms(&mut self.typecheck_timings.hir_ms, t_hir);
 
         // Set source file path on HIR module for stack trace source info
         let mut hir_module = hir_module;
@@ -5527,6 +5793,7 @@ impl CompilationUnit {
         // method signatures). Their runtime code is provided by build_stdlib() from Rust
         // implementations. Generating MIR stubs here would create function entries with wrong
         // signatures (0-param stubs for methods that need a receiver), breaking codegen.
+        let t_extern_check = profile_timer(self.config.profile_typecheck);
         {
             use crate::tast::symbols::SymbolFlags;
             let has_non_extern_class = typed_file.classes.iter().any(|c| {
@@ -5568,9 +5835,11 @@ impl CompilationUnit {
                 );
                 self.compiled_files
                     .insert(filename.to_string(), typed_file.clone());
+                add_profile_ms(&mut self.typecheck_timings.extern_check_ms, t_extern_check);
                 return Ok(typed_file);
             }
         }
+        add_profile_ms(&mut self.typecheck_timings.extern_check_ms, t_extern_check);
 
         // Lower to MIR
         // Use lower_hir_to_mir_with_function_map to:
@@ -5606,33 +5875,9 @@ impl CompilationUnit {
 
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
 
-        // Single pass: build both constructor param counts and function param types
-        // from all import MIR modules (previously two separate O(modules × functions) loops)
-        let constructor_ids: std::collections::BTreeSet<_> =
-            self.import_constructor_name_map.values().copied().collect();
-        let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> =
-            BTreeMap::new();
-        let mut external_function_param_types: BTreeMap<
-            crate::ir::IrFunctionId,
-            Vec<crate::ir::IrType>,
-        > = BTreeMap::new();
-        for import_mir in &self.import_mir_modules {
-            for (func_id, func) in &import_mir.functions {
-                external_function_param_types.insert(
-                    *func_id,
-                    func.signature
-                        .parameters
-                        .iter()
-                        .map(|p| p.ty.clone())
-                        .collect(),
-                );
-                if constructor_ids.contains(func_id) {
-                    constructor_param_counts
-                        .entry(*func_id)
-                        .or_insert(func.signature.parameters.len());
-                }
-            }
-        }
+        let t_mir_prep = profile_timer(self.config.profile_typecheck);
+        let constructor_param_counts = self.import_constructor_param_counts.clone();
+        let external_function_param_types = self.import_function_param_types.clone();
 
         // Seed cross-file property accessors from loaded stdlib typed files.
         // Extern-only files like sys/thread/Tls.hx skip MIR generation (handled
@@ -5658,17 +5903,11 @@ impl CompilationUnit {
         // Globals from modules already lowered, keyed by qualified name. Their
         // ids are final: imports are renumbered into disjoint ranges before this
         // module is lowered.
-        let mut external_globals: BTreeMap<String, (crate::ir::IrGlobalId, crate::ir::IrType)> =
-            BTreeMap::new();
-        for import_mir in &self.import_mir_modules {
-            for g in import_mir.globals.values() {
-                external_globals
-                    .entry(g.name.clone())
-                    .or_insert((g.id, g.ty.clone()));
-            }
-        }
+        let external_globals = self.import_external_globals.clone();
+        file_mir_prep_ms = finish_profile_ms(&mut self.typecheck_timings.mir_prep_ms, t_mir_prep);
 
-        let mir_result = lower_hir_to_mir_with_function_map(
+        let t_mir = profile_timer(self.config.profile_typecheck);
+        let mir_result = match lower_hir_to_mir_with_function_map(
             &hir_module,
             &self.string_interner,
             &self.type_table,
@@ -5693,19 +5932,25 @@ impl CompilationUnit {
             self.import_function_param_iface_names.clone(),
             self.import_field_class_names.clone(),
             Some(Rc::clone(&self.static_sig_index)),
-        )
-        .map_err(|errors| {
-            errors
-                .into_iter()
-                .map(|e| CompilationError {
-                    message: e.message,
-                    location: e.location,
-                    category: ErrorCategory::TypeError,
-                    suggestion: None,
-                    related_errors: Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        })?;
+        ) {
+            Ok(result) => result,
+            Err(errors) => {
+                add_profile_ms(&mut self.typecheck_timings.mir_ms, t_mir);
+                add_profile_ms(&mut self.typecheck_timings.mir_lower_core_ms, t_mir);
+                return Err(errors
+                    .into_iter()
+                    .map(|e| CompilationError {
+                        message: e.message,
+                        location: e.location,
+                        category: ErrorCategory::TypeError,
+                        suggestion: None,
+                        related_errors: Vec::new(),
+                    })
+                    .collect::<Vec<_>>());
+            }
+        };
+        file_mir_ms = finish_profile_ms(&mut self.typecheck_timings.mir_ms, t_mir);
+        self.typecheck_timings.mir_lower_core_ms += file_mir_ms;
 
         // Print any diagnostics from MIR lowering (e.g., exhaustiveness warnings)
         if !mir_result.diagnostics.is_empty() {
@@ -5914,6 +6159,7 @@ impl CompilationUnit {
         // their own functions. When the main file is compiled, all imports are merged in
         // first, then a single stdlib merge resolves forward refs without corrupting
         // user package functions.
+        let t_stdlib_merge = profile_timer(self.config.profile_typecheck);
         if !is_stdlib_file && !skip_stdlib_merge {
             // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
             // This ensures extern runtime functions are available.
@@ -6334,6 +6580,8 @@ impl CompilationUnit {
                 }
             }
         } // end if !is_stdlib_file (stdlib merge + renumbering)
+        file_merge_ms =
+            finish_profile_ms(&mut self.typecheck_timings.stdlib_merge_ms, t_stdlib_merge);
 
         // Dump MIR after stdlib merge so wrapper bodies are visible
         if std::env::var("RAYZOR_DUMP_MIR").is_ok() {
@@ -6343,8 +6591,10 @@ impl CompilationUnit {
         }
 
         // Run monomorphization pass to specialize generic functions
+        let t_monomorphize = profile_timer(self.config.profile_typecheck);
         let mut monomorphizer = Monomorphizer::new();
         monomorphizer.monomorphize_module(&mut mir_module);
+        add_profile_ms(&mut self.typecheck_timings.monomorphize_ms, t_monomorphize);
         // let mono_stats = monomorphizer.stats();
         // if mono_stats.generic_functions_found > 0 || mono_stats.instantiations_created > 0 {
         //     debug!("DEBUG: Monomorphization stats: {} generic functions, {} instantiations, {} call sites rewritten",
@@ -6390,6 +6640,20 @@ impl CompilationUnit {
         self.compiled_files
             .insert(filename.to_string(), typed_file.clone());
 
+        if profile_file_detail {
+            let total_ms = file_total.map(elapsed_ms).unwrap_or(0.0);
+            eprintln!(
+                "  typecheck-file: total={:.2}ms ast={:.2}ms hir={:.2}ms mir_prep={:.2}ms mir={:.2}ms merge={:.2}ms file={}",
+                total_ms,
+                file_ast_ms,
+                file_hir_ms,
+                file_mir_prep_ms,
+                file_mir_ms,
+                file_merge_ms,
+                filename
+            );
+        }
+
         Ok(typed_file)
     }
 
@@ -6419,6 +6683,31 @@ impl CompilationUnit {
         self.compile_ast_with_shared_state(&filename, &source, ast_file, false, false)
     }
 
+    fn macro_expansion_may_apply(&self, ast_file: &parser::HaxeFile) -> bool {
+        fn source_has_macro_hook(file: &parser::HaxeFile) -> bool {
+            let Some(source) = file.input.as_deref() else {
+                return false;
+            };
+            source.contains("macro ")
+                || source.contains("macro\t")
+                || source.contains("@:build")
+                || source.contains("@:autoBuild")
+                || source.contains("@:genericBuild")
+        }
+
+        source_has_macro_hook(ast_file)
+            || self.user_files.iter().any(source_has_macro_hook)
+            || self.import_hx_files.iter().any(source_has_macro_hook)
+            || self
+                .loaded_import_haxe_files
+                .iter()
+                .any(source_has_macro_hook)
+    }
+
+    pub fn typecheck_timings(&self) -> TypecheckStageTimings {
+        self.typecheck_timings
+    }
+
     /// Lower all files (stdlib + user) to TAST with full pipeline analysis
     ///
     /// This method delegates to HaxeCompilationPipeline for each file to leverage
@@ -6439,13 +6728,18 @@ impl CompilationUnit {
     /// IMPORTANT: On error, this automatically prints formatted diagnostics to stderr
 
     pub fn lower_to_tast(&mut self) -> Result<Vec<TypedFile>, Vec<CompilationError>> {
+        self.typecheck_timings = TypecheckStageTimings::default();
+
         // Step 0: Discover @:hlNative metadata in user files and load HDLL plugins
+        let t_hdll = profile_timer(self.config.profile_typecheck);
         if self.config.pipeline_config.enable_semantic_analysis {
             self.discover_and_load_hdlls();
         }
+        add_profile_ms(&mut self.typecheck_timings.hdll_ms, t_hdll);
 
         // Step 1: Analyze dependencies for user files
         // Fast path: single-file compilations don't need dependency analysis
+        let t_dependency = profile_timer(self.config.profile_typecheck);
         let analysis = if self.user_files.len() <= 1 {
             DependencyAnalysis {
                 compilation_order: (0..self.user_files.len()).collect(),
@@ -6460,6 +6754,7 @@ impl CompilationUnit {
                 }
             }
         };
+        add_profile_ms(&mut self.typecheck_timings.dependency_ms, t_dependency);
 
         let mut all_typed_files = Vec::new();
         let mut all_errors = Vec::new();
@@ -6468,6 +6763,7 @@ impl CompilationUnit {
         // This ensures typedefs like sys.FileStat are available before compilation
         // Also handles root-level imports like "import StringTools;" and "using StringTools;"
         // Extract imports from already-parsed user file ASTs (no re-parsing needed).
+        let t_import_scan = profile_timer(self.config.profile_typecheck);
         let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) =
             self.user_files.iter().fold(
                 (Vec::new(), Vec::new()),
@@ -6490,11 +6786,14 @@ impl CompilationUnit {
                     (imports, usings)
                 },
             );
+        add_profile_ms(&mut self.typecheck_timings.import_scan_ms, t_import_scan);
 
         // Pre-load imports using efficient topological loading (avoids retry loops)
         let mut all_imports = imports_to_load;
         all_imports.extend(usings_to_load);
+        let t_import_load = profile_timer(self.config.profile_typecheck);
         let _ = self.load_imports_efficiently(&all_imports);
+        add_profile_ms(&mut self.typecheck_timings.import_load_ms, t_import_load);
 
         // Step 3: Compile import.hx files using SHARED state
         let import_sources: Vec<(String, String)> = self
@@ -6503,6 +6802,7 @@ impl CompilationUnit {
             .filter_map(|f| f.input.as_ref().map(|s| (f.filename.clone(), s.clone())))
             .collect();
 
+        let t_import_hx = profile_timer(self.config.profile_typecheck);
         for (filename, source) in import_sources {
             match self.compile_file_with_shared_state(&filename, &source) {
                 Ok(typed_file) => {
@@ -6513,11 +6813,13 @@ impl CompilationUnit {
                 }
             }
         }
+        add_profile_ms(&mut self.typecheck_timings.import_hx_ms, t_import_hx);
 
         // Step 4: Compile user files in dependency order using SHARED state.
         // Use pre-parsed ASTs from self.user_files to avoid re-parsing.
         let user_file_indices: Vec<usize> = analysis.compilation_order.clone();
 
+        let t_user_files = profile_timer(self.config.profile_typecheck);
         for idx in user_file_indices {
             let ast_file = self.user_files[idx].clone();
             match self.compile_pre_parsed_file(&ast_file) {
@@ -6625,6 +6927,7 @@ impl CompilationUnit {
                 }
             }
         }
+        add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 
         // Step 5: Report all errors if any were found
         if !all_errors.is_empty() {
@@ -6635,9 +6938,14 @@ impl CompilationUnit {
         // Step 6: Include loaded stdlib files (typedefs, etc.) in the result
         // These were loaded on-demand during import resolution and contain type aliases
         // that need to be processed by HIR
+        let t_result_stdlib = profile_timer(self.config.profile_typecheck);
         for stdlib_file in std::mem::take(&mut self.loaded_stdlib_typed_files) {
             all_typed_files.push(stdlib_file);
         }
+        add_profile_ms(
+            &mut self.typecheck_timings.result_stdlib_ms,
+            t_result_stdlib,
+        );
 
         self.maybe_dump_file_table();
 
@@ -6721,13 +7029,9 @@ impl CompilationUnit {
             if name == "Key" || name == "Value" || name == "Item" || name == "Element" {
                 return None;
             }
-            // Skip built-in typedefs from StdTypes.hx (these are already loaded)
-            if name == "Iterator"
-                || name == "KeyValueIterator"
-                || name == "Iterable"
-                || name == "KeyValueIterable"
-            {
-                debug!("  Filtering out StdTypes typedef: {}", name);
+            // Skip built-in top-level types from StdTypes.hx (these are already loaded).
+            if Self::is_stdtypes_prelude_type_name(name) {
+                debug!("  Filtering out StdTypes prelude type: {}", name);
                 return None;
             }
         }
@@ -8294,8 +8598,10 @@ mod tests {
         // Load stdlib
         unit.load_stdlib().expect("Failed to load stdlib");
 
-        // Verify stdlib files were loaded
-        assert!(unit.stdlib_files.len() > 0, "No stdlib files loaded");
+        // Verify stdlib symbols were loaded. With a BLADE symbol manifest,
+        // top-level stdlib types do not require parsing source files into
+        // stdlib_files.
+        assert!(unit.symbol_table.len() > 0, "No stdlib symbols loaded");
         assert_eq!(unit.user_files.len(), 0, "Should have no user files");
     }
 

@@ -133,7 +133,7 @@ enum Commands {
         interactive: bool,
 
         /// Report phase timings as plain lines instead of drawing the TUI.
-        /// Implied when stderr is not a terminal, so timings survive a pipe.
+        /// Also enabled by RAYZOR_PROFILE_COMPILE/RAYZOR_PROFILE_TYPECHECK.
         #[arg(long)]
         plain: bool,
 
@@ -1310,16 +1310,17 @@ fn run_bundle(
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
         {
-            let _up_t = std::time::Instant::now();
+            let profile_load = verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some();
+            let up_t = profile_load.then(std::time::Instant::now);
             if let Err(e) = backend.upgrade_to_llvm() {
                 eprintln!(
                     "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
                     e
                 );
-            } else if verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some() {
+            } else if let Some(up_t) = up_t {
                 eprintln!(
                     "[tier] Upgraded to LLVM in {:.3}s",
-                    _up_t.elapsed().as_secs_f64()
+                    up_t.elapsed().as_secs_f64()
                 );
             }
         }
@@ -1466,12 +1467,16 @@ fn run_file(
     // TUI modes:
     // -i (interactive): full ratatui TUI with scrollable output, search (after execution)
     // -v (verbose):     spinner during compilation + inline stats after
-    // default:          plain output, no TUI overhead
+    // default:          program output only, no profiling/reporting overhead
     // The reporter collects phase timings; the TUI is only one way to show
     // them. Gating its construction on a terminal meant a piped or CI run
     // recorded nothing at all, so `--verbose` there produced no timings.
-    let plain = plain || !tui::style::is_tty();
-    let want_report = interactive || verbose || plain;
+    let profile_compile_env = std::env::var_os("RAYZOR_PROFILE_COMPILE").is_some()
+        || std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some();
+    let is_tty = tui::style::is_tty();
+    let plain = plain || profile_compile_env || (verbose && !is_tty);
+    let want_report = interactive || verbose || plain || profile_compile_env;
+    compile_helpers::set_compile_profiling_enabled(want_report);
     let progress_tui = if want_report {
         if plain {
             tui::progress::print_run_banner(
@@ -1877,7 +1882,7 @@ fn run_file(
         if let Some(ref h) = progress_handle {
             h.begin_phase("compile");
         }
-        let t_compile = std::time::Instant::now();
+        let t_compile = progress_handle.is_some().then(std::time::Instant::now);
         let define_refs: Vec<&str> = compile_defines.iter().map(|s| s.as_str()).collect();
         let compile_result = compile_helpers::compile_haxe_to_mir_with_defines_and_cache(
             &source,
@@ -1902,9 +1907,50 @@ fn run_file(
                 h.end_phase("stdlib", stdlib);
                 h.end_phase("parse", parse);
                 h.end_phase("typecheck", tast);
+                if std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some() {
+                    if let Some(detail) = compile_helpers::LAST_TYPECHECK_DETAIL
+                        .lock()
+                        .ok()
+                        .and_then(|s| *s)
+                    {
+                        h.end_phase("tc.hdll", detail.hdll_ms);
+                        h.end_phase("tc.deps", detail.dependency_ms);
+                        h.end_phase("tc.import-scan", detail.import_scan_ms);
+                        h.end_phase("tc.imports", detail.import_load_ms + detail.import_hx_ms);
+                        h.end_phase("tc.user", detail.user_files_ms);
+                        h.end_phase("tc.file-parse", detail.file_parse_ms);
+                        h.end_phase("tc.macro", detail.macro_ms);
+                        h.end_phase("tc.ast", detail.ast_lower_ms);
+                        h.end_phase("tc.send-sync", detail.send_sync_ms);
+                        h.end_phase("tc.ownership", detail.ownership_ms);
+                        h.end_phase("tc.hir", detail.hir_ms);
+                        h.end_phase("tc.extern", detail.extern_check_ms);
+                        h.end_phase("tc.mir-prep", detail.mir_prep_ms);
+                        h.end_phase("tc.mir", detail.mir_ms);
+                        h.end_phase("tc.mir-core", detail.mir_lower_core_ms);
+                        h.end_phase("tc.merge", detail.stdlib_merge_ms);
+                        h.end_phase("tc.mono", detail.monomorphize_ms);
+                        eprintln!(
+                            "  typecheck-detail: files={} macro_skipped={} imports={} \
+                             cache_hit={} cache_miss={} fresh={} typedef_fresh={} \
+                             already={} extern_skip={}",
+                            detail.files_seen,
+                            detail.macro_skipped_files,
+                            detail.imports_collected,
+                            detail.import_cache_hits,
+                            detail.import_cache_misses,
+                            detail.import_fresh_compiles,
+                            detail.import_typedef_fresh,
+                            detail.import_already_compiled,
+                            detail.import_extern_skips
+                        );
+                    }
+                }
                 h.end_phase("mir", mir);
             }
-            h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
+            if let Some(t_compile) = t_compile {
+                h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         // Surface non-fatal compile WARNINGS (errors already abort the compile).
         // e.g. the untyped-empty-array "uncertain element type" warning. Rendered
@@ -1935,7 +1981,7 @@ fn run_file(
             if let Some(ref h) = progress_handle {
                 h.begin_phase("tree-shake");
             }
-            let t_shake = std::time::Instant::now();
+            let t_shake = progress_handle.is_some().then(std::time::Instant::now);
             use compiler::ir::tree_shake;
             let before = mir_module.functions.len() + mir_module.extern_functions.len();
             let mut modules = vec![mir_module];
@@ -1953,7 +1999,9 @@ fn run_file(
             mir_module.link_selfcontained_wrapper_stubs();
             let after = mir_module.functions.len() + mir_module.extern_functions.len();
             if let Some(ref h) = progress_handle {
-                h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);
+                if let Some(t_shake) = t_shake {
+                    h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);
+                }
                 h.set_shake_stats(before, after);
             }
         }
@@ -1975,7 +2023,7 @@ fn run_file(
             if let Some(ref h) = progress_handle {
                 h.begin_phase("optimize");
             }
-            let t_opt = std::time::Instant::now();
+            let t_opt = progress_handle.is_some().then(std::time::Instant::now);
             use compiler::ir::optimization::{OptimizationLevel, PassManager};
             let level = match std::env::var("RAYZOR_OPT_LEVEL").as_deref() {
                 Ok("0") => OptimizationLevel::O0,
@@ -1986,7 +2034,9 @@ fn run_file(
             let mut pass_manager = PassManager::for_level(level);
             let _ = pass_manager.run(&mut mir_module);
             if let Some(ref h) = progress_handle {
-                h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
+                if let Some(t_opt) = t_opt {
+                    h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
+                }
             }
         } else if fast_interpreter_start && verbose {
             eprintln!("[compile] skipping MIR optimize for interpreter-first startup");
@@ -2138,10 +2188,12 @@ fn run_file(
     if let Some(ref h) = progress_handle {
         h.begin_phase("jit");
     }
-    let t_jit = std::time::Instant::now();
+    let t_jit = progress_handle.is_some().then(std::time::Instant::now);
     backend.compile_module(mir_module)?;
     if let Some(ref h) = progress_handle {
-        h.end_phase("jit", t_jit.elapsed().as_secs_f64() * 1000.0);
+        if let Some(t_jit) = t_jit {
+            h.end_phase("jit", t_jit.elapsed().as_secs_f64() * 1000.0);
+        }
         // Stop spinner before execution (output goes to stdout)
         h.finish();
     }
@@ -2176,16 +2228,17 @@ fn run_file(
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
         {
-            let _up_t = std::time::Instant::now();
+            let profile_load = verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some();
+            let up_t = profile_load.then(std::time::Instant::now);
             if let Err(e) = backend.upgrade_to_llvm() {
                 eprintln!(
                     "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
                     e
                 );
-            } else if verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some() {
+            } else if let Some(up_t) = up_t {
                 eprintln!(
                     "[tier] Upgraded to LLVM in {:.3}s",
-                    _up_t.elapsed().as_secs_f64()
+                    up_t.elapsed().as_secs_f64()
                 );
             }
         }
