@@ -217,14 +217,15 @@ pub struct LLVMJitBackend<'ctx> {
     global_vars: Vec<Option<GlobalValue<'ctx>>>,
 }
 
-#[cfg(feature = "llvm-backend")]
 /// Which alias family an access belongs to. See `tbaa_tag_for_offset`.
+#[cfg(feature = "llvm-backend")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TbaaFamily {
     Fp,
     Word,
 }
 
+#[cfg(feature = "llvm-backend")]
 impl<'ctx> LLVMJitBackend<'ctx> {
     /// Create a new LLVM JIT backend with aggressive optimization (Tier 3)
     pub fn new(context: &'ctx Context) -> Result<Self, String> {
