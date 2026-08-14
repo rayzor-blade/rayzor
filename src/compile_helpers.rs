@@ -135,6 +135,10 @@ fn typecheck_detail_report(timings: compiler::compilation::TypecheckStageTimings
     }
 }
 
+// Each argument is a distinct compilation input (source, plugins, source dirs,
+// defines, cache settings); bundling them into a struct would only move the
+// same list behind one more name.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_haxe_to_mir_with_defines_and_cache(
     source: &str,
     filename: &str,
