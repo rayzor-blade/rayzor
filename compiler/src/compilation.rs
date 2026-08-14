@@ -7302,6 +7302,12 @@ impl CompilationUnit {
 
         let formatter = ErrorFormatter::with_colors();
         for diagnostic in mir_diagnostics {
+            if diagnostic.code.as_deref() == Some("W0014")
+                && std::env::var_os("RAYZOR_SHOW_W0014").is_none()
+                && std::env::var_os("RAYZOR_SHOW_ADVICE").is_none()
+            {
+                continue;
+            }
             let formatted = formatter.format_diagnostic(diagnostic, &source_map);
             eprint!("{}", formatted);
         }

@@ -3270,7 +3270,15 @@ impl MirInterpreter {
             } as u64)),
             IrType::F32 => Ok(NativeValue::F32(val.to_f64()? as f32)),
             IrType::F64 => Ok(NativeValue::F64(val.to_f64()?)),
-            IrType::Ptr(_) | IrType::Ref(_) => Ok(NativeValue::Ptr(val.to_usize()?)),
+            IrType::Ptr(_) | IrType::Ref(_) => match val {
+                // Several stdlib extern mappings use PtrVoid for HaxeString
+                // headers (`Sys.getEnv`, `Sys.putEnv`, etc.). JIT backends
+                // lower string literals to runtime string headers before the
+                // call; the interpreter must do the same rather than treating
+                // a String value as a raw pointer.
+                InterpValue::String(s) => Ok(Self::marshal_string_arg(s, scratch)),
+                _ => Ok(NativeValue::Ptr(val.to_usize()?)),
+            },
             IrType::String => {
                 // String args cross the FFI as `*const HaxeString` headers.
                 match val {

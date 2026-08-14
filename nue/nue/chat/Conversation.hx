@@ -3,7 +3,9 @@ package nue.chat;
 import nue.CausalLanguageModel;
 import nue.tokenizer.BPETokenizer;
 import nue.sampling.GenerationLoop;
+#if nue_spec_decode
 import nue.sampling.SpeculativeGenerationLoop;
+#end
 import nue.sampling.LocalTempSampler;
 import nue.model.ModelMetadata;
 import nue.model.Architecture.Architectures;
@@ -126,10 +128,17 @@ class Conversation {
         var full:String;
         var finish:String;
         if (config.useSpeculative) {
+            #if nue_spec_decode
             var loop = new SpeculativeGenerationLoop(model, tokenizer, sampler, eos, config.maxNewTokens);
             loop.stopIds = stopIdList;
             full = loop.generate(prompt, counting);
             finish = loop.finishReason;
+            #else
+            var loop = new GenerationLoop(model, tokenizer, sampler, eos, config.maxNewTokens);
+            loop.stopIds = stopIdList;
+            full = loop.generate(prompt, counting);
+            finish = loop.finishReason;
+            #end
         } else {
             var loop = new GenerationLoop(model, tokenizer, sampler, eos, config.maxNewTokens);
             loop.stopIds = stopIdList;
