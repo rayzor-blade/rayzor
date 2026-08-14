@@ -512,7 +512,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn", "Thread_join"]),
+        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_join"]),
     );
 
     // TEST 4: Thread.isFinished
@@ -537,7 +537,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn", "Thread_isFinished"]),
+        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_is_finished"]),
     );
 
     // ============================================================================
@@ -565,7 +565,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Mutex_init", "Mutex_lock"]),
+        .expect_mir_calls(vec!["sys_mutex_alloc", "sys_mutex_acquire"]),
     );
 
     // TEST 6: Mutex tryAcquire
@@ -590,7 +590,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Mutex_tryLock"]),
+        .expect_mir_calls(vec!["sys_mutex_try_acquire"]),
     );
 
     // TEST 7: Mutex with Thread
@@ -634,7 +634,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Mutex_lock", "Thread_spawn"]),
+        .expect_mir_calls(vec!["sys_mutex_acquire", "Thread_spawn"]),
     );
 
     // ============================================================================
