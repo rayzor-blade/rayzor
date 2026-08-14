@@ -74,15 +74,10 @@ class GGUFLoader implements ModelLoader {
     }
 
     /** Post-build engine wiring, shared by `load` and `loadWithTokenizer`:
-     * bert pooling convention (`bert.pooling_type`: 1 mean, 2 CLS) and the
-     * llama fused prefill graph (auto-detect `<stem>.prefill_s{S}.mlmodelc`
+     * the llama fused prefill graph (auto-detect `<stem>.prefill_s{S}.mlmodelc`
      * next to the gguf — capability IS the config; NUE_PREFILL=off kills).
      */
     function applyEngines(model:Module, meta:ModelMetadata, reader:GGUFReader, path:String):Void {
-        if (meta.architecture == "bert") {
-            var pooling = readIntOr(reader, "bert.pooling_type", 1);
-            if (pooling == 2) cast(model, nue.arch.BertModel).clsPool = true;
-        }
         // Llama-family (Llama/Mistral/Qwen2) all build a LlamaModel and share
         // the same prefill-graph + decode-warm wiring.
         if (meta.architecture == "llama" || meta.architecture == "qwen2") {

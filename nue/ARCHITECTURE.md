@@ -364,11 +364,13 @@ interface ArchBuilder {
 
 [ArchRegistry.hx](nue/arch/ArchRegistry.hx) is an **instance-based** registry
 (not static — dodges JIT flakiness with global mutable state). `withDefaults()`
-returns a registry pre-populated with `LlamaArch` and `BertArch`. The internal
-`ArchEntry` caches each builder's `name()` at registration time because
-calling the interface method later (when the receiver is typed as
-`ArchBuilder`, not the concrete class) has hit JIT dispatch bugs in this
-codebase.
+returns a Llama-family registry (`llama`, `qwen2`, `mistral`) so source-run
+cold starts do not lower BERT encoder code for causal-LM apps. Use
+`BuiltinArchRegistry.withDefaults()` when an application wants every built-in
+architecture, including BERT. The internal `ArchEntry` caches each builder's
+`name()` at registration time because calling the interface method later (when
+the receiver is typed as `ArchBuilder`, not the concrete class) has hit JIT
+dispatch bugs in this codebase.
 
 | File | Role |
 |---|---|
@@ -714,8 +716,9 @@ is why the activation side is shifted `+128` and corrected by subtracting
 4. In `build()`, fetch weights from `NamedTensorMap` by canonical name,
    construct the module tree, return a `Module` (or `CausalLanguageModel` /
    `EncoderModel` as appropriate).
-5. Register in `ArchRegistry.withDefaults()` or, for downstream consumers, on
-   a fresh registry instance.
+5. Register in `ArchRegistry.withDefaults()` for Llama-family defaults,
+   `BuiltinArchRegistry.withDefaults()` for broader built-ins, or on a fresh
+   registry instance for downstream consumers.
 
 ### Adding a new sampler
 1. Implement `Sampler` in `nue/sampling/MySampler.hx`.

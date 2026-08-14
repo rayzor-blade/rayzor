@@ -276,14 +276,18 @@ class Q4Matmul {
     static var _dsTokens:Int = 0;
     static var _dsOn:Int = 0;
 
-    /** Timestamp when the split is on, else 0. A ternary at the call site, not
-        `if (c) f = expr`, which boxes a loop-carried Float per iteration. */
-    public static function splitNow():Float {
+    /** True when per-stage decode split profiling is enabled. */
+    public static function decodeSplitEnabled():Bool {
         if (_dsOn == 0) {
             var v = Sys.getEnvOr("NUE_PROFILE_DECODE_SPLIT", "RAYZOR_PROFILE_DECODE_SPLIT");
             _dsOn = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
         }
-        return _dsOn == 1 ? Sys.time() : 0.0;
+        return _dsOn == 1;
+    }
+
+    /** Timestamp when the split is on, else 0. */
+    public static function splitNow():Float {
+        return decodeSplitEnabled() ? Sys.time() : 0.0;
     }
 
     public static function noteBlockSplit(norm:Float, attn:Float, ffn:Float,

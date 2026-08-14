@@ -12,8 +12,8 @@ class Main {
 
         var llama = reg.get("llama");
         trace("looked up llama: " + (llama != null));
-        var bert = reg.get("bert");
-        trace("looked up bert: " + (bert != null));
+        var qwen = reg.get("qwen2");
+        trace("looked up qwen2: " + (qwen != null));
 
         // Demonstrate name() works on a CONCRETE-typed reference (the
         // ArchEntry pre-cached name is what survives JIT — see

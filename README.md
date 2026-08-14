@@ -97,9 +97,9 @@ Details: [MEMORY_MANAGEMENT.md](docs/architecture/MEMORY_MANAGEMENT.md).
 | `.rpkg` | package of Haxe sources and optional native libraries |
 
 Caching is on by default; `--no-cache` disables it. The cache is invalidated by
-source content, compiler version, **and** a build id stamped when the compiler
-itself is built — a compiler rebuild therefore invalidates it, which is why the
-first run afterwards is slow.
+source content, compiler version, and a content-derived compiler cache ABI id.
+That ABI id changes when compiler/parser/stdlib inputs change, but not for a
+redundant relink of identical sources.
 
 ---
 

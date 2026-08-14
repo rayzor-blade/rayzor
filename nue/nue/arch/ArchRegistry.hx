@@ -40,7 +40,10 @@ class ArchEntry {
  * ```
  *
  * For one-line convenience, `ArchRegistry.withDefaults()` returns a
- * registry pre-populated with every nue-built-in arch.
+ * registry pre-populated with the Llama-family builders used by causal LMs.
+ * Encoder/BERT callers should use `BuiltinArchRegistry.withDefaults()` or
+ * register `BertArch` explicitly, keeping unrelated builders out of Llama
+ * cold compile graphs.
  */
 class ArchRegistry {
     var entries:Array<ArchEntry>;
@@ -50,9 +53,9 @@ class ArchRegistry {
     }
 
     /**
-     * Convenience factory returning a registry preloaded with every
-     * nue-built-in architecture. Users add their own via `register()`
-     * on top of this.
+     * Convenience factory returning a registry preloaded with the Llama-family
+     * causal-LM architectures. Users add their own via `register()` on top of
+     * this; encoder/BERT users can call `BuiltinArchRegistry.withDefaults()`.
      */
     public static function withDefaults():ArchRegistry {
         var r = new ArchRegistry();
@@ -68,7 +71,6 @@ class ArchRegistry {
         // attention is NOT implemented; it only diverges past the window
         // (4096 on v0.1, and v0.2+ dropped SWA entirely).
         r.register("mistral", new LlamaArch());
-        r.register("bert", new BertArch());
         return r;
     }
 

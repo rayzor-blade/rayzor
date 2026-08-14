@@ -66,20 +66,20 @@ class TransformerBlock implements Module {
         // tensor returns, so each intermediate gets an inline .free()
         // once its consumer is done — without these, every block leaks
         // six tensor handles per token (96 handles/token at 16 layers).
-        var xClone1 = x.clone();
-        var t = attnNorm.forward(xClone1);
+        var xClone1:Tensor = x.clone();
+        var t:Tensor = attnNorm.forward(xClone1);
         xClone1.free();
-        var attnOut = attn.forward(t);
+        var attnOut:Tensor = attn.forward(t);
         t.free();
         x.addInto(attnOut);
         attnOut.free();
-        var h1 = x;
+        var h1:Tensor = x;
         // Same pattern for the FFN sub-layer: ffnNorm consumes a copy of
         // h1, original h1 accumulates ffnOut in place.
-        var xClone2 = h1.clone();
-        var t2 = ffnNorm.forward(xClone2);
+        var xClone2:Tensor = h1.clone();
+        var t2:Tensor = ffnNorm.forward(xClone2);
         xClone2.free();
-        var ffnOut = ffn.forward(t2);
+        var ffnOut:Tensor = ffn.forward(t2);
         t2.free();
         h1.addInto(ffnOut);
         ffnOut.free();
@@ -93,20 +93,20 @@ class TransformerBlock implements Module {
         // (the F32 matmul reads it), so x is cloned only to satisfy the
         // strict move analyzer's linearised call-arg consume; the clone
         // is freed right after, and the original x accumulates in place.
-        var xc = x.clone();
-        var attnOut = attn.forward(xc);
+        var xc:Tensor = x.clone();
+        var attnOut:Tensor = attn.forward(xc);
         xc.free();
         x.addInto(attnOut);            // x += attn(x)
         attnOut.free();
-        var a = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
+        var a:Tensor = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
         x.free();
         // FFN sublayer, same shape: out = ffnNorm(a + ffn(a)).
-        var ac = a.clone();
-        var ffnOut = ffn.forward(ac);
+        var ac:Tensor = a.clone();
+        var ffnOut:Tensor = ffn.forward(ac);
         ac.free();
         a.addInto(ffnOut);             // a += ffn(a)
         ffnOut.free();
-        var out = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
+        var out:Tensor = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
         a.free();
         return out;
     }
@@ -119,19 +119,19 @@ class TransformerBlock implements Module {
      * masked caller (BERT) is post-norm.
      */
     public function forwardMasked(x:Tensor, attnBias:Tensor):Tensor {
-        var xc = x.clone();
-        var attnOut = attn.forwardMasked(xc, attnBias); // virtual dispatch — no downcast
+        var xc:Tensor = x.clone();
+        var attnOut:Tensor = attn.forwardMasked(xc, attnBias); // virtual dispatch — no downcast
         xc.free();
         x.addInto(attnOut);            // x += attn(x, mask)
         attnOut.free();
-        var a = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
+        var a:Tensor = attnNorm.forward(x);   // a = LayerNorm(x + attnOut)
         x.free();
-        var ac = a.clone();
-        var ffnOut = ffn.forward(ac);
+        var ac:Tensor = a.clone();
+        var ffnOut:Tensor = ffn.forward(ac);
         ac.free();
         a.addInto(ffnOut);             // a += ffn(a)
         ffnOut.free();
-        var out = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
+        var out:Tensor = ffnNorm.forward(a);  // out = LayerNorm(a + ffnOut)
         a.free();
         return out;
     }

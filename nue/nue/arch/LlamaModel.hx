@@ -115,10 +115,11 @@ class LlamaModel implements CausalLanguageModel {
             if (dbgLogit) dumpArgmax(result);
             return result;
         }
-        var _tLm = nue.Q4Matmul.splitNow();
+        var profileSplit = nue.Q4Matmul.decodeSplitEnabled();
+        var _tLm = profileSplit ? Sys.time() : 0.0;
         var normed1 = outputNorm.forward(h);
         var result1 = lmHead.forward(normed1);
-        nue.Q4Matmul.noteLmHeadSplit(nue.Q4Matmul.splitNow() - _tLm);
+        if (profileSplit) nue.Q4Matmul.noteLmHeadSplit(Sys.time() - _tLm);
         normed1.free();
         h.free();
         if (dbgLogit) dumpArgmax(result1);

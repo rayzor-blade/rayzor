@@ -1,4 +1,33 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+
+const CACHE_ABI_VERSION: &str = "rayzor-cache-abi-v1";
+
+struct Fnv64(u64);
+
+impl Fnv64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write(value.as_bytes());
+        self.write(&[0]);
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
 
 fn main() {
     // On Linux, export symbols for dynamically loaded shared libraries
@@ -10,21 +39,12 @@ fn main() {
         build_llvm21_const_compat();
     }
 
-    // Emit a build ID that changes on every rebuild. BLADE cache entries
-    // are tagged with this ID, so MIR cached by one compiler build is
-    // invalidated when the compiler itself is recompiled — protects
-    // against silent miscompiles when a parser/lowerer change shifts
-    // function IDs or AST shape for the same source.
-    //
-    // Use the compile-time clock (seconds since UNIX epoch). Two builds
-    // in the same second would collide, which is fine for cache
-    // invalidation in practice (rebuilding the compiler takes longer
-    // than a second).
-    let build_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    println!("cargo:rustc-env=RAYZOR_BUILD_ID={}", build_secs);
+    // Emit a cache ABI build id. BLADE cache entries are tagged with this
+    // value, so MIR cached by one compiler binary is only reused by another
+    // binary built from the same compiler/parser/stdlib inputs. This keeps the
+    // corruption guard from the old per-build timestamp without invalidating
+    // every cache on a redundant relink of identical sources.
+    println!("cargo:rustc-env=RAYZOR_BUILD_ID={}", cache_build_id());
 
     // Re-run this script (bumping the build id) whenever ANY compiler
     // source changes. The previous list covered only src/ir, src/tast,
@@ -39,6 +59,87 @@ fn main() {
     println!("cargo:rerun-if-changed=haxe-std");
     println!("cargo:rerun-if-changed=../parser/src");
     println!("cargo:rerun-if-changed=../diagnostics/src");
+}
+
+fn cache_build_id() -> String {
+    let mut hash = Fnv64::new();
+    hash.write_str(CACHE_ABI_VERSION);
+    hash.write_str(env!("CARGO_PKG_VERSION"));
+
+    for key in [
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_OS",
+        "CARGO_CFG_TARGET_ENV",
+        "CARGO_CFG_TARGET_POINTER_WIDTH",
+        "CARGO_FEATURE_LLVM_BACKEND",
+        "CARGO_FEATURE_WASM_RUNTIME",
+        "CARGO_FEATURE_GPU_RUNTIME",
+    ] {
+        hash.write_str(key);
+        hash.write_str(&std::env::var(key).unwrap_or_default());
+    }
+
+    for path in [
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("../Cargo.lock"),
+        PathBuf::from("../parser/Cargo.toml"),
+        PathBuf::from("../diagnostics/Cargo.toml"),
+    ] {
+        hash_path(&path, &mut hash);
+    }
+
+    for dir in [
+        PathBuf::from("src"),
+        PathBuf::from("haxe-std"),
+        PathBuf::from("../parser/src"),
+        PathBuf::from("../diagnostics/src"),
+    ] {
+        hash_tree(&dir, &mut hash);
+    }
+
+    format!("{:016x}", hash.finish())
+}
+
+fn hash_tree(root: &Path, hash: &mut Fnv64) {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    files.sort();
+    for file in files {
+        hash_path(&file, hash);
+    }
+}
+
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.is_file() {
+        files.push(path.to_path_buf());
+        return;
+    }
+    if !meta.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        collect_files(&entry.path(), files);
+    }
+}
+
+fn hash_path(path: &Path, hash: &mut Fnv64) {
+    let display = path.to_string_lossy();
+    hash.write_str(&display);
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            hash.write_str("file");
+            hash.write(&bytes);
+            hash.write(&[0]);
+        }
+        Err(_) => hash.write_str("missing"),
+    }
 }
 
 fn build_llvm21_const_compat() {

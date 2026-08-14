@@ -74,14 +74,13 @@ pub struct BladeMetadata {
     /// Compiler version that created this BLADE file
     pub compiler_version: String,
 
-    /// Build ID of the compiler binary that produced this cache. Set from
+    /// Cache ABI ID of the compiler binary that produced this cache. Set from
     /// the `RAYZOR_BUILD_ID` env var at compiler build time (see
-    /// compiler/build.rs — emits a UNIX-epoch second tick). Used to
-    /// invalidate caches when the compiler is rebuilt — covers parser /
-    /// lowerer / MIR-shape changes that wouldn't bump `compiler_version`
-    /// (which is the semver in Cargo.toml). `#[serde(default)]` so old
-    /// caches without the field round-trip as `String::new()` and fail
-    /// validation against the current build ID.
+    /// compiler/build.rs). It is derived from compiler/parser/stdlib inputs, so
+    /// parser/lowerer/MIR-shape changes invalidate BLADE without throwing away
+    /// cache state for a redundant relink of identical sources.
+    /// `#[serde(default)]` so old caches without the field round-trip as
+    /// `String::new()` and fail validation against the current build ID.
     #[serde(default)]
     pub build_id: String,
 }

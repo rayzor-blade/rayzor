@@ -6997,7 +6997,7 @@ impl<'a> AstLowering<'a> {
             .collect()
     }
 
-    /// Resolve a TypeId to the underlying class symbol if it's a class type
+    /// Resolve a TypeId to the underlying class-like symbol for member lookup.
     fn resolve_type_to_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.context.type_table.borrow();
         self.resolve_type_to_class_symbol_inner(&type_table, type_id)
@@ -7107,6 +7107,7 @@ impl<'a> AstLowering<'a> {
         if let Some(type_info) = type_table.get(type_id) {
             match &type_info.kind {
                 crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                crate::tast::core::TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
                 // `@:coreType extern abstract` receivers (Box<Int>, Atomic<Int>, Ptr<Int>)
                 // resolve to the abstract symbol so instance method calls (cell.asPtr(),
                 // a.fetchAdd()) find the pre-pass-typed method in the abstract's scope and
@@ -7133,7 +7134,11 @@ impl<'a> AstLowering<'a> {
                     // Try exact match first (bare name like "Bytes")
                     let results = self.context.symbol_table.find_symbols(|sym| {
                         sym.name == placeholder_name
-                            && sym.kind == crate::tast::symbols::SymbolKind::Class
+                            && matches!(
+                                sym.kind,
+                                crate::tast::symbols::SymbolKind::Class
+                                    | crate::tast::symbols::SymbolKind::Interface
+                            )
                     });
                     if let Some(sym) = results.first() {
                         return Some(sym.id);
@@ -7142,8 +7147,11 @@ impl<'a> AstLowering<'a> {
                     // Try matching qualified placeholder name against symbol's qualified_name
                     // e.g., placeholder "rayzor.Bytes" matches symbol with qualified_name "rayzor.Bytes"
                     let results = self.context.symbol_table.find_symbols(|sym| {
-                        sym.kind == crate::tast::symbols::SymbolKind::Class
-                            && sym.qualified_name == Some(placeholder_name)
+                        matches!(
+                            sym.kind,
+                            crate::tast::symbols::SymbolKind::Class
+                                | crate::tast::symbols::SymbolKind::Interface
+                        ) && sym.qualified_name == Some(placeholder_name)
                     });
                     if let Some(sym) = results.first() {
                         return Some(sym.id);
@@ -7161,7 +7169,11 @@ impl<'a> AstLowering<'a> {
                         let bare_interned = self.context.string_interner.intern(bare_name);
                         let results = self.context.symbol_table.find_symbols(|sym| {
                             sym.name == bare_interned
-                                && sym.kind == crate::tast::symbols::SymbolKind::Class
+                                && matches!(
+                                    sym.kind,
+                                    crate::tast::symbols::SymbolKind::Class
+                                        | crate::tast::symbols::SymbolKind::Interface
+                                )
                         });
                         if let Some(sym) = results.first() {
                             return Some(sym.id);
