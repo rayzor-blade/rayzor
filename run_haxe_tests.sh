@@ -11,6 +11,13 @@ RAYZOR="$SCRIPT_DIR/target/release/rayzor"
 TESTS_DIR="compiler/tests/haxe"
 RESULTS_FILE="test_results.txt"
 
+# The captured output carries the compiler's colour codes. They render as
+# escape noise in a file, so drop them on the way in; the terminal output
+# above is untouched.
+strip_ansi() {
+    sed $'s/\033\[[0-9;]*m//g'
+}
+
 # Counters
 PASSED=0
 FAILED=0
@@ -100,7 +107,7 @@ for hx_file in "$TESTS_DIR"/*.hx; do
 
     {
         echo "--- $test_name [$status] ---"
-        echo "$output"
+        printf '%s\n' "$output" | strip_ansi
         echo ""
     } >> "$RESULTS_FILE"
 done
@@ -128,7 +135,7 @@ if [ -f "$NUE_SMOKE_MODEL" ]; then
     fi
     {
         echo "--- nue_smoke_llama_chat [$smoke_status] ---"
-        echo "$smoke_out" | tail -20
+        printf '%s\n' "$smoke_out" | tail -20 | strip_ansi
         echo ""
     } >> "$RESULTS_FILE"
 fi
