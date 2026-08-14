@@ -11,6 +11,9 @@ RAYZOR="$SCRIPT_DIR/target/release/rayzor"
 TESTS_DIR="compiler/tests/haxe"
 RESULTS_FILE="test_results.txt"
 
+# test_interpreter_sys_getenv reads this at both static-init and run time.
+export RAYZOR_INTERP_TEST_ENV="ok"
+
 # The captured output carries the compiler's colour codes. They render as
 # escape noise in a file, so drop them on the way in; the terminal output
 # above is untouched.
