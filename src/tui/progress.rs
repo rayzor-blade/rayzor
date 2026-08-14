@@ -84,10 +84,17 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 pub struct ProgressTui {
     state: Arc<Mutex<CompilationState>>,
     start: Instant,
+    /// Report as plain lines rather than drawing. Set when stderr is not a
+    /// terminal, or asked for explicitly.
+    plain: bool,
 }
 
 impl ProgressTui {
     pub fn new(file: &str, profile: &str, preset: &str) -> Self {
+        Self::new_with_mode(file, profile, preset, !is_tty())
+    }
+
+    pub fn new_with_mode(file: &str, profile: &str, preset: &str, plain: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(CompilationState {
                 file: file.to_string(),
@@ -96,6 +103,7 @@ impl ProgressTui {
                 ..Default::default()
             })),
             start: Instant::now(),
+            plain,
         }
     }
 
@@ -107,15 +115,11 @@ impl ProgressTui {
 
     /// Run the spinner loop during compilation. Returns when done.
     pub fn run(&self) -> io::Result<()> {
-        if !is_tty() {
-            loop {
-                std::thread::sleep(Duration::from_millis(100));
-                if self.state.lock().unwrap().done {
-                    let state = self.state.lock().unwrap();
-                    print_plain_summary(&state, self.start.elapsed());
-                    return Ok(());
-                }
-            }
+        // Nothing to animate in plain mode; the caller prints the summary once
+        // compilation is done. Polling here for a flag would add its own poll
+        // interval to every run, which on a short one is most of the runtime.
+        if self.plain {
+            return Ok(());
         }
 
         let mut stderr = io::stderr();
@@ -668,6 +672,18 @@ impl ProgressHandle {
 
     pub fn finish(&self) {
         self.state.lock().unwrap().done = true;
+    }
+}
+
+impl ProgressTui {
+    /// Print the phase report. Plain mode only — the drawing path renders its
+    /// own final frame.
+    pub fn report_plain(&self) {
+        if !self.plain {
+            return;
+        }
+        let state = self.state.lock().unwrap();
+        print_plain_summary(&state, self.start.elapsed());
     }
 }
 

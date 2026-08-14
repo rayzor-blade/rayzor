@@ -132,6 +132,11 @@ enum Commands {
         #[arg(short, long)]
         interactive: bool,
 
+        /// Report phase timings as plain lines instead of drawing the TUI.
+        /// Implied when stderr is not a terminal, so timings survive a pipe.
+        #[arg(long)]
+        plain: bool,
+
         /// Run in WASM sandbox (compile to WASM, execute via embedded wasmtime)
         #[arg(long)]
         wasm: bool,
@@ -846,6 +851,7 @@ fn main() {
             native_libs,
             safety_warnings,
             interactive,
+            plain,
             wasm,
             program_args,
         } => {
@@ -877,6 +883,7 @@ fn main() {
                     native_libs,
                     safety_warnings != "off",
                     interactive,
+                    plain,
                     program_args,
                 )
             }
@@ -1364,6 +1371,7 @@ fn run_file(
     native_libs: Vec<PathBuf>,
     safety_warnings: bool,
     interactive: bool,
+    plain: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::TieredBackend;
@@ -1441,14 +1449,25 @@ fn run_file(
     // -i (interactive): full ratatui TUI with scrollable output, search (after execution)
     // -v (verbose):     spinner during compilation + inline stats after
     // default:          plain output, no TUI overhead
-    let use_tui = (interactive || verbose) && tui::style::is_tty();
-    let progress_tui = if use_tui {
-        let tui = tui::progress::ProgressTui::new(
+    // The reporter collects phase timings; the TUI is only one way to show
+    // them. Gating its construction on a terminal meant a piped or CI run
+    // recorded nothing at all, so `--verbose` there produced no timings.
+    let plain = plain || !tui::style::is_tty();
+    let want_report = interactive || verbose || plain;
+    let progress_tui = if want_report {
+        if plain {
+            tui::progress::print_run_banner(
+                &file.display().to_string(),
+                profile,
+                &format!("{:?}", preset),
+            );
+        }
+        Some(tui::progress::ProgressTui::new_with_mode(
             &file.display().to_string(),
             profile,
             &format!("{:?}", preset),
-        );
-        Some(tui)
+            plain,
+        ))
     } else {
         tui::progress::print_run_banner(
             &file.display().to_string(),
@@ -1814,6 +1833,14 @@ fn run_file(
         let mut mir_module = compile_result.module;
         let compile_diagnostics = compile_result.diagnostics;
         if let Some(ref h) = progress_handle {
+            if let Some((stdlib, parse, tast, mir)) =
+                compile_helpers::LAST_STAGE_MS.lock().ok().and_then(|s| *s)
+            {
+                h.end_phase("stdlib", stdlib);
+                h.end_phase("parse", parse);
+                h.end_phase("typecheck", tast);
+                h.end_phase("mir", mir);
+            }
             h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
         }
         // Surface non-fatal compile WARNINGS (errors already abort the compile).
@@ -2064,6 +2091,9 @@ fn run_file(
     if let Some(handle) = tui_thread {
         let _ = handle.join();
     }
+    if let Some(ref tui) = progress_tui_ref {
+        tui.report_plain();
+    }
 
     // Execute init functions before main. Run EVERY per-file copy (see the
     // comment where these lists are built) — vtable-slot registration and
@@ -2118,7 +2148,9 @@ fn run_file(
 
     // Capture program output by intercepting trace
     let output_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    if progress_tui_ref.is_some() {
+    // Only when the TUI will draw the output itself. In plain mode the program
+    // writes straight through, so installing this would swallow it.
+    if progress_tui_ref.is_some() && !plain {
         let capture = output_capture.clone();
         rayzor_runtime::haxe_sys::set_trace_callback(Some(Box::new(move |msg: &str| {
             capture.lock().unwrap().push(msg.to_string());
@@ -2159,7 +2191,7 @@ fn run_file(
     rayzor_runtime::haxe_sys::set_trace_callback(None);
 
     // Render TUI
-    if let Some(ref tui) = progress_tui_ref {
+    if let Some(ref tui) = progress_tui_ref.as_ref().filter(|_| !plain) {
         let captured = output_capture.lock().unwrap();
         let handle = tui.handle();
         for line in captured.iter() {
@@ -2560,6 +2592,7 @@ fn build_from_hxml(
                     Vec::new(), // native_libs
                     false,      // safety_warnings
                     false,      // interactive
+                    false,      // plain
                     Vec::new(), // program_args
                 )
             }
