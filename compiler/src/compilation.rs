@@ -129,6 +129,29 @@ fn is_extern_only_stdlib_base(base: &str) -> bool {
     )
 }
 
+#[inline]
+fn is_extern_only_stdlib_import(path: &str) -> bool {
+    is_extern_only_stdlib_base(path.rsplit('.').next().unwrap_or(path))
+}
+
+#[inline]
+fn is_manifest_backed_ambient_import(path: &str, stdlib_manifest_loaded: bool) -> bool {
+    is_stdtypes_ambient_import(path)
+        || (stdlib_manifest_loaded && is_extern_only_stdlib_import(path))
+}
+
+#[inline]
+fn haxe_file_source_has_macro_hook(file: &parser::HaxeFile) -> bool {
+    let Some(source) = file.input.as_deref() else {
+        return false;
+    };
+    source.contains("macro ")
+        || source.contains("macro\t")
+        || source.contains("@:build")
+        || source.contains("@:autoBuild")
+        || source.contains("@:genericBuild")
+}
+
 /// Represents a complete compilation unit with multiple source files
 pub struct CompilationUnit {
     /// Stdlib files (loaded first with haxe.* package)
@@ -139,6 +162,11 @@ pub struct CompilationUnit {
 
     /// User source files
     pub user_files: Vec<HaxeFile>,
+
+    /// True when stdlib symbols were populated from a BLADE manifest.
+    /// In that mode top-level extern-only stdlib imports are already known and
+    /// should not be resolved back to source during cold import discovery.
+    stdlib_manifest_loaded: bool,
 
     /// Macro expansion origins (for IDE hints showing expanded results)
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
@@ -662,6 +690,7 @@ impl CompilationUnit {
             stdlib_files: Vec::new(),
             import_hx_files: Vec::new(),
             user_files: Vec::new(),
+            stdlib_manifest_loaded: false,
             macro_expansions: Vec::new(),
             string_interner,
             symbol_table: SymbolTable::new(),
@@ -800,6 +829,7 @@ impl CompilationUnit {
         } else {
             false
         };
+        self.stdlib_manifest_loaded = bsym_loaded;
 
         // Load default stdlib imports (StdTypes, etc.) only when we have not
         // already registered them from the BLADE symbol manifest. StdTypes are
@@ -2973,15 +3003,30 @@ impl CompilationUnit {
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
-        let mut to_process: VecDeque<String> = imports
-            .iter()
-            .filter(|name| !is_stdtypes_ambient_import(name))
-            .cloned()
-            .collect();
+        let mut to_process: VecDeque<String> = VecDeque::new();
+        for name in imports {
+            if is_stdtypes_ambient_import(name) {
+                continue;
+            }
+            if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(name) {
+                if self.config.profile_typecheck {
+                    self.typecheck_timings.import_extern_skips += 1;
+                }
+                continue;
+            }
+            to_process.push_back(name.clone());
+        }
         let mut visited: BTreeSet<String> = BTreeSet::new();
 
         while let Some(qualified_path) = to_process.pop_front() {
-            if is_stdtypes_ambient_import(&qualified_path) || visited.contains(&qualified_path) {
+            if is_manifest_backed_ambient_import(&qualified_path, self.stdlib_manifest_loaded)
+                || visited.contains(&qualified_path)
+            {
+                if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(&qualified_path) {
+                    if self.config.profile_typecheck {
+                        self.typecheck_timings.import_extern_skips += 1;
+                    }
+                }
                 continue;
             }
             visited.insert(qualified_path.clone());
@@ -3063,7 +3108,15 @@ impl CompilationUnit {
             };
             // Queue dependencies for processing
             for dep in &deps {
-                if !is_stdtypes_ambient_import(dep) && !visited.contains(dep) {
+                if is_manifest_backed_ambient_import(dep, self.stdlib_manifest_loaded) {
+                    if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(dep) {
+                        if self.config.profile_typecheck {
+                            self.typecheck_timings.import_extern_skips += 1;
+                        }
+                    }
+                    continue;
+                }
+                if !visited.contains(dep) {
                     to_process.push_back(dep.clone());
                 }
             }
@@ -5931,7 +5984,7 @@ impl CompilationUnit {
             external_functions,
             external_functions_by_name,
             external_globals,
-            stdlib_mapping,
+            &stdlib_mapping,
             self.import_field_index_map.clone(),
             self.import_property_access_map.clone(),
             self.import_constructor_name_map.clone(),
@@ -6198,11 +6251,6 @@ impl CompilationUnit {
             // (b) generated MIR wrappers for stdlib calls — let stdlib merge replace these
             let mut merged_import_func_ids: std::collections::BTreeSet<IrFunctionId> =
                 own_func_ids.clone();
-            // Used below to veto protecting a stdlib MIR-wrapper stub by name
-            // (see the comment at its use site). Built once here — the
-            // earlier `stdlib_mapping` local was already moved into
-            // `lower_hir_to_mir_with_function_map` by this point.
-            let stdlib_mapping_for_merge = self.compiler_plugin_registry.build_combined_mapping();
             // Sort import modules by name for deterministic merge order.
             // Sorting ensures the merged MIR is identical regardless of resolver order.
             self.import_mir_modules.sort_by(|a, b| a.name.cmp(&b.name));
@@ -6251,7 +6299,7 @@ impl CompilationUnit {
                     // protect an id whose function is a known stdlib MIR-wrapper name,
                     // regardless of why the id ended up in `import_own_func_ids`.
                     let is_known_stdlib_wrapper =
-                        stdlib_mapping_for_merge.is_mir_wrapper_function(&func.name);
+                        stdlib_mapping.is_mir_wrapper_function(&func.name);
                     if self.import_own_func_ids.contains(&func_id) && !is_known_stdlib_wrapper {
                         merged_import_func_ids.insert(func_id);
                     }
@@ -6688,36 +6736,137 @@ impl CompilationUnit {
         &mut self,
         ast_file: &parser::HaxeFile,
     ) -> Result<TypedFile, Vec<CompilationError>> {
-        let filename = ast_file.filename.clone();
-        let source = ast_file.input.clone().unwrap_or_default();
-
         // Skip if already compiled
-        if let Some(cached) = self.compiled_files.get(&filename) {
+        if let Some(cached) = self.compiled_files.get(&ast_file.filename) {
             return Ok(cached.clone());
         }
 
-        self.compile_ast_with_shared_state(&filename, &source, ast_file, false, false)
+        let source = ast_file.input.as_deref().unwrap_or_default();
+        self.compile_ast_with_shared_state(&ast_file.filename, source, ast_file, false, false)
     }
 
     fn macro_expansion_may_apply(&self, ast_file: &parser::HaxeFile) -> bool {
-        fn source_has_macro_hook(file: &parser::HaxeFile) -> bool {
-            let Some(source) = file.input.as_deref() else {
-                return false;
-            };
-            source.contains("macro ")
-                || source.contains("macro\t")
-                || source.contains("@:build")
-                || source.contains("@:autoBuild")
-                || source.contains("@:genericBuild")
-        }
-
-        source_has_macro_hook(ast_file)
-            || self.user_files.iter().any(source_has_macro_hook)
-            || self.import_hx_files.iter().any(source_has_macro_hook)
+        haxe_file_source_has_macro_hook(ast_file)
+            || self.user_files.iter().any(haxe_file_source_has_macro_hook)
+            || self
+                .import_hx_files
+                .iter()
+                .any(haxe_file_source_has_macro_hook)
             || self
                 .loaded_import_haxe_files
                 .iter()
-                .any(source_has_macro_hook)
+                .any(haxe_file_source_has_macro_hook)
+    }
+
+    fn compile_user_ast_collecting_errors(
+        &mut self,
+        ast_file: &parser::HaxeFile,
+        all_typed_files: &mut Vec<TypedFile>,
+        all_errors: &mut Vec<CompilationError>,
+    ) {
+        match self.compile_pre_parsed_file(ast_file) {
+            Ok(typed_file) => {
+                all_typed_files.push(typed_file);
+            }
+            Err(errors) => {
+                // Check if any errors are unresolved types that we can try to load on-demand
+                let (loadable, other): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| {
+                    e.message.contains("Unresolved type")
+                        || e.message.contains("UnresolvedType")
+                        || e.message.contains("Cannot find type")
+                });
+
+                // Try to load unresolved types on-demand
+                let mut any_loaded = false;
+                for error in loadable {
+                    if let Some(type_name) = self.extract_type_name_from_error(&error.message) {
+                        // Skip if we already tried to load this type and it failed
+                        if self.failed_type_loads.contains(&type_name) {
+                            all_errors.push(error);
+                            continue;
+                        }
+                        if let Err(load_err) = self.load_import_file(&type_name) {
+                            debug!("On-demand load failed for {}: {}", type_name, load_err);
+                            self.failed_type_loads.insert(type_name.clone());
+                            all_errors.push(error);
+                        } else {
+                            // Successfully loaded! Mark that we should retry
+                            any_loaded = true;
+                        }
+                    } else {
+                        all_errors.push(error);
+                    }
+                }
+
+                // If we successfully loaded any dependencies, retry compiling this file
+                if any_loaded {
+                    debug!(
+                        "  Retrying {} after loading dependencies...",
+                        ast_file.filename
+                    );
+                    match self.compile_pre_parsed_file(ast_file) {
+                        Ok(typed_file) => {
+                            all_typed_files.push(typed_file);
+                        }
+                        Err(retry_errors) => {
+                            // Still failed after loading dependencies
+                            // Check if retry revealed NEW unresolved types that need loading
+                            let (retry_loadable, retry_other): (Vec<_>, Vec<_>) =
+                                retry_errors.into_iter().partition(|e| {
+                                    e.message.contains("Unresolved type")
+                                        || e.message.contains("UnresolvedType")
+                                        || e.message.contains("Cannot find type")
+                                });
+
+                            let mut retry_loaded = false;
+                            for error in retry_loadable {
+                                if let Some(type_name) =
+                                    self.extract_type_name_from_error(&error.message)
+                                {
+                                    if !self.failed_type_loads.contains(&type_name) {
+                                        if let Err(load_err) = self.load_import_file(&type_name) {
+                                            debug!(
+                                                "On-demand load failed for {}: {}",
+                                                type_name, load_err
+                                            );
+                                            self.failed_type_loads.insert(type_name.clone());
+                                            all_errors.push(error);
+                                        } else {
+                                            retry_loaded = true;
+                                        }
+                                    } else {
+                                        all_errors.push(error);
+                                    }
+                                } else {
+                                    all_errors.push(error);
+                                }
+                            }
+
+                            // If we loaded more dependencies on retry, try ONE more time
+                            if retry_loaded {
+                                debug!(
+                                    "  Second retry of {} after loading more dependencies...",
+                                    ast_file.filename
+                                );
+                                match self.compile_pre_parsed_file(ast_file) {
+                                    Ok(typed_file) => {
+                                        all_typed_files.push(typed_file);
+                                    }
+                                    Err(final_errors) => {
+                                        all_errors.extend(final_errors);
+                                    }
+                                }
+                            } else {
+                                all_errors.extend(retry_other);
+                            }
+                        }
+                    }
+                } else {
+                    // No dependencies loaded, keep original errors
+                    all_errors.extend(other);
+                }
+            }
+        }
     }
 
     pub fn typecheck_timings(&self) -> TypecheckStageTimings {
@@ -6834,114 +6983,37 @@ impl CompilationUnit {
         // Step 4: Compile user files in dependency order using SHARED state.
         // Use pre-parsed ASTs from self.user_files to avoid re-parsing.
         let user_file_indices: Vec<usize> = analysis.compilation_order.clone();
+        let user_context_has_macro_hooks =
+            self.user_files.iter().any(haxe_file_source_has_macro_hook)
+                || self
+                    .import_hx_files
+                    .iter()
+                    .any(haxe_file_source_has_macro_hook)
+                || self
+                    .loaded_import_haxe_files
+                    .iter()
+                    .any(haxe_file_source_has_macro_hook);
 
         let t_user_files = profile_timer(self.config.profile_typecheck);
-        for idx in user_file_indices {
-            let ast_file = self.user_files[idx].clone();
-            match self.compile_pre_parsed_file(&ast_file) {
-                Ok(typed_file) => {
-                    all_typed_files.push(typed_file);
-                }
-                Err(errors) => {
-                    // Check if any errors are unresolved types that we can try to load on-demand
-                    let (loadable, other): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| {
-                        e.message.contains("Unresolved type")
-                            || e.message.contains("UnresolvedType")
-                            || e.message.contains("Cannot find type")
-                    });
-
-                    // Try to load unresolved types on-demand
-                    let mut any_loaded = false;
-                    for error in loadable {
-                        if let Some(type_name) = self.extract_type_name_from_error(&error.message) {
-                            // Skip if we already tried to load this type and it failed
-                            if self.failed_type_loads.contains(&type_name) {
-                                all_errors.push(error);
-                                continue;
-                            }
-                            if let Err(load_err) = self.load_import_file(&type_name) {
-                                debug!("On-demand load failed for {}: {}", type_name, load_err);
-                                self.failed_type_loads.insert(type_name.clone());
-                                all_errors.push(error);
-                            } else {
-                                // Successfully loaded! Mark that we should retry
-                                any_loaded = true;
-                            }
-                        } else {
-                            all_errors.push(error);
-                        }
-                    }
-
-                    // If we successfully loaded any dependencies, retry compiling this file
-                    if any_loaded {
-                        debug!(
-                            "  Retrying {} after loading dependencies...",
-                            ast_file.filename
-                        );
-                        match self.compile_pre_parsed_file(&ast_file) {
-                            Ok(typed_file) => {
-                                all_typed_files.push(typed_file);
-                            }
-                            Err(retry_errors) => {
-                                // Still failed after loading dependencies
-                                // Check if retry revealed NEW unresolved types that need loading
-                                let (retry_loadable, retry_other): (Vec<_>, Vec<_>) =
-                                    retry_errors.into_iter().partition(|e| {
-                                        e.message.contains("Unresolved type")
-                                            || e.message.contains("UnresolvedType")
-                                            || e.message.contains("Cannot find type")
-                                    });
-
-                                let mut retry_loaded = false;
-                                for error in retry_loadable {
-                                    if let Some(type_name) =
-                                        self.extract_type_name_from_error(&error.message)
-                                    {
-                                        if !self.failed_type_loads.contains(&type_name) {
-                                            if let Err(load_err) = self.load_import_file(&type_name)
-                                            {
-                                                debug!(
-                                                    "On-demand load failed for {}: {}",
-                                                    type_name, load_err
-                                                );
-                                                self.failed_type_loads.insert(type_name.clone());
-                                                all_errors.push(error);
-                                            } else {
-                                                retry_loaded = true;
-                                            }
-                                        } else {
-                                            all_errors.push(error);
-                                        }
-                                    } else {
-                                        all_errors.push(error);
-                                    }
-                                }
-
-                                // If we loaded more dependencies on retry, try ONE more time
-                                if retry_loaded {
-                                    debug!(
-                                        "  Second retry of {} after loading more dependencies...",
-                                        ast_file.filename
-                                    );
-                                    match self.compile_pre_parsed_file(&ast_file) {
-                                        Ok(typed_file) => {
-                                            all_typed_files.push(typed_file);
-                                        }
-                                        Err(final_errors) => {
-                                            all_errors.extend(final_errors);
-                                        }
-                                    }
-                                } else {
-                                    all_errors.extend(retry_other);
-                                }
-                            }
-                        }
-                    } else {
-                        // No dependencies loaded, keep original errors
-                        all_errors.extend(other);
-                    }
-                }
+        if user_context_has_macro_hooks {
+            for idx in user_file_indices {
+                let ast_file = self.user_files[idx].clone();
+                self.compile_user_ast_collecting_errors(
+                    &ast_file,
+                    &mut all_typed_files,
+                    &mut all_errors,
+                );
             }
+        } else {
+            let user_files = std::mem::take(&mut self.user_files);
+            for idx in user_file_indices {
+                self.compile_user_ast_collecting_errors(
+                    &user_files[idx],
+                    &mut all_typed_files,
+                    &mut all_errors,
+                );
+            }
+            self.user_files = user_files;
         }
         add_profile_ms(&mut self.typecheck_timings.user_files_ms, t_user_files);
 

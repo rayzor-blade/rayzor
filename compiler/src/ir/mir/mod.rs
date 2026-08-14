@@ -247,7 +247,7 @@ pub struct HirToMirContext<'a> {
     current_hir_types: &'a indexmap::IndexMap<TypeId, HirTypeDecl>,
 
     /// Standard library runtime function mapping
-    stdlib_mapping: StdlibMapping,
+    stdlib_mapping: &'a StdlibMapping,
 
     /// Symbol table for resolving symbols
     symbol_table: &'a SymbolTable,
@@ -835,6 +835,7 @@ pub fn lower_hir_to_mir_with_externals(
 ) -> Result<IrModule, Vec<LoweringError>> {
     // Borrow once: lowering never mutates the type table.
     let type_table_ref = type_table.borrow();
+    let stdlib_mapping = StdlibMapping::new();
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
         hir_module.metadata.source_file.clone(),
@@ -842,7 +843,7 @@ pub fn lower_hir_to_mir_with_externals(
         &type_table_ref,
         &hir_module.types,
         symbol_table,
-        StdlibMapping::new(),
+        &stdlib_mapping,
     );
 
     context.external_function_map = external_functions;
@@ -910,7 +911,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_functions: BTreeMap<SymbolId, IrFunctionId>,
     external_functions_by_name: BTreeMap<String, IrFunctionId>,
     external_globals: BTreeMap<String, (IrGlobalId, IrType)>,
-    stdlib_mapping: StdlibMapping,
+    stdlib_mapping: &StdlibMapping,
     external_field_index_map: BTreeMap<SymbolId, (TypeId, u32)>,
     external_property_access_map: BTreeMap<SymbolId, crate::tast::PropertyAccessInfo>,
     external_constructor_name_map: BTreeMap<String, IrFunctionId>,
@@ -1006,7 +1007,7 @@ pub fn lower_hir_to_mir_with_function_map(
     // Reverse map func_id -> qualified_name for external functions: lets the
     // blade cache resolve cross-module references when function ids change
     // between sessions (different renumbering bases).
-    {
+    if !context.external_function_name_map.is_empty() {
         let mut ext_id_to_name: BTreeMap<IrFunctionId, String> = BTreeMap::new();
         for (name, &func_id) in &context.external_function_name_map {
             ext_id_to_name
@@ -1067,7 +1068,7 @@ impl<'a> HirToMirContext<'a> {
         type_table: &'a TypeTable,
         hir_types: &'a indexmap::IndexMap<TypeId, HirTypeDecl>,
         symbol_table: &'a SymbolTable,
-        stdlib_mapping: StdlibMapping,
+        stdlib_mapping: &'a StdlibMapping,
     ) -> Self {
         let mut ctx = Self {
             builder: IrBuilder::new(module_name.clone(), source_file),
