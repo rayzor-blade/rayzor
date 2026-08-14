@@ -6,6 +6,10 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic");
     }
 
+    if std::env::var_os("CARGO_FEATURE_LLVM_BACKEND").is_some() {
+        build_llvm21_const_compat();
+    }
+
     // Emit a build ID that changes on every rebuild. BLADE cache entries
     // are tagged with this ID, so MIR cached by one compiler build is
     // invalidated when the compiler itself is recompiled — protects
@@ -35,4 +39,45 @@ fn main() {
     println!("cargo:rerun-if-changed=haxe-std");
     println!("cargo:rerun-if-changed=../parser/src");
     println!("cargo:rerun-if-changed=../diagnostics/src");
+}
+
+fn build_llvm21_const_compat() {
+    println!("cargo:rerun-if-changed=src/llvm21_const_compat.cpp");
+
+    let include_dir = std::env::var("LLVM_SYS_211_PREFIX")
+        .ok()
+        .or_else(|| std::env::var("LLVM_SYS_PREFIX").ok())
+        .map(|prefix| std::path::PathBuf::from(prefix).join("include"))
+        .filter(|path| path.exists())
+        .or_else(|| llvm_config_arg("--includedir"))
+        .or_else(|| {
+            let path = std::path::PathBuf::from("/opt/homebrew/opt/llvm/include");
+            path.exists().then_some(path)
+        });
+
+    let Some(include_dir) = include_dir else {
+        // Let llvm-sys emit the real configuration error later; this shim is
+        // only needed once LLVM headers are discoverable.
+        return;
+    };
+
+    cc::Build::new()
+        .cpp(true)
+        .flag_if_supported("-std=c++17")
+        .include(include_dir)
+        .file("src/llvm21_const_compat.cpp")
+        .compile("rayzor_llvm21_const_compat");
+}
+
+fn llvm_config_arg(arg: &str) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("llvm-config")
+        .arg(arg)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = std::path::PathBuf::from(path.trim());
+    path.exists().then_some(path)
 }

@@ -3,6 +3,7 @@
 //! Used by the `run`, `check`, `build`, `dump`, and WASM command modules.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Result of compiling Haxe source to MIR, including metadata needed for codegen.
 pub struct MirCompilationResult {
@@ -106,9 +107,31 @@ pub fn compile_haxe_to_mir_with_defines(
 pub static LAST_STAGE_MS: std::sync::Mutex<Option<(f64, f64, f64, f64)>> =
     std::sync::Mutex::new(None);
 
+pub static LAST_TYPECHECK_DETAIL: std::sync::Mutex<
+    Option<compiler::compilation::TypecheckStageTimings>,
+> = std::sync::Mutex::new(None);
+
+static PROFILE_COMPILE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_compile_profiling_enabled(enabled: bool) {
+    PROFILE_COMPILE.store(enabled, Ordering::Relaxed);
+}
+
+fn compile_profiling_enabled() -> bool {
+    PROFILE_COMPILE.load(Ordering::Relaxed)
+        || std::env::var_os("RAYZOR_PROFILE_COMPILE").is_some()
+        || std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some()
+}
+
 fn stage_report(stdlib: f64, parse: f64, tast: f64, mir: f64) {
     if let Ok(mut slot) = LAST_STAGE_MS.lock() {
         *slot = Some((stdlib, parse, tast, mir));
+    }
+}
+
+fn typecheck_detail_report(timings: compiler::compilation::TypecheckStageTimings) {
+    if let Ok(mut slot) = LAST_TYPECHECK_DETAIL.lock() {
+        *slot = Some(timings);
     }
 }
 
@@ -124,12 +147,22 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
 ) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
+    let profile_compile = compile_profiling_enabled();
+    let profile_typecheck = std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some();
+    if let Ok(mut slot) = LAST_STAGE_MS.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = LAST_TYPECHECK_DETAIL.lock() {
+        *slot = None;
+    }
+
     let mut config = CompilationConfig {
         load_stdlib: true,
         enable_cache,
         cache_dir,
         emit_safety_warnings: safety_warnings,
         extra_defines: extra_defines.iter().map(|s| s.to_string()).collect(),
+        profile_typecheck,
         ..Default::default()
     };
     config.pipeline_config = config.pipeline_config.skip_analysis();
@@ -150,28 +183,41 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         unit.add_source_path(dir.clone());
     }
 
-    // Stage timings, so "compile" is not one opaque number. Reported by the
-    // plain progress output; see `stage_report`.
-    let t_stdlib = std::time::Instant::now();
+    // Stage timings are collected only when the CLI/reporting layer asks for
+    // them, which includes the long-standing non-TTY plain reporter path.
+    let t_stdlib = profile_compile.then(std::time::Instant::now);
     unit.load_stdlib()
         .map_err(|e| format!("Failed to load stdlib: {}", e))?;
-    let stdlib_ms = t_stdlib.elapsed().as_secs_f64() * 1000.0;
+    let stdlib_ms = t_stdlib
+        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
-    let t_parse = std::time::Instant::now();
+    let t_parse = profile_compile.then(std::time::Instant::now);
     unit.add_file(source, filename)?;
-    let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+    let parse_ms = t_parse
+        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
-    let t_tast = std::time::Instant::now();
+    let t_tast = profile_compile.then(std::time::Instant::now);
     if let Err(errors) = unit.lower_to_tast() {
         unit.print_compilation_errors(&errors);
         return Err(format!("Check failed with {} error(s)", errors.len()));
     }
-    let tast_ms = t_tast.elapsed().as_secs_f64() * 1000.0;
+    let tast_ms = t_tast
+        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    if profile_typecheck {
+        typecheck_detail_report(unit.typecheck_timings());
+    }
 
-    let t_mir = std::time::Instant::now();
+    let t_mir = profile_compile.then(std::time::Instant::now);
     let mir_modules = unit.get_mir_modules();
-    let mir_ms = t_mir.elapsed().as_secs_f64() * 1000.0;
-    stage_report(stdlib_ms, parse_ms, tast_ms, mir_ms);
+    let mir_ms = t_mir
+        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    if profile_compile {
+        stage_report(stdlib_ms, parse_ms, tast_ms, mir_ms);
+    }
 
     if mir_modules.is_empty() {
         return Err("No MIR modules generated".to_string());
