@@ -98,6 +98,20 @@ pub fn compile_haxe_to_mir_with_defines(
 
 /// Compile with additional preprocessor defines and explicit cache controls.
 #[allow(clippy::too_many_arguments)] // full pipeline knobs passed flat
+/// Where the last compile spent its time, in milliseconds:
+/// (stdlib import, parsing this file, type checking, MIR lowering).
+///
+/// A process compiles one program, so a single slot is enough and the value
+/// survives for the reporter to read after the call returns.
+pub static LAST_STAGE_MS: std::sync::Mutex<Option<(f64, f64, f64, f64)>> =
+    std::sync::Mutex::new(None);
+
+fn stage_report(stdlib: f64, parse: f64, tast: f64, mir: f64) {
+    if let Ok(mut slot) = LAST_STAGE_MS.lock() {
+        *slot = Some((stdlib, parse, tast, mir));
+    }
+}
+
 pub fn compile_haxe_to_mir_with_defines_and_cache(
     source: &str,
     filename: &str,
@@ -136,17 +150,28 @@ pub fn compile_haxe_to_mir_with_defines_and_cache(
         unit.add_source_path(dir.clone());
     }
 
+    // Stage timings, so "compile" is not one opaque number. Reported by the
+    // plain progress output; see `stage_report`.
+    let t_stdlib = std::time::Instant::now();
     unit.load_stdlib()
         .map_err(|e| format!("Failed to load stdlib: {}", e))?;
+    let stdlib_ms = t_stdlib.elapsed().as_secs_f64() * 1000.0;
 
+    let t_parse = std::time::Instant::now();
     unit.add_file(source, filename)?;
+    let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
 
+    let t_tast = std::time::Instant::now();
     if let Err(errors) = unit.lower_to_tast() {
         unit.print_compilation_errors(&errors);
         return Err(format!("Check failed with {} error(s)", errors.len()));
     }
+    let tast_ms = t_tast.elapsed().as_secs_f64() * 1000.0;
 
+    let t_mir = std::time::Instant::now();
     let mir_modules = unit.get_mir_modules();
+    let mir_ms = t_mir.elapsed().as_secs_f64() * 1000.0;
+    stage_report(stdlib_ms, parse_ms, tast_ms, mir_ms);
 
     if mir_modules.is_empty() {
         return Err("No MIR modules generated".to_string());

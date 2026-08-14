@@ -1,12 +1,14 @@
 ============================================
   Rayzor Haxe Test Results
-  Fri Aug 14 01:55:01 BST 2026
+  Fri Aug 14 02:49:57 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
 [33mWarning:[0m [W0110] type of array literal can not be inferred at assignment, this would fall back to Array<Dynamic>; annotate `var a:Array<T> = []` for deterministic behavior at runtime
 
+  stdlib 1.4ms → parse 0.10ms → typecheck 17ms → mir 0µs → compile 20ms → shake 0.43ms → optimize 35ms → jit 4µs
+  shake: 647 → 39 (93% removed)
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -34,6 +36,8 @@ Full Checksum: 112798288
 
 --- debug_array_index [PASS] ---
 Running compiler/tests/haxe/debug_array_index.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 11ms → mir 0µs → compile 14ms → shake 0.36ms → optimize 1.2ms → jit 5µs
+  shake: 629 → 24 (96% removed)
 Testing array indexing...
 Created empty array, length: 0
 Set arr[10] = 42, length: 11
@@ -48,6 +52,8 @@ Test passed!
 
 --- debug_array_ops [PASS] ---
 Running compiler/tests/haxe/debug_array_ops.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.03ms → typecheck 11ms → mir 0µs → compile 14ms → shake 0.32ms → optimize 1.8ms → jit 4µs
+  shake: 629 → 26 (95% removed)
 Test 1: push()
 arr1.length = 5
 arr1[3] = 3
@@ -63,6 +69,8 @@ All tests passed!
 
 --- debug_array_set [PASS] ---
 Running compiler/tests/haxe/debug_array_set.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.03ms → typecheck 11ms → mir 0µs → compile 13ms → shake 0.36ms → optimize 1.7ms → jit 4µs
+  shake: 629 → 26 (95% removed)
 === Array Set Debug ===
 Initial array:
 arr[0] = 10
@@ -84,6 +92,8 @@ Direct comparison: arr[2] == 30 -> false
 
 --- debug_bitshift [PASS] ---
 Running compiler/tests/haxe/debug_bitshift.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 3.2ms → mir 0µs → compile 5.5ms → shake 0.25ms → optimize 0.54ms → jit 3µs
+  shake: 583 → 13 (97% removed)
 static inline var SHIFT_16 = 1 << 16: 65536
 static inline var SHIFT_8 = 1 << 8: 256
 static inline var CONST_65536 = 65536: 65536
@@ -94,10 +104,14 @@ Direct 1 << 8: 256
 
 --- debug_channel [PASS] ---
 Running compiler/tests/haxe/debug_channel.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 503ms → mir 0µs → compile 508ms → shake 1.1ms → optimize 2.5ms → jit 7µs
+  shake: 1371 → 97 (92% removed)
 PASS debug-channel sum=100
 
 --- debug_checksum [PASS] ---
 Running compiler/tests/haxe/debug_checksum.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.08ms → typecheck 17ms → mir 0µs → compile 20ms → shake 0.30ms → optimize 34ms → jit 5µs
+  shake: 647 → 39 (93% removed)
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -125,6 +139,8 @@ Full Checksum: 112798288
 
 --- debug_division [PASS] ---
 Running compiler/tests/haxe/debug_division.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 3.5ms → mir 0µs → compile 5.9ms → shake 0.33ms → optimize 0.92ms → jit 3µs
+  shake: 583 → 15 (97% removed)
 i = 4
 MaxIterations = 1000
 i / MaxIterations = 0.004
@@ -137,6 +153,8 @@ i / 1000.0 = 0.004
 
 --- debug_palette [PASS] ---
 Running compiler/tests/haxe/debug_palette.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.04ms → typecheck 14ms → mir 0µs → compile 17ms → shake 0.30ms → optimize 3.1ms → jit 5µs
+  shake: 640 → 31 (95% removed)
 Creating palette...
 palette[0]: frac=0 r=0 g=255 b=0
 palette[1]: frac=0.001 r=0 g=254 b=0
@@ -162,6 +180,8 @@ arr[9] = 90
 
 --- debug_static_div [PASS] ---
 Running compiler/tests/haxe/debug_static_div.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.04ms → typecheck 3.8ms → mir 0µs → compile 6.4ms → shake 0.32ms → optimize 1.2ms → jit 6µs
+  shake: 583 → 15 (97% removed)
 MAX = 1000
 INLINE_MAX = 1000
 localMax = 1000
@@ -179,6 +199,8 @@ f / 1000 = 0.004
 
 --- debug_static_inline [PASS] ---
 Running compiler/tests/haxe/debug_static_inline.hx [debug] [preset: Application]...
+  stdlib 1.2ms → parse 0.02ms → typecheck 3.6ms → mir 0µs → compile 5.8ms → shake 0.28ms → optimize 0.75ms → jit 3µs
+  shake: 588 → 18 (96% removed)
 INLINE_1000 = 1000
 STATIC_1000 = 1000
 INLINE_EXPR (35*25) = 875
@@ -190,6 +212,8 @@ Dynamic INLINE_1000 = 1000
 
 --- debug_untyped_static [PASS] ---
 Running compiler/tests/haxe/debug_untyped_static.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 3.6ms → mir 0µs → compile 6.4ms → shake 0.28ms → optimize 0.56ms → jit 4µs
+  shake: 583 → 15 (97% removed)
 UNTYPED = 1000
 TYPED = 1000
 4 / UNTYPED = 0.004
@@ -199,6 +223,8 @@ i / TYPED = 0.004
 
 --- debug_while [PASS] ---
 Running compiler/tests/haxe/debug_while.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.03ms → typecheck 3.8ms → mir 0µs → compile 6.1ms → shake 0.24ms → optimize 2.3ms → jit 4µs
+  shake: 583 → 17 (97% removed)
 MaxRad = 65536
 MaxIterations = 1000
 Initial i=0, j=0
@@ -222,6 +248,8 @@ Final iteration = 4
 
 --- mandelbrot_small [PASS] ---
 Running compiler/tests/haxe/mandelbrot_small.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.06ms → typecheck 17ms → mir 0µs → compile 19ms → shake 0.28ms → optimize 5.5ms → jit 4µs
+  shake: 646 → 38 (94% removed)
 Creating palette...
 Palette created: 1001 entries
 Creating image array...
@@ -241,11 +269,15 @@ Checksum: 4511136
 
 --- test_abstract_static [PASS] ---
 Running compiler/tests/haxe/test_abstract_static.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 10µs → typecheck 10.0ms → mir 0µs → compile 12ms → shake 0.34ms → optimize 0.20ms → jit 6µs
+  shake: 618 → 12 (98% removed)
 21
 42
 
 --- test_anon_object [PASS] ---
 Running compiler/tests/haxe/test_anon_object.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.30ms → optimize 0.66ms → jit 5µs
+  shake: 630 → 21 (96% removed)
 10
 20
 3.14
@@ -267,10 +299,14 @@ true
 
 --- test_anon_simple [PASS] ---
 Running compiler/tests/haxe/test_anon_simple.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 6µs → typecheck 2.7ms → mir 0µs → compile 5.2ms → shake 0.27ms → optimize 0.13ms → jit 3µs
+  shake: 575 → 7 (98% removed)
 10
 
 --- test_anon_struct_return [PASS] ---
 Running compiler/tests/haxe/test_anon_struct_return.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.31ms → optimize 0.64ms → jit 5µs
+  shake: 631 → 22 (96% removed)
 llama
 2048
 3.5
@@ -278,6 +314,8 @@ true
 
 --- test_array_comprehension_scope [PASS] ---
 Running compiler/tests/haxe/test_array_comprehension_scope.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 2.8ms → mir 0µs → compile 5.2ms → shake 0.25ms → optimize 0.84ms → jit 7µs
+  shake: 574 → 6 (98% removed)
 0
 1
 2
@@ -290,6 +328,8 @@ Running compiler/tests/haxe/test_array_comprehension_scope.hx [debug] [preset: A
 
 --- test_array_iterator [PASS] ---
 Running compiler/tests/haxe/test_array_iterator.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 3.1ms → mir 0µs → compile 5.7ms → shake 0.33ms → optimize 1.5ms → jit 4µs
+  shake: 580 → 22 (96% removed)
 10
 20
 30
@@ -309,6 +349,8 @@ done
 
 --- test_array_methods [PASS] ---
 Running compiler/tests/haxe/test_array_methods.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 3.4ms → mir 0µs → compile 6.0ms → shake 0.33ms → optimize 0.65ms → jit 4µs
+  shake: 578 → 18 (96% removed)
 2
 4
 10
@@ -321,6 +363,8 @@ Running compiler/tests/haxe/test_array_methods.hx [debug] [preset: Application].
 
 --- test_async_await [PASS] ---
 Running compiler/tests/haxe/test_async_await.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 41ms → mir 0µs → compile 44ms → shake 0.30ms → optimize 0.44ms → jit 6µs
+  shake: 625 → 19 (96% removed)
 42
 not blocked
 200
@@ -329,6 +373,8 @@ done
 
 --- test_balanced_tree [PASS] ---
 Running compiler/tests/haxe/test_balanced_tree.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.04ms → typecheck 5.4ms → mir 0µs → compile 7.8ms → shake 0.31ms → optimize 1.4ms → jit 7µs
+  shake: 593 → 17 (97% removed)
 10
 20
 30
@@ -336,6 +382,8 @@ done
 
 --- test_balanced_tree_generic [PASS] ---
 Running compiler/tests/haxe/test_balanced_tree_generic.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.06ms → typecheck 17ms → mir 0µs → compile 19ms → shake 0.48ms → optimize 2.2ms → jit 4µs
+  shake: 655 → 35 (94% removed)
 10
 20
 30
@@ -350,10 +398,14 @@ done
 
 --- test_balancedtree_crossmodule_mono [PASS] ---
 Running compiler/tests/haxe/test_balancedtree_crossmodule_mono.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.07ms → typecheck 500ms → mir 0µs → compile 505ms → shake 1.0ms → optimize 7.8ms → jit 6µs
+  shake: 1377 → 96 (93% removed)
 PASS
 
 --- test_bind [PASS] ---
 Running compiler/tests/haxe/test_bind.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 47ms → mir 0µs → compile 49ms → shake 0.32ms → optimize 0.68ms → jit 4µs
+  shake: 629 → 27 (95% removed)
 8
 7
 17
@@ -366,6 +418,8 @@ done
 
 --- test_bitshift [PASS] ---
 Running compiler/tests/haxe/test_bitshift.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.06ms → typecheck 3.5ms → mir 0µs → compile 6.1ms → shake 0.25ms → optimize 0.72ms → jit 4µs
+  shake: 583 → 13 (97% removed)
 Testing bit shift constant evaluation...
 MaxRad (untyped) = 65536
 Typed:Int = 65536
@@ -378,34 +432,50 @@ Expected: 65536
 
 --- test_bitwise_conditional_reassign [PASS] ---
 Running compiler/tests/haxe/test_bitwise_conditional_reassign.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.05ms → typecheck 499ms → mir 0µs → compile 504ms → shake 0.92ms → optimize 5.0ms → jit 6µs
+  shake: 1371 → 84 (93% removed)
 PASS bitwise conditional reassign
 
 --- test_bytes_aligned_i32 [PASS] ---
 Running compiler/tests/haxe/test_bytes_aligned_i32.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 505ms → mir 0µs → compile 511ms → shake 1.2ms → optimize 4.4ms → jit 8µs
+  shake: 1368 → 81 (94% removed)
 PASS bytes-aligned-i32 a=287454020 c=-1234567 d=1432778632 byte4=121 byte8=136
 
 --- test_channel_explicit_int [PASS] ---
 Running compiler/tests/haxe/test_channel_explicit_int.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 500ms → mir 0µs → compile 505ms → shake 0.79ms → optimize 1.9ms → jit 7µs
+  shake: 1372 → 89 (93% removed)
 PASS channel-explicit-int
 
 --- test_channel_inferred_class_threaded [PASS] ---
 Running compiler/tests/haxe/test_channel_inferred_class_threaded.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.10ms → typecheck 496ms → mir 0µs → compile 500ms → shake 0.88ms → optimize 2.4ms → jit 6µs
+  shake: 1384 → 102 (92% removed)
 PASS channel-inferred-class-threaded
 
 --- test_channel_inferred_int_threaded [PASS] ---
 Running compiler/tests/haxe/test_channel_inferred_int_threaded.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 605ms → mir 0µs → compile 609ms → shake 0.85ms → optimize 2.5ms → jit 7µs
+  shake: 1371 → 97 (92% removed)
 PASS channel-inferred-int-threaded
 
 --- test_channel_init_class [PASS] ---
 Running compiler/tests/haxe/test_channel_init_class.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 581ms → mir 0µs → compile 584ms → shake 0.93ms → optimize 2.7ms → jit 0.04ms
+  shake: 1384 → 102 (92% removed)
 PASS channel-init-class
 
 --- test_channel_prim_roundtrip [PASS] ---
 Running compiler/tests/haxe/test_channel_prim_roundtrip.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.03ms → typecheck 514ms → mir 0µs → compile 518ms → shake 0.74ms → optimize 4.0ms → jit 8µs
+  shake: 1378 → 98 (92% removed)
 PASS channel-prim-roundtrip
 
 --- test_class_instance_reflection [PASS] ---
 Running compiler/tests/haxe/test_class_instance_reflection.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 19ms → mir 0µs → compile 22ms → shake 0.27ms → optimize 0.78ms → jit 5µs
+  shake: 678 → 37 (94% removed)
 Dog
 [name, legs, breed]
 Labrador
@@ -422,19 +492,27 @@ Animal
 
 --- test_closure_captured_heap [PASS] ---
 Running compiler/tests/haxe/test_closure_captured_heap.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.04ms → typecheck 516ms → mir 0µs → compile 521ms → shake 1.3ms → optimize 6.3ms → jit 6µs
+  shake: 1374 → 86 (93% removed)
 PASS: closure-captured heap values outlive their frame
 
 --- test_closure_field_call [PASS] ---
 Running compiler/tests/haxe/test_closure_field_call.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 509ms → mir 1µs → compile 514ms → shake 0.86ms → optimize 2.8ms → jit 8µs
+  shake: 1386 → 89 (93% removed)
 test_closure_field_call OK
 
 --- test_closures [PASS] ---
 Running compiler/tests/haxe/test_closures.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 9µs → typecheck 12ms → mir 0µs → compile 14ms → shake 0.28ms → optimize 0.09ms → jit 5µs
+  shake: 572 → 5 (99% removed)
 7
 15
 
 --- test_compress [PASS] ---
 Running compiler/tests/haxe/test_compress.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 21ms → mir 0µs → compile 24ms → shake 0.26ms → optimize 0.47ms → jit 4µs
+  shake: 635 → 22 (96% removed)
 55
 true
 true
@@ -446,11 +524,15 @@ done
 
 --- test_conditional [PASS] ---
 Running compiler/tests/haxe/test_conditional.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 7µs → typecheck 2.6ms → mir 0µs → compile 4.8ms → shake 0.25ms → optimize 0.07ms → jit 2µs
+  shake: 569 → 3 (99% removed)
 rayzor
 done
 
 --- test_copy [PASS] ---
 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 4.1ms → mir 0µs → compile 6.4ms → shake 0.25ms → optimize 0.66ms → jit 0.01ms
+  shake: 585 → 11 (98% removed)
 3
 42
 3
@@ -459,6 +541,8 @@ done
 
 --- test_copy_clone_identity [PASS] ---
 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 11ms → mir 0µs → compile 14ms → shake 0.26ms → optimize 0.69ms → jit 3µs
+  shake: 634 → 21 (96% removed)
 10
 99
 100
@@ -469,24 +553,34 @@ done
 
 --- test_cpu_topology_defaults [PASS] ---
 Running compiler/tests/haxe/test_cpu_topology_defaults.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 502ms → mir 1µs → compile 507ms → shake 1.1ms → optimize 2.9ms → jit 7µs
+  shake: 1374 → 82 (94% removed)
 PASS cpu-topology cpus=10 perf=8 relax=0 spins=200000
 
 --- test_cranelift_shift_float_pollution [PASS] ---
 Running compiler/tests/haxe/test_cranelift_shift_float_pollution.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 493ms → mir 0µs → compile 498ms → shake 0.86ms → optimize 2.2ms → jit 8µs
+  shake: 1368 → 80 (94% removed)
 PASS cranelift-shift-float-pollution
 
 --- test_create_enum [PASS] ---
 Running compiler/tests/haxe/test_create_enum.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 15ms → mir 0µs → compile 17ms → shake 0.24ms → optimize 0.23ms → jit 3µs
+  shake: 633 → 14 (97% removed)
 0
 1
 2
 
 --- test_debug_circular [PASS] ---
 Running compiler/tests/haxe/test_debug_circular.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 3.5ms → mir 0µs → compile 5.8ms → shake 0.31ms → optimize 0.53ms → jit 3µs
+  shake: 589 → 13 (97% removed)
 Node { value: 1, next: Node { value: 2, next: <object> } }
 
 --- test_default_params [PASS] ---
 Running compiler/tests/haxe/test_default_params.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 13ms → mir 0µs → compile 15ms → shake 0.27ms → optimize 1.1ms → jit 4µs
+  shake: 632 → 22 (96% removed)
 1
 2
 full
@@ -504,6 +598,8 @@ done
 
 --- test_default_params2 [PASS] ---
 Running compiler/tests/haxe/test_default_params2.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 4.1ms → mir 0µs → compile 6.5ms → shake 0.30ms → optimize 0.41ms → jit 3µs
+  shake: 586 → 11 (98% removed)
 1
 1
 2
@@ -514,6 +610,8 @@ done
 
 --- test_derive_clone [PASS] ---
 Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 3.3ms → mir 0µs → compile 5.5ms → shake 0.24ms → optimize 0.31ms → jit 3µs
+  shake: 583 → 9 (98% removed)
 3
 7
 3
@@ -521,22 +619,30 @@ Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]..
 
 --- test_derive_debug [PASS] ---
 Running compiler/tests/haxe/test_derive_debug.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 9µs → typecheck 3.3ms → mir 0µs → compile 5.6ms → shake 0.24ms → optimize 0.28ms → jit 4µs
+  shake: 587 → 12 (97% removed)
 Point { x: 3, y: 7 }
 
 --- test_derive_debug_format [PASS] ---
 Running compiler/tests/haxe/test_derive_debug_format.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 11ms → mir 0µs → compile 13ms → shake 0.33ms → optimize 0.65ms → jit 4µs
+  shake: 635 → 22 (96% removed)
 (3, 7)
 [Player #42]
 done
 
 --- test_derive_debug_nested [PASS] ---
 Running compiler/tests/haxe/test_derive_debug_nested.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.33ms → optimize 1.0ms → jit 3µs
+  shake: 635 → 22 (96% removed)
 Point { x: 3, y: 7 }
 Rect { topLeft: Point { x: 0, y: 0 }, bottomRight: Point { x: 10, y: 20 }, label: box }
 done
 
 --- test_derive_default [PASS] ---
 Running compiler/tests/haxe/test_derive_default.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 10µs → typecheck 3.2ms → mir 0µs → compile 5.5ms → shake 0.27ms → optimize 0.29ms → jit 4µs
+  shake: 587 → 10 (98% removed)
 0
 0
 0
@@ -544,6 +650,8 @@ false
 
 --- test_derive_default_custom [PASS] ---
 Running compiler/tests/haxe/test_derive_default_custom.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 3.1ms → mir 0µs → compile 5.4ms → shake 0.29ms → optimize 0.27ms → jit 3µs
+  shake: 588 → 11 (98% removed)
 8080
 60
 0
@@ -552,6 +660,8 @@ done
 
 --- test_derive_default_nested [PASS] ---
 Running compiler/tests/haxe/test_derive_default_nested.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 9.5ms → mir 0µs → compile 12ms → shake 0.30ms → optimize 0.57ms → jit 6µs
+  shake: 640 → 26 (95% removed)
 0
 
 0
@@ -561,6 +671,8 @@ false
 
 --- test_derive_string_fields [PASS] ---
 Running compiler/tests/haxe/test_derive_string_fields.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 11ms → mir 0µs → compile 13ms → shake 0.32ms → optimize 1.4ms → jit 3µs
+  shake: 634 → 19 (97% removed)
 true
 false
 true
@@ -571,6 +683,8 @@ true
 
 --- test_derive_traits [PASS] ---
 Running compiler/tests/haxe/test_derive_traits.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 4.4ms → mir 0µs → compile 6.8ms → shake 0.24ms → optimize 5.1ms → jit 3µs
+  shake: 584 → 9 (98% removed)
 true
 false
 true
@@ -588,6 +702,8 @@ true
 
 --- test_drop [PASS] ---
 Running compiler/tests/haxe/test_drop.hx [debug] [preset: Application]...
+  stdlib 1.2ms → parse 0.01ms → typecheck 3.4ms → mir 0µs → compile 5.6ms → shake 0.24ms → optimize 0.53ms → jit 4µs
+  shake: 585 → 15 (97% removed)
 1
 drop 1
 2
@@ -596,6 +712,8 @@ drop 2
 
 --- test_dynamic_arith [PASS] ---
 Running compiler/tests/haxe/test_dynamic_arith.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 3.3ms → mir 0µs → compile 5.5ms → shake 0.37ms → optimize 0.20ms → jit 3µs
+  shake: 579 → 10 (98% removed)
 13
 7
 30
@@ -608,6 +726,8 @@ done
 
 --- test_dynamic_class [PASS] ---
 Running compiler/tests/haxe/test_dynamic_class.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 3.8ms → mir 0µs → compile 6.2ms → shake 0.30ms → optimize 0.35ms → jit 3µs
+  shake: 587 → 12 (97% removed)
 10
 20
 3
@@ -616,10 +736,14 @@ done
 
 --- test_dynamic_equality [PASS] ---
 Running compiler/tests/haxe/test_dynamic_equality.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.03ms → typecheck 511ms → mir 0µs → compile 516ms → shake 0.90ms → optimize 17ms → jit 7µs
+  shake: 1381 → 90 (93% removed)
 PASS: Dynamic equality semantics
 
 --- test_dynamic_methods [PASS] ---
 Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 3.8ms → mir 0µs → compile 6.2ms → shake 0.32ms → optimize 0.38ms → jit 3µs
+  shake: 589 → 14 (97% removed)
 3
 7
 10
@@ -629,12 +753,16 @@ done
 
 --- test_enum_abstract [PASS] ---
 Running compiler/tests/haxe/test_enum_abstract.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 8µs → typecheck 2.8ms → mir 0µs → compile 5.1ms → shake 0.27ms → optimize 0.08ms → jit 3µs
+  shake: 570 → 3 (99% removed)
 0
 1
 2
 
 --- test_enum_abstract_methods [PASS] ---
 Running compiler/tests/haxe/test_enum_abstract_methods.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.04ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.24ms → optimize 0.49ms → jit 3µs
+  shake: 626 → 14 (97% removed)
 0
 1
 2
@@ -657,6 +785,8 @@ done
 
 --- test_enum_reflection_dynamic [PASS] ---
 Running compiler/tests/haxe/test_enum_reflection_dynamic.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.03ms → typecheck 508ms → mir 0µs → compile 513ms → shake 1.1ms → optimize 11ms → jit 7µs
+  shake: 1387 → 90 (93% removed)
 ok isOfType(boxed) = true
 ok isOfType(tagOnly) = true
 ok getEnumName = Color
@@ -671,6 +801,8 @@ ALL PASS
 
 --- test_enum_reflection_value_apis [PASS] ---
 Running compiler/tests/haxe/test_enum_reflection_value_apis.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 14ms → mir 0µs → compile 17ms → shake 0.29ms → optimize 0.38ms → jit 4µs
+  shake: 638 → 18 (97% removed)
 Some
 1
 [42]
@@ -684,12 +816,16 @@ Blue
 
 --- test_enum_switch [PASS] ---
 Running compiler/tests/haxe/test_enum_switch.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 2.6ms → mir 0µs → compile 5.0ms → shake 0.34ms → optimize 0.71ms → jit 3µs
+  shake: 571 → 5 (99% removed)
 42
 none
 other
 
 --- test_ereg [PASS] ---
 Running compiler/tests/haxe/test_ereg.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.03ms → typecheck 27ms → mir 0µs → compile 29ms → shake 0.41ms → optimize 1.5ms → jit 5µs
+  shake: 738 → 47 (93% removed)
 match1: true
 world
 hello 
@@ -711,6 +847,8 @@ done
 
 --- test_ereg_map [PASS] ---
 Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 22ms → mir 0µs → compile 24ms → shake 0.29ms → optimize 1.3ms → jit 4µs
+  shake: 737 → 47 (93% removed)
 123ABC456def
 123ABC456DEF789GHI
 1:a 2:b 3:c
@@ -719,6 +857,8 @@ done
 
 --- test_exception [PASS] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.03ms → typecheck 82ms → mir 0µs → compile 85ms → shake 0.60ms → optimize 1.9ms → jit 6µs
+  shake: 756 → 38 (94% removed)
 basic error
 custom error
 specific
@@ -730,6 +870,8 @@ done
 
 --- test_exception_method_parity [PASS] ---
 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 16ms → mir 0µs → compile 18ms → shake 0.36ms → optimize 1.6ms → jit 4µs
+  shake: 664 → 35 (94% removed)
 message=boom
 toString=boom
 details=Exception: "boom"
@@ -789,6 +931,8 @@ Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Applicati
  [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
 [38;5;246m────╯[0m
 
+  stdlib 1.3ms → parse 0.02ms → typecheck 2.9ms → mir 0µs → compile 5.1ms → shake 0.22ms → optimize 0.34ms → jit 3µs
+  shake: 571 → 5 (99% removed)
 red
 red
 red
@@ -798,6 +942,8 @@ done
 
 --- test_file_readall [PASS] ---
 Running compiler/tests/haxe/test_file_readall.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.02ms → typecheck 431ms → mir 0µs → compile 434ms → shake 0.66ms → optimize 1.5ms → jit 7µs
+  shake: 1233 → 72 (94% removed)
 3
 65
 66
@@ -808,14 +954,16 @@ done
 
 --- test_for_in [PASS] ---
 Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
+  stdlib 1.3ms → parse 0.01ms → typecheck 2.7ms → mir 0µs → compile 4.9ms → shake 0.22ms → optimize 0.60ms → jit 4µs
+  shake: 586 → 14 (97% removed)
 10
 20
 30
 0
 1
 2
-2
 1
+2
 200
 300
 100
@@ -823,6 +971,8 @@ done
 
 --- test_forward [PASS] ---
 Running compiler/tests/haxe/test_forward.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 14ms → mir 0µs → compile 16ms → shake 0.33ms → optimize 0.79ms → jit 4µs
+  shake: 616 → 19 (96% removed)
 3
 30
 2
@@ -833,6 +983,8 @@ Running compiler/tests/haxe/test_forward.hx [debug] [preset: Application]...
 
 --- test_future [PASS] ---
 Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.03ms → typecheck 14ms → mir 0µs → compile 17ms → shake 0.38ms → optimize 1.2ms → jit 8µs
+  shake: 646 → 44 (93% removed)
 42
 30
 100
@@ -846,10 +998,14 @@ done
 
 --- test_generic_ctor_untyped_selfref [PASS] ---
 Running compiler/tests/haxe/test_generic_ctor_untyped_selfref.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.03ms → typecheck 529ms → mir 0µs → compile 534ms → shake 0.94ms → optimize 3.2ms → jit 7µs
+  shake: 1390 → 90 (93% removed)
 PASS
 
 --- test_generic_std_string [PASS] ---
 Running compiler/tests/haxe/test_generic_std_string.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.03ms → typecheck 33ms → mir 0µs → compile 36ms → shake 0.42ms → optimize 2.2ms → jit 5µs
+  shake: 665 → 34 (94% removed)
 Hello
 42
 1.5
@@ -864,6 +1020,8 @@ n=42 f=1.5 b=true
 
 --- test_generic_tree [PASS] ---
 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.02ms → typecheck 13ms → mir 0µs → compile 16ms → shake 0.40ms → optimize 0.79ms → jit 4µs
+  shake: 637 → 22 (96% removed)
 0
 -1
 0
@@ -872,6 +1030,8 @@ done
 
 --- test_generics [PASS] ---
 Running compiler/tests/haxe/test_generics.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.35ms → optimize 0.91ms → jit 5µs
+  shake: 642 → 28 (95% removed)
 42
 42
 hello
@@ -882,15 +1042,21 @@ done
 
 --- test_generics_simple [PASS] ---
 Running compiler/tests/haxe/test_generics_simple.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 3.4ms → mir 0µs → compile 6.1ms → shake 0.32ms → optimize 0.24ms → jit 4µs
+  shake: 585 → 11 (98% removed)
 42
 done
 
 --- test_global_cse_invalidation [PASS] ---
 Running compiler/tests/haxe/test_global_cse_invalidation.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.04ms → typecheck 537ms → mir 1µs → compile 542ms → shake 0.90ms → optimize 4.3ms → jit 9µs
+  shake: 1371 → 83 (93% removed)
 PASS: cached global loads are invalidated by stores and calls
 
 --- test_guard [PASS] ---
 Running compiler/tests/haxe/test_guard.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 13ms → mir 0µs → compile 15ms → shake 0.29ms → optimize 0.98ms → jit 4µs
+  shake: 616 → 13 (97% removed)
 huge
 big
 small
@@ -900,17 +1066,25 @@ over10
 
 --- test_hello [PASS] ---
 Running compiler/tests/haxe/test_hello.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 4µs → typecheck 2.8ms → mir 0µs → compile 5.3ms → shake 0.21ms → optimize 0.06ms → jit 3µs
+  shake: 569 → 3 (99% removed)
 hello
 
 --- test_host_localhost [PASS] ---
 Running compiler/tests/haxe/test_host_localhost.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 9µs → typecheck 11ms → mir 0µs → compile 14ms → shake 0.33ms → optimize 0.21ms → jit 3µs
+  shake: 615 → 14 (97% removed)
 Damilares-MacBook-Pro.local
 
 --- test_host_simple [PASS] ---
 Running compiler/tests/haxe/test_host_simple.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 7µs → typecheck 11ms → mir 0µs → compile 13ms → shake 0.37ms → optimize 0.30ms → jit 3µs
+  shake: 614 → 13 (97% removed)
 
 --- test_interface [PASS] ---
 Running compiler/tests/haxe/test_interface.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 3.6ms → mir 0µs → compile 6.2ms → shake 0.28ms → optimize 0.48ms → jit 4µs
+  shake: 588 → 16 (97% removed)
 circle
 square
 
@@ -930,6 +1104,8 @@ Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]
  [38;5;240m   │[0m                   [31m┬[0m  
  [38;5;240m   │[0m                   [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
 [38;5;246m────╯[0m
+  stdlib 1.5ms → parse 0.07ms → typecheck 533ms → mir 0µs → compile 538ms → shake 0.88ms → optimize 3.0ms → jit 7µs
+  shake: 1388 → 94 (93% removed)
 draw:box
 null
 click:submit
@@ -938,6 +1114,8 @@ done
 
 --- test_interface_inherit [PASS] ---
 Running compiler/tests/haxe/test_interface_inherit.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.44ms → optimize 0.91ms → jit 5µs
+  shake: 636 → 27 (95% removed)
 Button.draw
 Button.resize
 Button.click
@@ -954,6 +1132,8 @@ done
 
 --- test_interface_lifetime [PASS] ---
 Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 4.0ms → mir 0µs → compile 6.6ms → shake 0.32ms → optimize 0.71ms → jit 4µs
+  shake: 585 → 13 (97% removed)
 1
 2
 3
@@ -961,10 +1141,14 @@ Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Applicat
 
 --- test_interface_nested_module_cast [PASS] ---
 Running compiler/tests/haxe/test_interface_nested_module_cast.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.42ms → optimize 1.3ms → jit 0.01ms
+  shake: 642 → 34 (94% removed)
 0
 
 --- test_interface_wrapper_copy [PASS] ---
 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 4.0ms → mir 0µs → compile 6.6ms → shake 0.31ms → optimize 0.69ms → jit 4µs
+  shake: 585 → 13 (97% removed)
 10
 20
 20
@@ -972,12 +1156,16 @@ Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Appl
 
 --- test_iterator [PASS] ---
 Running compiler/tests/haxe/test_iterator.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 3.8ms → mir 0µs → compile 6.7ms → shake 0.30ms → optimize 0.73ms → jit 4µs
+  shake: 587 → 12 (97% removed)
 15
 33
 done
 
 --- test_json [PASS] ---
 Running compiler/tests/haxe/test_json.hx [debug] [preset: Application]...
+  stdlib 2.0ms → parse 0.02ms → typecheck 14ms → mir 0µs → compile 17ms → shake 0.34ms → optimize 0.45ms → jit 3µs
+  shake: 621 → 15 (97% removed)
 Alice
 30
 [1,2,3]
@@ -992,33 +1180,47 @@ done
 
 --- test_licm_memory_clobber [PASS] ---
 Running compiler/tests/haxe/test_licm_memory_clobber.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.04ms → typecheck 521ms → mir 0µs → compile 526ms → shake 0.91ms → optimize 8.4ms → jit 6µs
+  shake: 1384 → 88 (93% removed)
 PASS: loop-invariant reads respect what the loop writes
 
 --- test_llvm_bitcast_i32_i64 [PASS] ---
 Running compiler/tests/haxe/test_llvm_bitcast_i32_i64.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 6µs → typecheck 3.5ms → mir 0µs → compile 6.2ms → shake 0.31ms → optimize 0.12ms → jit 3µs
+  shake: 572 → 5 (99% removed)
 42
 PASS llvm-bitcast-i32-i64
 
 --- test_loop_counter_from_param [PASS] ---
 Running compiler/tests/haxe/test_loop_counter_from_param.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 536ms → mir 0µs → compile 541ms → shake 0.96ms → optimize 3.2ms → jit 6µs
+  shake: 1368 → 81 (94% removed)
 PASS loop-counter-from-param while=44 for=44 closure=44
 
 --- test_loop_reassigned_alias_use [PASS] ---
 Running compiler/tests/haxe/test_loop_reassigned_alias_use.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 514ms → mir 0µs → compile 519ms → shake 1.1ms → optimize 2.4ms → jit 6µs
+  shake: 1378 → 83 (93% removed)
 loop reassigned alias ok
 
 --- test_loop_unroll_register_remap [PASS] ---
 Running compiler/tests/haxe/test_loop_unroll_register_remap.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.05ms → typecheck 834ms → mir 1µs → compile 841ms → shake 1.7ms → optimize 6.2ms → jit 7µs
+  shake: 1376 → 87 (93% removed)
 PASS: unrolled iterations keep distinct registers
 
 --- test_macro [PASS] ---
 Running compiler/tests/haxe/test_macro.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.01ms → typecheck 27ms → mir 0µs → compile 33ms → shake 0.63ms → optimize 0.60ms → jit 4µs
+  shake: 667 → 21 (96% removed)
 300
 42
 done
 
 --- test_macro2 [PASS] ---
 Running compiler/tests/haxe/test_macro2.hx [debug] [preset: Application]...
+  stdlib 5.1ms → parse 0.03ms → typecheck 168ms → mir 0µs → compile 176ms → shake 0.50ms → optimize 6.4ms → jit 8µs
+  shake: 670 → 23 (96% removed)
 300
 42
 Hello, World!
@@ -1030,12 +1232,16 @@ done
 
 --- test_manual_drop [PASS] ---
 Running compiler/tests/haxe/test_manual_drop.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.01ms → typecheck 4.2ms → mir 0µs → compile 7.0ms → shake 0.36ms → optimize 0.57ms → jit 5µs
+  shake: 585 → 15 (97% removed)
 42
 Released handle 42
 done
 
 --- test_map_kv [PASS] ---
 Running compiler/tests/haxe/test_map_kv.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 23ms → mir 0µs → compile 26ms → shake 0.70ms → optimize 0.89ms → jit 7µs
+  shake: 641 → 22 (96% removed)
 60
 182
 300
@@ -1043,11 +1249,15 @@ done
 
 --- test_map_literal [PASS] ---
 Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 8µs → typecheck 20ms → mir 0µs → compile 23ms → shake 0.34ms → optimize 0.26ms → jit 4µs
+  shake: 633 → 18 (97% removed)
 {hello => 42}
 42
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 31ms → mir 0µs → compile 35ms → shake 0.88ms → optimize 0.64ms → jit 6µs
+  shake: 652 → 24 (96% removed)
 {hello => 42, world => 99}
 42
 99
@@ -1067,14 +1277,20 @@ false
 
 --- test_map_value_iteration [PASS] ---
 Running compiler/tests/haxe/test_map_value_iteration.hx [debug] [preset: Application]...
+  stdlib 1.9ms → parse 0.03ms → typecheck 542ms → mir 0µs → compile 547ms → shake 0.89ms → optimize 3.4ms → jit 10µs
+  shake: 1381 → 86 (93% removed)
 PASS
 
 --- test_method_named_free [PASS] ---
 Running compiler/tests/haxe/test_method_named_free.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.04ms → typecheck 533ms → mir 0µs → compile 537ms → shake 0.90ms → optimize 13ms → jit 8µs
+  shake: 1387 → 93 (93% removed)
 PASS: libc-named methods compile and run
 
 --- test_method_reference_lvalue [PASS] ---
 Running compiler/tests/haxe/test_method_reference_lvalue.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 22ms → mir 0µs → compile 25ms → shake 0.36ms → optimize 0.54ms → jit 4µs
+  shake: 640 → 27 (95% removed)
 Animal: Rex
 Animal: Rex
 100
@@ -1082,6 +1298,8 @@ true
 
 --- test_not_null [PASS] ---
 Running compiler/tests/haxe/test_not_null.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.06ms → typecheck 11ms → mir 0µs → compile 14ms → shake 0.34ms → optimize 0.36ms → jit 4µs
+  shake: 621 → 18 (97% removed)
 5
 is null
 5
@@ -1090,6 +1308,8 @@ done
 
 --- test_null_array [PASS] ---
 Running compiler/tests/haxe/test_null_array.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.02ms → typecheck 12ms → mir 1µs → compile 15ms → shake 0.29ms → optimize 1.2ms → jit 5µs
+  shake: 629 → 24 (96% removed)
 Test 1: Setting null at index 10
 Array created, length: 0
 After null set, length: 11
@@ -1102,16 +1322,22 @@ All tests passed!
 
 --- test_null_receiver_method [PASS] ---
 Running compiler/tests/haxe/test_null_receiver_method.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 522ms → mir 0µs → compile 526ms → shake 0.85ms → optimize 4.2ms → jit 6µs
+  shake: 1383 → 87 (93% removed)
 PASS null-receiver-method a=12 b=12
 
 --- test_null_safety [PASS] ---
 Running compiler/tests/haxe/test_null_safety.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 10µs → typecheck 10ms → mir 0µs → compile 13ms → shake 0.34ms → optimize 0.22ms → jit 4µs
+  shake: 620 → 14 (97% removed)
 10
 hello
 done
 
 --- test_null_t [PASS] ---
 Running compiler/tests/haxe/test_null_t.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 9µs → typecheck 2.8ms → mir 0µs → compile 5.1ms → shake 0.22ms → optimize 0.14ms → jit 3µs
+  shake: 573 → 6 (98% removed)
 42
 null
 42
@@ -1120,6 +1346,8 @@ done
 
 --- test_objectmap [PASS] ---
 Running compiler/tests/haxe/test_objectmap.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 27ms → mir 0µs → compile 30ms → shake 0.30ms → optimize 0.95ms → jit 4µs
+  shake: 649 → 25 (96% removed)
 10
 20
 true
@@ -1131,15 +1359,21 @@ done
 
 --- test_onearg_cast_call_result [PASS] ---
 Running compiler/tests/haxe/test_onearg_cast_call_result.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 523ms → mir 0µs → compile 527ms → shake 0.93ms → optimize 4.7ms → jit 9µs
+  shake: 1395 → 90 (93% removed)
 PASS onearg-cast
 
 --- test_option_enum [PASS] ---
 Running compiler/tests/haxe/test_option_enum.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 4.3ms → mir 0µs → compile 6.6ms → shake 0.24ms → optimize 0.37ms → jit 3µs
+  shake: 574 → 5 (99% removed)
 42
 none
 
 --- test_optional_chain [PASS] ---
 Running compiler/tests/haxe/test_optional_chain.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.05ms → typecheck 4.4ms → mir 0µs → compile 7.3ms → shake 0.33ms → optimize 1.3ms → jit 4µs
+  shake: 589 → 13 (97% removed)
 42
 0
 42
@@ -1151,6 +1385,8 @@ done
 
 --- test_parser_expression_body_terminator [PASS] ---
 Running compiler/tests/haxe/test_parser_expression_body_terminator.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 13ms → mir 0µs → compile 15ms → shake 0.33ms → optimize 0.46ms → jit 0.03ms
+  shake: 638 → 22 (96% removed)
 42
 6
 4
@@ -1158,6 +1394,8 @@ Running compiler/tests/haxe/test_parser_expression_body_terminator.hx [debug] [p
 
 --- test_parser_function_type_forms [PASS] ---
 Running compiler/tests/haxe/test_parser_function_type_forms.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 23ms → mir 0µs → compile 25ms → shake 0.35ms → optimize 0.63ms → jit 0.02ms
+  shake: 590 → 20 (96% removed)
 curried:1,2
 named:3,4
 unnamed:5,6
@@ -1165,6 +1403,8 @@ nullary
 
 --- test_parser_nested_generic_close [PASS] ---
 Running compiler/tests/haxe/test_parser_nested_generic_close.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 20ms → mir 0µs → compile 23ms → shake 0.38ms → optimize 1.1ms → jit 4µs
+  shake: 637 → 25 (96% removed)
 3
 2
 1
@@ -1173,6 +1413,8 @@ Running compiler/tests/haxe/test_parser_nested_generic_close.hx [debug] [preset:
 
 --- test_primitives_no_move_warning [PASS] ---
 Running compiler/tests/haxe/test_primitives_no_move_warning.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.33ms → optimize 0.36ms → jit 3µs
+  shake: 627 → 17 (97% removed)
 10
 4
 3.5
@@ -1181,6 +1423,8 @@ true
 
 --- test_property [PASS] ---
 Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.36ms → optimize 0.58ms → jit 8µs
+  shake: 635 → 23 (96% removed)
 10
 42
 hello
@@ -1188,14 +1432,20 @@ done
 
 --- test_q4k_scale_unpack [PASS] ---
 Running compiler/tests/haxe/test_q4k_scale_unpack.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.11ms → typecheck 520ms → mir 4µs → compile 524ms → shake 0.89ms → optimize 12ms → jit 7µs
+  shake: 1376 → 95 (93% removed)
 ALL PASS
 
 --- test_q4km_dot [PASS] ---
 Running compiler/tests/haxe/test_q4km_dot.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.10ms → typecheck 526ms → mir 0µs → compile 530ms → shake 0.92ms → optimize 7.0ms → jit 7µs
+  shake: 1382 → 99 (92% removed)
 PASS q4km-dot case1=75.84 (~75.84) case2=-14.1860595703125 (~-14.186)
 
 --- test_rayzor_spec [PASS] ---
 Running compiler/tests/haxe/test_rayzor_spec.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.04ms → typecheck 591ms → mir 0µs → compile 597ms → shake 0.99ms → optimize 14ms → jit 8µs
+  shake: 1459 → 145 (90% removed)
   ok   Math > adds
   ok   Math > greater
   ok   Math > bool true
@@ -1216,12 +1466,16 @@ test_rayzor_spec OK
 
 --- test_recursive_class [PASS] ---
 Running compiler/tests/haxe/test_recursive_class.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 3.9ms → mir 0µs → compile 6.5ms → shake 0.34ms → optimize 0.32ms → jit 3µs
+  shake: 586 → 11 (98% removed)
 1
 2
 done
 
 --- test_recursive_ctor [PASS] ---
 Running compiler/tests/haxe/test_recursive_ctor.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 3.9ms → mir 0µs → compile 6.6ms → shake 0.33ms → optimize 0.60ms → jit 3µs
+  shake: 586 → 11 (98% removed)
 1
 1
 2
@@ -1230,12 +1484,16 @@ done
 
 --- test_reflect_call_method [PASS] ---
 Running compiler/tests/haxe/test_reflect_call_method.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.01ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.35ms → optimize 0.58ms → jit 5µs
+  shake: 629 → 21 (96% removed)
 42
 21
 true
 
 --- test_reflect_compare_methods [PASS] ---
 Running compiler/tests/haxe/test_reflect_compare_methods.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.35ms → optimize 0.28ms → jit 5µs
+  shake: 624 → 19 (96% removed)
 true
 false
 true
@@ -1246,6 +1504,8 @@ done
 
 --- test_reflect_isfunction [PASS] ---
 Running compiler/tests/haxe/test_reflect_isfunction.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 17ms → mir 0µs → compile 20ms → shake 0.34ms → optimize 0.27ms → jit 6µs
+  shake: 641 → 19 (97% removed)
 true
 TFunction
 false
@@ -1253,10 +1513,14 @@ false
 
 --- test_rotation_alias_live_out [PASS] ---
 Running compiler/tests/haxe/test_rotation_alias_live_out.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.03ms → typecheck 512ms → mir 0µs → compile 517ms → shake 0.88ms → optimize 2.7ms → jit 6µs
+  shake: 1378 → 83 (93% removed)
 rotation alias live-out ok
 
 --- test_rtti [PASS] ---
 Running compiler/tests/haxe/test_rtti.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 13ms → mir 0µs → compile 16ms → shake 0.33ms → optimize 0.99ms → jit 5µs
+  shake: 646 → 28 (95% removed)
 true
 true
 true
@@ -1275,6 +1539,8 @@ done
 
 --- test_safe_cast [PASS] ---
 Running compiler/tests/haxe/test_safe_cast.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 12ms → mir 0µs → compile 14ms → shake 0.27ms → optimize 0.67ms → jit 4µs
+  shake: 636 → 23 (96% removed)
 Shepherd
 null
 Whiskers
@@ -1282,11 +1548,15 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 3.9ms → mir 0µs → compile 6.5ms → shake 0.25ms → optimize 0.28ms → jit 3µs
+  shake: 584 → 10 (98% removed)
 42
 42
 
 --- test_send_sync [PASS] ---
 Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 16ms → mir 0µs → compile 19ms → shake 0.37ms → optimize 0.83ms → jit 4µs
+  shake: 637 → 29 (95% removed)
 84
 15
 100
@@ -1295,83 +1565,123 @@ done
 
 --- test_simd16i8_bitops [PASS] ---
 Running compiler/tests/haxe/test_simd16i8_bitops.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.04ms → typecheck 527ms → mir 0µs → compile 532ms → shake 0.86ms → optimize 5.8ms → jit 7µs
+  shake: 1364 → 87 (93% removed)
 PASS simd16i8-bitops and=112 ushr=160 shr=-96 shl=1792 or=112 xor=96
 
 --- test_simd16i8_get [PASS] ---
 Running compiler/tests/haxe/test_simd16i8_get.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 526ms → mir 0µs → compile 531ms → shake 0.80ms → optimize 3.9ms → jit 7µs
+  shake: 1370 → 83 (93% removed)
 PASS simd16i8-get l0=7 l1=23 l5=87 l15=247 l8signed=-121
 
 --- test_simd16i8_load_bytes [PASS] ---
 Running compiler/tests/haxe/test_simd16i8_load_bytes.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 519ms → mir 0µs → compile 524ms → shake 1.2ms → optimize 2.9ms → jit 7µs
+  shake: 1370 → 87 (93% removed)
 PASS simd16i8-load-bytes sumA=136 ordered=1360
 
 --- test_simd16i8_shuffle [PASS] ---
 Running compiler/tests/haxe/test_simd16i8_shuffle.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.05ms → typecheck 542ms → mir 0µs → compile 547ms → shake 0.90ms → optimize 11ms → jit 8µs
+  shake: 1374 → 91 (93% removed)
 ALL PASS
 
 --- test_simd256_dot [PASS] ---
 Running compiler/tests/haxe/test_simd256_dot.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.09ms → typecheck 540ms → mir 0µs → compile 544ms → shake 0.89ms → optimize 3.4ms → jit 7µs
+  shake: 1364 → 83 (93% removed)
 PASS simd256-dot (128-bit reference only, no 256-bit on this target)
 
 --- test_simd4f_get_lane [PASS] ---
 Running compiler/tests/haxe/test_simd4f_get_lane.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.03ms → typecheck 520ms → mir 0µs → compile 525ms → shake 0.87ms → optimize 4.5ms → jit 7µs
+  shake: 1364 → 80 (94% removed)
 PASS simd4f-get-lane lanes=10,20,30,40 loopSum=100
 
 --- test_simd4f_loop_phi [PASS] ---
 Running compiler/tests/haxe/test_simd4f_loop_phi.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.03ms → typecheck 516ms → mir 0µs → compile 521ms → shake 0.83ms → optimize 2.9ms → jit 7µs
+  shake: 1364 → 79 (94% removed)
 PASS simd4f-loop-phi add=800 mul=64
 
 --- test_simd4f_methods [PASS] ---
 Running compiler/tests/haxe/test_simd4f_methods.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.07ms → typecheck 527ms → mir 0µs → compile 531ms → shake 0.88ms → optimize 11ms → jit 7µs
+  shake: 1366 → 83 (93% removed)
 test_simd4f_methods OK
 
 --- test_simd4f_values [PASS] ---
 Running compiler/tests/haxe/test_simd4f_values.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 524ms → mir 2µs → compile 529ms → shake 0.95ms → optimize 4.1ms → jit 7µs
+  shake: 1364 → 82 (93% removed)
 PASS simd4f-values add=36 mul=70 dot=70 splat=16 sqrt=8
 
 --- test_simd4i32 [PASS] ---
 Running compiler/tests/haxe/test_simd4i32.hx [debug] [preset: Application]...
+  stdlib 2.7ms → parse 0.02ms → typecheck 575ms → mir 0µs → compile 581ms → shake 1.3ms → optimize 4.9ms → jit 0.01ms
+  shake: 1364 → 81 (94% removed)
 PASS simd4i32 add.sum=50 mul.sum=100 lanes=11,14
 
 --- test_simd_dot [PASS] ---
 Running compiler/tests/haxe/test_simd_dot.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 518ms → mir 0µs → compile 522ms → shake 0.88ms → optimize 5.4ms → jit 7µs
+  shake: 1364 → 82 (93% removed)
 PASS simd-dot sum1=96 sum2=192 sum3=560 sum4=-96 sum5=-96
 
 --- test_simd_dot_signed [PASS] ---
 Running compiler/tests/haxe/test_simd_dot_signed.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.03ms → typecheck 517ms → mir 0µs → compile 522ms → shake 0.87ms → optimize 5.0ms → jit 0.04ms
+  shake: 1364 → 83 (93% removed)
 PASS simd-dot-signed posNeg=-96 negPos=-96 negNeg=96 i8i7=-480 i8u8=-4576
 
 --- test_simd_from_array [PASS] ---
 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 9µs → typecheck 13ms → mir 0µs → compile 16ms → shake 0.31ms → optimize 0.43ms → jit 4µs
+  shake: 619 → 17 (97% removed)
 10
 
 --- test_single_f32 [PASS] ---
 Running compiler/tests/haxe/test_single_f32.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.03ms → typecheck 534ms → mir 0µs → compile 539ms → shake 0.93ms → optimize 3.2ms → jit 6µs
+  shake: 1364 → 77 (94% removed)
 PASS single-f32 perStep=16777216 f64=16777226 lit=1.2345678806304932
 
 --- test_socket_basic [PASS] ---
 Running compiler/tests/haxe/test_socket_basic.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.01ms → typecheck 444ms → mir 0µs → compile 449ms → shake 0.75ms → optimize 1.9ms → jit 7µs
+  shake: 1213 → 79 (93% removed)
 
 --- test_socket_echo [PASS] ---
 Running compiler/tests/haxe/test_socket_echo.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.04ms → typecheck 536ms → mir 0µs → compile 541ms → shake 0.82ms → optimize 2.9ms → jit 7µs
+  shake: 1222 → 94 (92% removed)
 socket echo ok
 
 --- test_socket_new [PASS] ---
 Running compiler/tests/haxe/test_socket_new.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 8µs → typecheck 437ms → mir 0µs → compile 441ms → shake 0.74ms → optimize 1.4ms → jit 7µs
+  shake: 1214 → 67 (94% removed)
 Damilares-MacBook-Pro.local
 socket created
 socket closed
 
 --- test_socket_read [PASS] ---
 Running compiler/tests/haxe/test_socket_read.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 554ms → mir 0µs → compile 558ms → shake 0.94ms → optimize 3.3ms → jit 8µs
+  shake: 1373 → 104 (92% removed)
 socket read ok
 
 --- test_spinpool_parallel_rows_cranelift [PASS] ---
 Running compiler/tests/haxe/test_spinpool_parallel_rows_cranelift.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 580ms → mir 1µs → compile 586ms → shake 1.5ms → optimize 27ms → jit 8µs
+  shake: 1430 → 136 (90% removed)
 PASS spinpool-parallel-rows-cranelift
 
 --- test_ssl [PASS] ---
 Running compiler/tests/haxe/test_ssl.hx [debug] [preset: Application]...
+  stdlib 2.0ms → parse 0.01ms → typecheck 549ms → mir 0µs → compile 554ms → shake 0.93ms → optimize 1.4ms → jit 0.01ms
+  shake: 1226 → 68 (94% removed)
 true
 true
 hostname set
@@ -1380,16 +1690,22 @@ done
 
 --- test_stack_trace [PASS] ---
 Running compiler/tests/haxe/test_stack_trace.hx [debug] [preset: Application]...
+  stdlib 4.0ms → parse 9µs → typecheck 22ms → mir 0µs → compile 27ms → shake 0.37ms → optimize 0.50ms → jit 0.03ms
+  shake: 664 → 25 (96% removed)
 boom
 done
 
 --- test_stack_trace_same [PASS] ---
 Running compiler/tests/haxe/test_stack_trace_same.hx [debug] [preset: Application]...
+  stdlib 4.8ms → parse 0.01ms → typecheck 20ms → mir 0µs → compile 27ms → shake 0.60ms → optimize 0.50ms → jit 6µs
+  shake: 663 → 24 (96% removed)
 boom
 done
 
 --- test_static_extension [PASS] ---
 Running compiler/tests/haxe/test_static_extension.hx [debug] [preset: Application]...
+  stdlib 4.3ms → parse 0.01ms → typecheck 3.7ms → mir 0µs → compile 10.0ms → shake 0.35ms → optimize 0.28ms → jit 4µs
+  shake: 575 → 7 (98% removed)
 10
 false
 8
@@ -1398,16 +1714,22 @@ true
 
 --- test_std_is_interface [PASS] ---
 Running compiler/tests/haxe/test_std_is_interface.hx [debug] [preset: Application]...
+  stdlib 1.9ms → parse 0.01ms → typecheck 21ms → mir 0µs → compile 25ms → shake 0.30ms → optimize 0.61ms → jit 6µs
+  shake: 641 → 26 (95% removed)
 true
 false
 true
 
 --- test_stdlib_self_construct [PASS] ---
 Running compiler/tests/haxe/test_stdlib_self_construct.hx [debug] [preset: Application]...
+  stdlib 2.1ms → parse 0.02ms → typecheck 644ms → mir 0µs → compile 651ms → shake 1.5ms → optimize 6.4ms → jit 7µs
+  shake: 1401 → 89 (93% removed)
 PASS stdlib-self-construct forced=3 global=1
 
 --- test_stringbuf_stringtools [PASS] ---
 Running compiler/tests/haxe/test_stringbuf_stringtools.hx [debug] [preset: Application]...
+  stdlib 1.9ms → parse 0.03ms → typecheck 101ms → mir 0µs → compile 105ms → shake 0.80ms → optimize 9.4ms → jit 7µs
+  shake: 774 → 66 (91% removed)
 Hello World
 11
 Hello World!
@@ -1431,6 +1753,8 @@ hi...
 
 --- test_structural [PASS] ---
 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
+  stdlib 3.0ms → parse 0.02ms → typecheck 6.4ms → mir 0µs → compile 11ms → shake 0.33ms → optimize 0.63ms → jit 4µs
+  shake: 590 → 15 (97% removed)
 10
 20
 3
@@ -1444,13 +1768,19 @@ done
 
 --- test_sys_cpu_arch [PASS] ---
 Running compiler/tests/haxe/test_sys_cpu_arch.hx [debug] [preset: Application]...
+  stdlib 2.3ms → parse 0.01ms → typecheck 604ms → mir 1µs → compile 610ms → shake 0.93ms → optimize 1.9ms → jit 6µs
+  shake: 1370 → 78 (94% removed)
 PASS sys-cpu-arch arch=aarch64
 
 --- test_thread_spawn_function_value [PASS] ---
 Running compiler/tests/haxe/test_thread_spawn_function_value.hx [debug] [preset: Application]...
+  stdlib 2.0ms → parse 0.01ms → typecheck 12ms → mir 0µs → compile 15ms → shake 0.31ms → optimize 0.24ms → jit 4µs
+  shake: 572 → 10 (98% removed)
 
 --- test_try_catch [PASS] ---
 Running compiler/tests/haxe/test_try_catch.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.01ms → typecheck 4.3ms → mir 0µs → compile 6.9ms → shake 0.50ms → optimize 0.14ms → jit 4µs
+  shake: 583 → 10 (98% removed)
 before
 42
 done
@@ -1459,14 +1789,20 @@ ok
 
 --- test_trycatch_merge_phi [PASS] ---
 Running compiler/tests/haxe/test_trycatch_merge_phi.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 572ms → mir 0µs → compile 577ms → shake 0.95ms → optimize 3.1ms → jit 8µs
+  shake: 1378 → 83 (93% removed)
 test_trycatch_merge_phi OK
 
 --- test_type_api [PASS] ---
 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
+  stdlib 1.8ms → parse 0.02ms → typecheck 634ms → mir 0µs → compile 639ms → shake 0.95ms → optimize 3.9ms → jit 8µs
+  shake: 1395 → 90 (93% removed)
 PASS type-api
 
 --- test_type_create_empty_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_empty_instance.hx [debug] [preset: Application]...
+  stdlib 1.9ms → parse 0.05ms → typecheck 21ms → mir 0µs → compile 24ms → shake 0.32ms → optimize 0.39ms → jit 5µs
+  shake: 651 → 22 (96% removed)
 0
 true
 7
@@ -1474,11 +1810,15 @@ ctor
 
 --- test_type_create_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 17ms → mir 0µs → compile 20ms → shake 0.35ms → optimize 0.33ms → jit 5µs
+  shake: 649 → 20 (96% removed)
 3
 4
 
 --- test_type_enum_reflection [PASS] ---
 Running compiler/tests/haxe/test_type_enum_reflection.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 16ms → mir 0µs → compile 19ms → shake 0.34ms → optimize 0.61ms → jit 4µs
+  shake: 642 → 22 (96% removed)
 Color
 Color
 3
@@ -1490,6 +1830,8 @@ false
 
 --- test_typed_catch [PASS] ---
 Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.02ms → typecheck 11ms → mir 0µs → compile 13ms → shake 0.32ms → optimize 0.87ms → jit 5µs
+  shake: 644 → 25 (96% removed)
 42
 hello
 99
@@ -1498,16 +1840,22 @@ caught dynamic
 
 --- test_typedef [PASS] ---
 Running compiler/tests/haxe/test_typedef.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 9µs → typecheck 16ms → mir 0µs → compile 19ms → shake 0.34ms → optimize 0.30ms → jit 4µs
+  shake: 622 → 17 (97% removed)
 Alice
 25
 30
 
 --- test_typeof_dynamic [PASS] ---
 Running compiler/tests/haxe/test_typeof_dynamic.hx [debug] [preset: Application]...
+  stdlib 1.7ms → parse 0.02ms → typecheck 527ms → mir 0µs → compile 532ms → shake 0.91ms → optimize 3.0ms → jit 7µs
+  shake: 1382 → 84 (93% removed)
 test_typeof_dynamic OK
 
 --- test_typeof_output_parity [PASS] ---
 Running compiler/tests/haxe/test_typeof_output_parity.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 16ms → mir 0µs → compile 19ms → shake 0.32ms → optimize 0.42ms → jit 5µs
+  shake: 639 → 18 (97% removed)
 TFunction
 TClass(String)
 TEnum(Color)
@@ -1523,6 +1871,8 @@ TEnum(Color)
 
 --- test_typeof_parity [PASS] ---
 Running compiler/tests/haxe/test_typeof_parity.hx [debug] [preset: Application]...
+  stdlib 2.1ms → parse 0.02ms → typecheck 19ms → mir 0µs → compile 23ms → shake 0.55ms → optimize 0.48ms → jit 9µs
+  shake: 637 → 18 (97% removed)
 fn-ok
 int-ok
 string-class-ok
@@ -1530,21 +1880,29 @@ enum-ok
 
 --- test_uncaught_exception_parity [PASS] ---
 Running compiler/tests/haxe/test_uncaught_exception_parity.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.01ms → typecheck 15ms → mir 0µs → compile 18ms → shake 0.32ms → optimize 0.58ms → jit 3µs
+  shake: 664 → 25 (96% removed)
 boom
 caught
 done
 
 --- test_untyped_closure_param_inference [PASS] ---
 Running compiler/tests/haxe/test_untyped_closure_param_inference.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.07ms → typecheck 542ms → mir 0µs → compile 547ms → shake 1.2ms → optimize 3.0ms → jit 8µs
+  shake: 1370 → 91 (93% removed)
 PASS untyped-closure-param-inference s=31 d=42
 
 --- test_user_auto_deref_wrapper [PASS] ---
 Running compiler/tests/haxe/test_user_auto_deref_wrapper.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.01ms → typecheck 4.0ms → mir 0µs → compile 6.6ms → shake 0.31ms → optimize 0.47ms → jit 3µs
+  shake: 587 → 13 (97% removed)
 41
 42
 
 --- test_virtual_dispatch [PASS] ---
 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
+  stdlib 1.6ms → parse 0.08ms → typecheck 13ms → mir 0µs → compile 16ms → shake 0.39ms → optimize 0.95ms → jit 4µs
+  shake: 644 → 33 (94% removed)
 Base
 Child
 GrandChild
@@ -1558,14 +1916,20 @@ done
 
 --- test_void_closure_trailing_loop [PASS] ---
 Running compiler/tests/haxe/test_void_closure_trailing_loop.hx [debug] [preset: Application]...
+  stdlib 1.4ms → parse 0.02ms → typecheck 519ms → mir 1µs → compile 524ms → shake 0.84ms → optimize 2.7ms → jit 6µs
+  shake: 1371 → 83 (93% removed)
 PASS void-closure-trailing-loop while=28 for=28
 
 --- test_wasm_callback_closure_capture [PASS] ---
 Running compiler/tests/haxe/test_wasm_callback_closure_capture.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 16ms → mir 0µs → compile 18ms → shake 0.35ms → optimize 0.47ms → jit 4µs
+  shake: 622 → 21 (96% removed)
 7
 
 --- trace_test [PASS] ---
 Running compiler/tests/haxe/trace_test.hx [debug] [preset: Application]...
+  stdlib 1.5ms → parse 0.02ms → typecheck 2.7ms → mir 0µs → compile 5.1ms → shake 0.31ms → optimize 0.10ms → jit 3µs
+  shake: 573 → 5 (99% removed)
 Hello from trace!
 42
 3.14
@@ -1578,8 +1942,8 @@ temp:   0
 
 [load] reading GGUF (k-quants stay quantized; zero-copy)...
 [kv-cache] Q8_0 mode enabled (guest cache + Haxe flash decode)
-[warm] model warmed in 1.438183069229126s
-[load] done in 2.533s
+[warm] model warmed in 1.5419280529022217s
+[load] done in 2.87s
 [meta] qwen2 hidden=896 layers=24 heads=14/2 ffn=4864 vocab=151936 ctx=2048 headDim=64 ropeBase=1000000 normEps=0.0000009999999974752427
 [pool] workers=8
 [tok]  vocab=151936
@@ -1591,7 +1955,7 @@ rep-penalty: 1.3  + no-repeat-8gram
 [gen] streaming...
 A compiler is a software program that translates
 
-[done] 8 tokens in 1.082s (7.392 tok/s, ttft=0.686s, finish=length)
+[done] 8 tokens in 0.643s (12.432 tok/s, ttft=0.322s, finish=length)
 
 
 =========================================
