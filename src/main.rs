@@ -665,6 +665,24 @@ fn parse_threshold_component(s: &str) -> Result<u64, String> {
     }
 }
 
+fn should_surface_compile_warning(d: &diagnostics::Diagnostic, verbose: bool) -> bool {
+    if d.severity != diagnostics::DiagnosticSeverity::Warning {
+        return false;
+    }
+    let Some(code) = d.code.as_deref() else {
+        return false;
+    };
+    if !code.starts_with('W') {
+        return false;
+    }
+
+    // W0014 is an advisory "cross-context iface return recovered late"
+    // hint. It can be extremely noisy on large Nue graphs and does not
+    // change execution; keep it available for annotation work without
+    // making normal cold-start runs scroll through it.
+    verbose || code != "W0014"
+}
+
 impl Preset {
     fn to_tier_preset(self) -> compiler::codegen::TierPreset {
         match self {
@@ -1493,6 +1511,21 @@ fn run_file(
         );
     }
 
+    let resolved_tier_config = resolve_tier_config(
+        preset,
+        preset_override_toml,
+        tier_thresholds.as_ref(),
+        tier_sample_rate,
+        tier_start_interpreted,
+        tier_promotion,
+        manifest_project.as_ref(),
+        verbose,
+        release,
+    );
+    // Snapshot the upgrade flag before moving `resolved_tier_config` into the
+    // backend. `--llvm` forces a whole-module LLVM compile.
+    let auto_upgrade_to_llvm = resolved_tier_config.auto_upgrade_to_llvm_after_main_entry || llvm;
+
     // Read source file
     if !file.exists() {
         return Err(format!("File not found: {}", file.display()));
@@ -1634,6 +1667,63 @@ fn run_file(
         }
     }
 
+    // Auto-define the execution tier so tests / code can conditionally
+    // compile per backend with `#if jit` / `#if llvm` / `#if interp`.
+    // rayzor's JIT is tiered (interp→cranelift→llvm at runtime); `--tier`
+    // only sets the START tier, so the default `run` is still the JIT path.
+    // The tier label therefore reflects the backend the command targets:
+    // `--llvm`/`--tier 3` → llvm, the interpreter-only Embedded preset →
+    // interp, otherwise the default JIT path.
+    let tier_define: &str = if llvm || tier >= 3 {
+        "llvm"
+    } else if matches!(preset, Preset::Embedded) {
+        "interp"
+    } else {
+        "jit"
+    };
+    let mut compile_defines: Vec<String> = vec![tier_define.to_string()];
+
+    // Native source runs now honor manifest `[build.defines]`, matching the
+    // WASM command. The current preprocessor stores define presence only, so
+    // false/0 values are treated as disabled and other values as enabled.
+    if let Some(project) = manifest_project.as_ref() {
+        for (key, value) in project.defines() {
+            let enabled = value
+                .as_deref()
+                .map(|v| {
+                    let v = v.trim();
+                    !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(true);
+            if enabled {
+                compile_defines.push(key);
+            }
+        }
+    }
+
+    // Auto-define a flag per loaded plugin so library code can guard an
+    // optional backend with `#if gpu` and still compile when the plugin is
+    // absent. Deriving it from what is actually loaded means the define can
+    // never disagree with reality, unlike a user-supplied -D.
+    for p in &compiler_plugins {
+        let n = p.name();
+        let short = n
+            .trim_start_matches("lib")
+            .trim_start_matches("rayzor_")
+            .trim_end_matches("_plugins");
+        if !short.is_empty() {
+            compile_defines.push(short.to_string());
+        }
+    }
+    compile_defines.sort();
+    compile_defines.dedup();
+
+    let raw_mir_requested = std::env::var_os("RAYZOR_RAW_MIR").is_some();
+    let opt_level_requested = std::env::var_os("RAYZOR_OPT_LEVEL").is_some();
+    let fast_interpreter_start =
+        resolved_tier_config.start_interpreted && !auto_upgrade_to_llvm && !opt_level_requested;
+    let skip_mir_opt = raw_mir_requested || fast_interpreter_start;
+
     // Check MIR cache: if source hash matches, skip compile+merge+shake entirely
     // Hash main source + all files in class paths for cache invalidation.
     //
@@ -1677,6 +1767,8 @@ fn run_file(
         safety_warnings.hash(&mut h);
         std::env::var("RAYZOR_OPT_LEVEL").ok().hash(&mut h);
         std::env::var("RAYZOR_RAW_MIR").is_ok().hash(&mut h);
+        skip_mir_opt.hash(&mut h);
+        compile_defines.hash(&mut h);
         for dir in &manifest_dirs {
             dir.to_string_lossy().hash(&mut h);
             if let Ok(abs) = dir.canonicalize() {
@@ -1786,36 +1878,7 @@ fn run_file(
             h.begin_phase("compile");
         }
         let t_compile = std::time::Instant::now();
-        // Auto-define the execution tier so tests / code can conditionally
-        // compile per backend with `#if jit` / `#if llvm` / `#if interp`.
-        // rayzor's JIT is tiered (interp→cranelift→llvm at runtime); `--tier`
-        // only sets the START tier, so the default `run` is still the JIT path.
-        // The tier label therefore reflects the backend the command targets:
-        // `--llvm`/`--tier 3` → llvm, the interpreter-only Embedded preset →
-        // interp, otherwise the default JIT path.
-        let tier_define: &str = if llvm || tier >= 3 {
-            "llvm"
-        } else if matches!(preset, Preset::Embedded) {
-            "interp"
-        } else {
-            "jit"
-        };
-        // Auto-define a flag per loaded plugin so library code can guard an
-        // optional backend with `#if gpu` and still compile when the plugin is
-        // absent. Deriving it from what is actually loaded means the define can
-        // never disagree with reality, unlike a user-supplied -D.
-        let mut defines: Vec<String> = vec![tier_define.to_string()];
-        for p in &compiler_plugins {
-            let n = p.name();
-            let short = n
-                .trim_start_matches("lib")
-                .trim_start_matches("rayzor_")
-                .trim_end_matches("_plugins");
-            if !short.is_empty() && !defines.iter().any(|d| d == short) {
-                defines.push(short.to_string());
-            }
-        }
-        let define_refs: Vec<&str> = defines.iter().map(|s| s.as_str()).collect();
+        let define_refs: Vec<&str> = compile_defines.iter().map(|s| s.as_str()).collect();
         let compile_result = compile_helpers::compile_haxe_to_mir_with_defines_and_cache(
             &source,
             file.to_str().unwrap_or("unknown"),
@@ -1852,10 +1915,7 @@ fn run_file(
             // own pass — including them here would double-print them.
             let warns: Vec<&diagnostics::Diagnostic> = compile_diagnostics
                 .iter()
-                .filter(|d| {
-                    d.severity == diagnostics::DiagnosticSeverity::Warning
-                        && d.code.as_deref().is_some_and(|c| c.starts_with('W'))
-                })
+                .filter(|d| should_surface_compile_warning(d, verbose))
                 .collect();
             if !warns.is_empty() {
                 let mut source_map = diagnostics::SourceMap::new();
@@ -1903,7 +1963,15 @@ fn run_file(
         // LICM, CFG simplify). Phase 2 closed the last two known O2 regressions
         // (loop unrolling on multi-phi headers, InliningPass dropping a BinOp
         // dest type via phi-fed operands), so O2 is now the run-default.
-        if std::env::var("RAYZOR_RAW_MIR").is_err() {
+        //
+        // Exception: an interpreter-first, non-LLVM source run is asking for
+        // first-instruction latency. In that mode the interpreter can execute
+        // raw MIR immediately and the tier system can still promote later.
+        // Spending ~1s+ optimizing before `main` defeats the tier contract, so
+        // skip MIR optimization unless the user explicitly requested an opt
+        // level. Eager LLVM runs keep optimizing up front because LLVM is the
+        // point of that mode.
+        if !skip_mir_opt {
             if let Some(ref h) = progress_handle {
                 h.begin_phase("optimize");
             }
@@ -1920,6 +1988,8 @@ fn run_file(
             if let Some(ref h) = progress_handle {
                 h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
             }
+        } else if fast_interpreter_start && verbose {
+            eprintln!("[compile] skipping MIR optimize for interpreter-first startup");
         }
 
         if let Some(ref h) = progress_handle {
@@ -1962,6 +2032,10 @@ fn run_file(
                 let formatter = diagnostics::ErrorFormatter::with_colors();
                 compile_diagnostics
                     .iter()
+                    .filter(|d| {
+                        d.severity == diagnostics::DiagnosticSeverity::Error
+                            || should_surface_compile_warning(d, verbose)
+                    })
                     .map(|d| formatter.format_diagnostic(d, &source_map))
                     .collect()
             } else {
@@ -2058,23 +2132,7 @@ fn run_file(
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
     // Set up tiered JIT backend.
-    let config = resolve_tier_config(
-        preset,
-        preset_override_toml,
-        tier_thresholds.as_ref(),
-        tier_sample_rate,
-        tier_start_interpreted,
-        tier_promotion,
-        manifest_project.as_ref(),
-        verbose,
-        release,
-    );
-
-    // Snapshot the upgrade flag before moving `config` into the backend.
-    // `--llvm` forces a whole-module LLVM compile (was ignored in the feature build).
-    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry || llvm;
-
-    let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
+    let mut backend = TieredBackend::with_symbols(resolved_tier_config, &symbols_ref)?;
 
     // Compile module with tiered JIT
     if let Some(ref h) = progress_handle {
