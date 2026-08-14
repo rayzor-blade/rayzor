@@ -12,7 +12,7 @@ use crate::ir::{
         BladeFieldEntry, BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
         BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
-    IrInstruction, IrModule, Monomorphizer,
+    IrFunctionId, IrInstruction, IrModule, IrValue, Monomorphizer,
 };
 use crate::pipeline::{
     CompilationError, CompilationResult, ErrorCategory, HaxeCompilationPipeline, PipelineConfig,
@@ -150,6 +150,75 @@ fn haxe_file_source_has_macro_hook(file: &parser::HaxeFile) -> bool {
         || source.contains("@:build")
         || source.contains("@:autoBuild")
         || source.contains("@:genericBuild")
+}
+
+fn collect_ir_value_function_refs(value: &IrValue, out: &mut Vec<IrFunctionId>) {
+    match value {
+        IrValue::Function(func_id) => out.push(*func_id),
+        IrValue::Closure {
+            function,
+            environment,
+        } => {
+            out.push(*function);
+            collect_ir_value_function_refs(environment, out);
+        }
+        IrValue::Array(items) | IrValue::Struct(items) => {
+            for item in items {
+                collect_ir_value_function_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_ir_instruction_function_refs(inst: &IrInstruction, out: &mut Vec<IrFunctionId>) {
+    match inst {
+        IrInstruction::CallDirect { func_id, .. }
+        | IrInstruction::FunctionRef { func_id, .. }
+        | IrInstruction::MakeClosure { func_id, .. } => out.push(*func_id),
+        IrInstruction::Const { value, .. } => collect_ir_value_function_refs(value, out),
+        _ => {}
+    }
+}
+
+fn retain_referenced_stdlib_functions(
+    stdlib_mir: &mut IrModule,
+    root_names: &BTreeSet<String>,
+) -> usize {
+    use std::collections::VecDeque;
+
+    let before = stdlib_mir.functions.len();
+    let mut needed: BTreeSet<IrFunctionId> = BTreeSet::new();
+    let mut queue = VecDeque::new();
+
+    for (func_id, func) in &stdlib_mir.functions {
+        if root_names.contains(&func.name) {
+            needed.insert(*func_id);
+            queue.push_back(*func_id);
+        }
+    }
+
+    while let Some(func_id) = queue.pop_front() {
+        let Some(func) = stdlib_mir.functions.get(&func_id) else {
+            continue;
+        };
+        let mut refs = Vec::new();
+        for block in func.cfg.blocks.values() {
+            for inst in &block.instructions {
+                collect_ir_instruction_function_refs(inst, &mut refs);
+            }
+        }
+        for ref_id in refs {
+            if stdlib_mir.functions.contains_key(&ref_id) && needed.insert(ref_id) {
+                queue.push_back(ref_id);
+            }
+        }
+    }
+
+    stdlib_mir
+        .functions
+        .retain(|func_id, _| needed.contains(func_id));
+    before.saturating_sub(stdlib_mir.functions.len())
 }
 
 /// Represents a complete compilation unit with multiple source files
@@ -6435,8 +6504,41 @@ impl CompilationUnit {
             debug!("DEBUG: Renumbering stdlib functions with offset {} (max_user_func={}, max_user_extern={})",
                   offset, max_user_func_id, max_user_extern_id);
 
+            // Build map of function names to ALL IDs in the user module (before merging).
+            // Multiple import modules can have duplicate extern declarations of the same function.
+            // We need to track ALL of them to replace every copy.
+            let mut user_func_name_to_ids: BTreeMap<String, Vec<IrFunctionId>> = BTreeMap::new();
+            for (func_id, func) in &mir_module.functions {
+                user_func_name_to_ids
+                    .entry(func.name.clone())
+                    .or_default()
+                    .push(*func_id);
+            }
+
+            // The full stdlib/runtime MIR module is large, and most source cold
+            // runs only need the wrappers that replace stubs already emitted in
+            // the user/import MIR. Keep those roots plus their transitive direct
+            // function references; tree-shake still runs later as the semantic
+            // safety net.
+            if std::env::var_os("RAYZOR_FULL_STDLIB_MERGE").is_none() {
+                let needed_stdlib_names: BTreeSet<String> = user_func_name_to_ids
+                    .iter()
+                    .filter(|(_, existing_ids)| {
+                        existing_ids
+                            .iter()
+                            .any(|id| !merged_import_func_ids.contains(id))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                let dropped =
+                    retain_referenced_stdlib_functions(&mut stdlib_mir, &needed_stdlib_names);
+                debug!(
+                    "DEBUG: Selective stdlib merge dropped {} unreferenced functions",
+                    dropped
+                );
+            }
+
             // Build mapping of old stdlib IDs to new renumbered IDs
-            use crate::ir::IrFunctionId;
             use std::collections::BTreeMap;
             let mut id_mapping: BTreeMap<IrFunctionId, IrFunctionId> = BTreeMap::new();
 
@@ -6510,17 +6612,6 @@ impl CompilationUnit {
             // the lowering process, but these might have incorrect signatures due to type
             // inference issues. The stdlib version is the source of truth, so we REPLACE
             // the user's version with the stdlib's version.
-
-            // Build map of function names to ALL IDs in the user module (before merging)
-            // Multiple import modules can have duplicate extern declarations of the same function.
-            // We need to track ALL of them to replace every copy.
-            let mut user_func_name_to_ids: BTreeMap<String, Vec<IrFunctionId>> = BTreeMap::new();
-            for (func_id, func) in &mir_module.functions {
-                user_func_name_to_ids
-                    .entry(func.name.clone())
-                    .or_default()
-                    .push(*func_id);
-            }
 
             // Build a map of old ID -> new ID for all replacements
             let mut id_replacements: BTreeMap<IrFunctionId, IrFunctionId> = BTreeMap::new();
