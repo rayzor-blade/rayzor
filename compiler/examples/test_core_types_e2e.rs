@@ -688,7 +688,9 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["haxe_array_push_i64", "haxe_array_pop_ptr"])
+        // `pop()` on an `Array<Int>` lowers to the i64 specialization, the same
+        // way `push` does — a pointer pop would hand back a boxed element.
+        .expect_mir_calls(vec!["haxe_array_push_i64", "haxe_array_pop_i64"])
         .expect_level(TestLevel::Execution),
     );
 

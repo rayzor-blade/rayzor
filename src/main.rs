@@ -2302,7 +2302,7 @@ fn run_file(
     rayzor_runtime::haxe_sys::set_trace_callback(None);
 
     // Render TUI
-    if let Some(ref tui) = progress_tui_ref.as_ref().filter(|_| !plain) {
+    if let Some(tui) = progress_tui_ref.as_ref().filter(|_| !plain) {
         let captured = output_capture.lock().unwrap();
         let handle = tui.handle();
         for line in captured.iter() {
