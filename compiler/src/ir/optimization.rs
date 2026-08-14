@@ -1997,6 +1997,17 @@ pub enum OptimizationLevel {
 }
 
 impl PassManager {
+    /// The passes a module cannot be run without, whatever the optimization
+    /// level. A startup path that skips optimization to save compile time must
+    /// still run these: `InsertFreePass` inserts the frees for heap
+    /// allocations the HIR drop analysis does not cover, so a module without
+    /// it misbehaves at runtime rather than merely running slower.
+    pub fn required_only() -> Self {
+        let mut manager = Self::new();
+        manager.add_pass(super::insert_free::InsertFreePass::new());
+        manager
+    }
+
     /// Create optimization pipeline for a specific level.
     pub fn for_level(level: OptimizationLevel) -> Self {
         let mut manager = Self::new();
