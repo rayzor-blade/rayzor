@@ -7,10 +7,10 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, load_symbol_manifest_from_bytes, save_blade_with_state,
-        BladeAbstractInfo, BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo,
-        BladeFieldEntry, BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
-        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
+        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo, BladeAccessor,
+        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
+        BladeMetadata, BladeMethodInfo, BladePropertyEntry, BladeSymbolManifest,
+        BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrFunctionId, IrInstruction, IrModule, IrValue, Monomorphizer,
 };
@@ -1654,15 +1654,19 @@ impl CompilationUnit {
     /// Returns true if symbols were loaded successfully
     pub fn load_stdlib_symbols(&mut self) -> bool {
         let manifest_path = PathBuf::from(".rayzor/blade/stdlib/stdlib.bsym");
-        let manifest = if manifest_path.exists() {
-            load_symbol_manifest(&manifest_path)
-        } else {
+        // Only a manifest generated for THIS stdlib may stand in for parsing it.
+        // A copy compiled into the binary cannot: nothing regenerates the asset
+        // when haxe-std changes, and the loader validates only magic and format
+        // version, so the symbols it registers can describe a different stdlib
+        // than the one being compiled against.
+        if !manifest_path.exists() {
             debug!(
-                "[BLADE] No symbol manifest found at {}; using bundled stdlib manifest",
+                "[BLADE] No symbol manifest at {}; parsing stdlib sources",
                 manifest_path.display()
             );
-            load_symbol_manifest_from_bytes(include_bytes!("../assets/stdlib.bsym"))
-        };
+            return false;
+        }
+        let manifest = load_symbol_manifest(&manifest_path);
 
         match manifest {
             Ok(manifest) => {
