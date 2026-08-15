@@ -5364,11 +5364,22 @@ impl<'a> AstLowering<'a> {
             }
         };
 
+        // Packaged types are published under their qualified name; the simple
+        // name is only bound when the module was registered from source.
+        let qualified_interned = self
+            .context
+            .string_interner
+            .intern(&format!("haxe.ds.{concrete_name}"));
         let concrete_name_interned = self.context.string_interner.intern(concrete_name);
         let symbol = self
             .context
             .symbol_table
-            .lookup_symbol(ScopeId::first(), concrete_name_interned)?;
+            .lookup_symbol(ScopeId::first(), qualified_interned)
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), concrete_name_interned)
+            })?;
         Some(
             self.context
                 .type_table
@@ -5421,15 +5432,24 @@ impl<'a> AstLowering<'a> {
             }
         };
 
-        // Resolve the concrete class symbol by name. Stdlib extern classes
-        // register under their simple name (StringMap / IntMap / etc.) in
-        // the root scope even when the FQN is `haxe.ds.StringMap`.
+        // Resolve the concrete class symbol. `haxe.ds.StringMap` and friends
+        // are packaged, so they are published under their qualified name;
+        // the simple name is only bound when the module was registered from
+        // source. Try the qualified name first and fall back to the simple
+        // one so both registration paths resolve to the same class.
+        let qualified = format!("haxe.ds.{concrete_name}");
+        let qualified_interned = self.context.string_interner.intern(&qualified);
         let concrete_name_interned = self.context.string_interner.intern(concrete_name);
-        let symbol = match self
+        let resolved = self
             .context
             .symbol_table
-            .lookup_symbol(ScopeId::first(), concrete_name_interned)
-        {
+            .lookup_symbol(ScopeId::first(), qualified_interned)
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), concrete_name_interned)
+            });
+        let symbol = match resolved {
             Some(sym) => sym,
             None => {
                 // Concrete class isn't loaded — keep the original to avoid
