@@ -1032,6 +1032,15 @@ impl CompilationUnit {
         Some(cache_dir.join(format!("{}.blade", module_name)))
     }
 
+    /// This module's artifact in the standard library carried by the binary,
+    /// if it holds one for the configuration being compiled.
+    fn embedded_snapshot_entry(&self, source_path: &str) -> Option<&'static [u8]> {
+        let file = self.blade_cache_path(source_path)?;
+        let file = file.file_name()?.to_str()?;
+        let key = crate::ir::snapshot::key_for(&self.config.cache_discriminator(), file);
+        crate::ir::snapshot::installed().get(key.as_str()).copied()
+    }
+
     /// Where a module's artifact lives in the PREPARED store: a shared cache
     /// written once by `rayzor cache warm` rather than per project.
     ///
@@ -3936,17 +3945,21 @@ impl CompilationUnit {
             return None;
         }
 
-        // Prefer this project's own artifact; fall back to the prepared store
-        // for a module this project has never compiled.
-        let blade_path = match self.blade_cache_path(source_path) {
-            Some(path) if path.exists() => path,
-            _ => match self.prepared_blade_path(source_path) {
-                Some(path) if path.exists() => path,
-                _ => return None,
+        // Prefer this project's own artifact. Failing that, take the standard
+        // library the binary carries, so a project that has never been built
+        // does not lower the library again.
+        let loaded = match self.blade_cache_path(source_path) {
+            Some(path) if path.exists() => load_blade(&path),
+            _ => match self.embedded_snapshot_entry(source_path) {
+                Some(bytes) => crate::ir::blade::load_blade_from_bytes(bytes),
+                None => match self.prepared_blade_path(source_path) {
+                    Some(path) if path.exists() => load_blade(&path),
+                    _ => return None,
+                },
             },
         };
 
-        match load_blade(&blade_path) {
+        match loaded {
             Ok((mir, metadata, symbols, cached_maps)) => {
                 let current_hash = self.hash_source_for_config(source_path, source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");

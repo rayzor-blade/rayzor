@@ -384,17 +384,29 @@ pub fn load_blade(
     // mmap avoids copying file contents into a heap Vec — the OS pages
     // the data directly from disk into virtual memory on demand.
     let file = std::fs::File::open(path.as_ref())?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BladeError::Io(e))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(BladeError::Io)?;
+    load_blade_from_bytes(&mmap)
+}
 
-    // Deserialize using postcard from the mmap'd region
-    let blade: BladeModule = postcard::from_bytes(&mmap)?;
+/// Decode a module artifact already resident in memory — an entry of the
+/// snapshot embedded in the binary, which the loader reads without touching
+/// the filesystem.
+pub fn load_blade_from_bytes(
+    bytes: &[u8],
+) -> Result<
+    (
+        IrModule,
+        BladeMetadata,
+        Option<BladeTypeInfo>,
+        Option<BladeCachedMaps>,
+    ),
+    BladeError,
+> {
+    let blade: BladeModule = postcard::from_bytes(bytes)?;
 
-    // Validate magic number
     if &blade.magic != BLADE_MAGIC {
         return Err(BladeError::InvalidMagic);
     }
-
-    // Check version
     if blade.version != BLADE_VERSION {
         return Err(BladeError::UnsupportedVersion(blade.version));
     }
