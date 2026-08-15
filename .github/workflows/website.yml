@@ -106,7 +106,12 @@ jobs:
       # Renders the design sources into the pages that ship, with the compiler
       # chart taken from the benchmark run that triggered this deploy rather
       # than from whatever was last committed.
-      - name: Build site
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Render pages
         run: |
           if [ -d "artifacts/benchmark-results" ]; then
             node website/build.mjs --results artifacts/benchmark-results
