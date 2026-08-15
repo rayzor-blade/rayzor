@@ -2747,6 +2747,60 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Bring an imported enum's constructors into scope under their bare names.
+    ///
+    /// `import haxe.ds.Option;` makes `Some`/`None` usable unqualified. A
+    /// packaged enum restored from the BLADE manifest publishes its
+    /// constructors under qualified names, so the bare names only exist once
+    /// something imports the enum — which is exactly Haxe's own rule.
+    fn import_enum_constructors(&mut self, enum_symbol: SymbolId) {
+        if self
+            .context
+            .symbol_table
+            .get_symbol(enum_symbol)
+            .map(|s| s.kind)
+            != Some(crate::tast::symbols::SymbolKind::Enum)
+        {
+            return;
+        }
+        let Some(variants) = self
+            .context
+            .symbol_table
+            .get_enum_variants(enum_symbol)
+            .cloned()
+        else {
+            return;
+        };
+        for variant in variants {
+            let Some(name) = self
+                .context
+                .symbol_table
+                .get_symbol(variant)
+                .map(|s| s.name)
+            else {
+                continue;
+            };
+            // A name already bound in the root scope belongs to whoever claimed
+            // it; an import adds constructors, it never displaces them.
+            self.context
+                .symbol_table
+                .add_symbol_alias(variant, ScopeId::first(), name);
+            // The bare name now reaches it, so it counts as a candidate again
+            // wherever the compiler weighs same-named constructors.
+            self.context
+                .symbol_table
+                .clear_symbol_flags(variant, crate::tast::symbols::SymbolFlags::QUALIFIED_ONLY);
+            let root = self
+                .context
+                .scope_tree
+                .get_scope_mut(ScopeId::first())
+                .expect("Root scope should exist");
+            if !root.has_symbol(name) {
+                root.add_symbol(variant, name);
+            }
+        }
+    }
+
     /// Lower an import declaration
     fn lower_import(&mut self, import: &Import) -> LoweringResult<TypedImport> {
         let imported_symbols = match &import.mode {
@@ -2973,6 +3027,8 @@ impl<'a> AstLowering<'a> {
                     .get_scope_mut(ScopeId::first())
                     .expect("Root scope should exist")
                     .add_symbol(imported_symbol, symbol_name);
+
+                self.import_enum_constructors(imported_symbol);
             }
         }
 
@@ -8151,9 +8207,15 @@ impl<'a> AstLowering<'a> {
                             .map(|s| s.name);
                         let mut parent_enum_names: Vec<String> = Vec::new();
                         if let Some(vname) = variant_name {
+                            // A constructor bound only under its qualified name
+                            // is not reachable as a bare `Some` here, so it is
+                            // not a candidate the scope walk could have picked.
                             let same_named = self.context.symbol_table.find_symbols(|s| {
                                 s.kind == crate::tast::symbols::SymbolKind::EnumVariant
                                     && s.name == vname
+                                    && !s
+                                        .flags
+                                        .contains(crate::tast::symbols::SymbolFlags::QUALIFIED_ONLY)
                             });
                             for v in same_named {
                                 let parent = self

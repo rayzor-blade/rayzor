@@ -350,6 +350,13 @@ impl SymbolFlags {
     /// `@:derive([Sync])` on the type; mirrored for the same cross-file reason.
     pub const DERIVE_SYNC: Self = Self(1 << 24);
 
+    /// Bound in the root scope under its QUALIFIED name only. Set on the
+    /// members of a packaged type restored from a BLADE symbol manifest, whose
+    /// bare name a module reaches only by importing it. Name-based scans must
+    /// skip these: the symbol exists in every compilation, but naming it
+    /// without the import never resolves to it.
+    pub const QUALIFIED_ONLY: Self = Self(1 << 25);
+
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)
     }
@@ -748,6 +755,20 @@ impl SymbolTable {
                 // the memory layout or any references.
                 let symbol_ptr = symbol_ref as *const Symbol as *mut Symbol;
                 (*symbol_ptr).flags = (*symbol_ptr).flags.union(flags);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Drop flags from a symbol
+    pub fn clear_symbol_flags(&mut self, id: SymbolId, flags: SymbolFlags) -> bool {
+        if let Some(&symbol_ref) = self.symbols_by_id.get(&id) {
+            unsafe {
+                // SAFETY: We're only modifying the flags field which doesn't affect
+                // the memory layout or any references.
+                let symbol_ptr = symbol_ref as *const Symbol as *mut Symbol;
+                (*symbol_ptr).flags.remove(flags);
             }
             return true;
         }

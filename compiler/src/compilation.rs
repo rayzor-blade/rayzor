@@ -7,10 +7,10 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo, BladeAccessor,
-        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
-        BladeMetadata, BladeMethodInfo, BladePropertyEntry, BladeSymbolManifest,
-        BladeTypeAliasInfo, BladeTypeInfo,
+        load_blade, load_symbol_manifest, load_symbol_manifest_from_bytes, save_blade_with_state,
+        BladeAbstractInfo, BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo,
+        BladeFieldEntry, BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
+        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrFunctionId, IrInstruction, IrModule, IrValue, Monomorphizer,
 };
@@ -22,8 +22,8 @@ use crate::tast::{
     namespace::{ImportResolver, NamespaceResolver},
     stdlib_loader::{StdLibConfig, StdLibLoader},
     symbols::SymbolFlags,
-    AstLowering, ScopeId, ScopeTree, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId,
-    TypeKind, TypeTable, TypedFile,
+    AstLowering, InternedString, ScopeId, ScopeTree, SourceLocation, StringInterner, SymbolId,
+    SymbolTable, TypeId, TypeKind, TypeTable, TypedFile,
 };
 use log::{debug, info, trace, warn};
 use parser::{parse_haxe_file, parse_haxe_file_with_debug, HaxeFile};
@@ -62,7 +62,6 @@ pub struct TypecheckStageTimings {
     pub import_fresh_compiles: usize,
     pub import_typedef_fresh: usize,
     pub import_already_compiled: usize,
-    pub import_extern_skips: usize,
 }
 
 #[inline]
@@ -121,23 +120,25 @@ fn is_stdtypes_ambient_import(path: &str) -> bool {
             .is_some_and(is_stdtypes_ambient_name)
 }
 
+/// Root-scope name a manifest-restored type is published under.
+///
+/// Only a package-less type is ambiently visible by its bare name. `haxe.zip.Entry`
+/// is `Entry` only inside a module that imports it, so a packaged type takes its
+/// qualified name in the root scope and leaves the bare name free. Publishing the
+/// bare name instead makes a user's own `class Entry` collide with the stdlib
+/// symbol: pre-registration sees the name taken, skips the user declaration, and
+/// the file's type silently resolves to the stdlib one.
 #[inline]
-fn is_extern_only_stdlib_base(base: &str) -> bool {
-    matches!(
-        base,
-        "Math" | "Array" | "String" | "Std" | "Class" | "Enum" | "EnumValue" | "Any"
-    )
-}
-
-#[inline]
-fn is_extern_only_stdlib_import(path: &str) -> bool {
-    is_extern_only_stdlib_base(path.rsplit('.').next().unwrap_or(path))
-}
-
-#[inline]
-fn is_manifest_backed_ambient_import(path: &str, stdlib_manifest_loaded: bool) -> bool {
-    is_stdtypes_ambient_import(path)
-        || (stdlib_manifest_loaded && is_extern_only_stdlib_import(path))
+fn manifest_root_name(
+    package: &[String],
+    short_name: InternedString,
+    qualified_name: InternedString,
+) -> InternedString {
+    if package.is_empty() {
+        short_name
+    } else {
+        qualified_name
+    }
 }
 
 #[inline]
@@ -236,6 +237,19 @@ pub struct CompilationUnit {
     /// In that mode top-level extern-only stdlib imports are already known and
     /// should not be resolved back to source during cold import discovery.
     stdlib_manifest_loaded: bool,
+
+    /// Short name → symbol for manifest types published under their qualified
+    /// name. A manifest records a field or parameter type as it was written in
+    /// source, so `haxe.io.Bytes` may appear as bare `Bytes`; resolving those
+    /// signatures needs a short-name route, and keeping it here instead of in
+    /// the root scope leaves the bare name free for a user declaration.
+    manifest_types_by_short_name: BTreeMap<InternedString, SymbolId>,
+
+    /// Type parameters of the manifest type whose members are being registered.
+    /// A signature naming `T` means that type's parameter, not a global type,
+    /// and member registration goes through `parse_type_string`, which has no
+    /// other way to see the enclosing declaration.
+    manifest_type_params: BTreeMap<String, TypeId>,
 
     /// Macro expansion origins (for IDE hints showing expanded results)
     pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
@@ -760,6 +774,8 @@ impl CompilationUnit {
             import_hx_files: Vec::new(),
             user_files: Vec::new(),
             stdlib_manifest_loaded: false,
+            manifest_types_by_short_name: BTreeMap::new(),
+            manifest_type_params: BTreeMap::new(),
             macro_expansions: Vec::new(),
             string_interner,
             symbol_table: SymbolTable::new(),
@@ -900,12 +916,20 @@ impl CompilationUnit {
         };
         self.stdlib_manifest_loaded = bsym_loaded;
 
-        // Load default stdlib imports (StdTypes, etc.) only when we have not
-        // already registered them from the BLADE symbol manifest. StdTypes are
-        // top-level compiler-visible types, not a user import; parsing the file
-        // here on the bsym path was cold-start work with no semantic payload.
+        // Load default stdlib imports (StdTypes, etc.). The BLADE manifest
+        // restores their SYMBOLS, so re-running pre-registration on top would
+        // duplicate them — but it carries no DECLARATIONS, and the
+        // static-signature index reads declarations to type call sites. Parse
+        // the same files for that index alone, so a call resolves its declared
+        // parameter types identically on both paths.
         if bsym_loaded {
-            debug!("BLADE symbols loaded; skipping default stdlib source parse");
+            for file in loader.load_default_imports() {
+                let Some(source) = file.input.as_deref() else {
+                    continue;
+                };
+                self.parse_file(&file.filename, source)
+                    .map_err(|e| format!("Parse error in {}: {}", file.filename, e))?;
+            }
         } else {
             let default_files = loader.load_default_imports();
             for file in default_files {
@@ -1654,19 +1678,15 @@ impl CompilationUnit {
     /// Returns true if symbols were loaded successfully
     pub fn load_stdlib_symbols(&mut self) -> bool {
         let manifest_path = PathBuf::from(".rayzor/blade/stdlib/stdlib.bsym");
-        // Only a manifest generated for THIS stdlib may stand in for parsing it.
-        // A copy compiled into the binary cannot: nothing regenerates the asset
-        // when haxe-std changes, and the loader validates only magic and format
-        // version, so the symbols it registers can describe a different stdlib
-        // than the one being compiled against.
-        if !manifest_path.exists() {
+        let manifest = if manifest_path.exists() {
+            load_symbol_manifest(&manifest_path)
+        } else {
             debug!(
-                "[BLADE] No symbol manifest at {}; parsing stdlib sources",
+                "[BLADE] No symbol manifest at {}; using the bundled one",
                 manifest_path.display()
             );
-            return false;
-        }
-        let manifest = load_symbol_manifest(&manifest_path);
+            load_symbol_manifest_from_bytes(include_bytes!("../assets/stdlib.bsym"))
+        };
 
         match manifest {
             Ok(manifest) => {
@@ -1809,6 +1829,37 @@ impl CompilationUnit {
             total_classes, total_enums, total_aliases, total_abstracts, total_methods);
     }
 
+    /// Index a packaged manifest type under its short name for signature
+    /// resolution. First registration wins, so the mapping is stable per run.
+    fn index_manifest_short_name(
+        &mut self,
+        package: &[String],
+        short_name: InternedString,
+        symbol_id: SymbolId,
+    ) {
+        if !package.is_empty() {
+            self.manifest_types_by_short_name
+                .entry(short_name)
+                .or_insert(symbol_id);
+        }
+    }
+
+    /// Mint a TypeParameter symbol and TypeId for each declared name.
+    fn register_manifest_type_params(&mut self, names: &[String]) -> BTreeMap<String, TypeId> {
+        let mut params = BTreeMap::new();
+        for name in names {
+            let interned = self.string_interner.intern(name);
+            let symbol = self.symbol_table.create_type_parameter(interned, vec![]);
+            let type_id = self.type_table.borrow_mut().create_type_parameter(
+                symbol,
+                vec![],
+                crate::tast::core::Variance::Invariant,
+            );
+            params.insert(name.clone(), type_id);
+        }
+        params
+    }
+
     /// Register a class from BLADE symbol info
     fn register_class_from_blade(&mut self, class_info: &BladeClassInfo) -> SymbolId {
         let short_name = self.string_interner.intern(&class_info.name);
@@ -1823,12 +1874,15 @@ impl CompilationUnit {
         let class_scope = self.scope_tree.create_scope(Some(ScopeId::first()));
 
         // Create class symbol using the existing helper method
+        let root_name = manifest_root_name(&class_info.package, short_name, qualified_interned);
         let symbol_id = self
             .symbol_table
-            .create_class_in_scope(short_name, ScopeId::first());
+            .create_class_in_scope(root_name, ScopeId::first());
+        self.index_manifest_short_name(&class_info.package, short_name, symbol_id);
 
         // Update symbol metadata including the class scope
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
+            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             sym.scope_id = class_scope; // Set the scope where members are registered
@@ -1864,6 +1918,21 @@ impl CompilationUnit {
         // Register qualified name alias
         self.symbol_table
             .add_symbol_alias(symbol_id, ScopeId::first(), qualified_interned);
+
+        // A generic class's parameters, so `Channel<T>.receive():T` restores as
+        // a type parameter rather than an unresolved placeholder. Callers
+        // recover the ordered ids from the symbol table to substitute the
+        // arguments at each instantiation.
+        let type_params = self.register_manifest_type_params(&class_info.type_params);
+        if !type_params.is_empty() {
+            let ordered: Vec<TypeId> = class_info
+                .type_params
+                .iter()
+                .filter_map(|name| type_params.get(name).copied())
+                .collect();
+            self.symbol_table.set_class_type_params(symbol_id, ordered);
+        }
+        let outer_type_params = std::mem::replace(&mut self.manifest_type_params, type_params);
 
         // Register instance methods
         for method in &class_info.methods {
@@ -1905,6 +1974,8 @@ impl CompilationUnit {
                 .entry(symbol_id)
                 .or_insert_with(|| restored_fields.clone());
         }
+
+        self.manifest_type_params = outer_type_params;
 
         trace!(
             "[BLADE] Registered class: {} ({} methods, {} fields) in scope {:?}",
@@ -2049,12 +2120,15 @@ impl CompilationUnit {
         let qualified_interned = self.string_interner.intern(&qualified_name);
 
         // Create enum symbol using the existing helper method
+        let root_name = manifest_root_name(&enum_info.package, short_name, qualified_interned);
         let symbol_id = self
             .symbol_table
-            .create_enum_in_scope(short_name, ScopeId::first());
+            .create_enum_in_scope(root_name, ScopeId::first());
+        self.index_manifest_short_name(&enum_info.package, short_name, symbol_id);
 
         // Update symbol metadata
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
+            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             if enum_info.is_extern {
@@ -2063,19 +2137,12 @@ impl CompilationUnit {
         }
 
         // Create type parameters for generic enums (e.g., Option<T>, Result<T, E>)
-        let mut type_param_ids = Vec::new();
-        let mut type_param_map: BTreeMap<String, TypeId> = BTreeMap::new();
-        for tp_name in &enum_info.type_params {
-            let tp_interned = self.string_interner.intern(tp_name);
-            let tp_symbol = self.symbol_table.create_type_parameter(tp_interned, vec![]);
-            let tp_type = self.type_table.borrow_mut().create_type_parameter(
-                tp_symbol,
-                vec![],
-                crate::tast::core::Variance::Invariant,
-            );
-            type_param_ids.push(tp_type);
-            type_param_map.insert(tp_name.clone(), tp_type);
-        }
+        let type_param_map = self.register_manifest_type_params(&enum_info.type_params);
+        let type_param_ids: Vec<TypeId> = enum_info
+            .type_params
+            .iter()
+            .filter_map(|name| type_param_map.get(name).copied())
+            .collect();
 
         // Create enum type with type parameters
         let enum_type = self
@@ -2098,11 +2165,26 @@ impl CompilationUnit {
         // during pattern matching and constructor calls
         for variant in &enum_info.variants {
             let variant_name = self.string_interner.intern(&variant.name);
+            // A packaged enum's constructors are no more ambient than the enum
+            // itself: `Some`/`None` belong to `haxe.ds.Option`, and a bare root
+            // slot here takes the name a user enum's own arm needs.
+            let variant_root_name = if enum_info.package.is_empty() {
+                variant_name
+            } else {
+                self.string_interner
+                    .intern(&format!("{}.{}", qualified_name, variant.name))
+            };
             let variant_symbol = self.symbol_table.create_enum_variant_in_scope(
-                variant_name,
+                variant_root_name,
                 ScopeId::first(),
                 symbol_id,
             );
+            if variant_root_name != variant_name {
+                if let Some(sym) = self.symbol_table.get_symbol_mut(variant_symbol) {
+                    sym.name = variant_name;
+                    sym.flags = sym.flags.union(SymbolFlags::QUALIFIED_ONLY);
+                }
+            }
 
             // For generic enum variants whose params reference type parameters,
             // create a Function type with proper TypeParameter TypeIds so
@@ -2162,12 +2244,15 @@ impl CompilationUnit {
         let qualified_interned = self.string_interner.intern(&qualified_name);
 
         // Create type alias symbol using the existing helper method
+        let root_name = manifest_root_name(&alias_info.package, short_name, qualified_interned);
         let symbol_id = self
             .symbol_table
-            .create_type_alias_in_scope(short_name, ScopeId::first());
+            .create_type_alias_in_scope(root_name, ScopeId::first());
+        self.index_manifest_short_name(&alias_info.package, short_name, symbol_id);
 
         // Update symbol metadata
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
+            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
         }
@@ -2219,15 +2304,18 @@ impl CompilationUnit {
         let abstract_scope = self.scope_tree.create_scope(Some(ScopeId::first()));
 
         // Create abstract symbol using the existing helper method
+        let root_name = manifest_root_name(&abstract_info.package, short_name, qualified_interned);
         let symbol_id = self
             .symbol_table
-            .create_abstract_in_scope(short_name, ScopeId::first());
+            .create_abstract_in_scope(root_name, ScopeId::first());
+        self.index_manifest_short_name(&abstract_info.package, short_name, symbol_id);
 
         // Parse the underlying type
         let underlying_type = self.parse_type_string(&abstract_info.underlying_type);
 
         // Update symbol metadata including the abstract scope
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
+            sym.name = short_name;
             sym.qualified_name = Some(qualified_interned);
             sym.is_exported = true;
             sym.scope_id = abstract_scope; // Set the scope where methods are registered
@@ -2283,6 +2371,11 @@ impl CompilationUnit {
     /// Parse a type string (e.g., "Array<Int>", "String", "Null<Float>") and return a TypeId
     fn parse_type_string(&mut self, type_str: &str) -> TypeId {
         let type_str = type_str.trim();
+
+        // A parameter of the type being registered shadows everything else.
+        if let Some(type_id) = self.manifest_type_params.get(type_str) {
+            return *type_id;
+        }
 
         // Handle primitives
         match type_str {
@@ -2371,20 +2464,28 @@ impl CompilationUnit {
 
         // Simple class/enum name
         if let Some(symbol_id) = self.lookup_type_symbol(type_str) {
-            // If the resolved symbol is a TypeAlias, return its existing type_id
-            // (the TypeAlias type) instead of wrapping it in a Class type with the
-            // alias's symbol_id. Wrapping would synthesise a bogus Class { symbol_id:
-            // <typedef-symbol> } whose `symbol_id` doesn't point at a class — every
-            // downstream `resolve_type_to_class_symbol` then returns None and method
-            // dispatch silently falls through to the wrong class's same-named
-            // method (e.g., `bytes.set(...)` jumping into `VecI32.set`).
-            let alias_type = self
+            // A TypeAlias, Abstract or Enum already OWNS a type; return it
+            // instead of wrapping the symbol in a Class type. Wrapping would
+            // synthesise a bogus Class { symbol_id: <non-class-symbol> }: every
+            // downstream `resolve_type_to_class_symbol` then returns None and
+            // method dispatch silently falls through to the wrong class's
+            // same-named method (e.g., `bytes.set(...)` jumping into
+            // `VecI32.set`), while a `@:coreType` abstract like SIMD4f loses its
+            // vector representation and lowers as a pointer.
+            let own_type = self
                 .symbol_table
                 .get_symbol(symbol_id)
-                .filter(|s| s.kind == crate::tast::symbols::SymbolKind::TypeAlias)
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        crate::tast::symbols::SymbolKind::TypeAlias
+                            | crate::tast::symbols::SymbolKind::Abstract
+                            | crate::tast::symbols::SymbolKind::Enum
+                    )
+                })
                 .map(|s| s.type_id)
                 .filter(|t| t.is_valid());
-            if let Some(t) = alias_type {
+            if let Some(t) = own_type {
                 return t;
             }
             return self
@@ -2467,7 +2568,10 @@ impl CompilationUnit {
             }
         }
 
-        None
+        // Packaged manifest types are published under their qualified name, so
+        // a manifest signature naming one by its short name resolves through
+        // the manifest index rather than the root scope.
+        self.manifest_types_by_short_name.get(&interned).copied()
     }
 
     /// Extract all class references from a Haxe AST file.
@@ -3081,25 +3185,12 @@ impl CompilationUnit {
             if is_stdtypes_ambient_import(name) {
                 continue;
             }
-            if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(name) {
-                if self.config.profile_typecheck {
-                    self.typecheck_timings.import_extern_skips += 1;
-                }
-                continue;
-            }
             to_process.push_back(name.clone());
         }
         let mut visited: BTreeSet<String> = BTreeSet::new();
 
         while let Some(qualified_path) = to_process.pop_front() {
-            if is_manifest_backed_ambient_import(&qualified_path, self.stdlib_manifest_loaded)
-                || visited.contains(&qualified_path)
-            {
-                if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(&qualified_path) {
-                    if self.config.profile_typecheck {
-                        self.typecheck_timings.import_extern_skips += 1;
-                    }
-                }
+            if is_stdtypes_ambient_import(&qualified_path) || visited.contains(&qualified_path) {
                 continue;
             }
             visited.insert(qualified_path.clone());
@@ -3152,22 +3243,6 @@ impl CompilationUnit {
                 continue;
             }
 
-            // BLADE manifests register extern-only stdlib classes up front.
-            // They have no Haxe bodies we need to lower, so do not spend cold
-            // start time reading/parsing them just to skip them later.
-            let base = std::path::Path::new(&file_path_str)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if self.namespace_resolver.is_file_loaded(&file_path)
-                && is_extern_only_stdlib_base(base)
-            {
-                if self.config.profile_typecheck {
-                    self.typecheck_timings.import_extern_skips += 1;
-                }
-                continue;
-            }
-
             // Read and parse to extract imports
             let source = match std::fs::read_to_string(&file_path) {
                 Ok(s) => s,
@@ -3181,12 +3256,7 @@ impl CompilationUnit {
             };
             // Queue dependencies for processing
             for dep in &deps {
-                if is_manifest_backed_ambient_import(dep, self.stdlib_manifest_loaded) {
-                    if self.stdlib_manifest_loaded && is_extern_only_stdlib_import(dep) {
-                        if self.config.profile_typecheck {
-                            self.typecheck_timings.import_extern_skips += 1;
-                        }
-                    }
+                if is_stdtypes_ambient_import(dep) {
                     continue;
                 }
                 if !visited.contains(dep) {
@@ -3456,27 +3526,6 @@ impl CompilationUnit {
                 self.typecheck_timings.import_already_compiled += 1;
             }
             return true;
-        }
-
-        // Skip extern-only stdlib files whose types are already registered via bsym.
-        // These files have no function bodies — their methods map to runtime externs
-        // via MIR wrappers. Compiling them produces 0 MIR functions.
-        // Files with real code (Exception, StringTools, BalancedTree, etc.) must still
-        // be compiled to get field indices, constructors, and MIR.
-        let is_loaded = self
-            .namespace_resolver
-            .is_file_loaded(&file_path.to_path_buf());
-        if is_loaded {
-            let base = std::path::Path::new(&filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if is_extern_only_stdlib_base(base) {
-                if self.config.profile_typecheck {
-                    self.typecheck_timings.import_extern_skips += 1;
-                }
-                return true;
-            }
         }
 
         // Mark as loaded

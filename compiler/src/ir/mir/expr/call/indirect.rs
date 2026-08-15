@@ -37,19 +37,23 @@ impl<'a> HirToMirContext<'a> {
         // Arguments are lowered before the callee, so lambdas passed as
         // arguments are still generated when callee lowering fails.
         debug!("About to lower {} indirect call arguments", args.len());
+        // Every argument must lower. Dropping the ones that fail would keep the
+        // call but shift the survivors into the wrong parameter slots, so a
+        // miscompiled argument becomes a silently miscompiled call.
+        let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             debug!("  arg[{}] kind={:?}", i, std::mem::discriminant(&a.kind));
-        }
-        let arg_regs: Vec<_> = args
-            .iter()
-            .filter_map(|a| {
-                debug!(
-                    "NOW lowering arg with kind={:?}",
+            let Some(reg) = self.lower_expression(a) else {
+                warn!(
+                    "indirect call: argument {} of {} failed to lower ({:?}); abandoning the call",
+                    i,
+                    args.len(),
                     std::mem::discriminant(&a.kind)
                 );
-                self.lower_expression(a)
-            })
-            .collect();
+                return None;
+            };
+            arg_regs.push(reg);
+        }
         debug!(
             "Lowered {} indirect call arguments successfully",
             arg_regs.len()

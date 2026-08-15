@@ -1933,7 +1933,7 @@ fn run_file(
                         eprintln!(
                             "  typecheck-detail: files={} macro_skipped={} imports={} \
                              cache_hit={} cache_miss={} fresh={} typedef_fresh={} \
-                             already={} extern_skip={}",
+                             already={}",
                             detail.files_seen,
                             detail.macro_skipped_files,
                             detail.imports_collected,
@@ -1941,8 +1941,7 @@ fn run_file(
                             detail.import_cache_misses,
                             detail.import_fresh_compiles,
                             detail.import_typedef_fresh,
-                            detail.import_already_compiled,
-                            detail.import_extern_skips
+                            detail.import_already_compiled
                         );
                     }
                 }
