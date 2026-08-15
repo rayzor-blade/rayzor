@@ -1826,7 +1826,35 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
     Ok(())
 }
 
+/// Install the lowered standard library the CLI carries, so a measured compile
+/// starts where a real one does.
+///
+/// The CLI embeds its snapshot at build time; this harness drives the compiler
+/// as a library and has no build script to embed one, so it is pointed at the
+/// archive instead. Which configuration ran is stated rather than inferred —
+/// compiling the library from source and reusing it are different amounts of
+/// work, and a compile-time figure means nothing without knowing which.
+fn install_stdlib_snapshot() {
+    let Some(path) = std::env::var_os("RAYZOR_SNAPSHOT") else {
+        eprintln!(
+            "[snapshot] RAYZOR_SNAPSHOT unset — the standard library is lowered from source, \
+             as it was before a snapshot existed"
+        );
+        return;
+    };
+    let path = Path::new(&path);
+    match compiler::ir::snapshot::install_from_path(path) {
+        // Asking for a snapshot and measuring without one is the failure this
+        // harness exists to avoid reporting as a result.
+        Ok(0) => panic!("[snapshot] {} carries no modules", path.display()),
+        Ok(count) => eprintln!("[snapshot] {count} modules from {}", path.display()),
+        Err(err) => panic!("[snapshot] cannot read {}: {err}", path.display()),
+    }
+}
+
 fn main() {
+    install_stdlib_snapshot();
+
     // IMPORTANT: Initialize LLVM on main thread BEFORE spawning any background threads
     // This prevents crashes due to LLVM's thread-unsafe global initialization
     #[cfg(feature = "llvm-backend")]

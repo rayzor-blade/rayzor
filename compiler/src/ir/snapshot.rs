@@ -100,3 +100,18 @@ pub fn install(bytes: &'static [u8]) {
 pub fn installed() -> &'static BTreeMap<&'static str, &'static [u8]> {
     EMBEDDED.get_or_init(BTreeMap::new)
 }
+
+/// Install a standard library read from disk, for a host that drives the
+/// compiler as a library and so has no build script of its own to embed one —
+/// a benchmark harness measuring the same work the CLI does, for instance.
+///
+/// Returns the number of modules available afterwards, which is what the
+/// caller should report: a host that installs an archive but measures a
+/// compile without one is measuring a different thing than it claims.
+pub fn install_from_path(path: impl AsRef<std::path::Path>) -> std::io::Result<usize> {
+    // Held for the life of the process, matching the embedded case, so entries
+    // can borrow from it for `'static` exactly as they do from the binary.
+    let bytes: &'static [u8] = Box::leak(std::fs::read(path)?.into_boxed_slice());
+    install(bytes);
+    Ok(installed().len())
+}
