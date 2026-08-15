@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rayzor Architecture — Pipeline, SSA and backends</title>
+    <meta name="description" content="How Rayzor lowers Haxe to machine code: a shared SSA pipeline optimized once, a five-level tiered runtime, SIMD types, and the Cranelift, LLVM and WASM backends.">
+    <meta name="keywords" content="Haxe, Haxe runtime, Haxe compiler, native Haxe, fast Haxe, JIT compilation, tiered JIT, WebAssembly, AOT compiler, ownership memory, no garbage collector, SIMD">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <meta name="theme-color" content="#f97316">
+    <link rel="canonical" href="https://rayzor-blade.com/architecture.html">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+    <meta property="og:url" content="https://rayzor-blade.com/architecture.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Rayzor">
+    <meta property="og:title" content="Rayzor Architecture — Pipeline, SSA and backends">
+    <meta property="og:description" content="How Rayzor lowers Haxe to machine code: a shared SSA pipeline optimized once, a five-level tiered runtime, SIMD types, and the Cranelift, LLVM and WASM backends.">
+    <meta property="og:image" content="https://rayzor-blade.com/ograph-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:type" content="image/png">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta property="twitter:domain" content="rayzor-blade.com">
+    <meta property="twitter:url" content="https://rayzor-blade.com/architecture.html">
+    <meta name="twitter:title" content="Rayzor Architecture — Pipeline, SSA and backends">
+    <meta name="twitter:description" content="How Rayzor lowers Haxe to machine code: a shared SSA pipeline optimized once, a five-level tiered runtime, SIMD types, and the Cranelift, LLVM and WASM backends.">
+    <meta name="twitter:image" content="https://rayzor-blade.com/ograph-image.png">
+    <meta name="twitter:image:width" content="1200">
+    <meta name="twitter:image:height" content="630">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+      body { margin:0; background:#0A0B0D; color:#E9EAEE; font-family:'Geist',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+      * { box-sizing:border-box; }
+      a { color:#F97316; text-decoration:none; }
+      a:hover { color:#FDBA74; }
+      ::selection { background:#F9731644; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+    <style>
+      html, body { max-width: 100%; overflow-x: hidden; }
+      img, svg { max-width: 100%; height: auto; }
+      pre, table { max-width: 100%; overflow-x: auto; }
+
+      /* Code set outside a <pre> has no scroller of its own; on a phone a long
+         expression has to break rather than run off the edge. */
+      @media (max-width: 640px) {
+        [style*="JetBrains Mono"] { overflow-wrap: anywhere; }
+      }
+
+      .rz-menu-state { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+      .rz-burger {
+        display: none; align-items: center; justify-content: center; flex: none;
+        width: 38px; height: 34px; border: 1px solid #22242A; border-radius: 9px;
+        color: #C9CCD2; cursor: pointer;
+      }
+      .rz-burger:hover { border-color: #4A4E58; color: #E9EAEE; }
+      .rz-menu-state:checked ~ header .rz-burger { border-color: #F97316; color: #F97316; }
+
+      @media (max-width: 860px) {
+        .rz-burger { display: inline-flex; }
+        .rz-nav { display: none !important; }
+        .rz-menu-state:checked ~ header nav.rz-nav {
+          display: flex !important; order: 10; width: 100%; flex-direction: column;
+          align-items: flex-start; gap: 0; margin-top: 4px; padding-top: 6px;
+          border-top: 1px solid #1A1C21;
+        }
+        .rz-menu-state:checked ~ header nav.rz-nav > a { padding: 9px 0; width: 100%; }
+        .rz-menu-state:checked ~ * aside.rz-nav { display: block !important; }
+        aside.rz-toc { display: none !important; }
+        .rz-menu-item { display: none !important; }
+        .rz-menu-state:checked ~ header .rz-menu-item {
+          display: inline-flex !important; order: 11; width: 100%; padding: 9px 0;
+        }
+        .rz-menu-state:checked ~ header input.rz-menu-item {
+          display: block !important; order: 9; width: 100%; margin-top: 4px;
+        }
+      }
+      .dch4:hover{color:#E9EAEE !important}
+      .dcr10{font-size:clamp(29px, 3.83vw, 46px) !important}
+      .dch17:hover{background:#FB8B3C !important}
+      @media (max-width:1024px){
+        .dcr0{gap:22px !important}
+        .dcr5{grid-template-columns:1fr !important}
+        .dcr6{gap:26px !important}
+        .dcr8{position:static !important}
+        .dcr12{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+      }
+      @media (max-width:900px){
+        .dcr14{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+      }
+      @media (max-width:860px){
+        .dcr3{height:auto !important;min-height:64px !important;flex-wrap:wrap !important;row-gap:10px !important;column-gap:14px !important;padding-top:10px !important;padding-bottom:10px !important}
+      }
+      @media (max-width:760px){
+        .dcr13{grid-template-columns:1fr !important}
+      }
+      @media (max-width:680px){
+        .dcr1{gap:16px !important}
+        .dcr2{padding:0 18px 0 18px !important}
+        .dcr7{gap:19px !important}
+        .dcr9{padding:40px 0 58px 0 !important}
+        .dcr11{flex-wrap:wrap !important}
+        .dcr15{grid-template-columns:1fr !important}
+        .dcr16{padding:26px 18px 26px 18px !important}
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rz-root" style="min-height:100vh;background:#0A0B0D"><input type="checkbox" id="rz-menu" class="rz-menu-state" aria-hidden="true" tabindex="-1">
+  <header style="position:sticky;top:0;z-index:50;border-bottom:1px solid #1A1C21;background:#0A0B0DE6;backdrop-filter:blur(12px)">
+    <div style="max-width:1280px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:40px" class="dcr0 dcr1 dcr2 dcr3">
+      <a href="/" style="display:flex;align-items:center;gap:10px;color:#E9EAEE">
+        <img src="logo.svg" alt="" style="width:26px;height:26px;display:block">
+        <span style="font-size:16px;font-weight:600;letter-spacing:-0.01em">Rayzor</span>
+        <span style="font-size:16px;color:#4E535B">/</span>
+        <span style="font-size:16px;color:#9AA0AA">Architecture</span>
+      </a>
+      <div style="flex:1"></div>
+      <a href="/docs.html" style="font-size:14px;color:#9AA0AA" class="dch4">Docs</a>
+      <a href="https://github.com/rayzor-blade/rayzor/blob/main/docs/architecture/ARCHITECTURE.md" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#9AA0AA" class="rz-menu-item dch4">Source ↗</a>
+    <label class="rz-burger" for="rz-menu" role="button" tabindex="0" aria-label="Navigation menu"><svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h14"></path></svg></label></div>
+  </header>
+
+  <div style="max-width:1280px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px 1fr 190px;gap:48px;align-items:start" class="dcr5 dcr6 dcr7 dcr2">
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13.5px" class="rz-nav dcr8">
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Start</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="/docs.html#quickstart" style="padding:5px 0;color:#9AA0AA;font-weight:400">Quick start</a>
+            
+              <a href="/docs.html#modes" style="padding:5px 0;color:#9AA0AA;font-weight:400">Compilation modes</a>
+            
+              <a href="/docs.html#tiers" style="padding:5px 0;color:#9AA0AA;font-weight:400">Tiering</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Concepts</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="#overview" style="padding:5px 0;color:#F97316;font-weight:500">Architecture</a>
+            
+              <a href="#simd" style="padding:5px 0;color:#9AA0AA;font-weight:400">SIMD</a>
+            
+              <a href="/concurrency.html" style="padding:5px 0;color:#9AA0AA;font-weight:400">Concurrency</a>
+            
+              <a href="#stdlib" style="padding:5px 0;color:#9AA0AA;font-weight:400">The rayzor package</a>
+            
+              <a href="/docs.html#memory" style="padding:5px 0;color:#9AA0AA;font-weight:400">Memory model</a>
+            
+              <a href="/docs.html#artifacts" style="padding:5px 0;color:#9AA0AA;font-weight:400">Artifacts</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Reference</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="/docs.html#manifest" style="padding:5px 0;color:#9AA0AA;font-weight:400">Project manifest</a>
+            
+              <a href="/docs.html#debug" style="padding:5px 0;color:#9AA0AA;font-weight:400">Debug toolkit</a>
+            
+              <a href="/cli.html" style="padding:5px 0;color:#9AA0AA;font-weight:400">CLI reference</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Project</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="/" style="padding:5px 0;color:#9AA0AA;font-weight:400">Home</a>
+            
+              <a href="https://github.com/rayzor-blade/rayzor" style="padding:5px 0;color:#9AA0AA;font-weight:400">Contributing</a>
+            
+          </div>
+        </div>
+      
+    </aside>
+
+    <main style="padding:40px 0 96px;min-width:0" class="dcr9">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Concepts</div>
+      <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr10">Architecture</h1>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor is a native code generator, not a source-to-source backend: every backend emits machine code, WASM bytecode, or C used as an assembler. What it adds over the official compiler is a tiered runtime and a single optimization pipeline shared by every backend — code starts executing immediately, and only what proves hot pays compilation cost.</p>
+      <p style="margin:14px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">Language transpilation is an explicit non-goal. There is no JavaScript target and none planned.</p>
+
+      <h2 id="pipeline" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">The pipeline</h2>
+      <div data-dc-ref="diagramRef" style="margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:28px 24px;overflow-x:auto;min-height:180px;display:flex;justify-content:center" class="dcr11"></div>
+      <div style="margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">01</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">Parser</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">Preprocessor and conditional compilation, then a recursive-descent parser — with a legacy parser for error recovery</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">02</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">AST</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">Source syntax verbatim, then macro expansion (interpreter, reification, @:build)</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">03</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">TAST</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">Types, symbol table and type table resolved. Type checking is folded into lowering, not a separate phase</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">04</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">HIR</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">Desugared but still structured — ForIn, TryCatch, Switch, lambdas. Ownership analysis and diagnostics read here</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">05</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">MIR</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">SSA over basic blocks with real phi nodes. Monomorphization runs here, after lowering and the stdlib merge</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">06</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">Backends</span>
+            </div>
+            <div style="font-size:14px;line-height:1.6;color:#8A9099">One optimized MIR consumed by the interpreter, Cranelift, LLVM and WASM alike</div>
+          </div>
+        
+      </div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">HIR still knows what the user wrote, so diagnostics and ownership analysis read naturally there. MIR is flat and typed, so one optimization pipeline serves every backend — that is the whole reason for the split. Type checking is not a separate phase; it is folded into AST lowering.</p>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:20px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;color:#C9CCD2"><span style="color:#F97316">$</span> rayzor compile main.hx --stage ast|tast|hir|mir|native</div>
+
+      <h2 id="mir" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">MIR</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">SSA over basic blocks with real phi nodes, type metadata carried down rather than erased. Every collection is a <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">BTreeMap</span> — explicitly so iteration order is deterministic and codegen is reproducible.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        <div style="display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">IrModule</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099">functions · globals · types · string_pool · extern_functions</span>
+        </div>
+        <div style="display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">IrFunction</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099">signature · cfg · locals · register_types</span>
+        </div>
+        <div style="display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;align-items:baseline" class="dcr5">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">IrBasicBlock</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099">instructions · terminator · phi_nodes · predecessors</span>
+        </div>
+      </div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">MIR prints in an LLVM-like textual form — registers <span style="font-family:'JetBrains Mono',monospace;font-size:14px">$N</span>, blocks <span style="font-family:'JetBrains Mono',monospace;font-size:14px">bbN</span> — sorted by id so dumps diff cleanly. <span style="font-family:'JetBrains Mono',monospace;font-size:14px">RAYZOR_DUMP_MIR=1</span> fires before the passes; use <span style="font-family:'JetBrains Mono',monospace;font-size:14px">rayzor dump --diff</span> for what the backend actually sees.</p>
+
+      <h2 id="opt" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Optimization levels</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">The default is O2. <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">InsertFree</span> is added before the level match at every level — it is a correctness pass, not an optimization.</p>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        
+          <div style="display:grid;grid-template-columns:60px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">O0</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Inlining(15), DCE, UnreachableBlockElim, SRA, CopyProp, DCE</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:60px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">O1</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Inlining, DCE, Devirtualization, ConstantFolding, CopyProp, UnreachableBlockElim — the only level without SRA</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:60px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">O2</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">O1 plus SRA, GlobalLoadCaching, BCE, GVN, CSE, LICM, LoopUnrolling, ControlFlowSimplify, DCE (default)</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:60px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">O3</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">O2 plus LoopVectorization and TailCallOpt</span>
+          </div>
+        
+      </div>
+      <p style="margin:20px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="color:#C9CCD2">O0 is not "no optimization."</span> It still forces inlining, because Haxe <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">inline</span> is a language guarantee rather than a hint — and because inlining small constructors is what exposes the Alloc+GEP shape SRA needs. Without it, per-iteration constructor allocations are never scalarised and loops leak.</p>
+      <p style="margin:14px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">Ordering is load-bearing: inlining exposes Alloc+GEP for SRA, GlobalLoadCaching dedups metadata loads for BCE, BCE emits the invariant load LICM hoists, and LICM's clean loop bodies are what LoopUnrolling and LoopVectorization need.</p>
+
+      <h2 id="tiers" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Tiered execution</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The interpreter is tier 0, the next three rungs are Cranelift, and Maximum is LLVM. Promotion compares tier ordinals, so a counter clearing several thresholds at once skips rungs.</p>
+      <div style="margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        
+          <div style="display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">T0</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#9AA0AA">Interpreted</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">MIR interpreter at O0 — register-based, since MIR is already SSA. Instant startup</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">T1</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">Baseline</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Cranelift, no opt, O0. Compiled inline on the main thread</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">T2</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">Standard</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Cranelift speed, O1. Routed to a background broker thread</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">T3</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0">Optimized</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Cranelift speed, O2. Background, one adapter and bead registry per tier</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B">T4</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">Maximum</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">LLVM at O3, queued and drained on the main thread — add_global_mapping requires it</span>
+          </div>
+        
+      </div>
+      <p style="margin:20px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="color:#C9CCD2">The promotion barrier</span> is the safety-critical part. Function pointers cannot be swapped while JIT code is running, so a safepoint gates the swap: the promoter requests promotion, waits for the in-flight execution counter to drain to zero, swaps under a write lock, and returns to idle. Installs are monotonic — a pointer for a function already at a higher tier is dropped.</p>
+
+      <h2 id="simd" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">SIMD</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Vectors are language-level types, not intrinsics you reach for through externs. The <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.SIMD*</span> family are <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:coreType</span> abstracts whose representation follows from their identity — each lowers straight to a MIR vector type, in 128- and 256-bit widths, across float and integer lanes.</p>
+      <div style="margin-top:22px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px" class="dcr12 dcr13">
+        
+          <div style="border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">SIMD4f</div>
+            <div style="margin-top:8px;font-size:13px;color:#C9CCD2">4 × f32</div>
+            <div style="margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B">128-bit</div>
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">SIMD4i32</div>
+            <div style="margin-top:8px;font-size:13px;color:#C9CCD2">4 × i32</div>
+            <div style="margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B">128-bit</div>
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">SIMD16i8</div>
+            <div style="margin-top:8px;font-size:13px;color:#C9CCD2">16 × i8</div>
+            <div style="margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B">128-bit</div>
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">SIMD8i32</div>
+            <div style="margin-top:8px;font-size:13px;color:#C9CCD2">8 × i32</div>
+            <div style="margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B">256-bit</div>
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">SIMD32i8</div>
+            <div style="margin-top:8px;font-size:13px;color:#C9CCD2">32 × i8</div>
+            <div style="margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B">256-bit</div>
+          </div>
+        
+      </div>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">import</span> <span style="color:#C9CCD2">rayzor.SIMD4f;
+</span>
+<span style="color:#F97316">var</span> <span style="color:#C9CCD2">a:</span><span style="color:#7FD1C0">SIMD4f</span> <span style="color:#C9CCD2">= (</span><span style="color:#E8B84B">1.0</span><span style="color:#C9CCD2">, </span><span style="color:#E8B84B">2.0</span><span style="color:#C9CCD2">, </span><span style="color:#E8B84B">3.0</span><span style="color:#C9CCD2">, </span><span style="color:#E8B84B">4.0</span><span style="color:#C9CCD2">);   </span><span style="color:#5B616B">// tuple literal
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">b = </span><span style="color:#7FD1C0">SIMD4f</span><span style="color:#C9CCD2">.splat(</span><span style="color:#E8B84B">2.0</span><span style="color:#C9CCD2">);          </span><span style="color:#5B616B">// broadcast to 4 lanes
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">c = a * b + a;                 </span><span style="color:#5B616B">// @:op overloads
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">d = a.dot(b);                  </span><span style="color:#5B616B">// dot, sum, normalize, magnitude, lerp</span></div>
+      <div style="margin-top:20px;display:grid;gap:2px">
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Representation</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Decided from the type's identity ahead of the underlying type, so a vector is never truncated to a 64-bit param at a call boundary</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Construction</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Tuple literal, array literal via @:from, SIMD4f.make(x, y, z, w), or SIMD4f.splat(v) to broadcast one scalar across all four lanes</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Operations</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Arithmetic through real operators, lane read/write via array access, and a full float surface — dot, sum, sqrt, abs, min, max, rounding, normalize, magnitude, lerp</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Quantized kernels</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">The integer types carry widening dot-accumulate — dot, dotI8I7, dotI8U8 — which lower to a single VNNI instruction on x86-64</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Native paths</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Vectorized f32 CPU paths for NEON and SSE2, with a scalar fallback where neither is available</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">WASM SIMD128</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">The WebAssembly backend carries the same vector work through SIMD128</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Tier policy</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">The interpreter executes vector types, and functions that use SIMD are promoted to Baseline on first call so vector work runs compiled from the start</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">Vectorization</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">LoopVectorization runs at O3, on the clean loop bodies LICM leaves behind</span>
+          </div>
+        
+      </div>
+      <p style="margin:20px 0 0;padding:16px 20px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:14.5px;line-height:1.65;color:#8A9099;max-width:820px;text-wrap:pretty"><span style="color:#C9CCD2">The 256-bit types are not portable.</span> <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">SIMD8i32</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">SIMD32i8</span> are LLVM-only — wasm's <span style="font-family:'JetBrains Mono',monospace;font-size:13px">v128</span> and Cranelift have no 256-bit vector type and refuse them rather than narrowing. Gate behind <span style="font-family:'JetBrains Mono',monospace;font-size:13px">#if llvm</span> with a 128-bit fallback. The TCC linker path on Linux also lacks SIMD in its final tier.</p>
+
+      <h2 id="stdlib" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">The rayzor package</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Beyond the Haxe standard library, Rayzor ships a systems layer: memory primitives that map to real machine types, a native vector monomorphized per element type, and a concurrency surface the compiler validates through Send and Sync.</p>
+      <div style="margin-top:26px;display:grid;grid-template-columns:repeat(2,1fr);gap:20px" class="dcr13">
+        
+          <div style="border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316">Memory &amp; systems</div>
+            <p style="margin:10px 0 16px;font-size:13.5px;line-height:1.6;color:#8A9099">Pointer-sized abstracts that carry machine addresses and are never truncated.</p>
+            <div style="display:flex;flex-wrap:wrap;gap:7px">
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Ptr</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Ref</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Box</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Usize</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Mem</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Bytes</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Slice</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">CString</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Double</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Atomic</span>
+              
+            </div>
+            
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316">Collections</div>
+            <p style="margin:10px 0 16px;font-size:13.5px;line-height:1.6;color:#8A9099">Vec&lt;T&gt; is monomorphized per element type — VecI32, VecF64, packed VecBool, VecPtr — so primitives are contiguous and unboxed.</p>
+            <div style="display:flex;flex-wrap:wrap;gap:7px">
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Vec&lt;T&gt;</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Result&lt;T,E&gt;</span>
+              
+            </div>
+            
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316">Concurrency</div>
+            <p style="margin:10px 0 16px;font-size:13.5px;line-height:1.6;color:#8A9099">Message passing and shared state, validated at compile time through Send and Sync.</p>
+            <div style="display:flex;flex-wrap:wrap;gap:7px">
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Thread</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Channel&lt;T&gt;</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Select</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Mutex</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Arc</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Future</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">WorkerPool</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">SpinPool</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Parker</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">CpuTopology</span>
+              
+            </div>
+            
+              <a href="/concurrency.html" style="display:inline-block;margin-top:16px;font-family:'JetBrains Mono',monospace;font-size:12px">Concurrency guide →</a>
+            
+          </div>
+        
+          <div style="border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316">Platform</div>
+            <p style="margin:10px 0 16px;font-size:13.5px;line-height:1.6;color:#8A9099">Windowing, compile-time feature detection, and a built-in spec runner.</p>
+            <div style="display:flex;flex-wrap:wrap;gap:7px">
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Window</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Key</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">EventType</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">WindowStyle</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">CC</span>
+              
+                <span style="padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2">Spec</span>
+              
+            </div>
+            
+          </div>
+        
+      </div>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">pool = WorkerPool.global();
+</span><span style="color:#C9CCD2">pool.parallelFor(</span><span style="color:#E8B84B">1000000</span><span style="color:#C9CCD2">, (idx, node) -> { ... });   </span><span style="color:#5B616B">// one worker per NUMA node
+</span>
+<span style="color:#F97316">var</span> <span style="color:#C9CCD2">f = Future.create(() -> heavy());          </span><span style="color:#5B616B">// lazy — nothing runs yet
+</span><span style="color:#C9CCD2">f.then(v -> trace(v));                       </span><span style="color:#5B616B">// or f.await() to block</span></div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px;text-wrap:pretty"><span style="color:#9AA0AA">Parallelism adapts to the machine.</span> On multi-NUMA-node systems the pool pins one worker per node so allocations land first-touch on that node's controller; on UMA hardware and wasm it runs inline on the calling thread unless you force fanout.</p>
+
+      <h2 id="backends" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Backends</h2>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">interpreter</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Register-based MIR interpreter. Instant startup, tier 0</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">cranelift</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">JIT tiers 1–3. Fast compile; fuses fmul into fma within a block</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">llvm</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Default AOT path, top JIT tier, and a whole-module upgrade</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">wasm</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">MIR → core WASM → WASI P2 component. Linear memory, SIMD128</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">wgsl</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">@:shader classes → WGSL at compile time. Not a general target</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">c99</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Experimental — MIR → C99 → gcc -O2. Not an official backend</span>
+          </div>
+        
+      </div>
+      <p style="margin:20px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">AOT defaults to LLVM; without the <span style="font-family:'JetBrains Mono',monospace;font-size:14px">llvm-backend</span> feature <span style="font-family:'JetBrains Mono',monospace;font-size:14px">rayzor aot</span> errors rather than silently degrading.</p>
+
+      <h2 id="memory" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Memory &amp; object layout</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Cleanup is decided at compile time. The HIR-level drop-point analyzer computes last use per variable, tracking loop position, reassignment, block depth, and two escape sets — general escapes and lambda captures, since a captured variable is owned by the closure.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;color:#C9CCD2">slot 0   <span style="color:#7FD1C0">__type_id : i64</span>      <span style="color:#5B616B">← stable name-hash class id</span>
+slot 1   first user field
+...      <span style="color:#5B616B">every slot is 8 bytes</span></div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">There is no vtable pointer in the header — dispatch resolves the vtable from the class id in slot 0, and interface values are fat pointers wrapped at the <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">new</span> site. Allocation size takes the maximum over the whole extends chain at the allocation site, because an imported parent's fields may not have been visible when the subclass was registered.</p>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        
+          <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B">AutoDrop</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Compiler emits Free — user classes allocated with new</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B">AutoDropWithDtor</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Run the user's drop(), then Free — @:derive(Drop)</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B">ManualDrop</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">@:manualDrop; never auto-freed</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B">RuntimeManaged</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Runtime owns the lifetime — Thread, Channel, Arc, Mutex</span>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B">NoDrop</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">Primitives, arrays, Dynamic</span>
+          </div>
+        
+      </div>
+
+      <h2 id="formats" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">On-disk formats</h2>
+      <div style="margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px" class="dcr14 dcr15">
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.blade <span style="color:#4E535B">BLAD</span></div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">One MIR module plus metadata and cached maps.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.bsym <span style="color:#4E535B">BSYM</span></div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Pre-resolved stdlib symbols, for fast startup.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rzb <span style="color:#4E535B">RZBF</span></div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">All modules, module table, entry point, build info.</p>
+        </div>
+      </div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Cache invalidation uses three independent keys: a source content hash, the compiler semver, and a content-derived compiler cache ABI id — the last exists because parser or MIR-shape changes do not bump the semver. Cached maps are keyed by name, never by symbol or type id, because ids are reassigned per compilation.</p>
+
+      <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap" class="dcr16">
+        <div>
+          <div style="font-size:16px;font-weight:600">The full architecture doc</div>
+          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">Pass internals, the runtime ABI, closure conventions and the format specs.</p>
+        </div>
+        <a href="https://github.com/rayzor-blade/rayzor/blob/main/docs/architecture/ARCHITECTURE.md" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" class="dch17">Read it on GitHub ↗</a>
+      </div>
+    </main>
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13px" class="rz-toc dcr8">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:12px">On this page</div>
+      <div style="display:grid;gap:9px">
+        <a href="#overview" style="color:#8A9099" class="dch4">Overview</a>
+        <a href="#pipeline" style="color:#8A9099" class="dch4">The pipeline</a>
+        <a href="#mir" style="color:#8A9099" class="dch4">MIR</a>
+        <a href="#opt" style="color:#8A9099" class="dch4">Optimization levels</a>
+        <a href="#tiers" style="color:#8A9099" class="dch4">Tiered execution</a>
+        <a href="#simd" style="color:#8A9099" class="dch4">SIMD</a>
+        <a href="#stdlib" style="color:#8A9099" class="dch4">The rayzor package</a>
+        <a href="#backends" style="color:#8A9099" class="dch4">Backends</a>
+        <a href="#memory" style="color:#8A9099" class="dch4">Memory &amp; layout</a>
+        <a href="#formats" style="color:#8A9099" class="dch4">On-disk formats</a>
+      </div>
+    </aside>
+  </div>
+</div>
+    <script type="module">
+
+    function $e(v){ return v==null ? "" : String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+    function $a(v){ return v==null ? "" : String(v).replace(/&/g,"&amp;").replace(/"/g,"&quot;"); }
+    function $list(v){ return Array.isArray(v) ? v : []; }
+
+    const $refs = new Map();
+    const React = { createRef(){ const r = { name: null, get current(){
+      if (!r.name) throw new Error("dc: ref read before it was bound to a field");
+      return document.querySelector('[data-dc-ref="' + r.name + '"]');
+    } }; return r; } };
+
+    let $pending = false;
+    class DCLogic {
+      setState(patch){
+        Object.assign(this.state, typeof patch === "function" ? patch(this.state) : patch);
+        if ($pending) return;
+        $pending = true;
+        queueMicrotask(() => { $pending = false; paint(); });
+      }
+    }
+
+
+    const NAV = [
+      { title: "Start", items: [["Quick start", "/docs.html#quickstart"], ["Compilation modes", "/docs.html#modes"], ["Tiering", "/docs.html#tiers"]] },
+      { title: "Concepts", items: [["Architecture", "#overview", 1], ["SIMD", "#simd"], ["Concurrency", "/concurrency.html"], ["The rayzor package", "#stdlib"], ["Memory model", "/docs.html#memory"], ["Artifacts", "/docs.html#artifacts"]] },
+      { title: "Reference", items: [["Project manifest", "/docs.html#manifest"], ["Debug toolkit", "/docs.html#debug"], ["CLI reference", "/cli.html"]] },
+      { title: "Project", items: [["Home", "/"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
+    ];
+    const PIPELINE = [
+      { n: "01", name: "Parser", what: "Preprocessor and conditional compilation, then a recursive-descent parser — with a legacy parser for error recovery" },
+      { n: "02", name: "AST", what: "Source syntax verbatim, then macro expansion (interpreter, reification, @:build)" },
+      { n: "03", name: "TAST", what: "Types, symbol table and type table resolved. Type checking is folded into lowering, not a separate phase" },
+      { n: "04", name: "HIR", what: "Desugared but still structured — ForIn, TryCatch, Switch, lambdas. Ownership analysis and diagnostics read here" },
+      { n: "05", name: "MIR", what: "SSA over basic blocks with real phi nodes. Monomorphization runs here, after lowering and the stdlib merge" },
+      { n: "06", name: "Backends", what: "One optimized MIR consumed by the interpreter, Cranelift, LLVM and WASM alike" }
+    ];
+    const LEVELS = [
+      { name: "O0", passes: "Inlining(15), DCE, UnreachableBlockElim, SRA, CopyProp, DCE" },
+      { name: "O1", passes: "Inlining, DCE, Devirtualization, ConstantFolding, CopyProp, UnreachableBlockElim — the only level without SRA" },
+      { name: "O2", passes: "O1 plus SRA, GlobalLoadCaching, BCE, GVN, CSE, LICM, LoopUnrolling, ControlFlowSimplify, DCE (default)" },
+      { name: "O3", passes: "O2 plus LoopVectorization and TailCallOpt" }
+    ];
+    const TIERS = [
+      { n: "T0", name: "Interpreted", what: "MIR interpreter at O0 — register-based, since MIR is already SSA. Instant startup", color: "#9AA0AA" },
+      { n: "T1", name: "Baseline", what: "Cranelift, no opt, O0. Compiled inline on the main thread", color: "#7FD1C0" },
+      { n: "T2", name: "Standard", what: "Cranelift speed, O1. Routed to a background broker thread", color: "#7FD1C0" },
+      { n: "T3", name: "Optimized", what: "Cranelift speed, O2. Background, one adapter and bead registry per tier", color: "#7FD1C0" },
+      { n: "T4", name: "Maximum", what: "LLVM at O3, queued and drained on the main thread — add_global_mapping requires it", color: "#F97316" }
+    ];
+    const SIMD = [
+      { name: "Representation", what: "Decided from the type's identity ahead of the underlying type, so a vector is never truncated to a 64-bit param at a call boundary" },
+      { name: "Construction", what: "Tuple literal, array literal via @:from, SIMD4f.make(x, y, z, w), or SIMD4f.splat(v) to broadcast one scalar across all four lanes" },
+      { name: "Operations", what: "Arithmetic through real operators, lane read/write via array access, and a full float surface — dot, sum, sqrt, abs, min, max, rounding, normalize, magnitude, lerp" },
+      { name: "Quantized kernels", what: "The integer types carry widening dot-accumulate — dot, dotI8I7, dotI8U8 — which lower to a single VNNI instruction on x86-64" },
+      { name: "Native paths", what: "Vectorized f32 CPU paths for NEON and SSE2, with a scalar fallback where neither is available" },
+      { name: "WASM SIMD128", what: "The WebAssembly backend carries the same vector work through SIMD128" },
+      { name: "Tier policy", what: "The interpreter executes vector types, and functions that use SIMD are promoted to Baseline on first call so vector work runs compiled from the start" },
+      { name: "Vectorization", what: "LoopVectorization runs at O3, on the clean loop bodies LICM leaves behind" }
+    ];
+    const SIMD_TYPES = [
+      { name: "SIMD4f", lanes: "4 × f32", width: "128-bit" },
+      { name: "SIMD4i32", lanes: "4 × i32", width: "128-bit" },
+      { name: "SIMD16i8", lanes: "16 × i8", width: "128-bit" },
+      { name: "SIMD8i32", lanes: "8 × i32", width: "256-bit" },
+      { name: "SIMD32i8", lanes: "32 × i8", width: "256-bit" }
+    ];
+    const STDLIB = [
+      { title: "Memory & systems", note: "Pointer-sized abstracts that carry machine addresses and are never truncated.", items: ["Ptr", "Ref", "Box", "Usize", "Mem", "Bytes", "Slice", "CString", "Double", "Atomic"] },
+      { title: "Collections", note: "Vec<T> is monomorphized per element type — VecI32, VecF64, packed VecBool, VecPtr — so primitives are contiguous and unboxed.", items: ["Vec<T>", "Result<T,E>"] },
+      { title: "Concurrency", note: "Message passing and shared state, validated at compile time through Send and Sync.", items: ["Thread", "Channel<T>", "Select", "Mutex", "Arc", "Future", "WorkerPool", "SpinPool", "Parker", "CpuTopology"], href: "/concurrency.html", linkLabel: "Concurrency guide →" },
+      { title: "Platform", note: "Windowing, compile-time feature detection, and a built-in spec runner.", items: ["Window", "Key", "EventType", "WindowStyle", "CC", "Spec"] }
+    ];
+    const BACKENDS = [
+      { name: "interpreter", what: "Register-based MIR interpreter. Instant startup, tier 0" },
+      { name: "cranelift", what: "JIT tiers 1–3. Fast compile; fuses fmul into fma within a block" },
+      { name: "llvm", what: "Default AOT path, top JIT tier, and a whole-module upgrade" },
+      { name: "wasm", what: "MIR → core WASM → WASI P2 component. Linear memory, SIMD128" },
+      { name: "wgsl", what: "@:shader classes → WGSL at compile time. Not a general target" },
+      { name: "c99", what: "Experimental — MIR → C99 → gcc -O2. Not an official backend" }
+    ];
+    const DROPS = [
+      { name: "AutoDrop", what: "Compiler emits Free — user classes allocated with new" },
+      { name: "AutoDropWithDtor", what: "Run the user's drop(), then Free — @:derive(Drop)" },
+      { name: "ManualDrop", what: "@:manualDrop; never auto-freed" },
+      { name: "RuntimeManaged", what: "Runtime owns the lifetime — Thread, Channel, Arc, Mutex" },
+      { name: "NoDrop", what: "Primitives, arrays, Dynamic" }
+    ];
+
+    const DIAGRAM = `flowchart TD
+      SRC["Haxe source"] --> PRE["Preprocessor<br/>conditional compilation"]
+      PRE --> RD["Recursive-descent parser"]
+      RD -.->|"on parse error"| NOM["Legacy parser<br/>recovery"]
+      RD --> AST["AST · HaxeFile"]
+      NOM --> AST
+      AST --> MACRO["Macro expansion"]
+      MACRO --> LOWER["AST lowering<br/>type checking folded in"]
+      LOWER --> TAST["TAST · TypedFile<br/>types and symbols resolved"]
+      TAST --> HIR["HIR · HirModule<br/>desugared, still structured"]
+      HIR --> MIR["MIR · IrModule<br/>SSA over basic blocks"]
+      MIR --> MONO["Monomorphize"]
+      MONO --> OPT["Optimization passes<br/>O0 to O3, default O2"]
+      OPT --> BE{"Backends"}
+      BE --> INTERP["MIR interpreter"]
+      BE --> CL["Cranelift JIT"]
+      BE --> LLVM["LLVM<br/>JIT + AOT"]
+      BE --> WASM["WASM"]
+      BE -.->|"experimental"| CBE["C99 then gcc"]
+      BE -.->|"@:shader only"| WGSL["WGSL transpiler"]`;
+
+    class Component extends DCLogic {
+      diagramRef = React.createRef();
+
+      componentDidMount() { this.drawDiagram(); }
+
+      async drawDiagram(tries = 0) {
+        const el = this.diagramRef.current;
+        if (!el) return;
+        if (!window.mermaid) {
+          if (tries < 40) setTimeout(() => this.drawDiagram(tries + 1), 150);
+          return;
+        }
+        try {
+          window.mermaid.initialize({
+            startOnLoad: false,
+            theme: "base",
+            fontFamily: "'JetBrains Mono', monospace",
+            themeVariables: {
+              background: "#0E1013", primaryColor: "#14171C", primaryTextColor: "#C9CCD2",
+              primaryBorderColor: "#2A2D35", lineColor: "#4E535B", secondaryColor: "#1A1C21",
+              tertiaryColor: "#101216", fontSize: "13px", edgeLabelBackground: "#0E1013"
+            }
+          });
+          const { svg } = await window.mermaid.render("rz-pipeline", DIAGRAM);
+          el.innerHTML = svg;
+          const s = el.querySelector("svg");
+          if (s) { s.style.maxWidth = "100%"; s.style.height = "auto"; }
+        } catch (e) { el.innerHTML = ""; }
+      }
+
+      renderVals() {
+        return {
+          diagramRef: this.diagramRef,
+          nav: NAV.map(g => ({
+            title: g.title,
+            items: g.items.map(([label, href, active]) => ({
+              label, href,
+              style: "padding:5px 0;color:" + (active ? "#F97316" : "#9AA0AA") + ";font-weight:" + (active ? "500" : "400")
+            }))
+          })),
+          pipeline: PIPELINE, levels: LEVELS, tiers: TIERS, simd: SIMD, simdTypes: SIMD_TYPES, stdlib: STDLIB, backends: BACKENDS, drops: DROPS
+        };
+      }
+    }
+
+
+
+    const $render = (function(){
+      return function(V, H){
+        var O = [];
+        function $h(fn){ H.push(fn); return H.length - 1; }
+    O.push("<div"," id=\"rz-root\""," style=\"min-height:100vh;background:#0A0B0D\"",">","<input type=\"checkbox\" id=\"rz-menu\" class=\"rz-menu-state\" aria-hidden=\"true\" tabindex=\"-1\">","\n  ","<header"," style=\"position:sticky;top:0;z-index:50;border-bottom:1px solid #1A1C21;background:#0A0B0DE6;backdrop-filter:blur(12px)\"",">","\n    ","<div"," style=\"max-width:1280px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:40px\""," class=\"dcr0 dcr1 dcr2 dcr3\"",">","\n      ","<a"," href=\"/\""," style=\"display:flex;align-items:center;gap:10px;color:#E9EAEE\"",">","\n        ","<img"," src=\"logo.svg\""," alt=\"\""," style=\"width:26px;height:26px;display:block\"",">","\n        ","<span"," style=\"font-size:16px;font-weight:600;letter-spacing:-0.01em\"",">","Rayzor","</span>","\n        ","<span"," style=\"font-size:16px;color:#4E535B\"",">","/","</span>","\n        ","<span"," style=\"font-size:16px;color:#9AA0AA\"",">","Architecture","</span>","\n      ","</a>","\n      ","<div"," style=\"flex:1\"",">","</div>","\n      ","<a"," href=\"/docs.html\""," style=\"font-size:14px;color:#9AA0AA\""," class=\"dch4\"",">","Docs","</a>","\n      ","<a"," href=\"https://github.com/rayzor-blade/rayzor/blob/main/docs/architecture/ARCHITECTURE.md\""," style=\"font-family:'JetBrains Mono',monospace;font-size:12px;color:#9AA0AA\""," class=\"rz-menu-item dch4\"",">","Source ↗","</a>","\n    ","<label class=\"rz-burger\" for=\"rz-menu\" role=\"button\" tabindex=\"0\" aria-label=\"Navigation menu\"><svg viewBox=\"0 0 20 20\" width=\"17\" height=\"17\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M3 6h14M3 10h14M3 14h14\"></path></svg></label>","</div>","\n  ","</header>","\n\n  ","<div"," style=\"max-width:1280px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px 1fr 190px;gap:48px;align-items:start\""," class=\"dcr5 dcr6 dcr7 dcr2\"",">","\n\n    ","<aside"," style=\"position:sticky;top:64px;padding:40px 0;font-size:13.5px\""," class=\"rz-nav dcr8\"",">","\n      ");
+    $list(V.nav).forEach(function(group, $i){
+    O.push("\n        ","<div"," style=\"margin-bottom:26px\"",">","\n          ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px\"",">",$e(group.title),"</div>","\n          ","<div"," style=\"display:grid;gap:2px\"",">","\n            ");
+    $list(group.items).forEach(function(item, $i){
+    O.push("\n              ","<a"," href=\"",$a(item.href),"\""," style=\"",$a(item.style),"\"",">",$e(item.label),"</a>","\n            ");
+    });
+    O.push("\n          ","</div>","\n        ","</div>","\n      ");
+    });
+    O.push("\n    ","</aside>","\n\n    ","<main"," style=\"padding:40px 0 96px;min-width:0\""," class=\"dcr9\"",">","\n      ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316\"",">","Concepts","</div>","\n      ","<h1"," id=\"overview\""," style=\"margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600\""," class=\"dcr10\"",">","Architecture","</h1>","\n      ","<p"," style=\"margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","Rayzor is a native code generator, not a source-to-source backend: every backend emits machine code, WASM bytecode, or C used as an assembler. What it adds over the official compiler is a tiered runtime and a single optimization pipeline shared by every backend — code starts executing immediately, and only what proves hot pays compilation cost.","</p>","\n      ","<p"," style=\"margin:14px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px\"",">","Language transpilation is an explicit non-goal. There is no JavaScript target and none planned.","</p>","\n\n      ","<h2"," id=\"pipeline\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","The pipeline","</h2>","\n      ","<div"," data-dc-ref=\"diagramRef\""," style=\"margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:28px 24px;overflow-x:auto;min-height:180px;display:flex;justify-content:center\""," class=\"dcr11\"",">","</div>","\n      ","<div"," style=\"margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden\"",">","\n        ");
+    $list(V.pipeline).forEach(function(step, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:150px 1fr;gap:24px;padding:18px 24px;border-bottom:1px solid #16181D;align-items:baseline\""," class=\"dcr5\"",">","\n            ","<div"," style=\"display:flex;align-items:baseline;gap:10px\"",">","\n              ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B\"",">",$e(step.n),"</span>","\n              ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">",$e(step.name),"</span>","\n            ","</div>","\n            ","<div"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(step.what),"</div>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<p"," style=\"margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","HIR still knows what the user wrote, so diagnostics and ownership analysis read naturally there. MIR is flat and typed, so one optimization pipeline serves every backend — that is the whole reason for the split. Type checking is not a separate phase; it is folded into AST lowering.","</p>","\n      ","<div"," style=\"margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:20px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;color:#C9CCD2\"",">","<span"," style=\"color:#F97316\"",">","$","</span>"," rayzor compile main.hx --stage ast|tast|hir|mir|native","</div>","\n\n      ","<h2"," id=\"mir\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","MIR","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","SSA over basic blocks with real phi nodes, type metadata carried down rather than erased. Every collection is a ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2\"",">","BTreeMap","</span>"," — explicitly so iteration order is deterministic and codegen is reproducible.","</p>","\n      ","<div"," style=\"margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden\"",">","\n        ","<div"," style=\"display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline\""," class=\"dcr5\"",">","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0\"",">","IrModule","</span>","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099\"",">","functions · globals · types · string_pool · extern_functions","</span>","\n        ","</div>","\n        ","<div"," style=\"display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline\""," class=\"dcr5\"",">","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0\"",">","IrFunction","</span>","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099\"",">","signature · cfg · locals · register_types","</span>","\n        ","</div>","\n        ","<div"," style=\"display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:16px 24px;align-items:baseline\""," class=\"dcr5\"",">","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#7FD1C0\"",">","IrBasicBlock","</span>","\n          ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.7;color:#8A9099\"",">","instructions · terminator · phi_nodes · predecessors","</span>","\n        ","</div>","\n      ","</div>","\n      ","<p"," style=\"margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px\"",">","MIR prints in an LLVM-like textual form — registers ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","$N","</span>",", blocks ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","bbN","</span>"," — sorted by id so dumps diff cleanly. ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","RAYZOR_DUMP_MIR=1","</span>"," fires before the passes; use ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","rayzor dump --diff","</span>"," for what the backend actually sees.","</p>","\n\n      ","<h2"," id=\"opt\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","Optimization levels","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","The default is O2. ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2\"",">","InsertFree","</span>"," is added before the level match at every level — it is a correctness pass, not an optimization.","</p>","\n      ","<div"," style=\"margin-top:22px;display:grid;gap:2px\"",">","\n        ");
+    $list(V.levels).forEach(function(lv, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:60px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline\"",">","\n            ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">",$e(lv.name),"</span>","\n            ","<span"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(lv.passes),"</span>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<p"," style=\"margin:20px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","<span"," style=\"color:#C9CCD2\"",">","O0 is not \"no optimization.\"","</span>"," It still forces inlining, because Haxe ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2\"",">","inline","</span>"," is a language guarantee rather than a hint — and because inlining small constructors is what exposes the Alloc+GEP shape SRA needs. Without it, per-iteration constructor allocations are never scalarised and loops leak.","</p>","\n      ","<p"," style=\"margin:14px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px\"",">","Ordering is load-bearing: inlining exposes Alloc+GEP for SRA, GlobalLoadCaching dedups metadata loads for BCE, BCE emits the invariant load LICM hoists, and LICM's clean loop bodies are what LoopUnrolling and LoopVectorization need.","</p>","\n\n      ","<h2"," id=\"tiers\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","Tiered execution","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px\"",">","The interpreter is tier 0, the next three rungs are Cranelift, and Maximum is LLVM. Promotion compares tier ordinals, so a counter clearing several thresholds at once skips rungs.","</p>","\n      ","<div"," style=\"margin-top:24px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden\"",">","\n        ");
+    $list(V.tiers).forEach(function(t, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:44px 150px minmax(0,1fr);gap:20px;padding:16px 24px;border-bottom:1px solid #16181D;align-items:baseline\""," class=\"dcr5\"",">","\n            ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:11px;color:#4E535B\"",">",$e(t.n),"</span>","\n            ","<span"," style=\"","font-family:'JetBrains Mono',monospace;font-size:13px;color:"+$a(t.color),"\"",">",$e(t.name),"</span>","\n            ","<span"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(t.what),"</span>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<p"," style=\"margin:20px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","<span"," style=\"color:#C9CCD2\"",">","The promotion barrier","</span>"," is the safety-critical part. Function pointers cannot be swapped while JIT code is running, so a safepoint gates the swap: the promoter requests promotion, waits for the in-flight execution counter to drain to zero, swaps under a write lock, and returns to idle. Installs are monotonic — a pointer for a function already at a higher tier is dropped.","</p>","\n\n      ","<h2"," id=\"simd\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","SIMD","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","Vectors are language-level types, not intrinsics you reach for through externs. The ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2\"",">","rayzor.SIMD*","</span>"," family are ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2\"",">","@:coreType","</span>"," abstracts whose representation follows from their identity — each lowers straight to a MIR vector type, in 128- and 256-bit widths, across float and integer lanes.","</p>","\n      ","<div"," style=\"margin-top:22px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px\""," class=\"dcr12 dcr13\"",">","\n        ");
+    $list(V.simdTypes).forEach(function(t, $i){
+    O.push("\n          ","<div"," style=\"border:1px solid #22242A;border-radius:10px;padding:16px 14px;background:#0E1013\"",">","\n            ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316\"",">",$e(t.name),"</div>","\n            ","<div"," style=\"margin-top:8px;font-size:13px;color:#C9CCD2\"",">",$e(t.lanes),"</div>","\n            ","<div"," style=\"margin-top:3px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5B616B\"",">",$e(t.width),"</div>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<div"," style=\"margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;white-space:pre-wrap;overflow-wrap:break-word\"",">","<span"," style=\"color:#F97316\"",">","import","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","rayzor.SIMD4f;\n","</span>","\n","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","a:","</span>","<span"," style=\"color:#7FD1C0\"",">","SIMD4f","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","= (","</span>","<span"," style=\"color:#E8B84B\"",">","1.0","</span>","<span"," style=\"color:#C9CCD2\"",">",", ","</span>","<span"," style=\"color:#E8B84B\"",">","2.0","</span>","<span"," style=\"color:#C9CCD2\"",">",", ","</span>","<span"," style=\"color:#E8B84B\"",">","3.0","</span>","<span"," style=\"color:#C9CCD2\"",">",", ","</span>","<span"," style=\"color:#E8B84B\"",">","4.0","</span>","<span"," style=\"color:#C9CCD2\"",">",");   ","</span>","<span"," style=\"color:#5B616B\"",">","// tuple literal\n","</span>","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","b = ","</span>","<span"," style=\"color:#7FD1C0\"",">","SIMD4f","</span>","<span"," style=\"color:#C9CCD2\"",">",".splat(","</span>","<span"," style=\"color:#E8B84B\"",">","2.0","</span>","<span"," style=\"color:#C9CCD2\"",">",");          ","</span>","<span"," style=\"color:#5B616B\"",">","// broadcast to 4 lanes\n","</span>","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","c = a * b + a;                 ","</span>","<span"," style=\"color:#5B616B\"",">","// @:op overloads\n","</span>","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","d = a.dot(b);                  ","</span>","<span"," style=\"color:#5B616B\"",">","// dot, sum, normalize, magnitude, lerp","</span>","</div>","\n      ","<div"," style=\"margin-top:20px;display:grid;gap:2px\"",">","\n        ");
+    $list(V.simd).forEach(function(s, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline\""," class=\"dcr5\"",">","\n            ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316\"",">",$e(s.name),"</span>","\n            ","<span"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(s.what),"</span>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<p"," style=\"margin:20px 0 0;padding:16px 20px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:14.5px;line-height:1.65;color:#8A9099;max-width:820px;text-wrap:pretty\"",">","<span"," style=\"color:#C9CCD2\"",">","The 256-bit types are not portable.","</span>"," ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">","SIMD8i32","</span>"," and ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">","SIMD32i8","</span>"," are LLVM-only — wasm's ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px\"",">","v128","</span>"," and Cranelift have no 256-bit vector type and refuse them rather than narrowing. Gate behind ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px\"",">","#if llvm","</span>"," with a 128-bit fallback. The TCC linker path on Linux also lacks SIMD in its final tier.","</p>","\n\n      ","<h2"," id=\"stdlib\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","The rayzor package","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","Beyond the Haxe standard library, Rayzor ships a systems layer: memory primitives that map to real machine types, a native vector monomorphized per element type, and a concurrency surface the compiler validates through Send and Sync.","</p>","\n      ","<div"," style=\"margin-top:26px;display:grid;grid-template-columns:repeat(2,1fr);gap:20px\""," class=\"dcr13\"",">","\n        ");
+    $list(V.stdlib).forEach(function(g, $i){
+    O.push("\n          ","<div"," style=\"border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px\"",">","\n            ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316\"",">",$e(g.title),"</div>","\n            ","<p"," style=\"margin:10px 0 16px;font-size:13.5px;line-height:1.6;color:#8A9099\"",">",$e(g.note),"</p>","\n            ","<div"," style=\"display:flex;flex-wrap:wrap;gap:7px\"",">","\n              ");
+    $list(g.items).forEach(function(it, $i){
+    O.push("\n                ","<span"," style=\"padding:4px 10px;border:1px solid #22242A;border-radius:999px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9CCD2\"",">",$e(it),"</span>","\n              ");
+    });
+    O.push("\n            ","</div>","\n            ");
+    if (g.href) {
+    O.push("\n              ","<a"," href=\"",$a(g.href),"\""," style=\"display:inline-block;margin-top:16px;font-family:'JetBrains Mono',monospace;font-size:12px\"",">",$e(g.linkLabel),"</a>","\n            ");
+    }
+    O.push("\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<div"," style=\"margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word\"",">","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","pool = WorkerPool.global();\n","</span>","<span"," style=\"color:#C9CCD2\"",">","pool.parallelFor(","</span>","<span"," style=\"color:#E8B84B\"",">","1000000","</span>","<span"," style=\"color:#C9CCD2\"",">",", (idx, node) -> { ... });   ","</span>","<span"," style=\"color:#5B616B\"",">","// one worker per NUMA node\n","</span>","\n","<span"," style=\"color:#F97316\"",">","var","</span>"," ","<span"," style=\"color:#C9CCD2\"",">","f = Future.create(() -> heavy());          ","</span>","<span"," style=\"color:#5B616B\"",">","// lazy — nothing runs yet\n","</span>","<span"," style=\"color:#C9CCD2\"",">","f.then(v -> trace(v));                       ","</span>","<span"," style=\"color:#5B616B\"",">","// or f.await() to block","</span>","</div>","\n      ","<p"," style=\"margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px;text-wrap:pretty\"",">","<span"," style=\"color:#9AA0AA\"",">","Parallelism adapts to the machine.","</span>"," On multi-NUMA-node systems the pool pins one worker per node so allocations land first-touch on that node's controller; on UMA hardware and wasm it runs inline on the calling thread unless you force fanout.","</p>","\n\n      ","<h2"," id=\"backends\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","Backends","</h2>","\n      ","<div"," style=\"margin-top:22px;display:grid;gap:2px\"",">","\n        ");
+    $list(V.backends).forEach(function(b, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline\""," class=\"dcr5\"",">","\n            ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316\"",">",$e(b.name),"</span>","\n            ","<span"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(b.what),"</span>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n      ","<p"," style=\"margin:20px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px\"",">","AOT defaults to LLVM; without the ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","llvm-backend","</span>"," feature ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px\"",">","rayzor aot","</span>"," errors rather than silently degrading.","</p>","\n\n      ","<h2"," id=\"memory\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","Memory &amp; object layout","</h2>","\n      ","<p"," style=\"margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px\"",">","Cleanup is decided at compile time. The HIR-level drop-point analyzer computes last use per variable, tracking loop position, reassignment, block depth, and two escape sets — general escapes and lambda captures, since a captured variable is owned by the closure.","</p>","\n      ","<div"," style=\"margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;color:#C9CCD2\"",">","slot 0   ","<span"," style=\"color:#7FD1C0\"",">","__type_id : i64","</span>","      ","<span"," style=\"color:#5B616B\"",">","← stable name-hash class id","</span>","\nslot 1   first user field\n...      ","<span"," style=\"color:#5B616B\"",">","every slot is 8 bytes","</span>","</div>","\n      ","<p"," style=\"margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","There is no vtable pointer in the header — dispatch resolves the vtable from the class id in slot 0, and interface values are fat pointers wrapped at the ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2\"",">","new","</span>"," site. Allocation size takes the maximum over the whole extends chain at the allocation site, because an imported parent's fields may not have been visible when the subclass was registered.","</p>","\n      ","<div"," style=\"margin-top:22px;display:grid;gap:2px\"",">","\n        ");
+    $list(V.drops).forEach(function(d, $i){
+    O.push("\n          ","<div"," style=\"display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline\""," class=\"dcr5\"",">","\n            ","<span"," style=\"font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#E8B84B\"",">",$e(d.name),"</span>","\n            ","<span"," style=\"font-size:14px;line-height:1.6;color:#8A9099\"",">",$e(d.what),"</span>","\n          ","</div>","\n        ");
+    });
+    O.push("\n      ","</div>","\n\n      ","<h2"," id=\"formats\""," style=\"margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21\"",">","On-disk formats","</h2>","\n      ","<div"," style=\"margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px\""," class=\"dcr14 dcr15\"",">","\n        ","<div"," style=\"border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013\"",">","\n          ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">",".blade ","<span"," style=\"color:#4E535B\"",">","BLAD","</span>","</div>","\n          ","<p"," style=\"margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099\"",">","One MIR module plus metadata and cached maps.","</p>","\n        ","</div>","\n        ","<div"," style=\"border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013\"",">","\n          ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">",".bsym ","<span"," style=\"color:#4E535B\"",">","BSYM","</span>","</div>","\n          ","<p"," style=\"margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099\"",">","Pre-resolved stdlib symbols, for fast startup.","</p>","\n        ","</div>","\n        ","<div"," style=\"border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013\"",">","\n          ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316\"",">",".rzb ","<span"," style=\"color:#4E535B\"",">","RZBF","</span>","</div>","\n          ","<p"," style=\"margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099\"",">","All modules, module table, entry point, build info.","</p>","\n        ","</div>","\n      ","</div>","\n      ","<p"," style=\"margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty\"",">","Cache invalidation uses three independent keys: a source content hash, the compiler semver, and a content-derived compiler cache ABI id — the last exists because parser or MIR-shape changes do not bump the semver. Cached maps are keyed by name, never by symbol or type id, because ids are reassigned per compilation.","</p>","\n\n      ","<div"," style=\"margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap\""," class=\"dcr16\"",">","\n        ","<div",">","\n          ","<div"," style=\"font-size:16px;font-weight:600\"",">","The full architecture doc","</div>","\n          ","<p"," style=\"margin:6px 0 0;font-size:14px;color:#8A9099\"",">","Pass internals, the runtime ABI, closure conventions and the format specs.","</p>","\n        ","</div>","\n        ","<a"," href=\"https://github.com/rayzor-blade/rayzor/blob/main/docs/architecture/ARCHITECTURE.md\""," style=\"padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap\""," class=\"dch17\"",">","Read it on GitHub ↗","</a>","\n      ","</div>","\n    ","</main>","\n\n    ","<aside"," style=\"position:sticky;top:64px;padding:40px 0;font-size:13px\""," class=\"rz-toc dcr8\"",">","\n      ","<div"," style=\"font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:12px\"",">","On this page","</div>","\n      ","<div"," style=\"display:grid;gap:9px\"",">","\n        ","<a"," href=\"#overview\""," style=\"color:#8A9099\""," class=\"dch4\"",">","Overview","</a>","\n        ","<a"," href=\"#pipeline\""," style=\"color:#8A9099\""," class=\"dch4\"",">","The pipeline","</a>","\n        ","<a"," href=\"#mir\""," style=\"color:#8A9099\""," class=\"dch4\"",">","MIR","</a>","\n        ","<a"," href=\"#opt\""," style=\"color:#8A9099\""," class=\"dch4\"",">","Optimization levels","</a>","\n        ","<a"," href=\"#tiers\""," style=\"color:#8A9099\""," class=\"dch4\"",">","Tiered execution","</a>","\n        ","<a"," href=\"#simd\""," style=\"color:#8A9099\""," class=\"dch4\"",">","SIMD","</a>","\n        ","<a"," href=\"#stdlib\""," style=\"color:#8A9099\""," class=\"dch4\"",">","The rayzor package","</a>","\n        ","<a"," href=\"#backends\""," style=\"color:#8A9099\""," class=\"dch4\"",">","Backends","</a>","\n        ","<a"," href=\"#memory\""," style=\"color:#8A9099\""," class=\"dch4\"",">","Memory &amp; layout","</a>","\n        ","<a"," href=\"#formats\""," style=\"color:#8A9099\""," class=\"dch4\"",">","On-disk formats","</a>","\n      ","</div>","\n    ","</aside>","\n  ","</div>","\n","</div>");
+        return O.join("");
+      };
+    })();
+
+    const root = document.getElementById("rz-root");
+    let handlers = [];
+
+    function paint(){
+      handlers = [];
+      const html = $render(component.renderVals(), handlers);
+      const scratch = document.createElement("template");
+      scratch.innerHTML = html;
+      morph(root, scratch.content.firstElementChild);
+    }
+
+    function morph(live, next){
+      if (live.nodeType !== next.nodeType || live.nodeName !== next.nodeName) { live.replaceWith(next); return; }
+      if (live.nodeType === Node.TEXT_NODE) { if (live.data !== next.data) live.data = next.data; return; }
+      for (const a of Array.from(next.attributes)) {
+        if (live.getAttribute(a.name) !== a.value) live.setAttribute(a.name, a.value);
+      }
+      for (const a of Array.from(live.attributes)) {
+        if (!next.hasAttribute(a.name)) live.removeAttribute(a.name);
+      }
+      const liveKids = Array.from(live.childNodes);
+      const nextKids = Array.from(next.childNodes);
+      const shared = Math.min(liveKids.length, nextKids.length);
+      for (let i = 0; i < shared; i++) morph(liveKids[i], nextKids[i]);
+      for (let i = shared; i < nextKids.length; i++) live.appendChild(nextKids[i]);
+      for (let i = liveKids.length - 1; i >= shared; i--) liveKids[i].remove();
+    }
+
+    const component = new Component();
+    for (const key of Object.keys(component)) {
+      const value = component[key];
+      if (value && typeof value === "object" && "name" in value && value.name === null && "current" in value) {
+        value.name = key;
+      }
+    }
+
+    for (const type of []) {
+      root.addEventListener(type, (event) => {
+        const el = event.target.closest('[data-dc-on="' + type + '"]');
+        if (!el || !root.contains(el)) return;
+        const fn = handlers[Number(el.getAttribute("data-dc-h"))];
+        if (typeof fn !== "function") throw new Error("dc: no handler bound for " + el.outerHTML.slice(0, 80));
+        fn(event);
+      });
+    }
+
+    paint();
+    if (component.componentDidMount) component.componentDidMount();
+    </script>
+  </body>
+</html>

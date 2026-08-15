@@ -14,11 +14,7 @@ The canonical host is `https://rayzor-blade.com/`, and the home page must keep
 that exact URL — new pages are additions beneath it, never a relocation of the
 existing one.
 
-- `<title>` — `Rayzor — High Performance Haxe Compiler`
-- `description` — "A next-generation Haxe compiler with 5-tier JIT,
-  ownership-based memory, and LLVM-powered native code generation. Built with
-  Rust."
-- `keywords`, `robots` (`index, follow, max-image-preview:large`)
+- `robots` (`index, follow, max-image-preview:large`)
 - `theme-color` `#f97316`
 - icons: `/favicon.svg`, `/favicon.png` (32x32), `/apple-touch-icon.png`
 - Open Graph: `og:url`, `og:type` (website), `og:site_name` (Rayzor),
@@ -29,7 +25,26 @@ existing one.
 - two JSON-LD blocks: `SoftwareApplication` and `Organization`
 
 `ograph-image.png` is referenced by absolute URL from both the Open Graph and
-Twitter tags, so its path must not move. `og-image.html` is what generates it.
+Twitter tags, so its path must not move.
+
+## Deliberately changed in the redesign
+
+The title and description were rewritten for search intent. The old pair —
+`Rayzor — High Performance Haxe Compiler` and "A next-generation Haxe compiler
+with 5-tier JIT, ownership-based memory, and LLVM-powered native code
+generation. Built with Rust." — described the implementation. Backend names are
+not what anyone types into a search box, so they moved to the structured
+`featureList` and the new pair leads with what someone is looking for:
+
+- `<title>` — `Rayzor — Faster Haxe, Native Performance`
+- tagline — "Faster Haxe, Native Performance", used for `og:description` and
+  `twitter:description`, where a card truncates anything longer
+
+The `keywords` term list and the JSON-LD `featureList` are where the technical
+vocabulary lives now. Note that search engines rank on neither: `keywords` is
+ignored outright, and `featureList` matters because it can reach a rich result,
+not because it is a ranking signal. The title, the description and the page's
+own headings are what actually carry weight.
 
 ## Needs per-page values, not copies
 
