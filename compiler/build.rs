@@ -70,11 +70,26 @@ fn main() {
 /// standard library changes, and the manifest is rebuilt from those same
 /// sources. A committed artifact could disagree with them; one produced here
 /// cannot.
+/// Reserve for the parse below. A recursive-descent parser's stack depth
+/// follows how deeply the source nests, and the standard library has
+/// expressions deep enough to exceed the 1 MB a thread gets by default on
+/// Windows — where it shows up as the build script exiting with
+/// STATUS_STACK_OVERFLOW rather than as a parse error.
+const MANIFEST_PARSE_STACK: usize = 32 * 1024 * 1024;
+
 fn generate_stdlib_manifest() {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let stdlib_root = PathBuf::from("haxe-std");
 
-    let modules = bsym::build_manifest(&stdlib_root);
+    // Parse on a thread with a stack sized for it, rather than on whichever
+    // stack the host happened to give the build script.
+    let root = stdlib_root.clone();
+    let modules = std::thread::Builder::new()
+        .stack_size(MANIFEST_PARSE_STACK)
+        .spawn(move || bsym::build_manifest(&root))
+        .expect("failed to spawn the manifest parse")
+        .join()
+        .expect("the stdlib manifest parse panicked");
     if modules.is_empty() {
         panic!(
             "no stdlib declarations found under {}; the embedded manifest would be empty",
