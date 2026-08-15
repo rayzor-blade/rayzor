@@ -157,53 +157,57 @@ impl<'a> HirToMirContext<'a> {
                     return IrType::F32;
                 }
 
+                // A SIMD coreType's representation follows from its IDENTITY, so it
+                // is decided ahead of both the underlying type and the
+                // `is_systems_type` check below — the latter claims them (SIMD* are
+                // mir_wrapper classes) and returns I64, truncating the vector to a
+                // 64-bit param, while the former hands back whatever nominal
+                // underlying the declaration carries (a BLADE manifest records the
+                // absent one as `Dynamic`, which lowers to a pointer). Match on
+                // native_name, qualified_name or bare name: a coreType SIMD abstract
+                // reached through a function parameter may not carry native_name in
+                // this view.
+                let type_names = self.symbol_table.get_symbol(*symbol_id).map(|sym| {
+                    let native = sym
+                        .native_name
+                        .and_then(|nn| self.string_interner.get(nn))
+                        .unwrap_or("");
+                    let qualified = sym
+                        .qualified_name
+                        .and_then(|qn| self.string_interner.get(qn))
+                        .unwrap_or("");
+                    let bare = self.string_interner.get(sym.name).unwrap_or("");
+                    (native, qualified, bare)
+                });
+                if let Some((native, qualified, bare)) = type_names {
+                    let is = |simd: &str| {
+                        native == format!("rayzor::{}", simd)
+                            || qualified == format!("rayzor.{}", simd)
+                            || bare == simd
+                    };
+                    if is("SIMD4f") {
+                        return IrType::vector(IrType::F32, 4);
+                    }
+                    if is("SIMD4i32") {
+                        return IrType::vector(IrType::I32, 4);
+                    }
+                    if is("SIMD16i8") {
+                        return IrType::vector(IrType::I8, 16);
+                    }
+                    if is("SIMD8i32") {
+                        return IrType::vector(IrType::I32, 8);
+                    }
+                    if is("SIMD32i8") {
+                        return IrType::vector(IrType::I8, 32);
+                    }
+                    if native == "rayzor::Atomic" {
+                        return IrType::Ptr(Box::new(IrType::I32));
+                    }
+                }
+
                 if let Some(underlying_type) = underlying {
                     self.convert_type(*underlying_type)
                 } else {
-                    // SIMD vectors must be matched before the `is_systems_type` check
-                    // below, which claims them (SIMD* are mir_wrapper classes) and
-                    // returns I64 — truncating the vector to a 64-bit param. Match on
-                    // native_name, qualified_name or bare name: a coreType SIMD
-                    // abstract reached through a function parameter may not carry
-                    // native_name in this view.
-                    let type_names = self.symbol_table.get_symbol(*symbol_id).map(|sym| {
-                        let native = sym
-                            .native_name
-                            .and_then(|nn| self.string_interner.get(nn))
-                            .unwrap_or("");
-                        let qualified = sym
-                            .qualified_name
-                            .and_then(|qn| self.string_interner.get(qn))
-                            .unwrap_or("");
-                        let bare = self.string_interner.get(sym.name).unwrap_or("");
-                        (native, qualified, bare)
-                    });
-                    if let Some((native, qualified, bare)) = type_names {
-                        let is = |simd: &str| {
-                            native == format!("rayzor::{}", simd)
-                                || qualified == format!("rayzor.{}", simd)
-                                || bare == simd
-                        };
-                        if is("SIMD4f") {
-                            return IrType::vector(IrType::F32, 4);
-                        }
-                        if is("SIMD4i32") {
-                            return IrType::vector(IrType::I32, 4);
-                        }
-                        if is("SIMD16i8") {
-                            return IrType::vector(IrType::I8, 16);
-                        }
-                        if is("SIMD8i32") {
-                            return IrType::vector(IrType::I32, 8);
-                        }
-                        if is("SIMD32i8") {
-                            return IrType::vector(IrType::I8, 32);
-                        }
-                        if native == "rayzor::Atomic" {
-                            return IrType::Ptr(Box::new(IrType::I32));
-                        }
-                    }
-
                     // Systems types (Ptr, Ref, Box, Usize) are pointer-sized abstracts.
                     let is_systems_type = self
                         .symbol_table
