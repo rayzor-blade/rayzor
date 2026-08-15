@@ -354,15 +354,12 @@ impl ExactSizeIterator for InternerIterator {
     }
 }
 
-/// Display implementation for InternedString (requires interner context)
-///
-/// Note: This is mainly for debugging. In production, you should use
-/// interner.get(id) for more explicit context.
-impl std::fmt::Display for InternedString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "InternedString({})", self.0)
-    }
-}
+// `InternedString` deliberately has no `Display`. It is an index into a
+// per-process interner, so it carries no text of its own; a `Display` that
+// printed the index would let `{}` or `.to_string()` produce a name-shaped
+// string that matches nothing and varies between runs. Resolve through the
+// interner that produced the id — `StringInterner::get` — and use `{:?}` only
+// where an id is genuinely what is wanted.
 
 /// Convenience functions for common string interning patterns
 impl StringInterner {

@@ -450,7 +450,10 @@ fn validate_interfaces(
         // Check if interface has proper source location
         if !interface.source_location.is_valid() {
             errors.push(ValidationError {
-                message: format!("Interface '{}' has unknown source location", interface_name),
+                message: format!(
+                    "Interface '{:?}' has unknown source location",
+                    interface_name
+                ),
                 category: ValidationErrorCategory::SourceLocation,
                 severity: ValidationSeverity::Medium,
             });
@@ -460,7 +463,7 @@ fn validate_interfaces(
         // Check if interface has proper symbol ID
         if !interface.symbol_id.is_valid() {
             errors.push(ValidationError {
-                message: format!("Interface '{}' has invalid symbol ID", interface_name),
+                message: format!("Interface '{:?}' has invalid symbol ID", interface_name),
                 category: ValidationErrorCategory::SymbolResolution,
                 severity: ValidationSeverity::High,
             });
@@ -473,7 +476,7 @@ fn validate_interfaces(
                 let method_name = &method.name;
                 warnings.push(ValidationWarning {
                     message: format!(
-                        "Method '{}' in interface '{}' has unknown source location",
+                        "Method '{:?}' in interface '{:?}' has unknown source location",
                         method_name, interface_name
                     ),
                     category: ValidationWarningCategory::MetadataSimplification,
@@ -498,7 +501,7 @@ fn validate_enums(
         // Check if enum has proper source location
         if !enum_def.source_location.is_valid() {
             errors.push(ValidationError {
-                message: format!("Enum '{}' has unknown source location", enum_name),
+                message: format!("Enum '{:?}' has unknown source location", enum_name),
                 category: ValidationErrorCategory::SourceLocation,
                 severity: ValidationSeverity::Medium,
             });
@@ -508,7 +511,7 @@ fn validate_enums(
         // Check if enum has proper symbol ID
         if !enum_def.symbol_id.is_valid() {
             errors.push(ValidationError {
-                message: format!("Enum '{}' has invalid symbol ID", enum_name),
+                message: format!("Enum '{:?}' has invalid symbol ID", enum_name),
                 category: ValidationErrorCategory::SymbolResolution,
                 severity: ValidationSeverity::High,
             });
@@ -520,7 +523,7 @@ fn validate_enums(
             if !variant.source_location.is_valid() {
                 warnings.push(ValidationWarning {
                     message: format!(
-                        "Variant '{}' in enum '{}' has unknown source location",
+                        "Variant '{:?}' in enum '{:?}' has unknown source location",
                         variant.name, enum_name
                     ),
                     category: ValidationWarningCategory::MetadataSimplification,
@@ -862,7 +865,10 @@ pub fn validate_type_parameters() -> ValidationResult {
                 for tp in &class.type_parameters {
                     if !tp.symbol_id.is_valid() {
                         validation_errors.push(ValidationError {
-                            message: format!("Type parameter '{}' has invalid symbol ID", tp.name),
+                            message: format!(
+                                "Type parameter '{:?}' has invalid symbol ID",
+                                tp.name
+                            ),
                             category: ValidationErrorCategory::TypeInformation,
                             severity: ValidationSeverity::High,
                         });

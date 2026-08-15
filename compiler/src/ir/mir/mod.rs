@@ -1060,6 +1060,17 @@ pub fn lower_hir_to_mir_with_function_map(
 }
 
 impl<'a> HirToMirContext<'a> {
+    /// The text an interned name stands for.
+    ///
+    /// An `InternedString` is an index into a per-process interner, so anything
+    /// that reaches MIR as a name — a local's name, a string literal, a metadata
+    /// key compared against a literal — has to be resolved through the interner
+    /// that produced it. An unresolvable id yields an empty string rather than a
+    /// placeholder that could be mistaken for a real name.
+    pub(crate) fn interned_str(&self, name: crate::tast::InternedString) -> &'a str {
+        self.string_interner.get(name).unwrap_or("")
+    }
+
     /// Create a new lowering context
     pub fn new(
         module_name: String,

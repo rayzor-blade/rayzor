@@ -1224,7 +1224,7 @@ impl DfgBuilder {
                 Ok(DataFlowNode {
                     id: node_id,
                     kind: DataFlowNodeKind::Constant {
-                        value: ConstantValue::String(name.to_string()),
+                        value: ConstantValue::String(format!("{:?}", name)),
                     },
                     value_type: expression.expr_type,
                     source_location: expression.source_location,
@@ -1242,7 +1242,7 @@ impl DfgBuilder {
                 Ok(DataFlowNode {
                     id: node_id,
                     kind: DataFlowNodeKind::Constant {
-                        value: ConstantValue::String(format!("__{}__", target)),
+                        value: ConstantValue::String(format!("__{:?}__", target)),
                     },
                     value_type: expression.expr_type,
                     source_location: expression.source_location,

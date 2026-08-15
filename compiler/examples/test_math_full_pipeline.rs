@@ -463,7 +463,7 @@ fn compile_haxe_to_mir(source: &str) -> Result<compiler::ir::IrModule, String> {
     // Debug: Print HIR functions and class methods
     for (symbol_id, func) in &hir_module.functions {
         eprintln!(
-            "  HIR function: {} (symbol {:?}), has_body: {}",
+            "  HIR function: {:?} (symbol {:?}), has_body: {}",
             func.name,
             symbol_id,
             func.body.is_some()
@@ -474,13 +474,13 @@ fn compile_haxe_to_mir(source: &str) -> Result<compiler::ir::IrModule, String> {
         match type_decl {
             compiler::ir::hir::HirTypeDecl::Class(class) => {
                 eprintln!(
-                    "  HIR class: {} with {} methods",
+                    "  HIR class: {:?} with {} methods",
                     class.name,
                     class.methods.len()
                 );
                 for method in &class.methods {
                     eprintln!(
-                        "    Method: {}, has_body: {}",
+                        "    Method: {:?}, has_body: {}",
                         method.function.name,
                         method.function.body.is_some()
                     );

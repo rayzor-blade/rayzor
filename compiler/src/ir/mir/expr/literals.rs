@@ -802,7 +802,10 @@ impl<'a> HirToMirContext<'a> {
 
         for part in parts {
             let part_str = match part {
-                HirStringPart::Literal(s) => self.builder.build_string(s.to_string())?,
+                HirStringPart::Literal(s) => {
+                    let text = self.interned_str(*s).to_string();
+                    self.builder.build_string(text)?
+                }
                 HirStringPart::Interpolation(expr) => {
                     let expr_val = self.lower_expression(expr)?;
 

@@ -312,7 +312,7 @@ impl<'a> TypeFlowGuard<'a> {
         if !dfg.is_valid_ssa() {
             self.results.warnings.push(FlowSafetyError::TypeError {
                 message: format!(
-                    "DFG for function '{}' is not in valid SSA form",
+                    "DFG for function '{:?}' is not in valid SSA form",
                     function.name
                 ),
             });

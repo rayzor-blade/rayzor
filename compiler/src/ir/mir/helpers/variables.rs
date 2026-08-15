@@ -229,8 +229,8 @@ impl<'a> HirToMirContext<'a> {
         for (symbol_id, func) in &hir_module.functions {
             // Parse optimization hints from function metadata
             for attr in &func.metadata {
-                let attr_name = attr.name.to_string();
-                match attr_name.as_str() {
+                let attr_name = self.interned_str(attr.name);
+                match attr_name {
                     "inline_candidate" => {
                         self.ssa_hints.inline_candidates.insert(*symbol_id);
                     }
@@ -238,7 +238,7 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(HirAttributeArg::Literal(HirLiteral::String(hint))) =
                             attr.args.first()
                         {
-                            match hint.to_string().as_str() {
+                            match self.interned_str(*hint) {
                                 "straight_line_code" => {
                                     self.ssa_hints.straight_line_functions.insert(*symbol_id);
                                 }

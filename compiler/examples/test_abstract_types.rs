@@ -220,7 +220,8 @@ fn test_operator_overloading() {
             if let Some(abs) = abstract_decl {
                 let has_op_method = abs.methods.iter().any(|m| {
                     // Check if method name or metadata indicates operator
-                    m.name.to_string().contains("add") || m.name.to_string().contains("op")
+                    let name = unit.string_interner.get(m.name).unwrap_or("");
+                    name.contains("add") || name.contains("op")
                 });
 
                 if has_op_method {

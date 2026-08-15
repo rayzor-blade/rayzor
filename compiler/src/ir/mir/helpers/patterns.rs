@@ -76,11 +76,12 @@ impl<'a> HirToMirContext<'a> {
                         var_type_from_hint
                     };
 
+                    let local_name = self.interned_str(*name).to_string();
                     if let Some(func) = self.builder.current_function_mut() {
                         func.locals.insert(
                             value,
                             crate::ir::IrLocal {
-                                name: name.to_string(),
+                                name: local_name,
                                 ty: var_type.clone(),
                                 mutable: is_mutable,
                                 source_location: IrSourceLocation::unknown(),

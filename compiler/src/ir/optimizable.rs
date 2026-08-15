@@ -486,12 +486,12 @@ fn validate_hir(module: &super::hir::HirModule) -> Result<(), Vec<ValidationErro
         if !function_names.insert(&func.name) {
             errors.push(ValidationError {
                 kind: super::validation::ValidationErrorKind::InvalidOperand {
-                    instruction: format!("function {}", func.name),
-                    reason: format!("Duplicate function name: {}", func.name),
+                    instruction: format!("function {:?}", func.name),
+                    reason: format!("Duplicate function name: {:?}", func.name),
                 },
                 function: None,
                 block: None,
-                instruction: Some(format!("function {}", func.name)),
+                instruction: Some(format!("function {:?}", func.name)),
             });
         }
     }

@@ -577,7 +577,7 @@ impl<'a> HirToMirContext<'a> {
                 for (field_name, field_pattern) in fields {
                     // TODO: real field lookup by name; this offset is a
                     // placeholder derived from the name's length.
-                    let field_offset = field_name.to_string().len() as i64;
+                    let field_offset = self.interned_str(*field_name).len() as i64;
 
                     let Some(field_idx) = self.builder.build_int(field_offset, IrType::I64) else {
                         return None;
