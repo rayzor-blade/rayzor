@@ -1,0 +1,8 @@
+[package]
+name = "snapshot-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Lowering the standard library needs the front end, not a backend.
+compiler = { path = "../compiler", default-features = false }

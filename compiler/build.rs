@@ -92,14 +92,17 @@ fn cache_build_id() -> String {
     hash.write_str(CACHE_ABI_VERSION);
     hash.write_str(env!("CARGO_PKG_VERSION"));
 
+    // Target shape only. A cache entry holds MIR and type information, all of
+    // it produced before a backend is chosen, so which backends a build links
+    // does not change what a module lowers to — and including them would give
+    // the same front end two identities, so artifacts produced by a
+    // backend-free build of this crate could not be read by one that links a
+    // backend.
     for key in [
         "CARGO_CFG_TARGET_ARCH",
         "CARGO_CFG_TARGET_OS",
         "CARGO_CFG_TARGET_ENV",
         "CARGO_CFG_TARGET_POINTER_WIDTH",
-        "CARGO_FEATURE_LLVM_BACKEND",
-        "CARGO_FEATURE_WASM_RUNTIME",
-        "CARGO_FEATURE_GPU_RUNTIME",
     ] {
         hash.write_str(key);
         hash.write_str(&std::env::var(key).unwrap_or_default());
