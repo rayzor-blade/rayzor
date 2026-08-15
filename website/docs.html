@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rayzor Docs — Compilation modes, tiering and memory</title>
+    <meta name="description" content="Rayzor compiles Haxe 4.x to native code. Pick a compilation mode, understand tier promotion, and read the memory model, artifacts and debug toolkit.">
+    <meta name="keywords" content="Haxe, Haxe runtime, Haxe compiler, native Haxe, fast Haxe, JIT compilation, tiered JIT, WebAssembly, AOT compiler, ownership memory, no garbage collector, SIMD">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <meta name="theme-color" content="#f97316">
+    <link rel="canonical" href="https://rayzor-blade.com/docs.html">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+    <meta property="og:url" content="https://rayzor-blade.com/docs.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Rayzor">
+    <meta property="og:title" content="Rayzor Docs — Compilation modes, tiering and memory">
+    <meta property="og:description" content="Rayzor compiles Haxe 4.x to native code. Pick a compilation mode, understand tier promotion, and read the memory model, artifacts and debug toolkit.">
+    <meta property="og:image" content="https://rayzor-blade.com/ograph-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:type" content="image/png">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta property="twitter:domain" content="rayzor-blade.com">
+    <meta property="twitter:url" content="https://rayzor-blade.com/docs.html">
+    <meta name="twitter:title" content="Rayzor Docs — Compilation modes, tiering and memory">
+    <meta name="twitter:description" content="Rayzor compiles Haxe 4.x to native code. Pick a compilation mode, understand tier promotion, and read the memory model, artifacts and debug toolkit.">
+    <meta name="twitter:image" content="https://rayzor-blade.com/ograph-image.png">
+    <meta name="twitter:image:width" content="1200">
+    <meta name="twitter:image:height" content="630">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+      body { margin:0; background:#0A0B0D; color:#E9EAEE; font-family:'Geist',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+      * { box-sizing:border-box; }
+      a { color:#F97316; text-decoration:none; }
+      a:hover { color:#FDBA74; }
+      ::selection { background:#F9731644; }
+    </style>
+    <style>
+      html, body { max-width: 100%; overflow-x: hidden; }
+      img, svg { max-width: 100%; height: auto; }
+      pre, table { max-width: 100%; overflow-x: auto; }
+
+      /* Code set outside a <pre> has no scroller of its own; on a phone a long
+         expression has to break rather than run off the edge. */
+      @media (max-width: 640px) {
+        [style*="JetBrains Mono"] { overflow-wrap: anywhere; }
+      }
+
+      .rz-menu-state { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+      .rz-burger {
+        display: none; align-items: center; justify-content: center; flex: none;
+        width: 38px; height: 34px; border: 1px solid #22242A; border-radius: 9px;
+        color: #C9CCD2; cursor: pointer;
+      }
+      .rz-burger:hover { border-color: #4A4E58; color: #E9EAEE; }
+      .rz-menu-state:checked ~ header .rz-burger { border-color: #F97316; color: #F97316; }
+
+      @media (max-width: 860px) {
+        .rz-burger { display: inline-flex; }
+        .rz-nav { display: none !important; }
+        .rz-menu-state:checked ~ header nav.rz-nav {
+          display: flex !important; order: 10; width: 100%; flex-direction: column;
+          align-items: flex-start; gap: 0; margin-top: 4px; padding-top: 6px;
+          border-top: 1px solid #1A1C21;
+        }
+        .rz-menu-state:checked ~ header nav.rz-nav > a { padding: 9px 0; width: 100%; }
+        .rz-menu-state:checked ~ * aside.rz-nav { display: block !important; }
+        aside.rz-toc { display: none !important; }
+        .rz-menu-item { display: none !important; }
+        .rz-menu-state:checked ~ header .rz-menu-item {
+          display: inline-flex !important; order: 11; width: 100%; padding: 9px 0;
+        }
+        .rz-menu-state:checked ~ header input.rz-menu-item {
+          display: block !important; order: 9; width: 100%; margin-top: 4px;
+        }
+      }
+      .dcf5:focus{border-color:#F97316 !important}
+      .dch6:hover{color:#E9EAEE !important}
+      .dcr12{font-size:clamp(29px, 3.83vw, 46px) !important}
+      .dch19:hover{background:#FB8B3C !important}
+      @media (max-width:1024px){
+        .dcr0{gap:22px !important}
+        .dcr7{grid-template-columns:1fr !important}
+        .dcr8{gap:26px !important}
+        .dcr10{position:static !important}
+        .dcr13{display:none !important}
+      }
+      @media (max-width:900px){
+        .dcr15{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+      }
+      @media (max-width:860px){
+        .dcr3{height:auto !important;min-height:64px !important;flex-wrap:wrap !important;row-gap:10px !important;column-gap:14px !important;padding-top:10px !important;padding-bottom:10px !important}
+        .dcr4{width:auto !important;min-width:0 !important;flex:1 1 140px !important}
+      }
+      @media (max-width:680px){
+        .dcr1{gap:16px !important}
+        .dcr2{padding:0 18px 0 18px !important}
+        .dcr9{gap:19px !important}
+        .dcr11{padding:40px 0 58px 0 !important}
+        .dcr14{flex-wrap:wrap !important}
+        .dcr16{grid-template-columns:1fr !important}
+        .dcr17{width:100% !important;max-width:100% !important}
+        .dcr18{padding:26px 18px 26px 18px !important}
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rz-root" style="min-height:100vh;background:#0A0B0D"><input type="checkbox" id="rz-menu" class="rz-menu-state" aria-hidden="true" tabindex="-1">
+  <header style="position:sticky;top:0;z-index:50;border-bottom:1px solid #1A1C21;background:#0A0B0DE6;backdrop-filter:blur(12px)">
+    <div style="max-width:1280px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:40px" class="dcr0 dcr1 dcr2 dcr3">
+      <a href="/" style="display:flex;align-items:center;gap:10px;color:#E9EAEE">
+        <img src="logo.svg" alt="" style="width:26px;height:26px;display:block">
+        <span style="font-size:16px;font-weight:600;letter-spacing:-0.01em">Rayzor</span>
+        <span style="font-size:16px;color:#4E535B">/</span>
+        <span style="font-size:16px;color:#9AA0AA">Docs</span>
+      </a>
+      <div style="flex:1"></div>
+      <input placeholder="Search docs" style="width:220px;padding:7px 12px;border-radius:8px;border:1px solid #22242A;background:#0E1013;color:#E9EAEE;font-family:'Geist',sans-serif;font-size:13px;outline:none" class="rz-menu-item dcr4 dcf5">
+      <a href="https://github.com/rayzor-blade/rayzor" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#9AA0AA" class="rz-menu-item dch6">GitHub ↗</a>
+    <label class="rz-burger" for="rz-menu" role="button" tabindex="0" aria-label="Navigation menu"><svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h14"></path></svg></label></div>
+  </header>
+
+  <div style="max-width:1280px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px 1fr 190px;gap:48px;align-items:start" class="dcr7 dcr8 dcr9 dcr2">
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13.5px" class="rz-nav dcr10">
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Start</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="#quickstart" style="padding:5px 0;color:#F97316;font-weight:500">Quick start</a>
+            
+              <a href="#modes" style="padding:5px 0;color:#9AA0AA;font-weight:400">Compilation modes</a>
+            
+              <a href="#tiers" style="padding:5px 0;color:#9AA0AA;font-weight:400">Tiering</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Concepts</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="/architecture.html" style="padding:5px 0;color:#9AA0AA;font-weight:400">Architecture</a>
+            
+              <a href="/architecture.html#simd" style="padding:5px 0;color:#9AA0AA;font-weight:400">SIMD</a>
+            
+              <a href="/concurrency.html" style="padding:5px 0;color:#9AA0AA;font-weight:400">Concurrency</a>
+            
+              <a href="#memory" style="padding:5px 0;color:#9AA0AA;font-weight:400">Memory model</a>
+            
+              <a href="#artifacts" style="padding:5px 0;color:#9AA0AA;font-weight:400">Artifacts</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Reference</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="#manifest" style="padding:5px 0;color:#9AA0AA;font-weight:400">Project manifest</a>
+            
+              <a href="#debug" style="padding:5px 0;color:#9AA0AA;font-weight:400">Debug toolkit</a>
+            
+              <a href="/cli.html" style="padding:5px 0;color:#9AA0AA;font-weight:400">CLI reference</a>
+            
+              <a href="/cli.html#env" style="padding:5px 0;color:#9AA0AA;font-weight:400">Environment variables</a>
+            
+          </div>
+        </div>
+      
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Project</div>
+          <div style="display:grid;gap:2px">
+            
+              <a href="/" style="padding:5px 0;color:#9AA0AA;font-weight:400">Home</a>
+            
+              <a href="https://github.com/rayzor-blade/rayzor" style="padding:5px 0;color:#9AA0AA;font-weight:400">Contributing</a>
+            
+          </div>
+        </div>
+      
+    </aside>
+
+    <main style="padding:40px 0 96px;min-width:0" class="dcr11">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Getting started</div>
+      <h1 id="quickstart" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr12">Quick start</h1>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Picking what you want — a fast dev loop, a shippable binary, a portable artifact — means picking a command.</p>
+
+      <div style="margin-top:32px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;color:#C9CCD2">
+        <div><span style="color:#F97316">$</span> cargo install --git https://github.com/rayzor-blade/rayzor</div>
+        <div><span style="color:#F97316">$</span> rayzor init --name my-app</div>
+        <div><span style="color:#F97316">$</span> rayzor run src/Main.hx</div>
+      </div>
+
+      <h2 id="modes" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;gap:0;background:#101216;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:#6F757E" class="dcr7 dcr13">
+          <div style="padding:12px 18px">You want to</div><div style="padding:12px 18px">Command</div><div style="padding:12px 18px">What happens</div>
+        </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Run code while developing</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor run main.hx</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Type-check only</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor check main.hx</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Parse and type-check, no codegen</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Ship a native binary</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor aot main.hx -o app</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Whole program through LLVM, linked against the runtime</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Ship one portable artifact</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor bundle main.hx</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Serialized MIR in a single .rzb, run later with rayzor run</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Target the browser or WASI</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor build --target wasm</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">WebAssembly module; --browser also emits an HTML harness</div>
+          </div>
+        
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Inspect the pipeline</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor compile --stage mir</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Stop at any stage — ast, tast, hir, mir, native — and print it</div>
+          </div>
+        
+      </div>
+
+      <h2 id="tiers" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Tiering</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor run</span> starts in the MIR interpreter so execution begins immediately, then promotes a function to a compiled tier once it has run enough times. A preset is a policy, not a backend.</p>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">script</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">CLI tools and one-shot scripts — instant startup, no promotion</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">application</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Desktop apps and web servers — balanced, includes LLVM (default)</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">server</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Long-running services — aggressive optimization</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">benchmark</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Performance testing — immediate bailout, manual LLVM upgrade</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">development</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Debugging — verbose logging</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">embedded</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Constrained environments — interpreter only</span>
+          </div>
+        
+      </div>
+      <p style="margin:26px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099"><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">--tier-thresholds &lt;I/W/H[/B]&gt;</span> overrides the preset's thresholds directly.</p>
+
+      <h2 id="memory" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Memory model</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">There is no garbage collector. The compiler decides at compile time when a value is freed, from last-use and escape analysis, with a MIR-level pass as the backstop for anything the HIR analysis cannot see. Ownership is opt-in through annotations.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#E8B84B">@:move</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">UniqueResource { ... }      </span><span style="color:#5B616B">// move semantics, no aliasing
+</span><span style="color:#E8B84B">@:arc</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">SharedState { ... }          </span><span style="color:#5B616B">// atomic reference counting
+</span><span style="color:#E8B84B">@:derive</span><span style="color:#C9CCD2">([Send, Sync]) </span><span style="color:#F97316">class</span> <span style="color:#C9CCD2">Data { ... } </span><span style="color:#5B616B">// thread-safety markers</span></div>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:safety</span> on the Main class selects a program-wide mode: strict requires every class to be annotated, non-strict wraps the rest in <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">Rc</span>. Use-after-move is a hard error for <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:move</span> types and a warning otherwise.</p>
+
+      <h2 id="artifacts" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Artifacts</h2>
+      <div style="margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px" class="dcr15 dcr16">
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.blade</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Per-module MIR cache for incremental builds. On by default; <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">--no-cache</span> disables it.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rzb</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Every compiled module in one file. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">rayzor run app.rzb</span> skips compilation entirely.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rpkg</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Haxe sources plus optional native libraries. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">strip</span> reduces it to one platform.</p>
+        </div>
+      </div>
+      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id — not by a redundant relink of identical sources.</p>
+
+      <h2 id="manifest" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Project manifest</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A project is described by a <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at its root.</p>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        <div style="padding:9px 18px;border-bottom:1px solid #1A1C21;background:#101216;font-family:'JetBrains Mono',monospace;font-size:11px;color:#6F757E">rayzor.toml</div>
+        <div style="padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#7FD1C0">[project]
+</span><span style="color:#C9CCD2">name = </span><span style="color:#E8B84B">"my-app"
+</span><span style="color:#C9CCD2">version = </span><span style="color:#E8B84B">"0.1.0"
+</span><span style="color:#C9CCD2">entry = </span><span style="color:#E8B84B">"src/Main.hx"
+</span>
+<span style="color:#7FD1C0">[build]
+</span><span style="color:#C9CCD2">class-paths = [</span><span style="color:#E8B84B">"src"</span><span style="color:#C9CCD2">]
+opt-level = </span><span style="color:#E8B84B">2
+</span><span style="color:#C9CCD2">preset = </span><span style="color:#E8B84B">"application"
+</span>
+<span style="color:#7FD1C0">[cache]
+</span><span style="color:#C9CCD2">enabled = </span><span style="color:#E8B84B">true</span></div>
+      </div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">An existing HXML build can be delegated to rather than ported — set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
+      <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.</p>
+
+      <h2 id="debug" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Debug toolkit</h2>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor debug run</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Forensic run with crash handlers pre-armed</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor debug bench</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Run N times, per-run metrics plus aggregate stats</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor debug compare</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">A/B two git refs and report the median delta; restores the tree on exit</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor debug resolve</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Hex PCs from a crash dump → Haxe functions and lines</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor debug server</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Live metrics over HTTP with a browser dashboard</span>
+          </div>
+        
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none" class="dcr17">rayzor dump --diff</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">MIR before and after optimization — the fastest way to see what a pass did</span>
+          </div>
+        
+      </div>
+
+      <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap" class="dcr18">
+        <div>
+          <div style="font-size:16px;font-weight:600">Full reference lives in the repo</div>
+          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">Every flag, the pass ordering, the runtime ABI and the format specs.</p>
+        </div>
+        <a href="https://github.com/rayzor-blade/rayzor/tree/main/docs" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" class="dch19">Open docs/ ↗</a>
+      </div>
+    </main>
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13px" class="rz-toc dcr10">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:12px">On this page</div>
+      <div style="display:grid;gap:9px">
+        <a href="#quickstart" style="color:#8A9099" class="dch6">Quick start</a>
+        <a href="#modes" style="color:#8A9099" class="dch6">Compilation modes</a>
+        <a href="#tiers" style="color:#8A9099" class="dch6">Tiering</a>
+        <a href="#memory" style="color:#8A9099" class="dch6">Memory model</a>
+        <a href="#artifacts" style="color:#8A9099" class="dch6">Artifacts</a>
+        <a href="#manifest" style="color:#8A9099" class="dch6">Project manifest</a>
+        <a href="#debug" style="color:#8A9099" class="dch6">Debug toolkit</a>
+      </div>
+    </aside>
+  </div>
+</div>
+  </body>
+</html>

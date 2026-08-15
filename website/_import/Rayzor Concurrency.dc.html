@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; background:#0A0B0D; color:#E9EAEE; font-family:'Geist',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+  * { box-sizing:border-box; }
+  a { color:#F97316; text-decoration:none; }
+  a:hover { color:#FDBA74; }
+  ::selection { background:#F9731644; }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#0A0B0D">
+  <header style="position:sticky;top:0;z-index:50;border-bottom:1px solid #1A1C21;background:#0A0B0DE6;backdrop-filter:blur(12px)">
+    <div style="max-width:1280px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:40px">
+      <a href="Rayzor Home.dc.html" style="display:flex;align-items:center;gap:10px;color:#E9EAEE">
+        <img src="logo.svg" alt="" style="width:26px;height:26px;display:block">
+        <span style="font-size:16px;font-weight:600;letter-spacing:-0.01em">Rayzor</span>
+        <span style="font-size:16px;color:#4E535B">/</span>
+        <span style="font-size:16px;color:#9AA0AA">Concurrency</span>
+      </a>
+      <div style="flex:1"></div>
+      <a href="Rayzor Docs.dc.html" style="font-size:14px;color:#9AA0AA" style-hover="color:#E9EAEE">Docs</a>
+      <a href="Rayzor Architecture.dc.html" style="font-size:14px;color:#9AA0AA" style-hover="color:#E9EAEE">Architecture</a>
+      <a href="https://github.com/rayzor-blade/rayzor" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#9AA0AA" style-hover="color:#E9EAEE">GitHub ↗</a>
+    </div>
+  </header>
+
+  <div style="max-width:1280px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px minmax(0,1fr) 190px;gap:48px;align-items:start">
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13.5px">
+      <sc-for list="{{ nav }}" as="group" hint-placeholder-count="4">
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">{{ group.title }}</div>
+          <div style="display:grid;gap:2px">
+            <sc-for list="{{ group.items }}" as="item" hint-placeholder-count="4">
+              <a href="{{ item.href }}" style="{{ item.style }}">{{ item.label }}</a>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </aside>
+
+    <main style="padding:40px 0 96px;min-width:0">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Concepts</div>
+      <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600">Concurrency</h1>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Threads, channels and shared state, with the sharing rules checked before you run. Every value that crosses a thread boundary must be <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Send</span>; every value shared by reference must also be <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Sync</span> — both declared with one annotation and validated by the compiler.</p>
+      <div style="margin-top:26px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#E8B84B">@:derive</span><span style="color:#C9CCD2">([Send, Sync])
+</span><span style="color:#F97316">class</span> <span style="color:#C9CCD2">SharedData {
+    </span><span style="color:#F97316">public var</span> <span style="color:#C9CCD2">counter:</span><span style="color:#7FD1C0">Int</span><span style="color:#C9CCD2">;
+    </span><span style="color:#F97316">public function</span> <span style="color:#7FD1C0">new</span><span style="color:#C9CCD2">() { counter = </span><span style="color:#E8B84B">0</span><span style="color:#C9CCD2">; }
+}</span></div>
+
+      <h2 id="threads" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Threads</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Lightweight and goroutine-shaped: spawn a closure, get a handle back, join it for the result. Every variable the closure captures must be Send, and the closure itself is moved into the new thread.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">msg = </span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Message(</span><span style="color:#E8B84B">"hello"</span><span style="color:#C9CCD2">);
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">handle = Thread.spawn(() -> {
+    trace(msg.data);
+    </span><span style="color:#F97316">return</span> <span style="color:#E8B84B">42</span><span style="color:#C9CCD2">;
+});
+
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">result = handle.join();     </span><span style="color:#5B616B">// 42
+</span><span style="color:#C9CCD2">handle.isFinished();          </span><span style="color:#5B616B">// non-blocking check</span></div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px"><span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">Parker</span> exposes the primitive underneath — register for park/unpark, block, and wake by id. An unpark issued before the park makes the next park return immediately, so there is no lost-wakeup window.</p>
+
+      <h2 id="channels" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Channels</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Multi-producer, multi-consumer. Capacity zero is unbounded and never blocks the sender; a positive capacity is bounded and blocks when full. <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">trySend</span> and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">tryReceive</span> are the non-blocking pair.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">ch = </span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Channel&lt;Message&gt;(</span><span style="color:#E8B84B">10</span><span style="color:#C9CCD2">);   </span><span style="color:#5B616B">// bounded
+
+</span><span style="color:#C9CCD2">Thread.spawn(() -> ch.send(</span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Message(</span><span style="color:#E8B84B">42</span><span style="color:#C9CCD2">)));
+
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">msg = ch.receive();             </span><span style="color:#5B616B">// blocks
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">maybe = ch.tryReceive();        </span><span style="color:#5B616B">// null if empty</span></div>
+
+      <h3 style="margin:36px 0 0;font-size:19px;font-weight:600">Select</h3>
+      <p style="margin:12px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Non-deterministic receive across several channels, Go-shaped. <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Select.recv</span> blocks until any channel yields; <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Select.tryRecv</span> polls once and reports <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">index == -1</span> when nothing was ready.</p>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">r = Select.recv([ch1, ch2]);
+</span><span style="color:#F97316">if</span> <span style="color:#C9CCD2">(r.index == </span><span style="color:#E8B84B">1</span><span style="color:#C9CCD2">) trace(r.value.v);   </span><span style="color:#5B616B">// 42</span></div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">A closed, empty channel yields its own slot index with a null value — the same "zero value on a closed receive" convention, which is how you detect closure inside a select arm. Channels in one call share an element type; use <span style="font-family:'JetBrains Mono',monospace;font-size:14px">Channel&lt;Dynamic&gt;</span> for heterogeneous selects.</p>
+
+      <h2 id="shared" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Shared state</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Arc</span> gives shared ownership across threads — cloning bumps the refcount rather than copying — and pairs with <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">Mutex</span> when the shared value is also mutable.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">counter = </span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Arc(</span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Mutex(</span><span style="color:#F97316">new</span> <span style="color:#C9CCD2">Counter()));
+</span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">handle = counter.clone();       </span><span style="color:#5B616B">// refcount bump
+
+</span><span style="color:#C9CCD2">Thread.spawn(() -> {
+    </span><span style="color:#F97316">var</span> <span style="color:#C9CCD2">guard = handle.get().lock();
+    guard.get().value += </span><span style="color:#E8B84B">1</span><span style="color:#C9CCD2">;
+    guard.unlock();
+});</span></div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#6F757E;max-width:680px">The inner type must be Send + Sync to cross a thread boundary at all — the compiler rejects the spawn otherwise, rather than leaving it to a data race at runtime. <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">Atomic</span> covers the cases where a lock is more than you need.</p>
+
+      <h2 id="parallel" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Data-parallel work</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">WorkerPool</span> is the entry point for anything that iterates a large index range — matmul rows, conv tiles, attention heads, elementwise sweeps.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#F97316">var</span> <span style="color:#C9CCD2">pool = WorkerPool.global();
+pool.parallelFor(</span><span style="color:#E8B84B">1000000</span><span style="color:#C9CCD2">, (idx, node) -> {
+    </span><span style="color:#5B616B">// one worker per NUMA node when nodeCount &gt; 1
+</span><span style="color:#C9CCD2">});</span></div>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        <sc-for list="{{ parallel }}" as="p" hint-placeholder-count="3">
+          <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;padding:15px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">{{ p.name }}</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">{{ p.what }}</span>
+          </div>
+        </sc-for>
+      </div>
+
+      <h3 style="margin:40px 0 0;font-size:19px;font-weight:600">SpinPool, for kernels called hundreds of times</h3>
+      <p style="margin:12px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Spawning and joining OS threads per call dominates when a kernel runs hundreds of times per token. A <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">SpinPool</span> spawns its workers once and re-dispatches through a lock-free protocol, so a dispatch costs a few atomic stores.</p>
+      <p style="margin:14px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Work distribution is chunk-stealing rather than static bands: workers claim row ranges from a shared atomic cursor until the range is exhausted. Static bands lose the join to the slowest core — an E-core band runs three to four times longer than a P-core band — while stealing self-balances heterogeneous cores without knowing the topology.</p>
+      <div style="margin-top:20px;padding:16px 20px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:14.5px;line-height:1.65;color:#8A9099;max-width:820px;text-wrap:pretty"><span style="color:#C9CCD2">Results stay bit-identical.</span> Each row is computed by exactly one worker with an unchanged per-row reduction order, so a parallel run matches the serial loop exactly.</div>
+
+      <h2 id="topology" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Topology &amp; affinity</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">CpuTopology</span> is the low-level primitive WorkerPool is built on, exposed for callers who need fine-grained pinning. One topology per process, queried lazily on first call.</p>
+      <div style="margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div style="border:1px solid #22242A;border-radius:12px;padding:24px;background:#0E1013">
+          <div style="font-size:15px;font-weight:600">Multi-node servers</div>
+          <p style="margin:8px 0 0;font-size:14px;line-height:1.6;color:#8A9099">On multi-socket Linux and Windows, one worker is pinned per NUMA node so allocations land first-touch on that node's memory controller.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:24px;background:#0E1013">
+          <div style="font-size:15px;font-weight:600">UMA hardware and wasm</div>
+          <p style="margin:8px 0 0;font-size:14px;line-height:1.6;color:#8A9099">Node count is 1, every CPU maps to node 0, and binding succeeds as a soft affinity hint. Work runs inline unless you force fanout.</p>
+        </div>
+      </div>
+
+      <h2 id="api" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">The concurrent package</h2>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        <sc-for list="{{ api }}" as="a" hint-placeholder-count="10">
+          <div style="display:grid;grid-template-columns:170px minmax(0,1fr);gap:20px;padding:14px 0;border-top:1px solid #1A1C21;align-items:baseline">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">{{ a.name }}</span>
+            <span style="font-size:14px;line-height:1.6;color:#8A9099">{{ a.what }}</span>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:16px;font-weight:600">How the runtime backs this</div>
+          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">Drop behavior for runtime-managed types, the closure ABI, and the tier ladder.</p>
+        </div>
+        <a href="Rayzor Architecture.dc.html" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" style-hover="background:#FB8B3C">Architecture →</a>
+      </div>
+    </main>
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13px">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:12px">On this page</div>
+      <div style="display:grid;gap:9px">
+        <a href="#overview" style="color:#8A9099" style-hover="color:#E9EAEE">Overview</a>
+        <a href="#threads" style="color:#8A9099" style-hover="color:#E9EAEE">Threads</a>
+        <a href="#channels" style="color:#8A9099" style-hover="color:#E9EAEE">Channels</a>
+        <a href="#shared" style="color:#8A9099" style-hover="color:#E9EAEE">Shared state</a>
+        <a href="#parallel" style="color:#8A9099" style-hover="color:#E9EAEE">Data-parallel work</a>
+        <a href="#topology" style="color:#8A9099" style-hover="color:#E9EAEE">Topology &amp; affinity</a>
+        <a href="#api" style="color:#8A9099" style-hover="color:#E9EAEE">The concurrent package</a>
+      </div>
+    </aside>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280}}">
+const NAV = [
+  { title: "Start", items: [["Quick start", "Rayzor Docs.dc.html#quickstart"], ["Compilation modes", "Rayzor Docs.dc.html#modes"], ["Tiering", "Rayzor Docs.dc.html#tiers"]] },
+  { title: "Concepts", items: [["Architecture", "Rayzor Architecture.dc.html"], ["SIMD", "Rayzor Architecture.dc.html#simd"], ["Concurrency", "#overview", 1], ["Memory model", "Rayzor Docs.dc.html#memory"]] },
+  { title: "Reference", items: [["The rayzor package", "Rayzor Architecture.dc.html#stdlib"], ["Project manifest", "Rayzor Docs.dc.html#manifest"], ["CLI reference", "Rayzor CLI.dc.html"]] },
+  { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
+];
+const PARALLEL = [
+  { name: "Multi-node", what: "One worker spawned per NUMA node, each pinned before the closure runs" },
+  { name: "Single-node", what: "No fanout — runs inline on the calling thread. withForcedNodes(N) fans out anyway" },
+  { name: "Small work", what: "Fewer items than twice the node count also runs inline; the fanout would cost more than it saves" }
+];
+const API = [
+  { name: "Thread<T>", what: "spawn a closure, join for its result, isFinished for a non-blocking check" },
+  { name: "Channel<T>", what: "MPMC queue — send, receive, trySend, tryReceive, close. Unbounded at capacity 0" },
+  { name: "Select", what: "recv and tryRecv across an array of channels, returning (index, value)" },
+  { name: "Mutex<T>", what: "Exclusive access to the inner value; lock returns a guard, unlock releases it" },
+  { name: "Arc<T>", what: "Atomic refcounted shared ownership; clone bumps the count, not the value" },
+  { name: "Future<T>", what: "Lazy — nothing runs until await() blocks or then(cb) resolves on a worker" },
+  { name: "WorkerPool", what: "parallelFor and parallelRows over an index range, NUMA-pinned where it matters" },
+  { name: "SpinPool", what: "Persistent workers with chunk-stealing dispatch, for kernels called hundreds of times" },
+  { name: "Parker", what: "registerParkable, park, unpark — the wake primitive, with no lost-wakeup window" },
+  { name: "CpuTopology", what: "multiNode, nodeCount, cpu count and bindToNode for explicit affinity" }
+];
+
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      nav: NAV.map(g => ({
+        title: g.title,
+        items: g.items.map(([label, href, active]) => ({
+          label, href,
+          style: "padding:5px 0;color:" + (active ? "#F97316" : "#9AA0AA") + ";font-weight:" + (active ? "500" : "400")
+        }))
+      })),
+      parallel: PARALLEL, api: API
+    };
+  }
+}
+
+</script>
+</body>
+</html>

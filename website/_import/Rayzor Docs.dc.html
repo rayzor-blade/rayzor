@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; background:#0A0B0D; color:#E9EAEE; font-family:'Geist',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+  * { box-sizing:border-box; }
+  a { color:#F97316; text-decoration:none; }
+  a:hover { color:#FDBA74; }
+  ::selection { background:#F9731644; }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#0A0B0D">
+  <header style="position:sticky;top:0;z-index:50;border-bottom:1px solid #1A1C21;background:#0A0B0DE6;backdrop-filter:blur(12px)">
+    <div style="max-width:1280px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:40px">
+      <a href="Rayzor Home.dc.html" style="display:flex;align-items:center;gap:10px;color:#E9EAEE">
+        <img src="logo.svg" alt="" style="width:26px;height:26px;display:block">
+        <span style="font-size:16px;font-weight:600;letter-spacing:-0.01em">Rayzor</span>
+        <span style="font-size:16px;color:#4E535B">/</span>
+        <span style="font-size:16px;color:#9AA0AA">Docs</span>
+      </a>
+      <div style="flex:1"></div>
+      <input placeholder="Search docs" style="width:220px;padding:7px 12px;border-radius:8px;border:1px solid #22242A;background:#0E1013;color:#E9EAEE;font-family:'Geist',sans-serif;font-size:13px;outline:none" style-focus="border-color:#F97316">
+      <a href="https://github.com/rayzor-blade/rayzor" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#9AA0AA" style-hover="color:#E9EAEE">GitHub ↗</a>
+    </div>
+  </header>
+
+  <div style="max-width:1280px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px 1fr 190px;gap:48px;align-items:start">
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13.5px">
+      <sc-for list="{{ nav }}" as="group" hint-placeholder-count="4">
+        <div style="margin-bottom:26px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">{{ group.title }}</div>
+          <div style="display:grid;gap:2px">
+            <sc-for list="{{ group.items }}" as="item" hint-placeholder-count="4">
+              <a href="{{ item.href }}" style="{{ item.style }}">{{ item.label }}</a>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </aside>
+
+    <main style="padding:40px 0 96px;min-width:0">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Getting started</div>
+      <h1 id="quickstart" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600">Quick start</h1>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Picking what you want — a fast dev loop, a shippable binary, a portable artifact — means picking a command.</p>
+
+      <div style="margin-top:32px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;color:#C9CCD2">
+        <div><span style="color:#F97316">$</span> cargo install --git https://github.com/rayzor-blade/rayzor</div>
+        <div><span style="color:#F97316">$</span> rayzor init --name my-app</div>
+        <div><span style="color:#F97316">$</span> rayzor run src/Main.hx</div>
+      </div>
+
+      <h2 id="modes" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;gap:0;background:#101216;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:#6F757E">
+          <div style="padding:12px 18px">You want to</div><div style="padding:12px 18px">Command</div><div style="padding:12px 18px">What happens</div>
+        </div>
+        <sc-for list="{{ modes }}" as="row" hint-placeholder-count="6">
+          <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013">
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">{{ row.want }}</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">{{ row.cmd }}</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">{{ row.what }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <h2 id="tiers" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Tiering</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor run</span> starts in the MIR interpreter so execution begins immediately, then promotes a function to a compiled tier once it has run enough times. A preset is a policy, not a backend.</p>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        <sc-for list="{{ presets }}" as="p" hint-placeholder-count="6">
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">{{ p.name }}</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">{{ p.for }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <p style="margin:26px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099"><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">--tier-thresholds &lt;I/W/H[/B]&gt;</span> overrides the preset's thresholds directly.</p>
+
+      <h2 id="memory" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Memory model</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">There is no garbage collector. The compiler decides at compile time when a value is freed, from last-use and escape analysis, with a MIR-level pass as the backstop for anything the HIR analysis cannot see. Ownership is opt-in through annotations.</p>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#E8B84B">@:move</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">UniqueResource { ... }      </span><span style="color:#5B616B">// move semantics, no aliasing
+</span><span style="color:#E8B84B">@:arc</span> <span style="color:#F97316">class</span> <span style="color:#C9CCD2">SharedState { ... }          </span><span style="color:#5B616B">// atomic reference counting
+</span><span style="color:#E8B84B">@:derive</span><span style="color:#C9CCD2">([Send, Sync]) </span><span style="color:#F97316">class</span> <span style="color:#C9CCD2">Data { ... } </span><span style="color:#5B616B">// thread-safety markers</span></div>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty"><span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:safety</span> on the Main class selects a program-wide mode: strict requires every class to be annotated, non-strict wraps the rest in <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">Rc</span>. Use-after-move is a hard error for <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">@:move</span> types and a warning otherwise.</p>
+
+      <h2 id="artifacts" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Artifacts</h2>
+      <div style="margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.blade</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Per-module MIR cache for incremental builds. On by default; <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">--no-cache</span> disables it.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rzb</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Every compiled module in one file. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">rayzor run app.rzb</span> skips compilation entirely.</p>
+        </div>
+        <div style="border:1px solid #22242A;border-radius:12px;padding:22px;background:#0E1013">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">.rpkg</div>
+          <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Haxe sources plus optional native libraries. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">strip</span> reduces it to one platform.</p>
+        </div>
+      </div>
+      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id — not by a redundant relink of identical sources.</p>
+
+      <h2 id="manifest" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Project manifest</h2>
+      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A project is described by a <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at its root.</p>
+      <div style="margin-top:20px;border:1px solid #22242A;border-radius:12px;background:#0E1013;overflow:hidden">
+        <div style="padding:9px 18px;border-bottom:1px solid #1A1C21;background:#101216;font-family:'JetBrains Mono',monospace;font-size:11px;color:#6F757E">rayzor.toml</div>
+        <div style="padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.95;white-space:pre-wrap;overflow-wrap:break-word"><span style="color:#7FD1C0">[project]
+</span><span style="color:#C9CCD2">name = </span><span style="color:#E8B84B">"my-app"
+</span><span style="color:#C9CCD2">version = </span><span style="color:#E8B84B">"0.1.0"
+</span><span style="color:#C9CCD2">entry = </span><span style="color:#E8B84B">"src/Main.hx"
+</span>
+<span style="color:#7FD1C0">[build]
+</span><span style="color:#C9CCD2">class-paths = [</span><span style="color:#E8B84B">"src"</span><span style="color:#C9CCD2">]
+opt-level = </span><span style="color:#E8B84B">2
+</span><span style="color:#C9CCD2">preset = </span><span style="color:#E8B84B">"application"
+</span>
+<span style="color:#7FD1C0">[cache]
+</span><span style="color:#C9CCD2">enabled = </span><span style="color:#E8B84B">true</span></div>
+      </div>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">An existing HXML build can be delegated to rather than ported — set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
+      <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.</p>
+
+      <h2 id="debug" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Debug toolkit</h2>
+      <div style="margin-top:22px;display:grid;gap:2px">
+        <sc-for list="{{ debug }}" as="d" hint-placeholder-count="6">
+          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none">{{ d.cmd }}</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">{{ d.what }}</span>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:16px;font-weight:600">Full reference lives in the repo</div>
+          <p style="margin:6px 0 0;font-size:14px;color:#8A9099">Every flag, the pass ordering, the runtime ABI and the format specs.</p>
+        </div>
+        <a href="https://github.com/rayzor-blade/rayzor/tree/main/docs" style="padding:11px 20px;border-radius:9px;background:#F97316;color:#0A0B0D;font-size:14px;font-weight:600;white-space:nowrap" style-hover="background:#FB8B3C">Open docs/ ↗</a>
+      </div>
+    </main>
+
+    <aside style="position:sticky;top:64px;padding:40px 0;font-size:13px">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:12px">On this page</div>
+      <div style="display:grid;gap:9px">
+        <a href="#quickstart" style="color:#8A9099" style-hover="color:#E9EAEE">Quick start</a>
+        <a href="#modes" style="color:#8A9099" style-hover="color:#E9EAEE">Compilation modes</a>
+        <a href="#tiers" style="color:#8A9099" style-hover="color:#E9EAEE">Tiering</a>
+        <a href="#memory" style="color:#8A9099" style-hover="color:#E9EAEE">Memory model</a>
+        <a href="#artifacts" style="color:#8A9099" style-hover="color:#E9EAEE">Artifacts</a>
+        <a href="#manifest" style="color:#8A9099" style-hover="color:#E9EAEE">Project manifest</a>
+        <a href="#debug" style="color:#8A9099" style-hover="color:#E9EAEE">Debug toolkit</a>
+      </div>
+    </aside>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280}}">
+const NAV = [
+  { title: "Start", items: [["Quick start", "#quickstart", 1], ["Compilation modes", "#modes"], ["Tiering", "#tiers"]] },
+  { title: "Concepts", items: [["Architecture", "Rayzor Architecture.dc.html"], ["SIMD", "Rayzor Architecture.dc.html#simd"], ["Concurrency", "Rayzor Concurrency.dc.html"], ["Memory model", "#memory"], ["Artifacts", "#artifacts"]] },
+  { title: "Reference", items: [["Project manifest", "#manifest"], ["Debug toolkit", "#debug"], ["CLI reference", "Rayzor CLI.dc.html"], ["Environment variables", "Rayzor CLI.dc.html#env"]] },
+  { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
+];
+const MODES = [
+  { want: "Run code while developing", cmd: "rayzor run main.hx", what: "Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM" },
+  { want: "Type-check only", cmd: "rayzor check main.hx", what: "Parse and type-check, no codegen" },
+  { want: "Ship a native binary", cmd: "rayzor aot main.hx -o app", what: "Whole program through LLVM, linked against the runtime" },
+  { want: "Ship one portable artifact", cmd: "rayzor bundle main.hx", what: "Serialized MIR in a single .rzb, run later with rayzor run" },
+  { want: "Target the browser or WASI", cmd: "rayzor build --target wasm", what: "WebAssembly module; --browser also emits an HTML harness" },
+  { want: "Inspect the pipeline", cmd: "rayzor compile --stage mir", what: "Stop at any stage — ast, tast, hir, mir, native — and print it" }
+];
+const PRESETS = [
+  { name: "script", for: "CLI tools and one-shot scripts — instant startup, no promotion" },
+  { name: "application", for: "Desktop apps and web servers — balanced, includes LLVM (default)" },
+  { name: "server", for: "Long-running services — aggressive optimization" },
+  { name: "benchmark", for: "Performance testing — immediate bailout, manual LLVM upgrade" },
+  { name: "development", for: "Debugging — verbose logging" },
+  { name: "embedded", for: "Constrained environments — interpreter only" }
+];
+const DEBUG = [
+  { cmd: "rayzor debug run", what: "Forensic run with crash handlers pre-armed" },
+  { cmd: "rayzor debug bench", what: "Run N times, per-run metrics plus aggregate stats" },
+  { cmd: "rayzor debug compare", what: "A/B two git refs and report the median delta; restores the tree on exit" },
+  { cmd: "rayzor debug resolve", what: "Hex PCs from a crash dump → Haxe functions and lines" },
+  { cmd: "rayzor debug server", what: "Live metrics over HTTP with a browser dashboard" },
+  { cmd: "rayzor dump --diff", what: "MIR before and after optimization — the fastest way to see what a pass did" }
+];
+
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      nav: NAV.map(g => ({
+        title: g.title,
+        items: g.items.map(([label, href, active]) => ({
+          label, href,
+          style: "padding:5px 0;color:" + (active ? "#F97316" : "#9AA0AA") + ";font-weight:" + (active ? "500" : "400")
+        }))
+      })),
+      modes: MODES, presets: PRESETS, debug: DEBUG
+    };
+  }
+}
+
+</script>
+</body>
+</html>

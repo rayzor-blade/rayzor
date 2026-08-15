@@ -103,10 +103,25 @@ jobs:
             fi
           done
 
+      # Renders the design sources into the pages that ship, with the compiler
+      # chart taken from the benchmark run that triggered this deploy rather
+      # than from whatever was last committed.
+      - name: Build site
+        run: |
+          if [ -d "artifacts/benchmark-results" ]; then
+            node website/build.mjs --results artifacts/benchmark-results
+          else
+            echo "No CI results downloaded — building from the committed ones"
+            node website/build.mjs
+          fi
+
       - name: Prepare site
         run: |
           mkdir -p _site
-          cp -r website/* _site/
+          # Everything except the build's own inputs: the vendored design
+          # sources, the metadata reference and the renderer are not served.
+          rsync -a --exclude '_import/' --exclude '.seo/' --exclude 'build.mjs' \
+            website/ _site/
 
           echo "=== Debug: Available artifacts ==="
           ls -la artifacts/ 2>/dev/null || echo "No artifacts directory"
