@@ -676,7 +676,7 @@ impl<'a> HirToMirContext<'a> {
                         let field_name = self
                             .symbol_table
                             .get_symbol(*field)
-                            .map(|s| format!("{}", s.name))
+                            .map(|s| self.interned_str(s.name).to_string())
                             .unwrap_or_else(|| format!("{:?}", field));
                         self.add_error(
                             &format!("Field '{}' ({:?}) index not found for write - class may not be registered", field_name, field),

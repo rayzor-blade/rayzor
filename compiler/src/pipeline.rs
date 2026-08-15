@@ -1553,7 +1553,7 @@ impl HaxeCompilationPipeline {
         for field in &class.fields {
             if !self.is_valid_type_id(field.field_type) {
                 errors.push(CompilationError {
-                    message: format!("Invalid field type for '{}'", field.name),
+                    message: format!("Invalid field type for '{:?}'", field.name),
                     location: field.source_location,
                     category: ErrorCategory::TypeError,
                     suggestion: Some("Check that the field type is properly defined".to_string()),
@@ -1579,7 +1579,7 @@ impl HaxeCompilationPipeline {
         // Check for duplicate method signatures
         let mut method_signatures = std::collections::BTreeSet::new();
         for method in &interface.methods {
-            let signature = format!("{}:{}", method.name, "type"); // Simplified signature
+            let signature = format!("{:?}:{}", method.name, "type"); // Simplified signature
             if !method_signatures.insert(signature.clone()) {
                 errors.push(CompilationError {
                     message: format!("Duplicate method signature: '{}'", signature),
@@ -1610,7 +1610,7 @@ impl HaxeCompilationPipeline {
         for variant in &enum_def.variants {
             if !variant_names.insert(variant.name.clone()) {
                 errors.push(CompilationError {
-                    message: format!("Duplicate enum variant: '{}'", variant.name),
+                    message: format!("Duplicate enum variant: '{:?}'", variant.name),
                     location: variant.source_location,
                     category: ErrorCategory::SymbolError,
                     suggestion: Some("Rename one of the variants".to_string()),

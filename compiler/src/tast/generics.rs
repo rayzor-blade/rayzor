@@ -863,7 +863,7 @@ impl fmt::Display for GenericError {
                 )
             }
             GenericError::TypeParameterNotFound { name, .. } => {
-                write!(f, "Type parameter '{}' not found", name)
+                write!(f, "Type parameter '{:?}' not found", name)
             }
             GenericError::ScopeError { message } => {
                 write!(f, "Scope error: {}", message)
@@ -876,7 +876,11 @@ impl fmt::Display for GenericError {
                 reason,
                 ..
             } => {
-                write!(f, "Method '{}' resolution failed: {}", method_name, reason)
+                write!(
+                    f,
+                    "Method '{:?}' resolution failed: {}",
+                    method_name, reason
+                )
             }
         }
     }

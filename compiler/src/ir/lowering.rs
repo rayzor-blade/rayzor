@@ -213,7 +213,7 @@ impl<'a> LoweringContext<'a> {
         // Add parameters
         for param in &function.parameters {
             let param_type = self.lower_type(param.param_type);
-            sig_builder = sig_builder.param(param.name.to_string(), param_type);
+            sig_builder = sig_builder.param(format!("{:?}", param.name), param_type);
         }
 
         // Set return type
@@ -229,7 +229,7 @@ impl<'a> LoweringContext<'a> {
     /// Get mangled function name
     fn get_function_name(&self, function: &TypedFunction) -> String {
         // TODO: Implement proper name mangling
-        function.name.to_string()
+        format!("{:?}", function.name)
     }
 
     /// Lower a statement
@@ -481,7 +481,7 @@ impl<'a> LoweringContext<'a> {
                 // Convert TypedObjectField to expected format
                 let converted_fields: Vec<(String, TypedExpression)> = fields
                     .iter()
-                    .map(|f| (f.name.to_string(), f.value.clone()))
+                    .map(|f| (format!("{:?}", f.name), f.value.clone()))
                     .collect();
                 self.lower_object_literal(&converted_fields, expr.expr_type)
             }

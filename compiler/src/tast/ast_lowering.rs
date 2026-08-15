@@ -14816,7 +14816,10 @@ impl<'a> AstLowering<'a> {
                 .any(|p| p.symbol_id == SymbolId::invalid())
             {
                 errors.push(LoweringError::IncompleteImplementation {
-                    feature: format!("Function parameter symbol resolution for {}", function.name),
+                    feature: format!(
+                        "Function parameter symbol resolution for {:?}",
+                        function.name
+                    ),
                     location: function.source_location,
                 });
             }
@@ -14831,7 +14834,7 @@ impl<'a> AstLowering<'a> {
         for class in &typed_file.classes {
             if class.symbol_id == SymbolId::invalid() {
                 errors.push(LoweringError::IncompleteImplementation {
-                    feature: format!("Class symbol resolution for {}", class.name),
+                    feature: format!("Class symbol resolution for {:?}", class.name),
                     location: class.source_location,
                 });
             }
@@ -14839,7 +14842,7 @@ impl<'a> AstLowering<'a> {
             for field in &class.fields {
                 if field.symbol_id == SymbolId::invalid() {
                     errors.push(LoweringError::IncompleteImplementation {
-                        feature: format!("Field symbol resolution for {}", field.name),
+                        feature: format!("Field symbol resolution for {:?}", field.name),
                         location: field.source_location,
                     });
                 }

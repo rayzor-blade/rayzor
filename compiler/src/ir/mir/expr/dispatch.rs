@@ -376,7 +376,8 @@ impl<'a> HirToMirContext<'a> {
                         HirLiteral::String(s) => {
                             // Stored as the string-pool id; the runtime resolves
                             // the pool entry.
-                            let string_id = self.builder.module.string_pool.add(s.to_string());
+                            let text = self.interned_str(*s).to_string();
+                            let string_id = self.builder.module.string_pool.add(text);
                             Some(IrValue::I32(string_id as i32))
                         }
                         HirLiteral::Regex { .. } => None,

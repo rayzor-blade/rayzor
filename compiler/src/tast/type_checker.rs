@@ -926,9 +926,9 @@ impl fmt::Display for ConstraintKind {
             ConstraintKind::Subtype { supertype } => write!(f, "<: {:?}", supertype),
             ConstraintKind::Implements { interface_type } => write!(f, ": {:?}", interface_type),
             ConstraintKind::HasMethod { method_name, .. } => {
-                write!(f, "has method {}", method_name)
+                write!(f, "has method {:?}", method_name)
             }
-            ConstraintKind::HasField { field_name, .. } => write!(f, "has field {}", field_name),
+            ConstraintKind::HasField { field_name, .. } => write!(f, "has field {:?}", field_name),
             ConstraintKind::Comparable => write!(f, "Comparable"),
             ConstraintKind::Arithmetic => write!(f, "Arithmetic"),
             ConstraintKind::StringConvertible => write!(f, "StringConvertible"),

@@ -126,11 +126,12 @@ impl<'a> HirToMirContext<'a> {
                     // Register the parameter as a local so Cranelift can find its type
                     let param_type = self.convert_type(param.ty);
                     let src_loc = IrSourceLocation::unknown();
+                    let param_name = self.interned_str(param.name).to_string();
                     if let Some(func_mut) = self.builder.current_function_mut() {
                         func_mut.locals.insert(
                             param_reg,
                             crate::ir::IrLocal {
-                                name: param.name.to_string(),
+                                name: param_name,
                                 ty: param_type,
                                 mutable: false, // Parameters are immutable by default
                                 source_location: src_loc,

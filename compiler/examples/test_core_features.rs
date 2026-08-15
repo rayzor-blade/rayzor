@@ -74,7 +74,7 @@ class Test {
             for method in &class.methods {
                 let effects = analyzer.analyze_function(method);
                 println!(
-                    "    - {}: throw={}, pure={}",
+                    "    - {:?}: throw={}, pure={}",
                     method.name, effects.can_throw, effects.is_pure
                 );
             }
@@ -119,7 +119,7 @@ class Test {
                     AsyncKind::Generator => "generator",
                     AsyncKind::AsyncGenerator => "async-generator",
                 };
-                println!("    - {}: {}", method.name, async_str);
+                println!("    - {:?}: {}", method.name, async_str);
             }
         }
     }
@@ -163,10 +163,10 @@ class Test {
                 let effects = analyzer.analyze_function(method);
                 if effects.can_throw {
                     can_throw += 1;
-                    println!("    - {}: CAN THROW", method.name);
+                    println!("    - {:?}: CAN THROW", method.name);
                 } else {
                     safe += 1;
-                    println!("    - {}: safe", method.name);
+                    println!("    - {:?}: safe", method.name);
                 }
             }
         }
