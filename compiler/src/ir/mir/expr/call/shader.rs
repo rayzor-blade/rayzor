@@ -51,7 +51,7 @@ impl<'a> HirToMirContext<'a> {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
                                 if c.symbol_id == *class_sym {
                                     let tt = self.type_table;
-                                    match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                    match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                         c,
                                         self.symbol_table,
                                         tt,
@@ -112,7 +112,7 @@ impl<'a> HirToMirContext<'a> {
                     if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
                         if Some(c.symbol_id) == obj_sym {
                             let type_table = self.type_table;
-                            match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                            match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                 c,
                                 self.symbol_table,
                                 type_table,

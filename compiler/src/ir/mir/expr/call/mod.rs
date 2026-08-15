@@ -247,7 +247,7 @@ impl<'a> HirToMirContext<'a> {
                                 .unwrap_or(false);
                             if is_shader {
                                 let type_table = self.type_table;
-                                match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                     c,
                                     self.symbol_table,
                                     type_table,

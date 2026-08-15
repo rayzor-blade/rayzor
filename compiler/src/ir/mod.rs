@@ -37,10 +37,13 @@ pub mod optimizable; // Generic optimization trait for different IR levels
 pub mod optimization;
 pub mod scalar_replacement; // Scalar Replacement of Aggregates (SRA)
 pub mod snapshot; // Standard library lowered at build time and carried in the binary
+                  // Shaders lower from HIR to WGSL source, which is a lowering step and not
+                  // code generation — it reads HIR and types, and nothing a backend provides.
 pub mod tree_shake; // Dead-code elimination for .rzb bundles
 pub mod types;
 pub mod validation;
-pub mod vectorization; // SIMD auto-vectorization for loops
+pub mod vectorization;
+pub mod wgsl_transpiler; // SIMD auto-vectorization for loops
 
 pub use blade::{load_bundle, save_bundle, BladeError, RayzorBundle};
 pub use blocks::*;

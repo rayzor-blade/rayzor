@@ -61,7 +61,7 @@ impl<'a> HirToMirContext<'a> {
                         // it is handled before the has_method check.
                         if is_shader && callee_name.as_deref() == Some("wgsl") {
                             let type_table = self.type_table;
-                            match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                            match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                 c,
                                 self.symbol_table,
                                 type_table,
@@ -103,7 +103,7 @@ impl<'a> HirToMirContext<'a> {
                             // wgsl() on @:shader classes runs before the layout check.
                             if is_shader && callee_name.as_deref() == Some("wgsl") {
                                 let type_table = self.type_table;
-                                match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                     c,
                                     self.symbol_table,
                                     type_table,
@@ -165,7 +165,7 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                         "wgsl" => {
                                             let type_table = self.type_table;
-                                            match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                            match crate::ir::wgsl_transpiler::transpile_shader_from_hir(
                                                 c,
                                                 self.symbol_table,
                                                 type_table,

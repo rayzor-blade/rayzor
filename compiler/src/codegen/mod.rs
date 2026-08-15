@@ -22,7 +22,6 @@ pub mod wasm_component;
 pub mod wasm_linker;
 pub mod wasm_runner;
 pub mod wasm_wit;
-pub mod wgsl_transpiler;
 
 // Apple Silicon-specific JIT memory management
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
