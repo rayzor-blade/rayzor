@@ -2,6 +2,7 @@
 members = [
     "parser",
     "compiler",
+    "compiler/bsym",
     "diagnostics",
     "source_map",
     "runtime",

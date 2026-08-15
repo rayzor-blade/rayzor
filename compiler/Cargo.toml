@@ -6,6 +6,7 @@ description = "Rayzor Haxe Language Compiler"
 
 [dependencies]
 parser = { path = "../parser" }
+bsym = { path = "bsym" }
 source_map = { path = "../source_map" }
 diagnostics = { path = "../diagnostics" }
 rayzor-runtime = { path = "../runtime", features = ["tcc-runtime"] }
@@ -80,6 +81,7 @@ regex = "1.12.3"
 
 [build-dependencies]
 cc = "1"
+bsym = { path = "bsym" }
 
 [dev-dependencies]
 walkdir = "2"

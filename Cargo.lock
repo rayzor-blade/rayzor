@@ -303,6 +303,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsym"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "parser",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -591,6 +601,7 @@ name = "compiler"
 version = "0.1.0"
 dependencies = [
  "beadie",
+ "bsym",
  "cc",
  "chrono",
  "clap",

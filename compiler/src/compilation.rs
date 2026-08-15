@@ -1685,7 +1685,10 @@ impl CompilationUnit {
                 "[BLADE] No symbol manifest at {}; using the bundled one",
                 manifest_path.display()
             );
-            load_symbol_manifest_from_bytes(include_bytes!("../assets/stdlib.bsym"))
+            load_symbol_manifest_from_bytes(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/stdlib.bsym"
+            )))
         };
 
         match manifest {
@@ -1797,10 +1800,24 @@ impl CompilationUnit {
         let mut total_abstracts = 0;
         let mut total_methods = 0;
 
+        // A manifest records module paths relative to the standard library it was
+        // built from, so it does not depend on where that tree lived at build
+        // time. Resolve them against this run's stdlib root to get the same paths
+        // the namespace resolver produces.
+        let stdlib_root = self
+            .config
+            .stdlib_paths
+            .iter()
+            .find(|path| path.exists())
+            .cloned();
+
         for module in &manifest.modules {
             // Mark this file as "loaded" so load_import_file_recursive will skip it
             // This prevents redundant re-parsing of files whose symbols are already cached
-            let source_path = PathBuf::from(&module.source_path);
+            let source_path = match &stdlib_root {
+                Some(root) => root.join(&module.source_path),
+                None => PathBuf::from(&module.source_path),
+            };
             self.namespace_resolver.mark_file_loaded(source_path);
 
             for class_info in &module.types.classes {
@@ -5671,7 +5688,7 @@ impl CompilationUnit {
 
         // Extract type info from AST for BLADE cache (before macros may modify it)
         if self.config.enable_cache {
-            let type_info = crate::tools::preblade::extract_type_info_from_ast(ast_file);
+            let type_info = bsym::extract_type_info_from_ast(ast_file);
             self.last_compiled_type_info = Some(type_info);
         }
 

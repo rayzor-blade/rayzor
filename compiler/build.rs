@@ -39,6 +39,8 @@ fn main() {
         build_llvm21_const_compat();
     }
 
+    generate_stdlib_manifest();
+
     // Emit a cache ABI build id. BLADE cache entries are tagged with this
     // value, so MIR cached by one compiler binary is only reused by another
     // binary built from the same compiler/parser/stdlib inputs. This keeps the
@@ -59,6 +61,30 @@ fn main() {
     println!("cargo:rerun-if-changed=haxe-std");
     println!("cargo:rerun-if-changed=../parser/src");
     println!("cargo:rerun-if-changed=../diagnostics/src");
+}
+
+/// Extract the standard library's declarations into `OUT_DIR/stdlib.bsym`.
+///
+/// The compiler embeds this manifest, so building it here is what keeps the two
+/// in step: `rerun-if-changed=haxe-std` already re-runs this script whenever the
+/// standard library changes, and the manifest is rebuilt from those same
+/// sources. A committed artifact could disagree with them; one produced here
+/// cannot.
+fn generate_stdlib_manifest() {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let stdlib_root = PathBuf::from("haxe-std");
+
+    let modules = bsym::build_manifest(&stdlib_root);
+    if modules.is_empty() {
+        panic!(
+            "no stdlib declarations found under {}; the embedded manifest would be empty",
+            stdlib_root.display()
+        );
+    }
+
+    if let Err(e) = bsym::save_symbol_manifest(out_dir.join("stdlib.bsym"), modules) {
+        panic!("failed to write the stdlib symbol manifest: {e}");
+    }
 }
 
 fn cache_build_id() -> String {
