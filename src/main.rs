@@ -3242,38 +3242,61 @@ fn cache_warm(cache_dir: Option<PathBuf>) -> Result<(), String> {
         println!("Warming BLADE cache...");
     }
 
-    let mut config = CompilationConfig::default();
-    if let Some(dir) = cache_dir {
-        config.cache_dir = Some(dir);
-    }
-
-    // Step 1: Generate stdlib.bsym (suppress preblade's verbose output)
-    let preblade_config = compiler::tools::preblade::PrebladeConfig {
-        out_path: std::path::PathBuf::from(".rayzor/blade/stdlib"),
-        list_only: false,
-        verbose: false,
-        cache_dir: None,
+    // Warm into the shared prepared store unless a location was given, so the
+    // standard library is lowered once per machine rather than once per
+    // project.
+    let warm_root = match cache_dir {
+        Some(dir) => Some(dir),
+        None => CompilationUnit::prepared_cache_root(),
     };
-    compiler::tools::preblade::extract_stdlib_symbols(&preblade_config)
-        .map_err(|e| format!("preblade failed: {}", e))?;
 
-    if tty {
-        eprintln!(
-            "  {} symbols extracted",
-            "✓".with(crossterm::style::Color::Green),
-        );
+    // Reach the parts of the library a real program reaches. An empty `main`
+    // lowers almost nothing, leaving the closure that actually costs a cold
+    // compile - `Sys` and everything it pulls in - unprepared.
+    let source = r#"
+        class Main {
+            static function main() {
+                var m = new Map<String, Int>();
+                m.set("k", 1);
+                var b = new StringBuf();
+                b.add(StringTools.trim(" v "));
+                var xs = [1, 2, 3];
+                var total = 0;
+                for (x in xs) total += x + m.get("k") + Std.int(Math.sqrt(x));
+                Sys.println(b.toString() + Std.string(total));
+            }
+        }
+    "#;
+
+    // An artifact is only found again under the same cache discriminator, and
+    // the discriminator follows the defines. Prepare each tier a run can ask
+    // for, or the store is written where nothing looks for it.
+    struct WarmStats {
+        cached_modules: usize,
+        total_size_bytes: u64,
     }
+    let mut stats = WarmStats {
+        cached_modules: 0,
+        total_size_bytes: 0,
+    };
+    for tier_define in ["jit", "llvm", "interp"] {
+        let config = CompilationConfig {
+            extra_defines: vec![tier_define.to_string()],
+            cache_dir: warm_root.clone(),
+            ..Default::default()
+        };
 
-    // Step 2: Compile a minimal file to trigger stdlib caching
-    let mut unit = CompilationUnit::new(config);
-    unit.load_stdlib()
-        .map_err(|e| format!("Failed to load stdlib: {}", e))?;
-    let source = "class Main { static function main() {} }";
-    unit.add_file(source, "warmup.hx")
-        .map_err(|e| format!("warmup failed: {}", e))?;
-    let _ = unit.lower_to_tast();
+        let mut unit = CompilationUnit::new(config);
+        unit.load_stdlib()
+            .map_err(|e| format!("Failed to load stdlib: {}", e))?;
+        unit.add_file(source, "warmup.hx")
+            .map_err(|e| format!("warmup failed: {}", e))?;
+        let _ = unit.lower_to_tast();
 
-    let stats = unit.get_cache_stats();
+        let tier_stats = unit.get_cache_stats();
+        stats.cached_modules += tier_stats.cached_modules;
+        stats.total_size_bytes += tier_stats.total_size_bytes;
+    }
     if tty {
         eprintln!(
             "  {} {} modules cached ({})",

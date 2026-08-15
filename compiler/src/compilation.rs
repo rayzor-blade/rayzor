@@ -1032,6 +1032,29 @@ impl CompilationUnit {
         Some(cache_dir.join(format!("{}.blade", module_name)))
     }
 
+    /// Where a module's artifact lives in the PREPARED store: a shared cache
+    /// written once by `rayzor cache warm` rather than per project.
+    ///
+    /// The standard library lowers to the same thing for every program, so a
+    /// project that has never been built can start from a prepared artifact
+    /// instead of compiling the library again. Entries are keyed by the same
+    /// discriminator as the project cache, and validated on load by the same
+    /// build id, so an artifact from a different compiler is rejected rather
+    /// than decoded.
+    fn prepared_blade_path(&self, source_path: &str) -> Option<PathBuf> {
+        let root = Self::prepared_cache_root()?;
+        let file = self.blade_cache_path(source_path)?.file_name()?.to_owned();
+        Some(root.join(self.config.cache_discriminator()).join(file))
+    }
+
+    /// Root of the shared prepared store. `RAYZOR_PREPARED_CACHE` overrides it.
+    pub fn prepared_cache_root() -> Option<PathBuf> {
+        if let Some(explicit) = std::env::var_os("RAYZOR_PREPARED_CACHE") {
+            return Some(PathBuf::from(explicit));
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/rayzor/blade"))
+    }
+
     /// Compute the BLADE source fingerprint for this compilation context.
     ///
     /// Source text alone is not enough: `extra_defines` changes `#if`
@@ -3913,10 +3936,15 @@ impl CompilationUnit {
             return None;
         }
 
-        let blade_path = self.blade_cache_path(source_path)?;
-        if !blade_path.exists() {
-            return None;
-        }
+        // Prefer this project's own artifact; fall back to the prepared store
+        // for a module this project has never compiled.
+        let blade_path = match self.blade_cache_path(source_path) {
+            Some(path) if path.exists() => path,
+            _ => match self.prepared_blade_path(source_path) {
+                Some(path) if path.exists() => path,
+                _ => return None,
+            },
+        };
 
         match load_blade(&blade_path) {
             Ok((mir, metadata, symbols, cached_maps)) => {
