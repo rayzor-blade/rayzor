@@ -1961,9 +1961,15 @@ impl CompilationUnit {
             self.register_method_from_blade(method, symbol_id, class_scope, true);
         }
 
-        // Register constructor if present
+        // Register constructor if present, and record it as the class's
+        // constructor. Inference of a generic class's type arguments matches
+        // the declared constructor parameters against the call's arguments, so
+        // a restored class whose constructor is registered but not recorded
+        // leaves `new Channel(value)` with nothing to infer `T` from.
         if let Some(ctor) = &class_info.constructor {
-            self.register_method_from_blade(ctor, symbol_id, class_scope, false);
+            let ctor_symbol = self.register_method_from_blade(ctor, symbol_id, class_scope, false);
+            self.symbol_table
+                .set_class_constructor(symbol_id, ctor_symbol);
         }
 
         // Register fields, and seed the same per-class field table that a
