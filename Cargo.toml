@@ -13,7 +13,8 @@ members = [
     "plugin",
     "nue-plugins",
     "rayzor-tensors",
-    "wasm-opt-helper"
+    "wasm-opt-helper",
+    "snapshot-gen"
 ]
 # runtime-wasm is excluded from workspace — built separately for wasm32-wasip1
 exclude = [
