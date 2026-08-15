@@ -1060,7 +1060,27 @@ impl CompilationUnit {
         h.finish()
     }
 
-    fn hash_source_for_config(&self, source: &str) -> u64 {
+    /// Whether a source file belongs to the standard library.
+    ///
+    /// The standard library is the same for every program and is compiled
+    /// before any user file is seen, so what it lowers to does not depend on
+    /// the program that happened to trigger the compile. User code does: it is
+    /// lowered against the ids and layouts of the program it belongs to.
+    fn is_stdlib_source(&self, source_path: &str) -> bool {
+        let path = Path::new(source_path);
+        let canonical = path.canonicalize();
+        let candidate = canonical.as_deref().unwrap_or(path);
+        self.config
+            .stdlib_paths
+            .iter()
+            .any(|root| match root.canonicalize() {
+                Ok(root) => candidate.starts_with(root),
+                // A root that does not exist cannot contain the file.
+                Err(_) => false,
+            })
+    }
+
+    fn hash_source_for_config(&self, source_path: &str, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -1069,17 +1089,26 @@ impl CompilationUnit {
         let mut defines = self.config.extra_defines.clone();
         defines.sort();
         defines.hash(&mut hasher);
-        // F6 cache-coherence: a cached module carries state assigned relative
-        // to the WHOLE program (id renumbering, class layout, reflection ctor
-        // wrappers, inherited fields). Two different programs that both import
-        // this module previously SHARED its cache and reused that stale state
-        // — surfacing as `Cannot find name 'root'` (inherited field on a fresh
-        // subclass of a cached parent), the `__reflect_ctor_wrap` W0020
-        // (Cast source undefined), or a load SIGSEGV. Key on the program so the
-        // cache is only reused when it is genuinely valid (same program, no
-        // user-source edits). Sound; trades cross-program incremental reuse for
-        // correctness (cache-on previously required a manual `.rayzor` scrub).
-        self.user_program_hash().hash(&mut hasher);
+        // A cached USER module carries state assigned relative to the whole
+        // program (id renumbering, class layout, reflection ctor wrappers,
+        // inherited fields). Two different programs that both import such a
+        // module once shared its cache and reused that stale state — surfacing
+        // as `Cannot find name 'root'` (inherited field on a fresh subclass of
+        // a cached parent), the `__reflect_ctor_wrap` W0020 (Cast source
+        // undefined), or a load SIGSEGV. Keying on the program confines that
+        // reuse to where it is valid.
+        //
+        // The standard library is excluded. It is identical for every program
+        // and is compiled before any user file is seen, so keying it on the
+        // program only makes each new program recompile whatever part of the
+        // library it reaches — which, for anything touching `Sys`, is most of
+        // it. Reuse across programs depends on a restored class carrying the
+        // same declarations a freshly lowered one does; where it did not, the
+        // difference was a defect in the restore path rather than a reason to
+        // recompile.
+        if !self.is_stdlib_source(source_path) {
+            self.user_program_hash().hash(&mut hasher);
+        }
         // Fold in a content hash of the TRANSITIVE import set. The cache key was
         // previously the entry file's own bytes + defines only, so editing a
         // DEPENDENCY (a `.hx` imported by this entry, directly or transitively)
@@ -1114,7 +1143,7 @@ impl CompilationUnit {
                 // Validate cache by checking source hash AND compiler cache
                 // ABI id — see save_to_cache / matching check at the other
                 // load site for why both are required.
-                let current_hash = self.hash_source_for_config(source);
+                let current_hash = self.hash_source_for_config(source_path, source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
                 if metadata.source_hash != current_hash {
                     trace!("[BLADE] Cache stale (hash mismatch): {}", source_path);
@@ -1175,7 +1204,7 @@ impl CompilationUnit {
         let metadata = BladeMetadata {
             name: mir.name.clone(),
             source_path: source_path.to_string(),
-            source_hash: self.hash_source_for_config(source),
+            source_hash: self.hash_source_for_config(source_path, source),
             source_timestamp: now, // We use hash for validation, not timestamp
             compile_timestamp: now,
             dependencies,
@@ -3891,7 +3920,7 @@ impl CompilationUnit {
 
         match load_blade(&blade_path) {
             Ok((mir, metadata, symbols, cached_maps)) => {
-                let current_hash = self.hash_source_for_config(source);
+                let current_hash = self.hash_source_for_config(source_path, source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
                 if metadata.source_hash != current_hash {
                     debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
@@ -7338,7 +7367,7 @@ impl CompilationUnit {
         }
 
         if let Ok(source) = std::fs::read_to_string(source_path) {
-            let current_hash = self.hash_source_for_config(&source);
+            let current_hash = self.hash_source_for_config(&source_path.to_string_lossy(), &source);
             if metadata.source_hash != current_hash {
                 if self.config.enable_cache {
                     debug!("Cache source hash mismatch for {:?}", source_path);
@@ -7404,7 +7433,7 @@ impl CompilationUnit {
 
         // Read source for hash computation
         let source_hash = std::fs::read_to_string(source_path)
-            .map(|s| self.hash_source_for_config(&s))
+            .map(|s| self.hash_source_for_config(&source_path.to_string_lossy(), &s))
             .unwrap_or(0);
 
         let compile_timestamp = SystemTime::now()
