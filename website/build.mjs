@@ -27,7 +27,11 @@ const argOf = (flag, fallback) => {
   const i = argv.indexOf(flag);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
-const RESULTS_DIR = path.resolve(argOf("--results", path.join(ROOT, "compiler/benchmarks/results")));
+// Naming a results directory is a claim that it holds the run being published.
+// If it turns out to be empty the build stops, rather than quietly shipping
+// whatever figures were last committed under a caption naming another machine.
+const RESULTS_ARG = argOf("--results", null);
+const RESULTS_DIR = path.resolve(RESULTS_ARG || path.join(ROOT, "compiler/benchmarks/results"));
 const OUT_DIR = path.resolve(argOf("--out", HERE));
 
 // ---------------------------------------------------------------------------
@@ -857,6 +861,8 @@ function loadBenchmarks(dir) {
 
   const workloads = [];
   const runs = {};
+  const skipped = [];
+  const untracked = new Set();
   for (const bench of data.benchmarks || []) {
     const rows = [];
     for (const [target, label, isRayzor] of CHART_TARGETS) {
@@ -870,11 +876,21 @@ function loadBenchmarks(dir) {
       if (isRayzor) row.rz = 1;
       rows.push(row);
     }
-    // A chart of one bar says nothing; skip kernels CI only partly covered.
-    if (rows.length < 2) continue;
+    for (const r of bench.results || []) {
+      if (!CHART_TARGETS.some(([t]) => t === r.target)) untracked.add(r.target);
+    }
+    // A chart of one bar compares nothing.
+    if (rows.length < 2) {
+      skipped.push(`${bench.name} (${rows.length} of ${CHART_TARGETS.length} targets)`);
+      continue;
+    }
     workloads.push({ id: bench.name, name: bench.name });
     runs[bench.name] = rows;
   }
+  // Coverage the chart drops is reported, never silently absent — a kernel
+  // missing from the page should be traceable to the run that lacked it.
+  if (skipped.length) console.warn(`  ! kernels not charted: ${skipped.join(", ")}`);
+  if (untracked.size) console.warn(`  ! targets not in the chart: ${[...untracked].join(", ")}`);
   if (!workloads.length) return null;
 
   const info = data.system_info || {};
@@ -907,6 +923,7 @@ const BENCH_NOTE_ANCHOR = "15 warmup iterations, 10 measured, mean reported. AMD
 function applyBenchmarks(page, parsed, bench) {
   if (!page.interactive || !parsed.script.includes("const RUNS")) return parsed;
   if (!bench) {
+    if (RESULTS_ARG) throw new Error(`no usable benchmark results under ${RESULTS_DIR}`);
     console.warn(`  ! no benchmark results under ${RESULTS_DIR} — keeping the design's figures`);
     return parsed;
   }
@@ -1200,6 +1217,7 @@ function buildPage(page, bench) {
 }
 
 function copyAssets() {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const name of ["logo.svg", "favicon.svg"]) {
     const from = path.join(IMPORT_DIR, name);
     if (fs.existsSync(from)) fs.copyFileSync(from, path.join(OUT_DIR, name));
@@ -1210,6 +1228,9 @@ function main() {
   const bench = loadBenchmarks(RESULTS_DIR);
   if (bench) {
     console.log(`benchmarks: ${bench.source} — ${bench.workloads.map((w) => w.id).join(", ")}`);
+    console.log(`            ${bench.note}`);
+  } else if (RESULTS_ARG) {
+    throw new Error(`--results ${RESULTS_ARG} holds no usable benchmark results`);
   } else {
     console.log(`benchmarks: none found under ${RESULTS_DIR}`);
   }
