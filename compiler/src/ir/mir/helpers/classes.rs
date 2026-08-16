@@ -408,7 +408,7 @@ impl<'a> HirToMirContext<'a> {
                     )) = attr.args.first()
                     {
                         if let Some(native_str) = self.string_interner.get(*s) {
-                            return Some(native_str.replace("::", "_"));
+                            return Some(self.canonical_class_spelling(native_str));
                         }
                     }
                 }
@@ -416,6 +416,19 @@ impl<'a> HirToMirContext<'a> {
             return self.string_interner.get(cls.name).map(|s| s.to_string());
         }
         None
+    }
+
+    /// A class-name spelling normalized for use as a receiver hint: a
+    /// registered stdlib class resolves to the key it is registered under,
+    /// anything else keeps its dotted form. Hints produced here are compared
+    /// against mapping keys downstream, so producing the registered spelling
+    /// at the source keeps those comparisons exact.
+    pub(crate) fn canonical_class_spelling(&self, name: &str) -> String {
+        let dotted = name.replace("::", ".");
+        match self.stdlib_mapping.get_class_static_str(&dotted) {
+            Some(key) => key.to_string(),
+            None => dotted,
+        }
     }
 
     /// Check whether a method symbol is declared on the class or one of its parents.

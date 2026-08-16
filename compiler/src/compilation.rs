@@ -8418,12 +8418,16 @@ impl CompilationUnit {
         use crate::compiler_plugin::NativePlugin;
         use crate::rpkg::MethodDescEntry;
 
-        // Snapshot the builtin stdlib mapping so we can skip classes that already have
-        // explicit MIR wrapper mappings (e.g., rayzor.concurrent.Thread, rayzor.Bytes).
-        // Without this skip, naive @:native("spawn") auto-registration overrides the
-        // correct Thread_spawn MIR wrapper with a bare "spawn" bare-name symbol, which
-        // then fails to resolve at JIT time ("can't resolve symbol spawn").
-        let builtin_mapping = crate::stdlib::runtime_mapping::StdlibMapping::builtin();
+        // Snapshot everything already mapped — the builtin stdlib AND every
+        // loaded native plugin — so methods those sources already bind are
+        // skipped. Without the builtin part, naive @:native("spawn")
+        // auto-registration overrides the Thread_spawn MIR wrapper with a
+        // bare "spawn" symbol that fails at JIT time. Without the plugin
+        // part, a bodyless extern method with no @:native (KvCacheQ8's
+        // dequantView) gets a guessed bare-name binding that shadows the
+        // dylib descriptor's real symbol the moment the class is looked up
+        // by its qualified name.
+        let builtin_mapping = self.compiler_plugin_registry.build_combined_mapping();
 
         let mut entries: Vec<MethodDescEntry> = Vec::new();
 
