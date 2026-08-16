@@ -842,14 +842,6 @@ fn ensure_jemalloc() {
 fn ensure_jemalloc() {}
 
 fn main() {
-    // The standard library this binary carries, if it was built with one.
-    // Installed before anything compiles, so the first program in a fresh
-    // checkout starts from it instead of lowering the library again.
-    compiler::ir::snapshot::install(include_bytes!(concat!(
-        env!("OUT_DIR"),
-        "/stdlib_snapshot.bin"
-    )));
-
     ensure_jemalloc();
     #[cfg(feature = "profile")]
     unsafe {

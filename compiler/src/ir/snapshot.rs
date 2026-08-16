@@ -82,36 +82,20 @@ pub fn key_for(discriminator: &str, module_file: &str) -> String {
     format!("{discriminator}/{module_file}")
 }
 
-/// The snapshot this binary carries, indexed on first use.
+/// The archive this binary carries, staged into `OUT_DIR` by this crate's
+/// build script.
 ///
-/// The archive is produced by the CLI's build script and lives in that crate,
-/// so the CLI hands it over at startup rather than the compiler reaching for
-/// it. A host that installs nothing simply compiles from source.
-static EMBEDDED: std::sync::OnceLock<BTreeMap<&'static str, &'static [u8]>> =
-    std::sync::OnceLock::new();
+/// It belongs to the compiler rather than to whichever binary embeds the
+/// compiler: every host that lowers Haxe wants the same prepared library, and
+/// making each one find the archive and hand it over at startup is how a host
+/// ends up silently compiling without it. A build with nothing to stage
+/// embeds an empty archive, which reads as "carries nothing" and falls back to
+/// lowering from source.
+static ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stdlib_snapshot.bin"));
 
-/// Install the standard library carried by this binary. Only the first call
-/// takes effect.
-pub fn install(bytes: &'static [u8]) {
-    let _ = EMBEDDED.set(index(bytes));
-}
-
-/// The installed standard library, or an empty index if none was installed.
+/// The standard library this binary carries, indexed on first use.
 pub fn installed() -> &'static BTreeMap<&'static str, &'static [u8]> {
-    EMBEDDED.get_or_init(BTreeMap::new)
-}
-
-/// Install a standard library read from disk, for a host that drives the
-/// compiler as a library and so has no build script of its own to embed one —
-/// a benchmark harness measuring the same work the CLI does, for instance.
-///
-/// Returns the number of modules available afterwards, which is what the
-/// caller should report: a host that installs an archive but measures a
-/// compile without one is measuring a different thing than it claims.
-pub fn install_from_path(path: impl AsRef<std::path::Path>) -> std::io::Result<usize> {
-    // Held for the life of the process, matching the embedded case, so entries
-    // can borrow from it for `'static` exactly as they do from the binary.
-    let bytes: &'static [u8] = Box::leak(std::fs::read(path)?.into_boxed_slice());
-    install(bytes);
-    Ok(installed().len())
+    static INDEXED: std::sync::OnceLock<BTreeMap<&'static str, &'static [u8]>> =
+        std::sync::OnceLock::new();
+    INDEXED.get_or_init(|| index(ARCHIVE))
 }
