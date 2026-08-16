@@ -67,6 +67,36 @@ script-specific mechanism.
 
 Nothing is dynamic merely because it appears in a script.
 
+## RTTI is the bridge, and it already exists
+
+The type tag on an exported value is only useful if something can say what that
+type *is*. Two descriptions are already in the tree and were built for other
+reasons:
+
+- the `.bsym` manifest, a complete declaration record for every class — fields,
+  methods, signatures, type parameters — resolved at compile time;
+- the runtime class registry in `runtime/src/type_system.rs`, which carries
+  instance field names and their types per class.
+
+Between them that is an RTTI table, and `haxe.rtti`, `Type` and `Reflect`
+already exist as the API over it. Scripts need the join rather than anything
+new: a value's tag resolves through the registry to a shape, so `player.hp` is
+a known field at a known offset with a known type even when the value arrived
+through a dynamic path. `Reflect.field` becomes a registry lookup instead of a
+guess, and `Std.isOfType` works across the boundary because both sides are
+naming the same registered class.
+
+This is also what keeps the dynamic residue cheap. A value that stayed dynamic
+is not opaque — it is tagged, and the tag is describable — so field access on
+it can be checked rather than merely attempted, and reported as a script error
+naming the actual type rather than a failure at the point of use.
+
+One caveat worth stating: the runtime registry is populated by
+`register_class_from_mir`, so a class carries runtime type information only if
+it reached MIR. A class restored from cache and never lowered may be absent —
+which is the same restore gap described at the end of this document, seen from
+the runtime side.
+
 ## The host boundary
 
 Objects cross by pointer, copy-on-write. Reads are free and aliased; a write
