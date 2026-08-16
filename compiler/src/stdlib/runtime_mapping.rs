@@ -4438,6 +4438,105 @@ impl Default for StdlibMapping {
 mod tests {
     use super::*;
 
+    /// The canonical dotted name for a registered class key, whichever spelling
+    /// the table currently uses for it.
+    ///
+    /// Class keys are being migrated to the Haxe fully-qualified name. Reading
+    /// the snapshot through this leaves it stable across that migration, so it
+    /// keeps checking what the migration must not change — which methods exist,
+    /// what they dispatch to, and how many arguments they take.
+    fn canonical_class_name(class: &str) -> String {
+        // Packaged classes the table still spells with their simple name.
+        const PACKAGED: &[(&str, &str)] = &[
+            ("ArrayIterator", "haxe.iterators.ArrayIterator"),
+            (
+                "ArrayKeyValueIterator",
+                "haxe.iterators.ArrayKeyValueIterator",
+            ),
+            ("Bytes", "haxe.io.Bytes"),
+            ("File", "sys.io.File"),
+            ("FileInput", "sys.io.FileInput"),
+            ("FileOutput", "sys.io.FileOutput"),
+            ("FileSystem", "sys.FileSystem"),
+            ("IntMap", "haxe.ds.IntMap"),
+            ("Json", "haxe.Json"),
+            ("ObjectMap", "haxe.ds.ObjectMap"),
+            ("StringMap", "haxe.ds.StringMap"),
+            ("WeakMap", "haxe.ds.WeakMap"),
+        ];
+        if let Some((_, fqn)) = PACKAGED.iter().find(|(bare, _)| *bare == class) {
+            return (*fqn).to_string();
+        }
+        // Synthetic keys name no declared class and keep their spelling.
+        if class.starts_with('_') || class.starts_with("Vec") {
+            return class.to_string();
+        }
+        class.replace('_', ".")
+    }
+
+    /// Every entry, canonically named, one per line, sorted.
+    fn mapping_snapshot(mapping: &StdlibMapping) -> String {
+        let mut lines: Vec<String> = mapping
+            .mappings
+            .iter()
+            .map(|(sig, call)| {
+                format!(
+                    "{} {} static={} ctor={} params={} -> {}",
+                    canonical_class_name(sig.class),
+                    sig.method,
+                    sig.is_static,
+                    sig.is_constructor,
+                    call.param_count,
+                    call.runtime_name,
+                )
+            })
+            .collect();
+        lines.sort();
+        lines.dedup();
+        lines.join("\n")
+    }
+
+    /// The table's contents are frozen against a checked-in snapshot.
+    ///
+    /// Renaming class keys must be a renaming and nothing else. Set
+    /// `RAYZOR_WRITE_MAPPING_SNAPSHOT=1` to re-record after a deliberate change
+    /// to what the table maps, and review the diff.
+    #[test]
+    fn mapping_snapshot_unchanged() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/stdlib/mapping_snapshot.txt"
+        );
+        let current = mapping_snapshot(&StdlibMapping::new());
+
+        if std::env::var_os("RAYZOR_WRITE_MAPPING_SNAPSHOT").is_some() {
+            std::fs::write(path, format!("{current}\n")).expect("write snapshot");
+            return;
+        }
+
+        let recorded = std::fs::read_to_string(path)
+            .expect("snapshot missing; re-record with RAYZOR_WRITE_MAPPING_SNAPSHOT=1");
+        let recorded: Vec<&str> = recorded.lines().collect();
+        let current: Vec<&str> = current.lines().collect();
+
+        let added: Vec<_> = current.iter().filter(|l| !recorded.contains(l)).collect();
+        let removed: Vec<_> = recorded.iter().filter(|l| !current.contains(l)).collect();
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "the stdlib mapping changed.\n  added:\n    {}\n  removed:\n    {}",
+            added
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n    "),
+            removed
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n    "),
+        );
+    }
+
     /// The pre-index implementation of every class-keyed query: a whole-table
     /// scan filtered by `class_matches`. These are the oracle the indexed
     /// queries are checked against, and they are the definition of "unchanged".
