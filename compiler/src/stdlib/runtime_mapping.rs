@@ -18,7 +18,7 @@
 //! ```
 
 use crate::ir::IrType;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 // ============================================================================
 // Type Descriptors for Function Signatures
@@ -211,20 +211,52 @@ pub struct MethodSignature {
     pub param_count: usize,
 }
 
+/// Facts about a registered class that the class-keyed queries would otherwise
+/// recompute by scanning the whole table.
+#[derive(Default, Clone)]
+struct ClassMeta {
+    method_count: usize,
+    has_static: bool,
+    has_constructor: bool,
+    has_factory: bool,
+    has_mir_wrapper: bool,
+}
+
 /// Standard library runtime mapping
 pub struct StdlibMapping {
     mappings: BTreeMap<MethodSignature, RuntimeFunctionCall>,
     /// Cached set of instance method names for fast `any_class_has_method` lookups.
     /// Built eagerly after all mappings are registered.
     instance_method_names: std::collections::BTreeSet<String>,
+    /// Every spelling a lookup may use, mapped to the registered class names it
+    /// can denote, sorted so a query visits them in the same order a whole-table
+    /// scan would have. Reproduces `class_matches` exactly.
+    aliases: HashMap<Box<str>, Vec<&'static str>>,
+    /// Runtime function name to the first signature carrying it in table order.
+    by_runtime_name: HashMap<&'static str, MethodSignature>,
+    /// Per-class summaries for the queries that only need a yes/no answer.
+    class_meta: HashMap<&'static str, ClassMeta>,
 }
 
 impl StdlibMapping {
+    /// The built-in table, constructed once per process.
+    ///
+    /// Registration produces the same table every time and nothing mutates it
+    /// afterwards, so callers that only consult the built-ins share one copy.
+    /// Plugins register into their own combined mapping and are unaffected.
+    pub fn builtin() -> &'static StdlibMapping {
+        static BUILTIN: std::sync::OnceLock<StdlibMapping> = std::sync::OnceLock::new();
+        BUILTIN.get_or_init(StdlibMapping::new)
+    }
+
     /// Create a new stdlib mapping with all built-in mappings
     pub fn new() -> Self {
         let mut mapping = StdlibMapping {
             mappings: BTreeMap::new(),
             instance_method_names: std::collections::BTreeSet::new(),
+            aliases: HashMap::new(),
+            by_runtime_name: HashMap::new(),
+            class_meta: HashMap::new(),
         };
 
         mapping.register_string_methods();
@@ -302,14 +334,97 @@ impl StdlibMapping {
         mapping.register_enum_methods();
         // JSON (haxe.format.JsonParser/JsonPrinter)
         mapping.register_json_methods();
-        // Build cached method name set for O(1) any_class_has_method lookups
-        mapping.instance_method_names = mapping
-            .mappings
-            .keys()
-            .filter(|sig| !sig.is_static && !sig.is_constructor)
-            .map(|sig| sig.method.to_string())
-            .collect();
+        mapping.rebuild_index();
         mapping
+    }
+
+    /// Rebuild every lookup index from `mappings`. Must run after any change to
+    /// the table — construction, and plugin registration afterwards.
+    fn rebuild_index(&mut self) {
+        let mut aliases: HashMap<Box<str>, Vec<&'static str>> = HashMap::new();
+        let mut by_runtime_name: HashMap<&'static str, MethodSignature> = HashMap::new();
+        let mut class_meta: HashMap<&'static str, ClassMeta> = HashMap::new();
+        let mut instance_method_names = BTreeSet::new();
+
+        for (sig, call) in &self.mappings {
+            if !class_meta.contains_key(sig.class) {
+                // A class contributes its own name plus every simple-name suffix
+                // that begins right after a separator, which is exactly the set
+                // of spellings `class_matches` accepts for it.
+                aliases.entry(sig.class.into()).or_default().push(sig.class);
+                for (offset, byte) in sig.class.bytes().enumerate() {
+                    if matches!(byte, b'_' | b'.') && offset + 1 < sig.class.len() {
+                        aliases
+                            .entry(sig.class[offset + 1..].into())
+                            .or_default()
+                            .push(sig.class);
+                    }
+                }
+            }
+
+            by_runtime_name
+                .entry(call.runtime_name)
+                .or_insert_with(|| sig.clone());
+
+            let meta = class_meta.entry(sig.class).or_default();
+            meta.method_count += 1;
+            meta.has_static |= sig.is_static;
+            meta.has_constructor |= sig.is_constructor;
+            meta.has_factory |= sig.is_static && (sig.method == "init" || sig.method == "new");
+            meta.has_mir_wrapper |= call.is_mir_wrapper;
+
+            if !sig.is_static && !sig.is_constructor {
+                instance_method_names.insert(sig.method.to_string());
+            }
+        }
+
+        // Candidates are visited in table order, so a query that returns the
+        // first match returns the one the whole-table scan would have.
+        for candidates in aliases.values_mut() {
+            candidates.sort_unstable();
+            candidates.dedup();
+        }
+
+        self.aliases = aliases;
+        self.by_runtime_name = by_runtime_name;
+        self.class_meta = class_meta;
+        self.instance_method_names = instance_method_names;
+    }
+
+    /// Registered class names the given spelling may denote, in table order.
+    fn candidates(&self, lookup: &str) -> &[&'static str] {
+        self.aliases
+            .get(lookup)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every entry registered under `class`, in table order. A class occupies
+    /// one contiguous range because `MethodSignature` orders by class first.
+    fn class_entries(
+        &self,
+        class: &'static str,
+    ) -> impl Iterator<Item = (&MethodSignature, &RuntimeFunctionCall)> {
+        let start = MethodSignature {
+            class,
+            method: "",
+            is_static: false,
+            is_constructor: false,
+            param_count: 0,
+        };
+        self.mappings
+            .range(start..)
+            .take_while(move |(sig, _)| sig.class == class)
+    }
+
+    /// Every entry any spelling of `lookup` denotes, in table order.
+    fn matching_entries(
+        &self,
+        lookup: &str,
+    ) -> impl Iterator<Item = (&MethodSignature, &RuntimeFunctionCall)> {
+        self.candidates(lookup)
+            .iter()
+            .flat_map(|class| self.class_entries(class))
     }
 
     /// Look up the runtime function for a stdlib method call
@@ -346,11 +461,8 @@ impl StdlibMapping {
 
     /// Check if a method is a stdlib method with runtime mapping
     pub fn has_mapping(&self, class: &str, method: &str, is_static: bool) -> bool {
-        self.mappings.keys().any(|sig| {
-            self.class_matches(class, &sig.class)
-                && sig.method == method
-                && sig.is_static == is_static
-        })
+        self.matching_entries(class)
+            .any(|(sig, _)| sig.method == method && sig.is_static == is_static)
     }
 
     /// Find a stdlib method mapping by class and method name
@@ -360,9 +472,8 @@ impl StdlibMapping {
         class: &str,
         method: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings
-            .iter()
-            .find(|(sig, _)| self.class_matches(class, &sig.class) && sig.method == method)
+        self.matching_entries(class)
+            .find(|(sig, _)| sig.method == method)
     }
 
     /// Find a mapping by method name alone, accepted only when EXACTLY ONE
@@ -390,11 +501,8 @@ impl StdlibMapping {
         method: &str,
         param_count: usize,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings.iter().find(|(sig, call)| {
-            self.class_matches(class, &sig.class)
-                && sig.method == method
-                && call.param_count == param_count
-        })
+        self.matching_entries(class)
+            .find(|(sig, call)| sig.method == method && call.param_count == param_count)
     }
 
     /// Find a static stdlib method mapping by method name alone (no class specified).
@@ -431,10 +539,10 @@ impl StdlibMapping {
     /// fails to match `nue.engine.PrefillGraph` and the resolver falls through to
     /// a name-only path that collapses same-name externs (e.g. onto BertGraph).
     ///
-    /// Compared in place. The callers scan the whole table for every call
-    /// expression they lower, so building the two candidate strings here
-    /// allocated twice per entry per lookup — which is most of what lowering
-    /// a program spent its time doing.
+    /// The alias index is built from this rule and the agreement test checks
+    /// the two against each other over every spelling, so this stays as the
+    /// definition of what a lookup accepts even though queries no longer call it.
+    #[cfg(test)]
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
         if lookup == registered {
             return true;
@@ -456,9 +564,8 @@ impl StdlibMapping {
         class: &str,
         method: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings.iter().find(|(sig, _)| {
-            self.class_matches(class, &sig.class) && sig.method == method && sig.is_static
-        })
+        self.matching_entries(class)
+            .find(|(sig, _)| sig.method == method && sig.is_static)
     }
 
     /// Get all unique stdlib class names that have registered methods
@@ -474,27 +581,21 @@ impl StdlibMapping {
     /// (e.g., "Arc" matches "rayzor_concurrent_Arc") to handle cases where the full
     /// qualified name isn't available (e.g., EXTERN flag not propagated, no native_name).
     pub fn is_stdlib_class(&self, class_name: &str) -> bool {
-        self.mappings
-            .keys()
-            .any(|sig| self.class_matches(class_name, sig.class))
+        !self.candidates(class_name).is_empty()
     }
 
     /// Check if methods of this class are typically static
     /// Used to determine the default method type for a class
     pub fn class_has_static_methods(&self, class_name: &str) -> bool {
-        self.mappings
-            .keys()
-            .filter(|sig| self.class_matches(class_name, &sig.class))
-            .any(|sig| sig.is_static)
+        self.candidates(class_name)
+            .iter()
+            .any(|class| self.class_meta[class].has_static)
     }
 
     /// Get the class name as a 'static str if it exists in the mapping
     /// This is useful for converting owned/borrowed strings to 'static references
     pub fn get_class_static_str(&self, class_name: &str) -> Option<&'static str> {
-        self.mappings
-            .keys()
-            .find(|sig| self.class_matches(class_name, &sig.class))
-            .map(|sig| sig.class)
+        self.candidates(class_name).first().copied()
     }
 
     /// Get all classes that have registered constructors (method="new", is_constructor=true)
@@ -548,23 +649,15 @@ impl StdlibMapping {
     /// - Return-only types (guard types, etc.): 10-19
     /// - Everything else: 20+
     fn class_priority(&self, class: &str) -> u32 {
-        // Check if class has any constructor mappings
-        let has_constructor = self
-            .mappings
-            .keys()
-            .any(|sig| sig.class == class && sig.is_constructor);
-
-        // Check if class has any static "init" or "new" factory methods
-        let has_factory = self.mappings.keys().any(|sig| {
-            sig.class == class && sig.is_static && (sig.method == "init" || sig.method == "new")
-        });
-
-        // Count total methods for this class (fewer = more specific)
-        let method_count = self
-            .mappings
-            .keys()
-            .filter(|sig| sig.class == class)
-            .count();
+        let Some(meta) = self.class_meta.get(class) else {
+            return 10;
+        };
+        let ClassMeta {
+            has_constructor,
+            has_factory,
+            method_count,
+            ..
+        } = *meta;
 
         // Constructible types (can be created by user code) get highest priority
         // This includes Arc, Mutex, Channel, Thread, etc.
@@ -605,9 +698,8 @@ impl StdlibMapping {
         &self,
         class: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings.iter().find(|(sig, _)| {
-            self.class_matches(class, &sig.class) && sig.method == "new" && sig.is_constructor
-        })
+        self.matching_entries(class)
+            .find(|(sig, _)| sig.method == "new" && sig.is_constructor)
     }
 
     /// Find a constructor mapping for a class with a specific param count.
@@ -618,20 +710,17 @@ impl StdlibMapping {
         class: &str,
         param_count: usize,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.mappings.iter().find(|(sig, call)| {
-            self.class_matches(class, &sig.class)
-                && sig.method == "new"
-                && sig.is_constructor
-                && call.param_count == param_count
+        self.matching_entries(class).find(|(sig, call)| {
+            sig.method == "new" && sig.is_constructor && call.param_count == param_count
         })
     }
 
     /// Find a runtime function call by runtime function name
     /// Returns the RuntimeFunctionCall metadata if found
     pub fn find_by_runtime_name(&self, runtime_name: &str) -> Option<&RuntimeFunctionCall> {
-        self.mappings
-            .values()
-            .find(|call| call.runtime_name == runtime_name)
+        self.by_runtime_name
+            .get(runtime_name)
+            .and_then(|sig| self.mappings.get(sig))
     }
 
     /// Get the function signature (param types, return type) for a runtime function.
@@ -680,16 +769,14 @@ impl StdlibMapping {
     /// The `is_mir_wrapper` field on RuntimeFunctionCall is more precise for per-function checks.
     pub fn is_mir_wrapper_class(&self, class_name: &str) -> bool {
         // Check if any method of this class is registered as a MIR wrapper
-        self.mappings
+        self.candidates(class_name)
             .iter()
-            .any(|(sig, call)| self.class_matches(class_name, &sig.class) && call.is_mir_wrapper)
+            .any(|class| self.class_meta[class].has_mir_wrapper)
     }
 
     /// Check if any method of the given class is registered in the stdlib mapping
     pub fn class_has_any_method(&self, class_name: &str) -> bool {
-        self.mappings
-            .keys()
-            .any(|sig| self.class_matches(class_name, &sig.class))
+        !self.candidates(class_name).is_empty()
     }
 
     /// Register a stdlib method -> runtime function mapping (internal)
@@ -702,6 +789,19 @@ impl StdlibMapping {
     /// This is used by `PluginRegistry` to merge mappings from multiple plugins.
     pub fn register_mapping(&mut self, sig: MethodSignature, call: RuntimeFunctionCall) {
         self.mappings.insert(sig, call);
+        self.rebuild_index();
+    }
+
+    /// Register a batch of mappings, reindexing once at the end.
+    ///
+    /// The indexes summarise the whole table, so registering a plugin's
+    /// mappings one at a time would rebuild them once per method.
+    pub fn register_mappings(
+        &mut self,
+        entries: impl IntoIterator<Item = (MethodSignature, RuntimeFunctionCall)>,
+    ) {
+        self.mappings.extend(entries);
+        self.rebuild_index();
     }
 
     /// Get all mappings as a vector of (signature, call) tuples.
@@ -4337,6 +4437,301 @@ impl Default for StdlibMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-index implementation of every class-keyed query: a whole-table
+    /// scan filtered by `class_matches`. These are the oracle the indexed
+    /// queries are checked against, and they are the definition of "unchanged".
+    mod oracle {
+        use super::*;
+
+        pub fn entries<'m>(
+            m: &'m StdlibMapping,
+            class: &str,
+        ) -> impl Iterator<Item = (&'m MethodSignature, &'m RuntimeFunctionCall)> + 'm {
+            let class = class.to_string();
+            m.mappings
+                .iter()
+                .filter(move |(sig, _)| m.class_matches(&class, sig.class))
+        }
+
+        pub fn find_by_name(m: &StdlibMapping, class: &str, method: &str) -> Option<&'static str> {
+            entries(m, class)
+                .find(|(sig, _)| sig.method == method)
+                .map(|(_, call)| call.runtime_name)
+        }
+
+        pub fn find_by_name_and_params(
+            m: &StdlibMapping,
+            class: &str,
+            method: &str,
+            param_count: usize,
+        ) -> Option<&'static str> {
+            entries(m, class)
+                .find(|(sig, call)| sig.method == method && call.param_count == param_count)
+                .map(|(_, call)| call.runtime_name)
+        }
+
+        pub fn find_static_method(
+            m: &StdlibMapping,
+            class: &str,
+            method: &str,
+        ) -> Option<&'static str> {
+            entries(m, class)
+                .find(|(sig, _)| sig.method == method && sig.is_static)
+                .map(|(_, call)| call.runtime_name)
+        }
+
+        pub fn find_constructor(m: &StdlibMapping, class: &str) -> Option<&'static str> {
+            entries(m, class)
+                .find(|(sig, _)| sig.method == "new" && sig.is_constructor)
+                .map(|(_, call)| call.runtime_name)
+        }
+
+        pub fn find_constructor_with_params(
+            m: &StdlibMapping,
+            class: &str,
+            param_count: usize,
+        ) -> Option<&'static str> {
+            entries(m, class)
+                .find(|(sig, call)| {
+                    sig.method == "new" && sig.is_constructor && call.param_count == param_count
+                })
+                .map(|(_, call)| call.runtime_name)
+        }
+
+        pub fn has_mapping(m: &StdlibMapping, class: &str, method: &str, is_static: bool) -> bool {
+            entries(m, class).any(|(sig, _)| sig.method == method && sig.is_static == is_static)
+        }
+
+        pub fn is_stdlib_class(m: &StdlibMapping, class: &str) -> bool {
+            entries(m, class).next().is_some()
+        }
+
+        pub fn class_has_static_methods(m: &StdlibMapping, class: &str) -> bool {
+            entries(m, class).any(|(sig, _)| sig.is_static)
+        }
+
+        pub fn get_class_static_str(m: &StdlibMapping, class: &str) -> Option<&'static str> {
+            entries(m, class).map(|(sig, _)| sig.class).next()
+        }
+
+        pub fn is_mir_wrapper_class(m: &StdlibMapping, class: &str) -> bool {
+            entries(m, class).any(|(_, call)| call.is_mir_wrapper)
+        }
+    }
+
+    /// Every spelling any lookup could use: each registered class name, plus
+    /// each simple-name suffix `class_matches` would accept for it.
+    fn all_spellings(mapping: &StdlibMapping) -> BTreeSet<String> {
+        let mut spellings = BTreeSet::new();
+        for class in mapping.get_all_classes() {
+            spellings.insert(class.to_string());
+            for (offset, byte) in class.bytes().enumerate() {
+                if matches!(byte, b'_' | b'.') && offset + 1 < class.len() {
+                    spellings.insert(class[offset + 1..].to_string());
+                }
+            }
+        }
+        // Spellings that match nothing must answer identically too.
+        spellings.insert("NotAClass".to_string());
+        spellings.insert("".to_string());
+        spellings
+    }
+
+    /// The indexed queries must return what the whole-table scan returned, for
+    /// every spelling, every method name in the table, and every arity in use.
+    #[test]
+    fn index_agrees_with_linear_scan() {
+        let mapping = StdlibMapping::new();
+        let classes = mapping.get_all_classes();
+        let spellings = all_spellings(&mapping);
+        let methods: BTreeSet<&'static str> =
+            mapping.mappings.keys().map(|sig| sig.method).collect();
+        let arities: BTreeSet<usize> = mapping
+            .mappings
+            .values()
+            .map(|call| call.param_count)
+            .collect();
+
+        for spelling in &spellings {
+            // The alias closure is exactly the set `class_matches` accepts.
+            let expected: Vec<&'static str> = classes
+                .iter()
+                .copied()
+                .filter(|registered| mapping.class_matches(spelling, registered))
+                .collect();
+            assert_eq!(
+                mapping.candidates(spelling),
+                expected.as_slice(),
+                "alias closure for {spelling:?}"
+            );
+
+            assert_eq!(
+                mapping.is_stdlib_class(spelling),
+                oracle::is_stdlib_class(&mapping, spelling),
+                "is_stdlib_class({spelling:?})"
+            );
+            assert_eq!(
+                mapping.class_has_any_method(spelling),
+                oracle::is_stdlib_class(&mapping, spelling),
+                "class_has_any_method({spelling:?})"
+            );
+            assert_eq!(
+                mapping.class_has_static_methods(spelling),
+                oracle::class_has_static_methods(&mapping, spelling),
+                "class_has_static_methods({spelling:?})"
+            );
+            assert_eq!(
+                mapping.get_class_static_str(spelling),
+                oracle::get_class_static_str(&mapping, spelling),
+                "get_class_static_str({spelling:?})"
+            );
+            assert_eq!(
+                mapping.is_mir_wrapper_class(spelling),
+                oracle::is_mir_wrapper_class(&mapping, spelling),
+                "is_mir_wrapper_class({spelling:?})"
+            );
+            assert_eq!(
+                mapping
+                    .find_constructor(spelling)
+                    .map(|(_, c)| c.runtime_name),
+                oracle::find_constructor(&mapping, spelling),
+                "find_constructor({spelling:?})"
+            );
+            for &arity in &arities {
+                assert_eq!(
+                    mapping
+                        .find_constructor_with_params(spelling, arity)
+                        .map(|(_, c)| c.runtime_name),
+                    oracle::find_constructor_with_params(&mapping, spelling, arity),
+                    "find_constructor_with_params({spelling:?}, {arity})"
+                );
+            }
+
+            for method in &methods {
+                assert_eq!(
+                    mapping
+                        .find_by_name(spelling, method)
+                        .map(|(_, c)| c.runtime_name),
+                    oracle::find_by_name(&mapping, spelling, method),
+                    "find_by_name({spelling:?}, {method:?})"
+                );
+                assert_eq!(
+                    mapping
+                        .find_static_method(spelling, method)
+                        .map(|(_, c)| c.runtime_name),
+                    oracle::find_static_method(&mapping, spelling, method),
+                    "find_static_method({spelling:?}, {method:?})"
+                );
+                for is_static in [true, false] {
+                    assert_eq!(
+                        mapping.has_mapping(spelling, method, is_static),
+                        oracle::has_mapping(&mapping, spelling, method, is_static),
+                        "has_mapping({spelling:?}, {method:?}, {is_static})"
+                    );
+                }
+                for &arity in &arities {
+                    assert_eq!(
+                        mapping
+                            .find_by_name_and_params(spelling, method, arity)
+                            .map(|(_, c)| c.runtime_name),
+                        oracle::find_by_name_and_params(&mapping, spelling, method, arity),
+                        "find_by_name_and_params({spelling:?}, {method:?}, {arity})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `find_by_runtime_name` must still return the first entry in table order
+    /// carrying that name, and must answer for every registered name.
+    #[test]
+    fn runtime_name_index_agrees_with_linear_scan() {
+        let mapping = StdlibMapping::new();
+        for call in mapping.mappings.values() {
+            let expected = mapping
+                .mappings
+                .values()
+                .find(|c| c.runtime_name == call.runtime_name)
+                .expect("the entry we just iterated must be findable");
+            let found = mapping
+                .find_by_runtime_name(call.runtime_name)
+                .unwrap_or_else(|| panic!("{} should resolve", call.runtime_name));
+            assert_eq!(found.runtime_name, expected.runtime_name);
+            assert_eq!(found.param_count, expected.param_count);
+            assert_eq!(found.is_mir_wrapper, expected.is_mir_wrapper);
+        }
+        assert!(mapping.find_by_runtime_name("no_such_runtime_fn").is_none());
+    }
+
+    /// `class_priority` reads the cached summary; it must rank classes exactly
+    /// as the three scans it replaced did.
+    #[test]
+    fn class_priority_agrees_with_linear_scan() {
+        let mapping = StdlibMapping::new();
+        for class in mapping.get_all_classes() {
+            let has_constructor = mapping
+                .mappings
+                .keys()
+                .any(|sig| sig.class == class && sig.is_constructor);
+            let has_factory = mapping.mappings.keys().any(|sig| {
+                sig.class == class && sig.is_static && (sig.method == "init" || sig.method == "new")
+            });
+            let method_count = mapping
+                .mappings
+                .keys()
+                .filter(|sig| sig.class == class)
+                .count();
+            let expected = if has_constructor || has_factory {
+                method_count.min(9) as u32
+            } else {
+                10 + method_count.min(9) as u32
+            };
+            assert_eq!(
+                mapping.class_priority(class),
+                expected,
+                "priority for {class}"
+            );
+        }
+        assert_eq!(mapping.class_priority("NotAClass"), 10);
+    }
+
+    /// A mapping registered after construction must be visible to the indexes.
+    #[test]
+    fn late_registration_reindexes() {
+        let mut mapping = StdlibMapping::new();
+        let sig = MethodSignature {
+            class: "zz.late.Registered",
+            method: "go",
+            is_static: true,
+            is_constructor: false,
+            param_count: 0,
+        };
+        let call = mapping
+            .find_by_name("Math", "abs")
+            .expect("Math.abs is mapped")
+            .1
+            .clone();
+        let runtime_name = call.runtime_name;
+        mapping.register_mapping(sig, call);
+
+        assert!(mapping.is_stdlib_class("zz.late.Registered"));
+        assert!(mapping
+            .find_static_method("zz.late.Registered", "go")
+            .is_some());
+        // The suffix arm still resolves short spellings at this stage.
+        assert!(mapping.find_static_method("Registered", "go").is_some());
+        assert!(mapping
+            .find_static_method("late.Registered", "go")
+            .is_some());
+        assert!(mapping.class_has_static_methods("zz.late.Registered"));
+        assert_eq!(
+            mapping
+                .find_by_runtime_name(runtime_name)
+                .map(|c| c.runtime_name),
+            Some(runtime_name)
+        );
+    }
 
     #[test]
     fn test_string_methods() {

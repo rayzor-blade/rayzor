@@ -8412,7 +8412,7 @@ impl CompilationUnit {
         // Without this skip, naive @:native("spawn") auto-registration overrides the
         // correct Thread_spawn MIR wrapper with a bare "spawn" bare-name symbol, which
         // then fails to resolve at JIT time ("can't resolve symbol spawn").
-        let builtin_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+        let builtin_mapping = crate::stdlib::runtime_mapping::StdlibMapping::builtin();
 
         let mut entries: Vec<MethodDescEntry> = Vec::new();
 

@@ -835,7 +835,7 @@ pub fn lower_hir_to_mir_with_externals(
 ) -> Result<IrModule, Vec<LoweringError>> {
     // Borrow once: lowering never mutates the type table.
     let type_table_ref = type_table.borrow();
-    let stdlib_mapping = StdlibMapping::new();
+    let stdlib_mapping = StdlibMapping::builtin();
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
         hir_module.metadata.source_file.clone(),
@@ -843,7 +843,7 @@ pub fn lower_hir_to_mir_with_externals(
         &type_table_ref,
         &hir_module.types,
         symbol_table,
-        &stdlib_mapping,
+        stdlib_mapping,
     );
 
     context.external_function_map = external_functions;
