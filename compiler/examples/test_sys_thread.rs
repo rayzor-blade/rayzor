@@ -512,10 +512,7 @@ class Main {
 }
 "#,
         )
-        // The runtime entry `Thread.join` is documented to reach, and the one
-        // the thread declarations build the wrapper around. `sys_thread_join`
-        // is a void-returning shim over the same call, not the lowering target.
-        .expect_mir_calls(vec!["Thread_spawn", "rayzor_thread_join"]),
+        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_join"]),
     );
 
     // TEST 4: Thread.isFinished
@@ -540,7 +537,7 @@ class Main {
 }
 "#,
         )
-        .expect_mir_calls(vec!["Thread_spawn", "rayzor_thread_is_finished"]),
+        .expect_mir_calls(vec!["Thread_spawn", "sys_thread_is_finished"]),
     );
 
     // ============================================================================
