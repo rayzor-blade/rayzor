@@ -901,8 +901,25 @@ impl StdlibMapping {
     }
 
     /// Register a stdlib method -> runtime function mapping (internal)
+    ///
+    /// A second registration under the same signature would silently evict
+    /// the first — the table is a map — so it is a bug in the table itself
+    /// and fails loudly. Plugins overriding builtins go through
+    /// `register_mapping`, where replacement is the point.
     fn register(&mut self, sig: MethodSignature, call: RuntimeFunctionCall) {
-        self.mappings.insert(sig, call);
+        let runtime_name = call.runtime_name;
+        if let Some(previous) = self.mappings.insert(sig.clone(), call) {
+            panic!(
+                "stdlib mapping: {}.{}/{} (static={}) registered twice, as {} and {} — \
+                 the second registration evicts the first",
+                sig.class,
+                sig.method,
+                sig.param_count,
+                sig.is_static,
+                previous.runtime_name,
+                runtime_name,
+            );
+        }
     }
 
     /// Register a stdlib method -> runtime function mapping (public API for plugins)
@@ -3398,26 +3415,27 @@ impl StdlibMapping {
             // ptr.isNull(): Bool  (instance, compare to 0)
             map_method!(instance "rayzor.Ptr", "isNull" => "Ptr_isNull", params: 0, mir_wrapper,
                 types: &[I64] => Bool),
-            // Size-typed Ptr wrappers (L3). Selected at the call site by pointee
-            // size (see hir_to_mir). Registered only so get_function_signature()
-            // resolves param/return widths for these runtime names; find_by_name
-            // still returns the default "offset"/"deref"/"write" row first, so an
-            // un-redirected call stays byte-identical.
-            map_method!(instance "rayzor.Ptr", "offset" => "Ptr_offset_4", params: 1, mir_wrapper,
+            // Size-typed Ptr wrappers (L3). Selected at the call site by
+            // pointee size, which rewrites the DEFAULT row's runtime name by
+            // suffix. Registered only so get_function_signature() resolves
+            // param/return widths for these runtime names; the "$" method
+            // spellings are unreachable from Haxe, so the default
+            // offset/deref/write rows stay the ones a method lookup finds.
+            map_method!(instance "rayzor.Ptr", "offset$4" => "Ptr_offset_4", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
-            map_method!(instance "rayzor.Ptr", "offset" => "Ptr_offset_1", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "offset$1" => "Ptr_offset_1", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
-            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_4", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref$4" => "Ptr_deref_4", params: 0, mir_wrapper,
                 types: &[I64] => I32),
-            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_4f", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref$4f" => "Ptr_deref_4f", params: 0, mir_wrapper,
                 types: &[I64] => F32),
-            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_1", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref$1" => "Ptr_deref_1", params: 0, mir_wrapper,
                 types: &[I64] => U8),
-            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_4", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write$4" => "Ptr_write_4", params: 1, mir_wrapper,
                 types: &[I64, I32]),
-            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_4f", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write$4f" => "Ptr_write_4f", params: 1, mir_wrapper,
                 types: &[I64, F32]),
-            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_1", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write$1" => "Ptr_write_1", params: 1, mir_wrapper,
                 types: &[I64, U8]),
         ];
 
