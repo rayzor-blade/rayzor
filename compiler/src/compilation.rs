@@ -2154,13 +2154,29 @@ impl CompilationUnit {
     fn register_field_from_blade(
         &mut self,
         field: &crate::ir::blade::BladeFieldInfo,
-        _class_symbol: SymbolId,
+        class_symbol: SymbolId,
         class_scope: ScopeId,
     ) -> SymbolId {
         let field_name = self.string_interner.intern(&field.name);
 
         // Create the field symbol
         let field_symbol = self.symbol_table.create_field(field_name);
+
+        // Record which class owns the field. Saving a module writes a
+        // property out under its owning class and drops any it cannot
+        // attribute, so a field registered without this loses its accessors
+        // the moment the module is cached.
+        if let Some(owner) = self.symbol_table.get_symbol(class_symbol) {
+            let owner_name = owner
+                .qualified_name
+                .or(Some(owner.name))
+                .and_then(|n| self.string_interner.get(n))
+                .map(|n| n.to_string());
+            if let Some(owner_name) = owner_name {
+                self.import_field_class_names
+                    .insert(field_symbol, owner_name);
+            }
+        }
 
         // Parse field type
         let field_type = self.resolve_blade_type_or_dynamic(field.field_type.as_ref());
