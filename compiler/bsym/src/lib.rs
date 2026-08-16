@@ -83,15 +83,76 @@ impl From<postcard::Error> for BladeError {
 const SYMBOL_MAGIC: &[u8; 4] = b"BSYM";
 
 /// Current symbol format version
-const SYMBOL_VERSION: u32 = 1;
+const SYMBOL_VERSION: u32 = 2;
+
+/// A type as the manifest records it.
+///
+/// Types used to be written out as source text and parsed again on load. That
+/// cost a parse for every signature in the library on every process start, and
+/// the text could not express everything a type is: an anonymous structure, an
+/// intersection and a nested function type all came back as a placeholder, and
+/// an unannotated declaration was indistinguishable from one written
+/// `Dynamic`. Recording the shape means loading resolves names instead of
+/// re-deriving syntax.
+///
+/// Names are kept as written, package and all, rather than as ids: an id is
+/// meaningful only in the context that minted it, so a manifest that stored
+/// one could not be read by any other compilation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BladeType {
+    /// A named type — `Int`, `haxe.io.Bytes`, `Array<String>`.
+    Path {
+        package: Vec<String>,
+        name: String,
+        /// The member of a module, when the type is not the module's own.
+        sub: Option<String>,
+        params: Vec<BladeType>,
+    },
+    /// `(A, B) -> C`
+    Function {
+        params: Vec<BladeType>,
+        ret: Box<BladeType>,
+    },
+    /// `{ a: Int, b: String }`
+    Anonymous { fields: Vec<BladeAnonField> },
+    /// `Null<T>`
+    Optional(Box<BladeType>),
+    /// `A & B`
+    Intersection {
+        left: Box<BladeType>,
+        right: Box<BladeType>,
+    },
+    /// `?` — a type the source left to inference.
+    Wildcard,
+}
+
+impl BladeType {
+    /// The type a declaration carries when it names one it does not have,
+    /// keeping "unannotated" distinct from an explicit `Dynamic`.
+    pub fn dynamic() -> Self {
+        BladeType::Path {
+            package: Vec::new(),
+            name: "Dynamic".to_string(),
+            sub: None,
+            params: Vec::new(),
+        }
+    }
+}
+
+/// A field of an anonymous structure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BladeAnonField {
+    pub name: String,
+    pub ty: BladeType,
+}
 
 /// Complete symbol information for a field
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BladeFieldInfo {
     /// Field name
     pub name: String,
-    /// Field type as string (e.g., "Int", "Array<String>")
-    pub field_type: String,
+    /// Declared type, or `None` where the source annotated none.
+    pub field_type: Option<BladeType>,
     /// Is this field public?
     pub is_public: bool,
     /// Is this a static field?
@@ -107,8 +168,8 @@ pub struct BladeFieldInfo {
 pub struct BladeParamInfo {
     /// Parameter name
     pub name: String,
-    /// Parameter type as string
-    pub param_type: String,
+    /// Declared type, or `None` where the source annotated none.
+    pub param_type: Option<BladeType>,
     /// Does this parameter have a default value?
     pub has_default: bool,
     /// Is this parameter optional (nullable)?
@@ -122,8 +183,8 @@ pub struct BladeMethodInfo {
     pub name: String,
     /// Method parameters
     pub params: Vec<BladeParamInfo>,
-    /// Return type as string
-    pub return_type: String,
+    /// Declared return type, or `None` where the source annotated none.
+    pub return_type: Option<BladeType>,
     /// Is this method public?
     pub is_public: bool,
     /// Is this a static method?
@@ -209,8 +270,8 @@ pub struct BladeTypeAliasInfo {
     pub package: Vec<String>,
     /// Type parameters
     pub type_params: Vec<String>,
-    /// Target type as string
-    pub target_type: String,
+    /// The type this alias names.
+    pub target_type: BladeType,
 }
 
 /// Abstract type information
@@ -222,8 +283,8 @@ pub struct BladeAbstractInfo {
     pub package: Vec<String>,
     /// Type parameters
     pub type_params: Vec<String>,
-    /// Underlying type
-    pub underlying_type: String,
+    /// The representation this abstract wraps.
+    pub underlying_type: BladeType,
     /// Forward fields (from @:forward)
     pub forward_fields: Vec<String>,
     /// From types (implicit conversions from)
@@ -351,8 +412,12 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
             parser::TypeDeclaration::Class(class) => {
                 let is_extern = class.modifiers.contains(&parser::Modifier::Extern);
                 let native_name = extract_native_meta(&class.meta);
-                let extends = class.extends.as_ref().map(type_to_string);
-                let implements: Vec<String> = class.implements.iter().map(type_to_string).collect();
+                let extends = class.extends.as_ref().map(type_to_qualified_name);
+                let implements: Vec<String> = class
+                    .implements
+                    .iter()
+                    .map(type_to_qualified_name)
+                    .collect();
                 let type_params: Vec<String> =
                     class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
@@ -375,10 +440,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                         } => {
                             let field_info = BladeFieldInfo {
                                 name: name.clone(),
-                                field_type: type_hint
-                                    .as_ref()
-                                    .map(type_to_string)
-                                    .unwrap_or_else(|| "Dynamic".to_string()),
+                                field_type: type_hint.as_ref().map(type_to_blade),
                                 is_public,
                                 is_static,
                                 is_final: false,
@@ -397,10 +459,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                         } => {
                             let field_info = BladeFieldInfo {
                                 name: name.clone(),
-                                field_type: type_hint
-                                    .as_ref()
-                                    .map(type_to_string)
-                                    .unwrap_or_else(|| "Dynamic".to_string()),
+                                field_type: type_hint.as_ref().map(type_to_blade),
                                 is_public,
                                 is_static,
                                 is_final: true,
@@ -417,10 +476,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                         } => {
                             let field_info = BladeFieldInfo {
                                 name: name.clone(),
-                                field_type: type_hint
-                                    .as_ref()
-                                    .map(type_to_string)
-                                    .unwrap_or_else(|| "Dynamic".to_string()),
+                                field_type: type_hint.as_ref().map(type_to_blade),
                                 is_public,
                                 is_static,
                                 is_final: false,
@@ -485,11 +541,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             .iter()
                             .map(|p| BladeParamInfo {
                                 name: p.name.clone(),
-                                param_type: p
-                                    .type_hint
-                                    .as_ref()
-                                    .map(type_to_string)
-                                    .unwrap_or_else(|| "Dynamic".to_string()),
+                                param_type: p.type_hint.as_ref().map(type_to_blade),
                                 has_default: p.default_value.is_some(),
                                 is_optional: p.optional,
                             })
@@ -521,7 +573,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                     name: typedef.name.clone(),
                     package: package.clone(),
                     type_params,
-                    target_type: type_to_string(&typedef.type_def),
+                    target_type: type_to_blade(&typedef.type_def),
                 });
             }
             parser::TypeDeclaration::Abstract(abstract_decl) => {
@@ -535,12 +587,19 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                 let underlying_type = abstract_decl
                     .underlying
                     .as_ref()
-                    .map(type_to_string)
-                    .unwrap_or_else(|| "Dynamic".to_string());
+                    .map(type_to_blade)
+                    .unwrap_or_else(BladeType::dynamic);
 
-                let from_types: Vec<String> =
-                    abstract_decl.from.iter().map(type_to_string).collect();
-                let to_types: Vec<String> = abstract_decl.to.iter().map(type_to_string).collect();
+                let from_types: Vec<String> = abstract_decl
+                    .from
+                    .iter()
+                    .map(type_to_qualified_name)
+                    .collect();
+                let to_types: Vec<String> = abstract_decl
+                    .to
+                    .iter()
+                    .map(type_to_qualified_name)
+                    .collect();
 
                 let mut methods: Vec<BladeMethodInfo> = Vec::new();
                 let mut static_methods: Vec<BladeMethodInfo> = Vec::new();
@@ -579,9 +638,13 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                 });
             }
             parser::TypeDeclaration::Interface(iface) => {
-                let extends: Option<String> = iface.extends.first().map(type_to_string);
-                let implements: Vec<String> =
-                    iface.extends.iter().skip(1).map(type_to_string).collect();
+                let extends: Option<String> = iface.extends.first().map(type_to_qualified_name);
+                let implements: Vec<String> = iface
+                    .extends
+                    .iter()
+                    .skip(1)
+                    .map(type_to_qualified_name)
+                    .collect();
                 let type_params: Vec<String> =
                     iface.type_params.iter().map(|tp| tp.name.clone()).collect();
 
@@ -709,11 +772,7 @@ fn extract_method_from_ast(
         .iter()
         .map(|p| BladeParamInfo {
             name: p.name.clone(),
-            param_type: p
-                .type_hint
-                .as_ref()
-                .map(type_to_string)
-                .unwrap_or_else(|| "Dynamic".to_string()),
+            param_type: p.type_hint.as_ref().map(type_to_blade),
             has_default: p.default_value.is_some(),
             is_optional: p.optional,
         })
@@ -724,11 +783,7 @@ fn extract_method_from_ast(
     BladeMethodInfo {
         name: func.name.clone(),
         params,
-        return_type: func
-            .return_type
-            .as_ref()
-            .map(type_to_string)
-            .unwrap_or_else(|| "Void".to_string()),
+        return_type: func.return_type.as_ref().map(type_to_blade),
         is_public,
         is_static,
         is_inline,
@@ -737,43 +792,60 @@ fn extract_method_from_ast(
     }
 }
 
-fn type_to_string(ty: &parser::Type) -> String {
+/// The name a type refers to, for the places a manifest records a reference
+/// rather than a type — a supertype, an implemented interface, a conversion
+/// target. Type arguments are not part of the reference.
+fn type_to_qualified_name(ty: &parser::Type) -> String {
     match ty {
-        parser::Type::Path { path, params, .. } => {
-            let mut base = if path.package.is_empty() {
+        parser::Type::Path { path, .. } => {
+            let mut name = if path.package.is_empty() {
                 path.name.clone()
             } else {
                 format!("{}.{}", path.package.join("."), path.name)
             };
-
             if let Some(sub) = &path.sub {
-                base = format!("{}.{}", base, sub);
+                name = format!("{}.{}", name, sub);
             }
+            name
+        }
+        parser::Type::Parenthesis { inner, .. } => type_to_qualified_name(inner),
+        other => format!("{:?}", std::mem::discriminant(other)),
+    }
+}
 
-            if params.is_empty() {
-                base
-            } else {
-                let param_strs: Vec<String> = params.iter().map(type_to_string).collect();
-                format!("{}<{}>", base, param_strs.join(", "))
-            }
-        }
-        parser::Type::Function { params, ret, .. } => {
-            let param_strs: Vec<String> = params.iter().map(type_to_string).collect();
-            format!("({}) -> {}", param_strs.join(", "), type_to_string(ret))
-        }
-        parser::Type::Anonymous { fields, .. } => {
-            let field_strs: Vec<String> = fields
+/// Record a parsed type as the manifest stores it.
+///
+/// A direct transcription: no name is resolved and nothing is looked up, so
+/// extraction still needs only a parser. `Parenthesis` carries no meaning of
+/// its own and collapses to what it wraps.
+fn type_to_blade(ty: &parser::Type) -> BladeType {
+    match ty {
+        parser::Type::Path { path, params, .. } => BladeType::Path {
+            package: path.package.clone(),
+            name: path.name.clone(),
+            sub: path.sub.clone(),
+            params: params.iter().map(type_to_blade).collect(),
+        },
+        parser::Type::Function { params, ret, .. } => BladeType::Function {
+            params: params.iter().map(type_to_blade).collect(),
+            ret: Box::new(type_to_blade(ret)),
+        },
+        parser::Type::Anonymous { fields, .. } => BladeType::Anonymous {
+            fields: fields
                 .iter()
-                .map(|f| format!("{}: {}", f.name, type_to_string(&f.type_hint)))
-                .collect();
-            format!("{{ {} }}", field_strs.join(", "))
-        }
-        parser::Type::Optional { inner, .. } => format!("Null<{}>", type_to_string(inner)),
-        parser::Type::Parenthesis { inner, .. } => type_to_string(inner),
-        parser::Type::Intersection { left, right, .. } => {
-            format!("{} & {}", type_to_string(left), type_to_string(right))
-        }
-        parser::Type::Wildcard { .. } => "?".to_string(),
+                .map(|f| BladeAnonField {
+                    name: f.name.clone(),
+                    ty: type_to_blade(&f.type_hint),
+                })
+                .collect(),
+        },
+        parser::Type::Optional { inner, .. } => BladeType::Optional(Box::new(type_to_blade(inner))),
+        parser::Type::Parenthesis { inner, .. } => type_to_blade(inner),
+        parser::Type::Intersection { left, right, .. } => BladeType::Intersection {
+            left: Box::new(type_to_blade(left)),
+            right: Box::new(type_to_blade(right)),
+        },
+        parser::Type::Wildcard { .. } => BladeType::Wildcard,
     }
 }
 /// Extract every declaration in a standard library rooted at `stdlib_root`.
