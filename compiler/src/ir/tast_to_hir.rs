@@ -1460,37 +1460,43 @@ impl<'a> TastToHirContext<'a> {
         let type_table = self.type_table.borrow();
         let type_info = type_table.get(receiver_type)?;
 
-        // Get class name from type - prefer lowered @:native name for namespacing
-        let class_name = match &type_info.kind {
+        // Resolve the receiver's registered mapping key from the strongest
+        // name the class symbol carries: @:native, then the qualified name,
+        // then the simple name. What comes out is always the key the class
+        // is registered under, so every lookup below is exact.
+        let class_name: &'static str = match &type_info.kind {
             TypeKind::String => "String",
             TypeKind::Array { .. } => "Array",
             TypeKind::Class { symbol_id, .. } => {
-                if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
-                    // Use lowered native name if available (e.g., "rayzor::concurrent::Arc" -> "rayzor_concurrent_Arc")
-                    if let Some(native_interned) = class_info.native_name {
-                        if let Some(native_str) = self.string_interner.get(native_interned) {
-                            let lowered = native_str.replace("::", "_");
-                            Box::leak(lowered.into_boxed_str())
-                        } else {
-                            self.string_interner.get(class_info.name)?
-                        }
-                    } else {
-                        self.string_interner.get(class_info.name)?
-                    }
-                } else {
-                    return None;
+                let class_info = self.symbol_table.get_symbol(*symbol_id)?;
+                let native = class_info
+                    .native_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .and_then(|n| {
+                        self.stdlib_mapping
+                            .get_class_static_str(&n.replace("::", "."))
+                    });
+                let resolved = native
+                    .or_else(|| {
+                        class_info
+                            .qualified_name
+                            .and_then(|n| self.string_interner.get(n))
+                            .and_then(|n| self.stdlib_mapping.get_class_static_str(n))
+                    })
+                    .or_else(|| {
+                        self.string_interner
+                            .get(class_info.name)
+                            .and_then(|n| self.stdlib_mapping.get_class_static_str(n))
+                    });
+                match resolved {
+                    Some(key) => key,
+                    None => return None, // Not a stdlib class
                 }
             }
             _ => return None, // Not a stdlib type
         };
 
         drop(type_table);
-
-        // Check if this is actually a stdlib class using the mapping
-        // This replaces the hardcoded list ["Math", "Sys", "String", "Array"]
-        if !self.stdlib_mapping.is_stdlib_class(class_name) {
-            return None; // Not a stdlib class
-        }
 
         // Determine if methods are static by checking the mapping
         // This replaces hardcoded matches!(class_name, "Math" | "Sys")
@@ -1500,15 +1506,11 @@ impl<'a> TastToHirContext<'a> {
             .stdlib_mapping
             .has_mapping(class_name, method_name, is_static)
         {
-            // Get the class name as a 'static str from the mapping registry
-            // This replaces the hardcoded match statement
-            let class_static = self.stdlib_mapping.get_class_static_str(class_name)?;
-
             // For method names, we need to use a leaked string for now
             // In production, we'd maintain a static registry
             let method_static: &'static str = Box::leak(method_name.to_string().into_boxed_str());
 
-            Some((class_static, method_static, is_static))
+            Some((class_name, method_static, is_static))
         } else {
             None
         }

@@ -134,12 +134,12 @@ impl<'a> HirToMirContext<'a> {
                     func.name, func.qualified_name
                 );
                 if let Some(ref qn) = func.qualified_name {
-                    // Pattern: "rayzor.Bytes.set" -> class="rayzor_Bytes", method="set"
+                    // Pattern: "rayzor.Bytes.set" -> class="rayzor.Bytes", method="set"
                     let parts: Vec<&str> = qn.split('.').collect();
                     if parts.len() >= 2 {
                         let mir_method_name = *parts.last().unwrap();
                         let class_parts = &parts[..parts.len() - 1];
-                        let qualified_class = class_parts.join("_");
+                        let qualified_class = class_parts.join(".");
 
                         if let Some((_sig, mapping)) = self
                             .stdlib_mapping
@@ -718,11 +718,11 @@ impl<'a> HirToMirContext<'a> {
                         // Prefer native_name (from @:native annotation)
                         s.native_name
                             .and_then(|nn| self.string_interner.get(nn))
-                            .map(|ns| ns.replace("::", "_"))
+                            .map(|ns| self.canonical_class_spelling(ns))
                             .or_else(|| {
                                 s.qualified_name
                                     .and_then(|qn| self.string_interner.get(qn))
-                                    .map(|s| s.replace(".", "_"))
+                                    .map(|s| self.canonical_class_spelling(s))
                             })
                     });
 
@@ -742,7 +742,7 @@ impl<'a> HirToMirContext<'a> {
                         .and_then(|qn_str| {
                             let parts: Vec<&str> = qn_str.split('.').collect();
                             if parts.len() >= 2 {
-                                Some(parts[..parts.len() - 1].join("_"))
+                                Some(parts[..parts.len() - 1].join("."))
                             } else {
                                 None
                             }
@@ -1254,7 +1254,7 @@ impl<'a> HirToMirContext<'a> {
                         let qualified_name_opt = class_symbol
                             .native_name
                             .and_then(|nn| self.string_interner.get(nn))
-                            .map(|n| n.replace("::", "_"))
+                            .map(|n| n.replace("::", "."))
                             .or_else(|| {
                                 class_symbol
                                     .qualified_name

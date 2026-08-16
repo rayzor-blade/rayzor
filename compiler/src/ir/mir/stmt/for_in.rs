@@ -684,9 +684,9 @@ impl<'a> HirToMirContext<'a> {
                             let iter_rt_name = rt.runtime_name.to_string();
                             let is_kv = iter_rt_name.contains("kv_iterator");
                             let iter_class_name = if is_kv {
-                                "ArrayKeyValueIterator"
+                                "haxe.iterators.ArrayKeyValueIterator"
                             } else {
-                                "ArrayIterator"
+                                "haxe.iterators.ArrayIterator"
                             };
                             let hn_mapping =
                                 self.stdlib_mapping.find_by_name(iter_class_name, "hasNext");

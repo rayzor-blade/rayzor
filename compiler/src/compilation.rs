@@ -8468,7 +8468,6 @@ impl CompilationUnit {
             // Also get the dot-separated qualified name for stdlib mapping lookups
             // (MIR lowerer queries with dots, not ::)
             let class_dot_name = class_native_name.replace("::", ".");
-            let underscore_class_name = class_native_name.replace("::", "_");
 
             // Extract method entries
             for method in &class.methods {
@@ -8498,43 +8497,14 @@ impl CompilationUnit {
                     continue;
                 }
 
-                // If the builtin stdlib already has a mapping for this (class,
-                // method), use the builtin's canonical runtime_name instead of the
-                // bare @:native value. The BuiltinPlugin (priority 0) carries the
-                // correct symbol names for all stdlib methods:
-                //   - MIR wrappers:      Thread_spawn, Channel_send, ...
-                //   - Extern C functions: haxe_bytes_get, sys_thread_join, ...
-                //
-                // Without this override, the NativePlugin auto-registration
-                // (priority 10) would replace them with bare @:native symbols
-                // ("spawn", "join"), which then fail at JIT link time
-                // ("can't resolve symbol spawn"). For MIR wrappers we also skip
-                // the NativePlugin entry entirely since the builtin path handles
-                // them via stdlib MIR module merging.
-                // Match the builtin mapping by the qualified (underscored) class
-                // name first, then by the simple class name. The builtin mapping
-                // registers map_method! entries with simple names like "StringMap",
-                // "IntMap", etc. — the `class_matches` helper supports suffix-
-                // matching the other direction ("StringMap" matches
-                // "haxe_ds_StringMap"), but NOT the lookup direction. Without the
-                // simple-name fallback the override never fires for haxe.ds.*
-                // classes and the auto-registration registers
-                // `(class="haxe.ds.StringMap", method="set", runtime="set")` as a
-                // bogus mapping that the dispatch then picks up — see the user's
-                // "no silent dispatch fallthrough" feedback.
-                // Try multiple naming conventions to find the builtin mapping.
-                // `class_native_name` can come in as `haxe::ds::StringMap`,
-                // `haxe.ds.StringMap`, or `haxe_ds_StringMap` depending on the
-                // upstream source — and the simple bare name (`StringMap`) is
-                // what the macro-registered map_method! entries use.
-                let bare_name = underscore_class_name
-                    .rsplit(['_', '.'])
-                    .next()
-                    .unwrap_or(&underscore_class_name);
-                let builtin_match = builtin_mapping
-                    .find_by_name(&underscore_class_name, &method_name)
-                    .or_else(|| builtin_mapping.find_by_name(&class_dot_name, &method_name))
-                    .or_else(|| builtin_mapping.find_by_name(bare_name, &method_name));
+                // If anything already mapped — the builtin stdlib or a loaded
+                // native plugin — carries this (class, method), keep that
+                // binding and register nothing. Without this, the bare
+                // @:native symbol ("spawn") or the bare method name would
+                // shadow the correct one (Thread_spawn, a dylib descriptor's
+                // export) and fail at JIT link time. The dotted class name is
+                // enough: the mapping resolves every spelling of it.
+                let builtin_match = builtin_mapping.find_by_name(&class_dot_name, &method_name);
                 if let Some((_sig, call)) = builtin_match {
                     // DECLARATION vs RUNTIME arity. The lookup above is three
                     // name-only attempts with no arity awareness, so a method
@@ -8564,7 +8534,7 @@ impl CompilationUnit {
                     if declared != call.param_count && warn_arity {
                         eprintln!(
                             "[stdlib-arity] {}.{} declares {} parameter(s) but runtime mapping '{}' takes {} — a call supplying the extra argument(s) will be emitted against a mismatched native signature and silently produce nothing. Either implement the parameter in the runtime or narrow the .hx declaration.",
-                            bare_name, method_name, declared, call.runtime_name, call.param_count
+                            class_dot_name, method_name, declared, call.runtime_name, call.param_count
                         );
                     }
                     if declared != call.param_count
@@ -8652,25 +8622,11 @@ impl CompilationUnit {
             }
         }
 
-        // Also register entries under dot-separated and underscore-joined class names
-        // so the MIR lowerer can find them regardless of class name format.
-        let mut extra_entries: Vec<MethodDescEntry> = Vec::new();
-        for entry in &entries {
-            let parts: Vec<&str> = entry.class_name.split("::").collect();
-            if parts.len() > 1 {
-                let dot_class = parts.join(".");
-                extra_entries.push(MethodDescEntry {
-                    class_name: dot_class,
-                    ..entry.clone()
-                });
-                let underscore_class = parts.join("_");
-                extra_entries.push(MethodDescEntry {
-                    class_name: underscore_class,
-                    ..entry.clone()
-                });
-            }
+        // Register under the dotted class name; the mapping's alias index
+        // resolves every other spelling of it, so one key per class is enough.
+        for entry in &mut entries {
+            entry.class_name = entry.class_name.replace("::", ".");
         }
-        entries.extend(extra_entries);
 
         if !entries.is_empty() {
             let plugin = NativePlugin::from_method_entries("extern_import", entries);

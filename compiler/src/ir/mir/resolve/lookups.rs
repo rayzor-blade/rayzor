@@ -343,10 +343,10 @@ impl<'a> HirToMirContext<'a> {
         let parts: Vec<&str> = qualified_name.split('.').collect();
         let class_name = parts.iter().rev().nth(1)?; // Second-to-last part is class name
 
-        // The underscored qualified class name ("sys_thread_Thread") must be tried
+        // The qualified class name ("sys.thread.Thread") must be tried
         // first, otherwise sys.thread.Thread and rayzor.concurrent.Thread collide.
         if parts.len() >= 2 {
-            let qualified_class_name = parts[..parts.len() - 1].join("_");
+            let qualified_class_name = parts[..parts.len() - 1].join(".");
             if let Some(count) = param_count {
                 if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
                     &qualified_class_name,
@@ -507,9 +507,7 @@ impl<'a> HirToMirContext<'a> {
                         .symbol_table
                         .get_symbol(*symbol_id)
                         .map(|s| {
-                            let name = self.string_interner.get(s.name).unwrap_or("");
                             let is_extern = s.flags.contains(SymbolFlags::EXTERN);
-                            let is_wrapper = self.stdlib_mapping.is_mir_wrapper_class(name);
                             let in_stdlib_ns = s
                                 .qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
@@ -519,12 +517,14 @@ impl<'a> HirToMirContext<'a> {
                                         || qn.starts_with("rayzor.")
                                 })
                                 .unwrap_or(false);
-                            // class_has_any_method matches by simple name, so it must be
-                            // combined with in_stdlib_ns: `tink.Json` shares its simple
-                            // name with `haxe.Json` and would otherwise be hijacked.
-                            let has_stdlib_methods_in_ns =
-                                self.stdlib_mapping.class_has_any_method(name) && in_stdlib_ns;
-                            is_extern || is_wrapper || in_stdlib_ns || has_stdlib_methods_in_ns
+                            // The wrapper check resolves the symbol to its
+                            // registered key first, so `tink.Json` cannot ride
+                            // its simple name onto `haxe.Json`.
+                            let is_wrapper = self
+                                .canonical_stdlib_class_name(s)
+                                .map(|key| self.stdlib_mapping.is_mir_wrapper_class(&key))
+                                .unwrap_or(false);
+                            is_extern || is_wrapper || in_stdlib_ns
                         })
                         .unwrap_or(false);
                     if !is_known_stdlib {
@@ -537,8 +537,7 @@ impl<'a> HirToMirContext<'a> {
                     let placeholder_name = self.string_interner.get(*name);
                     let is_known_stdlib = placeholder_name
                         .map(|n| {
-                            self.stdlib_mapping.is_mir_wrapper_class(n)
-                                || self.stdlib_mapping.class_has_any_method(n)
+                            self.stdlib_mapping.get_class_static_str(n).is_some()
                                 || n.starts_with("haxe.")
                                 || n.starts_with("sys.")
                         })
@@ -572,7 +571,7 @@ impl<'a> HirToMirContext<'a> {
                 if parts.len() >= 2 {
                     let class_parts = &parts[..parts.len() - 1];
                     let class_name = class_parts[class_parts.len() - 1];
-                    let qualified_class_name = class_parts.join("_");
+                    let qualified_class_name = class_parts.join(".");
 
                     if let Some(count) = param_count {
                         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
@@ -658,7 +657,7 @@ impl<'a> HirToMirContext<'a> {
                                 ) = first_arg
                                 {
                                     let native_str = self.string_interner.get(*s).unwrap_or("");
-                                    let normalized = native_str.replace("::", "_");
+                                    let normalized = native_str.replace("::", ".");
                                     if let Some((sig, mapping)) =
                                         self.stdlib_mapping.find_by_name(&normalized, method_name)
                                     {
@@ -707,9 +706,9 @@ impl<'a> HirToMirContext<'a> {
             TypeKind::Map { key_type, .. } => {
                 let key_kind = type_table.get(*key_type).map(|t| t.kind.clone());
                 let class = match key_kind {
-                    Some(TypeKind::Int) | Some(TypeKind::Bool) => "IntMap",
-                    Some(TypeKind::String) => "StringMap",
-                    _ => "ObjectMap",
+                    Some(TypeKind::Int) | Some(TypeKind::Bool) => "haxe.ds.IntMap",
+                    Some(TypeKind::String) => "haxe.ds.StringMap",
+                    _ => "haxe.ds.ObjectMap",
                 };
                 (Some(class), None, Vec::new())
             }
@@ -721,16 +720,18 @@ impl<'a> HirToMirContext<'a> {
                 let (name, qname) =
                     if let Some(class_info) = self.symbol_table.get_symbol(*symbol_id) {
                         let n = self.string_interner.get(class_info.name);
-                        // Prefer the lowered @:native name over the qualified name.
+                        // Prefer the @:native name over the qualified name,
+                        // canonicalized to the registered key when the class
+                        // is a stdlib one.
                         let qn = if let Some(native) = class_info.native_name {
                             self.string_interner
                                 .get(native)
-                                .map(|n| n.replace("::", "_"))
+                                .map(|n| self.canonical_class_spelling(n))
                         } else {
                             class_info
                                 .qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
-                                .map(|qn| qn.replace(".", "_"))
+                                .map(|qn| self.canonical_class_spelling(qn))
                         };
                         (n, qn)
                     } else {
@@ -754,12 +755,12 @@ impl<'a> HirToMirContext<'a> {
                                 let qn = if let Some(native) = class_info.native_name {
                                     self.string_interner
                                         .get(native)
-                                        .map(|n| n.replace("::", "_"))
+                                        .map(|n| self.canonical_class_spelling(n))
                                 } else {
                                     class_info
                                         .qualified_name
                                         .and_then(|qn| self.string_interner.get(qn))
-                                        .map(|qn| qn.replace(".", "_"))
+                                        .map(|qn| self.canonical_class_spelling(qn))
                                 };
                                 (n, qn)
                             } else {
@@ -773,7 +774,7 @@ impl<'a> HirToMirContext<'a> {
                             // The typedef target is unresolved when it was loaded after
                             // the typedef itself; recover it by name.
                             if let Some(target_name) = self.string_interner.get(*placeholder_name) {
-                                let qualified_name = target_name.replace(".", "_");
+                                let qualified_name = target_name.to_string();
                                 if let Some((_sig, mapping)) = self
                                     .stdlib_mapping
                                     .find_by_name(&qualified_name, method_name)
@@ -802,12 +803,12 @@ impl<'a> HirToMirContext<'a> {
                         let qn = if let Some(native) = class_info.native_name {
                             self.string_interner
                                 .get(native)
-                                .map(|n| n.replace("::", "_"))
+                                .map(|n| self.canonical_class_spelling(n))
                         } else {
                             class_info
                                 .qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
-                                .map(|qn| qn.replace(".", "_"))
+                                .map(|qn| self.canonical_class_spelling(qn))
                         };
                         (n, qn)
                     } else {
@@ -841,12 +842,12 @@ impl<'a> HirToMirContext<'a> {
                                 let qn = if let Some(native) = class_info.native_name {
                                     self.string_interner
                                         .get(native)
-                                        .map(|n| n.replace("::", "_"))
+                                        .map(|n| self.canonical_class_spelling(n))
                                 } else {
                                     class_info
                                         .qualified_name
                                         .and_then(|qn| self.string_interner.get(qn))
-                                        .map(|qn| qn.replace(".", "_"))
+                                        .map(|qn| self.canonical_class_spelling(qn))
                                 };
                                 (n, qn)
                             } else {
@@ -866,14 +867,14 @@ impl<'a> HirToMirContext<'a> {
             TypeKind::Placeholder {
                 name: placeholder_name,
             } => {
-                // Derive the class from the Placeholder name:
-                // "rayzor.Bytes" → try "rayzor_Bytes", then "Bytes".
+                // The Placeholder name is the dotted FQN ("rayzor.Bytes");
+                // fall back to the simple name only if the FQN misses.
                 let ph_name = self
                     .string_interner
                     .get(*placeholder_name)
                     .map(|s| s.to_string());
                 if let Some(ref ph) = ph_name {
-                    let underscore_name = ph.replace(".", "_");
+                    let underscore_name = ph.clone();
                     let bare_name = ph.rsplit('.').next().unwrap_or(ph);
                     if let Some(count) = param_count {
                         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
@@ -907,7 +908,7 @@ impl<'a> HirToMirContext<'a> {
                     let parts: Vec<&str> = qname.split('.').collect();
                     if parts.len() >= 2 {
                         let class_parts = &parts[..parts.len() - 1];
-                        let underscore_class = class_parts.join("_");
+                        let underscore_class = class_parts.join(".");
                         if let Some((sig, mapping)) = self
                             .stdlib_mapping
                             .find_by_name(&underscore_class, method_name)
@@ -931,7 +932,7 @@ impl<'a> HirToMirContext<'a> {
                     let parts: Vec<&str> = qname.split('.').collect();
                     if parts.len() >= 2 {
                         let class_parts = &parts[..parts.len() - 1];
-                        let underscore_class = class_parts.join("_");
+                        let underscore_class = class_parts.join(".");
                         if let Some((sig, mapping)) = self
                             .stdlib_mapping
                             .find_by_name(&underscore_class, method_name)
@@ -1022,7 +1023,7 @@ impl<'a> HirToMirContext<'a> {
         // not sys_net_Socket_close.
         if let Some(hint) = receiver_class_hint {
             if hint.contains('.') {
-                let normalized_hint = hint.replace(".", "_");
+                let normalized_hint = hint.to_string();
                 if let Some(count) = param_count {
                     if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
                         &normalized_hint,
@@ -1223,11 +1224,11 @@ impl<'a> HirToMirContext<'a> {
                             let class_name = abs_sym
                                 .native_name
                                 .and_then(|nn| self.string_interner.get(nn))
-                                .map(|n| n.replace("::", "_"))
+                                .map(|n| n.replace("::", "."))
                                 .or_else(|| {
                                     self.string_interner
                                         .get(abs_sym.name)
-                                        .map(|n| format!("rayzor_{}", n))
+                                        .map(|n| format!("rayzor.{}", n))
                                 });
                             if let Some(class) = class_name {
                                 if let Some((_, mapping)) =
@@ -1798,7 +1799,7 @@ impl<'a> HirToMirContext<'a> {
                     s.qualified_name
                         .or(Some(s.name))
                         .and_then(|n| self.string_interner.get(n))
-                        .map(|s| s.replace(".", "_"))
+                        .map(|s| s.to_string())
                 })
             }
             TypeKind::GenericInstance { base_type, .. } => {

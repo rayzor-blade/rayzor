@@ -167,10 +167,9 @@ impl<'a> HirToMirContext<'a> {
             };
             match type_decl {
                 HirTypeDecl::Class(class) => {
-                    // Class name for runtime-mapping lookups: lowered @:native
-                    // name ("rayzor::concurrent::Arc" -> "rayzor_concurrent_Arc"),
-                    // else qualified name with dots replaced ("rayzor.Bytes" ->
-                    // "rayzor_Bytes").
+                    // The class's registered mapping key, resolved from the
+                    // strongest name it carries: @:native, then the qualified
+                    // name, then the simple name.
                     let qualified_class_name = self
                         .symbol_table
                         .get_symbol(class.symbol_id)
@@ -178,27 +177,28 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(native) = sym.native_name {
                                 self.string_interner
                                     .get(native)
-                                    .map(|n| n.replace("::", "_"))
+                                    .map(|n| self.canonical_class_spelling(n))
                             } else {
                                 sym.qualified_name
                                     .and_then(|qn| self.string_interner.get(qn))
-                                    .map(|qn| qn.replace(".", "_"))
+                                    .map(|qn| self.canonical_class_spelling(qn))
                             }
+                        })
+                        .or_else(|| {
+                            self.string_interner
+                                .get(class.name)
+                                .and_then(|n| self.stdlib_mapping.get_class_static_str(n))
+                                .map(str::to_string)
                         });
-
-                    // Fallback to simple class name if no qualified name
-                    let class_name = self.string_interner.get(class.name);
 
                     for method in &class.methods {
                         // A method of an extern class with a runtime mapping is
                         // served by the mapping system, not by a MIR stub.
                         let should_skip_method = if method.function.body.is_none() {
-                            // Qualified name first (e.g. "rayzor_Bytes"), then the
-                            // simple class name.
                             let has_mapping = if let Some(method_name) =
                                 self.string_interner.get(method.function.name)
                             {
-                                let found_in_qualified = qualified_class_name
+                                qualified_class_name
                                     .as_ref()
                                     .map(|qn| {
                                         self.stdlib_mapping.has_mapping(
@@ -207,20 +207,7 @@ impl<'a> HirToMirContext<'a> {
                                             method.is_static,
                                         )
                                     })
-                                    .unwrap_or(false);
-
-                                if found_in_qualified {
-                                    true
-                                } else if let Some(class_name_str) = class_name {
-                                    // Fall back to simple class name (e.g., "FileSystem" instead of "sys_FileSystem")
-                                    self.stdlib_mapping.has_mapping(
-                                        class_name_str,
-                                        method_name,
-                                        method.is_static,
-                                    )
-                                } else {
-                                    false
-                                }
+                                    .unwrap_or(false)
                             } else {
                                 false
                             };
@@ -338,22 +325,15 @@ impl<'a> HirToMirContext<'a> {
 
                             if found_in_qualified {
                                 true
-                            } else if let Some(class_name_str) = class_name {
-                                // Fallback to simple class name (e.g., "Thread" instead of "rayzor_concurrent_Thread")
-                                if check_class_runtime(class_name_str) {
-                                    true
-                                } else {
-                                    // Also skip if this is an extern class (using TAST flags)
-                                    self.symbol_table
-                                        .get_symbol(class.symbol_id)
-                                        .map(|sym| {
-                                            sym.flags
-                                                .contains(crate::tast::symbols::SymbolFlags::EXTERN)
-                                        })
-                                        .unwrap_or(false)
-                                }
                             } else {
-                                false
+                                // Also skip if this is an extern class (using TAST flags)
+                                self.symbol_table
+                                    .get_symbol(class.symbol_id)
+                                    .map(|sym| {
+                                        sym.flags
+                                            .contains(crate::tast::symbols::SymbolFlags::EXTERN)
+                                    })
+                                    .unwrap_or(false)
                             }
                         };
 

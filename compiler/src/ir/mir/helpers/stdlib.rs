@@ -112,7 +112,7 @@ impl<'a> HirToMirContext<'a> {
         target: TypeId,
         abs_name: &InternedString,
     ) -> Option<IrId> {
-        // Resolve abstract's stdlib class name (e.g., "rayzor_SIMD4f")
+        // Resolve abstract's stdlib class name (e.g., "rayzor.SIMD4f")
         let class_name = {
             let type_table = self.type_table;
             let ti = type_table.get(target)?;
@@ -120,11 +120,11 @@ impl<'a> HirToMirContext<'a> {
                 let sym = self.symbol_table.get_symbol(*symbol_id)?;
                 sym.native_name
                     .and_then(|nn| self.string_interner.get(nn))
-                    .map(|n| n.replace("::", "_"))
+                    .map(|n| n.replace("::", "."))
                     .or_else(|| {
                         self.string_interner
                             .get(sym.name)
-                            .map(|n| format!("rayzor_{}", n))
+                            .map(|n| format!("rayzor.{}", n))
                     })
             } else {
                 None
@@ -177,22 +177,18 @@ impl<'a> HirToMirContext<'a> {
                     None
                 }
             })?;
-        let bare = hint.rsplit(':').next().unwrap_or(&hint);
-        let bare = bare.rsplit('.').next().unwrap_or(bare).to_string();
-
         let field_name = self
             .symbol_table
             .get_symbol(field)
             .and_then(|s| self.string_interner.get(s.name))?
             .to_string();
 
-        // Candidate stdlib class names for the mapping lookup.
-        let candidates = [bare.clone(), format!("haxe_io_{}", bare)];
-        let runtime_name = candidates.iter().find_map(|cls| {
-            self.stdlib_mapping
-                .find_by_name(cls, &field_name)
-                .map(|(_, call)| call.runtime_name)
-        })?;
+        // The hint names the receiver's class; the mapping resolves whatever
+        // spelling it arrived in.
+        let runtime_name = self
+            .stdlib_mapping
+            .find_by_name(&hint, &field_name)
+            .map(|(_, call)| call.runtime_name)?;
 
         let field_kind = self.type_table.get(field_ty).map(|t| t.kind.clone());
         let result_type = match field_kind {
@@ -232,16 +228,14 @@ impl<'a> HirToMirContext<'a> {
         })?;
         let method_name = self.string_interner.get(accessor_name)?;
 
-        // The stdlib mapping uses `_`-separated qualified names like
-        // `sys_thread_Tls`; the symbol stores `sys.thread.Tls`. Try the
-        // dot form first (matches MIR_lookup convention), then convert.
+        // The symbol stores the dotted qualified name ("sys.thread.Tls"),
+        // which is the mapping's key form.
         let dot_form = class_name.to_string();
-        let underscore_form = dot_form.replace('.', "_");
 
         // expected_param_count = args.len() - 1 because args includes `this`
         let expected_extra = args.len().saturating_sub(1);
 
-        let candidate_classes = [dot_form.as_str(), underscore_form.as_str()];
+        let candidate_classes = [dot_form.as_str()];
         let mut found: Option<(String, IrType, Vec<IrType>, bool)> = None;
         for cn in &candidate_classes {
             if let Some((_sig, mapping)) = self
