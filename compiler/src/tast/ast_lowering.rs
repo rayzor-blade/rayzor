@@ -37,6 +37,54 @@ use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
 
+/// Top-level Haxe standard library classes that are always implicitly
+/// available, matching the `.hx` files in the haxe-std root. Registered as
+/// resolvable symbols wherever the full declarations have not been loaded;
+/// every registration site skips names that already resolve, so a class
+/// loaded from its real source is never shadowed by this backstop.
+pub(crate) const TOPLEVEL_STDLIB_CLASSES: &[&str] = &[
+    // Core types from StdTypes.hx
+    "Dynamic",
+    "Class",
+    "Enum",
+    "EnumValue",
+    "Type",
+    "Any",
+    "Unknown",
+    // Collections — Array must be here for array literals
+    "Array",
+    "Map",
+    "List",
+    "Vector",
+    // String handling
+    "String",
+    "StringBuf",
+    "StringTools",
+    "UnicodeString",
+    // Utilities
+    "Date",
+    "DateTools",
+    "Math",
+    "Reflect",
+    "Std",
+    "Sys",
+    "Lambda",
+    // Iteration
+    "IntIterator",
+    // Other stdlib
+    "EReg",
+    "Xml",
+    "UInt",
+    // System types living in packages but commonly used unqualified
+    "File",
+    "FileSystem",
+    "Json",
+    "Timer",
+    "Bytes",
+    "Int32",
+    "Int64",
+];
+
 /// Convert parser Variance to TAST Variance
 impl From<parser::Variance> for Variance {
     fn from(variance: parser::Variance) -> Self {
@@ -1945,40 +1993,10 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        // Register root-level stdlib classes that need to be resolvable by name.
-        // These are top-level Haxe standard library classes (Std.hx, Sys.hx, Math.hx, etc.)
-        // that exist as extern classes and need their symbols pre-registered so the compiler
-        // can resolve references like `Std.int()` or `Math.sin()` before loading the full definitions.
-        let toplevel_stdlib_classes = [
-            "Dynamic",
-            "Class",
-            "Enum",
-            "Type",
-            "Any",
-            "Unknown",
-            "Map",
-            "List",
-            "Vector",
-            "Date",
-            "Math",
-            "Reflect",
-            "Std",
-            "Sys",
-            "File",
-            "FileSystem",
-            "StringBuf",
-            "StringTools",
-            "EReg",
-            "Xml",
-            "Json",
-            "Timer",
-            "Bytes",
-            "Int32",
-            "Int64",
-            "UInt",
-        ];
-
-        for type_name in &toplevel_stdlib_classes {
+        // Register root-level stdlib classes that need to be resolvable by name
+        // before their full definitions load, so references like `Std.int()` or
+        // `Math.sin()` resolve regardless of load order.
+        for type_name in TOPLEVEL_STDLIB_CLASSES {
             let interned_name = self.context.intern_string(type_name);
 
             // Skip if this class was already registered (e.g., from loading Std.hx).
@@ -2103,52 +2121,7 @@ impl<'a> AstLowering<'a> {
     /// lazy stdlib loading where we want to skip parsing/processing stdlib files
     /// but still need these symbols to be resolvable.
     fn register_toplevel_stdlib_symbols(&mut self) {
-        // Top-level Haxe standard library classes that are always implicitly available.
-        // These match the .hx files in haxe-std/ root directory.
-        let toplevel_stdlib_classes = [
-            // Core types from StdTypes.hx
-            "Dynamic",
-            "Class",
-            "Enum",
-            "EnumValue",
-            "Type",
-            "Any",
-            "Unknown",
-            // Collections - CRITICAL: Array must be here for array literals
-            "Array",
-            "Map",
-            "List",
-            "Vector",
-            // String handling
-            "String",
-            "StringBuf",
-            "StringTools",
-            "UnicodeString",
-            // Utilities
-            "Date",
-            "DateTools",
-            "Math",
-            "Reflect",
-            "Std",
-            "Sys",
-            "Lambda",
-            // Iteration
-            "IntIterator",
-            // Other stdlib
-            "EReg",
-            "Xml",
-            "UInt",
-            // System types (may be in subdirectories but commonly used)
-            "File",
-            "FileSystem",
-            "Json",
-            "Timer",
-            "Bytes",
-            "Int32",
-            "Int64",
-        ];
-
-        for type_name in &toplevel_stdlib_classes {
+        for type_name in TOPLEVEL_STDLIB_CLASSES {
             let interned_name = self.context.intern_string(type_name);
 
             // Check if already registered (avoid duplicates)
