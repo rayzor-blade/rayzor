@@ -416,7 +416,7 @@ fn run_benchmark_cranelift(
     // Compile
     let compile_start = Instant::now();
 
-    let mut config = CompilationConfig::default();
+    let mut config = config_for_tier("jit");
     config.pipeline_config = config.pipeline_config.skip_analysis();
     let mut unit = CompilationUnit::new(config);
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
@@ -469,7 +469,7 @@ fn run_benchmark_interpreter(
     // Compile (to MIR only)
     let compile_start = Instant::now();
 
-    let mut unit = CompilationUnit::new(CompilationConfig::default());
+    let mut unit = CompilationUnit::new(config_for_tier("interp"));
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -543,7 +543,7 @@ fn setup_tiered_benchmark(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::default());
+    let mut unit = CompilationUnit::new(config_for_tier("jit"));
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -655,7 +655,7 @@ fn run_benchmark_tiered(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::default());
+    let mut unit = CompilationUnit::new(config_for_tier("jit"));
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -727,7 +727,7 @@ fn setup_llvm_benchmark<'ctx>(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib like interpreter - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::default());
+    let mut unit = CompilationUnit::new(config_for_tier("llvm"));
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -1849,6 +1849,21 @@ fn install_stdlib_snapshot() {
         Ok(0) => panic!("[snapshot] {} carries no modules", path.display()),
         Ok(count) => eprintln!("[snapshot] {count} modules from {}", path.display()),
         Err(err) => panic!("[snapshot] cannot read {}: {err}", path.display()),
+    }
+}
+
+/// The configuration a real run of a backend compiles under.
+///
+/// The CLI defines the tier it is compiling for, and that define reaches two
+/// things: the preprocessor, so `#if` selects the same branches a released
+/// binary takes, and the cache discriminator every artifact is filed under.
+/// Leaving it out preprocesses differently from any real run and looks for
+/// prepared work under a key nothing ever writes — including the standard
+/// library snapshot, which is stored per tier.
+fn config_for_tier(tier_define: &str) -> CompilationConfig {
+    CompilationConfig {
+        extra_defines: vec![tier_define.to_string()],
+        ..Default::default()
     }
 }
 

@@ -39,7 +39,21 @@ jobs:
       - name: Build rayzor-runtime static library
         run: cargo build --release -p rayzor-runtime
 
+      # The lowered standard library, built once here so no measured compile
+      # pays to lower it. Generated before the binaries that use it: the CLI
+      # embeds it at build time, so producing it afterwards would not reach the
+      # binary that ships. The generator needs only the front end, which is a
+      # different feature set from the CLI's and so compiles the compiler once
+      # more — the cache carries that between runs.
+      - name: Generate the standard library snapshot
+        run: |
+          mkdir -p target/release
+          cargo run --release -p snapshot-gen -- target/release/stdlib_snapshot.bin
+          ls -l target/release/stdlib_snapshot.bin
+
       - name: Build rayzor CLI
+        env:
+          RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
         run: cargo build --release --features llvm-backend
 
       # Built here so the kernel runners and `collect` only execute it. Their
@@ -73,6 +87,7 @@ jobs:
             target/release/rayzor
             target/release/librayzor_runtime.a
             target/release/examples/benchmark_runner
+            target/release/stdlib_snapshot.bin
           retention-days: 1
 
   benchmark:
@@ -176,7 +191,13 @@ jobs:
       - name: Fix binary permissions
         run: chmod +x target/release/rayzor target/release/examples/benchmark_runner
 
+      # The harness drives the compiler as a library, so it is pointed at the
+      # snapshot the CLI embeds. Without this the measured compile lowers the
+      # standard library again and reports a figure for a configuration no
+      # released binary runs.
       - name: Run ${{ matrix.kernel }} benchmark
+        env:
+          RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
         run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
 
       # Each runner produces only its own kernel; `collect` merges them back
