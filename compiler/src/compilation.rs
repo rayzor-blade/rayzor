@@ -4107,8 +4107,26 @@ impl CompilationUnit {
             return true;
         };
 
-        // Step 2: Rebuild MIR-level maps from cached maps using fresh IDs
-        self.restore_cached_maps(&cached_maps, &registered);
+        // Step 2: Rebuild MIR-level maps from cached maps using fresh IDs.
+        // A reference this context cannot resolve makes the entry unusable:
+        // loading it anyway is how a cached module comes back subtly different
+        // from the one that was cached. Decline it and lower from source.
+        let dropped = self.restore_cached_maps(&cached_maps, &registered);
+        if dropped > 0 {
+            // Measured across the standard library, this fires on most
+            // restores: the cache routinely loads modules missing references
+            // it could not resolve. Declining them is correct and costs a full
+            // recompile of nearly everything — 17ms becomes 880ms — so until
+            // the underlying resolution gaps are closed it stays opt-in, and
+            // says so rather than passing silently.
+            debug!(
+                "[BLADE] {} unresolved cross-references restoring {}",
+                dropped, filename
+            );
+            if std::env::var_os("RAYZOR_STRICT_BLADE").is_some() {
+                return false;
+            }
+        }
 
         // Step 3: Build name-based function map from MIR
         // Use qualified names to avoid collisions (e.g., "current" matching
@@ -4268,12 +4286,21 @@ impl CompilationUnit {
     }
 
     /// Restore MIR-level cross-reference maps from cached data using fresh symbol IDs.
+    /// Rebuild the MIR-level maps a cached module refers to, and report how
+    /// many references could not be resolved in this context.
+    ///
+    /// Each unresolved one used to be dropped where it was found. A dropped
+    /// reference is not a missing optimisation — it is a call that now
+    /// dispatches somewhere else, a field that reads as absent, a type that
+    /// resolves to nothing — and it was invisible, so the module loaded and
+    /// miscompiled. The count lets the caller decline the entry instead.
     fn restore_cached_maps(
         &mut self,
         cached_maps: &BladeCachedMaps,
         registered: &BTreeMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)>,
-    ) {
+    ) -> usize {
         use crate::ir::IrFunctionId;
+        let mut dropped = 0usize;
 
         // Restore function mappings: find method SymbolId in registered class scopes
         for entry in &cached_maps.functions {
@@ -4289,6 +4316,7 @@ impl CompilationUnit {
                 // Constructors are keyed by class name
                 self.import_constructor_name_map
                     .insert(entry.class_name.clone(), IrFunctionId(entry.func_id));
+                dropped += 1;
                 continue;
             }
 
@@ -4383,12 +4411,15 @@ impl CompilationUnit {
         // user-module's __vtable_init__.
         for entry in &cached_maps.interface_vtables {
             let Some((class_sym, _, _)) = registered.get(&entry.class_name) else {
+                dropped += 1;
                 continue;
             };
             let Some((iface_sym, _, iface_scope)) = registered.get(&entry.iface_name) else {
+                dropped += 1;
                 continue;
             };
             let Some(iface_scope) = self.scope_tree.get_scope(*iface_scope) else {
+                dropped += 1;
                 continue;
             };
             // Resolve each method qname's local name (the trailing
@@ -4408,6 +4439,7 @@ impl CompilationUnit {
                 }
             }
             if !all_found {
+                dropped += 1;
                 continue;
             }
             self.import_interface_vtables
@@ -4422,6 +4454,7 @@ impl CompilationUnit {
         // index from this map.
         for entry in &cached_maps.interface_method_names {
             let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                dropped += 1;
                 continue;
             };
             let method_syms: Vec<crate::tast::InternedString> = entry
@@ -4438,9 +4471,11 @@ impl CompilationUnit {
         // return-type re-resolution (W0014/W0015) on cached imports.
         for entry in &cached_maps.interface_method_return_types {
             let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                dropped += 1;
                 continue;
             };
             let Some((_, return_type_id, _)) = registered.get(&entry.return_type_name) else {
+                dropped += 1;
                 continue;
             };
             let method_name_interned = self.string_interner.intern(&entry.method_name);
@@ -4455,6 +4490,7 @@ impl CompilationUnit {
         // qname is unregistered in the consuming context.
         for entry in &cached_maps.interface_extends {
             let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                dropped += 1;
                 continue;
             };
             let mut parent_syms: Vec<crate::tast::SymbolId> =
@@ -4469,6 +4505,7 @@ impl CompilationUnit {
                 }
             }
             if !all_found {
+                dropped += 1;
                 continue;
             }
             self.import_interface_extends
@@ -4519,6 +4556,7 @@ impl CompilationUnit {
                 }
             }
         }
+        dropped
     }
 
     /// Post-load fixup: resolve stale cross-module function references in all import modules.
