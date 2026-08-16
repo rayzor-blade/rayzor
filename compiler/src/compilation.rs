@@ -1092,26 +1092,6 @@ impl CompilationUnit {
         h.finish()
     }
 
-    /// Whether a source file belongs to the standard library.
-    ///
-    /// The standard library is the same for every program and is compiled
-    /// before any user file is seen, so what it lowers to does not depend on
-    /// the program that happened to trigger the compile. User code does: it is
-    /// lowered against the ids and layouts of the program it belongs to.
-    fn is_stdlib_source(&self, source_path: &str) -> bool {
-        let path = Path::new(source_path);
-        let canonical = path.canonicalize();
-        let candidate = canonical.as_deref().unwrap_or(path);
-        self.config
-            .stdlib_paths
-            .iter()
-            .any(|root| match root.canonicalize() {
-                Ok(root) => candidate.starts_with(root),
-                // A root that does not exist cannot contain the file.
-                Err(_) => false,
-            })
-    }
-
     fn hash_source_for_config(&self, source_path: &str, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1130,17 +1110,18 @@ impl CompilationUnit {
         // undefined), or a load SIGSEGV. Keying on the program confines that
         // reuse to where it is valid.
         //
-        // The standard library is excluded. It is identical for every program
-        // and is compiled before any user file is seen, so keying it on the
-        // program only makes each new program recompile whatever part of the
-        // library it reaches — which, for anything touching `Sys`, is most of
-        // it. Reuse across programs depends on a restored class carrying the
-        // same declarations a freshly lowered one does; where it did not, the
-        // difference was a defect in the restore path rather than a reason to
-        // recompile.
-        if !self.is_stdlib_source(source_path) {
-            self.user_program_hash().hash(&mut hasher);
-        }
+        // This includes the standard library. Excluding it — on the reasoning
+        // that the library is identical for every program — shares one lowered
+        // copy across programs, and that is only sound if a restored class
+        // carries everything a freshly lowered one does. It does not: a
+        // generic library type is lowered against the instantiations the
+        // program supplies, so `Channel<T>` and `Tls<T>` restored for one
+        // program are wrong for the next. The symptoms are silent and varied —
+        // a field that resolves as missing, a method lowered to a different
+        // runtime entry point, unbounded recursion in type resolution — and
+        // they depend on cache warmth, so the same test passes cold and fails
+        // warm. Sharing can return when the restore path is proven equivalent.
+        self.user_program_hash().hash(&mut hasher);
         // Fold in a content hash of the TRANSITIVE import set. The cache key was
         // previously the entry file's own bytes + defines only, so editing a
         // DEPENDENCY (a `.hx` imported by this entry, directly or transitively)
