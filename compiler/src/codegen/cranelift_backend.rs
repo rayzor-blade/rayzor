@@ -1570,7 +1570,7 @@ impl CraneliftBackend {
         // class's `forward` claimed the id first (same disease as the
         // per-file `__vtable_init__` collapse, 62f69aa7). Cross-module
         // dedup for real methods happens by QUALIFIED name below.
-        let early_stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+        let early_stdlib_mapping = crate::stdlib::runtime_mapping::StdlibMapping::builtin();
         let name_reuse_allowed =
             is_extern || early_stdlib_mapping.is_mir_wrapper_function(&function.name);
         let mut runtime_name_conflict = false;

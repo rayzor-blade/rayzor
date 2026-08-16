@@ -55,7 +55,7 @@ pub struct TastToHirContext<'a> {
     current_file: Option<&'a TypedFile>,
 
     /// Standard library runtime function mapping
-    stdlib_mapping: StdlibMapping,
+    stdlib_mapping: &'static StdlibMapping,
 
     /// Inline variable values (for static inline vars that need constant evaluation)
     /// Maps symbol ID to the evaluated literal value (preserving type)
@@ -153,7 +153,7 @@ impl<'a> TastToHirContext<'a> {
             errors: Vec::new(),
             temp_var_counter: 0,
             current_file: None,
-            stdlib_mapping: StdlibMapping::new(),
+            stdlib_mapping: StdlibMapping::builtin(),
             inline_var_values: BTreeMap::new(),
             class_operator_methods: BTreeMap::new(),
         }

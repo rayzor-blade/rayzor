@@ -129,9 +129,7 @@ impl CompilerPluginRegistry {
 
         // Collect all mappings from plugins
         for plugin in &sorted_plugins {
-            for (sig, call) in plugin.method_mappings() {
-                mapping.register_mapping(sig, call);
-            }
+            mapping.register_mappings(plugin.method_mappings());
         }
 
         mapping
