@@ -628,11 +628,24 @@ impl<'a> HirToMirContext<'a> {
                                     mono_class, var_symbol, method_name
                                 );
 
-                                // Build the MIR wrapper function name: VecI32_push, VecF64_get, etc.
-                                let mir_func_name = format!("{}_{}", mono_class, method_name);
+                                // Resolve the MIR wrapper (VecI32_push, VecF64_get, …)
+                                // through the mapping rather than by spelling the
+                                // wrapper's name out of the class key, so the key's
+                                // spelling and the runtime symbol stay independent.
+                                let wrapper = self
+                                    .stdlib_mapping
+                                    .find_by_name_and_params(
+                                        &mono_class,
+                                        method_name,
+                                        args.len().saturating_sub(1),
+                                    )
+                                    .filter(|(_, call)| call.is_mir_wrapper)
+                                    .map(|(_, call)| call.runtime_name);
 
-                                if let Some((mir_param_types, mir_return_type)) =
-                                    self.get_stdlib_mir_wrapper_signature(&mir_func_name)
+                                if let Some((mir_func_name, (mir_param_types, mir_return_type))) =
+                                    wrapper.and_then(|name| {
+                                        Some((name, self.get_stdlib_mir_wrapper_signature(name)?))
+                                    })
                                 {
                                     debug!(
                                         "[MONO VAR DISPATCH] Using MIR wrapper: {}",
@@ -647,7 +660,7 @@ impl<'a> HirToMirContext<'a> {
                                     }
 
                                     let mir_func_id = self.register_stdlib_mir_forward_ref(
-                                        &mir_func_name,
+                                        mir_func_name,
                                         mir_param_types.clone(),
                                         mir_return_type.clone(),
                                     );
