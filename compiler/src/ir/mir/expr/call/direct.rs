@@ -260,8 +260,7 @@ impl<'a> HirToMirContext<'a> {
                         if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &ti.kind {
                             self.symbol_table
                                 .get_symbol(*symbol_id)
-                                .and_then(|sym| self.string_interner.get(sym.name))
-                                .map(|name| self.stdlib_mapping.class_has_any_method(name))
+                                .map(|sym| self.is_stdlib_class_by_symbol(sym))
                         } else {
                             None
                         }

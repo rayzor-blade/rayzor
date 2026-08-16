@@ -280,7 +280,7 @@ impl<'a> HirToMirContext<'a> {
                         if parts.len() >= 2 {
                             let mut class_candidates: Vec<String> = Vec::new();
                             // Fully-qualified class form used in runtime mapping
-                            class_candidates.push(parts[..parts.len() - 1].join("_"));
+                            class_candidates.push(parts[..parts.len() - 1].join("."));
                             // Simple class name fallback
                             class_candidates.push(parts[parts.len() - 2].to_string());
 

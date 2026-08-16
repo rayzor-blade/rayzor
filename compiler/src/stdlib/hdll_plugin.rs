@@ -50,7 +50,7 @@ use crate::ir::{CallingConvention, IrType};
 ///     "functions": [
 ///         {
 ///             "name": "ssl_new",
-///             "haxe_name": "Ssl.create",
+///             "haxe_name": "Ssl.create",  // "<fully.qualified.Class>.<method>"
 ///             "params": [{"name": "conf", "type": "dyn"}],
 ///             "returns": "dyn"
 ///         }
@@ -212,11 +212,14 @@ impl HdllPlugin {
         let mut functions = Vec::new();
 
         for func_def in &manifest.functions {
-            // Parse "Class.method" format
+            // Parse "<fully.qualified.Class>.method": the LAST dot separates
+            // the method, so a packaged class ("sys.ssl.Ssl.connect") keeps
+            // its package instead of parsing as class "sys".
             let (class_name, method_name) =
-                func_def.haxe_name.split_once('.').ok_or_else(|| {
+                func_def.haxe_name.rsplit_once('.').ok_or_else(|| {
                     HdllError::ManifestError(format!(
-                        "Invalid haxe_name format '{}': expected 'Class.method'",
+                        "Invalid haxe_name format '{}': expected 'Class.method' \
+                         with the class fully qualified",
                         func_def.haxe_name
                     ))
                 })?;
@@ -625,12 +628,16 @@ mod tests {
 
     #[test]
     fn test_haxe_name_parsing() {
-        // Valid format
-        assert!("Ssl.connect".split_once('.').is_some());
-        assert_eq!("Ssl.connect".split_once('.'), Some(("Ssl", "connect")));
+        // The method is everything after the LAST dot, so a packaged class
+        // keeps its package.
+        assert_eq!("Ssl.connect".rsplit_once('.'), Some(("Ssl", "connect")));
+        assert_eq!(
+            "sys.ssl.Ssl.connect".rsplit_once('.'),
+            Some(("sys.ssl.Ssl", "connect"))
+        );
 
         // Invalid format (no dot)
-        assert!("invalid".split_once('.').is_none());
+        assert!("invalid".rsplit_once('.').is_none());
     }
 
     #[test]

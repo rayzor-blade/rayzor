@@ -346,36 +346,39 @@ impl StdlibMapping {
         let mut class_meta: HashMap<&'static str, ClassMeta> = HashMap::new();
         let mut instance_method_names = BTreeSet::new();
 
+        // Every spelling a name answers to: the name itself, every suffix
+        // beginning right after a separator, and the same set spelled with
+        // the other separator. Keys are dotted FQNs; the underscore
+        // renderings are transitional, for callers that still build them
+        // from `@:native` paths, and go away when those callers pass FQNs.
+        // A leading underscore is part of the name (`_Internal`), never a
+        // separator.
+        fn spellings_of(name: &str) -> Vec<String> {
+            let mut spellings = vec![name.to_string()];
+            let renderings = if name.starts_with('_') {
+                vec![name.to_string()]
+            } else {
+                vec![name.replace('_', "."), name.replace('.', "_")]
+            };
+            for rendered in renderings {
+                spellings.push(rendered.clone());
+                for (offset, byte) in rendered.bytes().enumerate() {
+                    if offset > 0 && matches!(byte, b'_' | b'.') && offset + 1 < rendered.len() {
+                        spellings.push(rendered[offset + 1..].to_string());
+                    }
+                }
+            }
+            spellings
+        }
+
         for (sig, call) in &self.mappings {
             if !class_meta.contains_key(sig.class) {
-                // A class answers to its key, to every suffix beginning right
-                // after a separator, and to the same set spelled with the other
-                // separator. Keys are dotted FQNs; the underscore renderings
-                // are transitional, for callers that still build them from
-                // `@:native` paths, and go away when those callers pass FQNs.
-                let mut insert = |spelling: &str| {
-                    let list = aliases.entry(spelling.into()).or_default();
+                for spelling in spellings_of(sig.class) {
+                    let list = aliases.entry(spelling.into_boxed_str()).or_default();
                     if !list.contains(&sig.class) {
                         list.push(sig.class);
                     }
-                };
-                for rendered in [sig.class.replace('_', "."), sig.class.replace('.', "_")] {
-                    // A leading underscore is part of the name (`_Internal`),
-                    // not a separator.
-                    let rendered = if sig.class.starts_with('_') {
-                        sig.class.to_string()
-                    } else {
-                        rendered
-                    };
-                    insert(&rendered);
-                    for (offset, byte) in rendered.bytes().enumerate() {
-                        if offset > 0 && matches!(byte, b'_' | b'.') && offset + 1 < rendered.len()
-                        {
-                            insert(&rendered[offset + 1..]);
-                        }
-                    }
                 }
-                insert(sig.class);
             }
 
             by_runtime_name
@@ -394,6 +397,22 @@ impl StdlibMapping {
             }
         }
 
+        // Typedef names: a second legitimate FQN for a registered class
+        // (`typedef haxe.io.Bytes = rayzor.Bytes`). Declared here rather than
+        // registered as a second key, so one class has one method set.
+        const TYPEDEF_ALIASES: &[(&str, &str)] = &[("haxe.io.Bytes", "rayzor.Bytes")];
+        for (typedef_name, target) in TYPEDEF_ALIASES {
+            let Some(target_key) = class_meta.keys().find(|key| *key == target).copied() else {
+                continue;
+            };
+            for spelling in spellings_of(typedef_name) {
+                let list = aliases.entry(spelling.into_boxed_str()).or_default();
+                if !list.contains(&target_key) {
+                    list.push(target_key);
+                }
+            }
+        }
+
         // Candidates are visited in table order, so a query that returns the
         // first match returns the one the whole-table scan would have.
         for candidates in aliases.values_mut() {
@@ -408,11 +427,48 @@ impl StdlibMapping {
     }
 
     /// Registered class names the given spelling may denote, in table order.
+    ///
+    /// Quiet on alias hits: this also serves the sanctioned resolvers
+    /// (`get_class_static_str`, `same_class`), which exist to accept any
+    /// spelling once and hand back the key.
     fn candidates(&self, lookup: &str) -> &[&'static str] {
         self.aliases
             .get(lookup)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// `candidates` for the query paths, which are supposed to be handed the
+    /// registered key. The migration to FQN-keyed lookups is finished when
+    /// this reports nothing under RAYZOR_STDLIB_ALIAS_LOG: every line is a
+    /// query still resolving through an alias instead of the key.
+    fn query_candidates(&self, lookup: &str) -> &[&'static str] {
+        let found = self.candidates(lookup);
+        static LOG_ALIASES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LOG_ALIASES.get_or_init(|| std::env::var_os("RAYZOR_STDLIB_ALIAS_LOG").is_some())
+            && !found.is_empty()
+            && !found.contains(&lookup)
+        {
+            eprintln!("[stdlib-alias] {lookup:?} -> {found:?}");
+            // Name a spelling here to learn which call path produces it.
+            static TRAP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+            if TRAP
+                .get_or_init(|| {
+                    std::env::var("RAYZOR_STDLIB_ALIAS_TRAP")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
+                .as_deref()
+                == Some(lookup)
+            {
+                eprintln!(
+                    "[stdlib-alias-trap]\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+                std::process::exit(3);
+            }
+        }
+        found
     }
 
     /// Whether two spellings can denote the same registered class, whichever
@@ -481,7 +537,7 @@ impl StdlibMapping {
         &self,
         lookup: &str,
     ) -> impl Iterator<Item = (&MethodSignature, &RuntimeFunctionCall)> {
-        self.candidates(lookup)
+        self.query_candidates(lookup)
             .iter()
             .flat_map(|class| self.class_entries(class))
     }
@@ -646,13 +702,13 @@ impl StdlibMapping {
     /// (e.g., "Arc" matches "rayzor_concurrent_Arc") to handle cases where the full
     /// qualified name isn't available (e.g., EXTERN flag not propagated, no native_name).
     pub fn is_stdlib_class(&self, class_name: &str) -> bool {
-        !self.candidates(class_name).is_empty()
+        !self.query_candidates(class_name).is_empty()
     }
 
     /// Check if methods of this class are typically static
     /// Used to determine the default method type for a class
     pub fn class_has_static_methods(&self, class_name: &str) -> bool {
-        self.candidates(class_name)
+        self.query_candidates(class_name)
             .iter()
             .any(|class| self.class_meta[class].has_static)
     }
@@ -834,14 +890,14 @@ impl StdlibMapping {
     /// The `is_mir_wrapper` field on RuntimeFunctionCall is more precise for per-function checks.
     pub fn is_mir_wrapper_class(&self, class_name: &str) -> bool {
         // Check if any method of this class is registered as a MIR wrapper
-        self.candidates(class_name)
+        self.query_candidates(class_name)
             .iter()
             .any(|class| self.class_meta[class].has_mir_wrapper)
     }
 
     /// Check if any method of the given class is registered in the stdlib mapping
     pub fn class_has_any_method(&self, class_name: &str) -> bool {
-        !self.candidates(class_name).is_empty()
+        !self.query_candidates(class_name).is_empty()
     }
 
     /// Register a stdlib method -> runtime function mapping (internal)
@@ -3013,55 +3069,6 @@ impl StdlibMapping {
             // bytes.setDouble(pos: Int, value: Float): Void
             map_method!(instance "rayzor.Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F64]),
-            // ==== haxe.io.Bytes (typedef to rayzor.Bytes) ====
-            // When haxe.io.Bytes is used as a typedef, the type resolves to "haxe_io_Bytes"
-            // so we need to map those as well. All point to the same runtime functions.
-            map_method!(static "haxe.io.Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(static "haxe.io.Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe.io.Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe.io.Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid]),
-            map_method!(instance "haxe.io.Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe.io.Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe.io.Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe.io.Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe.io.Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe.io.Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe.io.Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe.io.Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe.io.Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
-            map_method!(instance "haxe.io.Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe.io.Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe.io.Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
-            map_method!(instance "haxe.io.Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "haxe.io.Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "haxe.io.Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe.io.Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe.io.Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
-            map_method!(instance "haxe.io.Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F32]),
-            map_method!(instance "haxe.io.Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F64]),
         ];
 
         self.register_from_tuples(mappings);
@@ -4817,6 +4824,27 @@ mod tests {
             );
         }
         assert_eq!(mapping.class_priority("NotAClass"), 10);
+    }
+
+    /// A typedef's own FQN resolves to the class it names, in any spelling.
+    #[test]
+    fn typedef_aliases_resolve() {
+        let mapping = StdlibMapping::new();
+        for spelling in [
+            "haxe.io.Bytes",
+            "haxe_io_Bytes",
+            "io.Bytes",
+            "io_Bytes",
+            "Bytes",
+        ] {
+            assert_eq!(
+                mapping.get_class_static_str(spelling),
+                Some("rayzor.Bytes"),
+                "{spelling:?} should name rayzor.Bytes"
+            );
+        }
+        assert!(mapping.find_by_name("haxe.io.Bytes", "subU64").is_some());
+        assert!(mapping.find_by_name("haxe.io.Bytes", "address").is_some());
     }
 
     /// A mapping registered after construction must be visible to the indexes.

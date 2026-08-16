@@ -60,24 +60,23 @@ impl<'a> HirToMirContext<'a> {
             // Also try to get class name from the object symbol directly.
             // Prefer native_name or qualified_name (fully qualified) over
             // bare name so that extern classes like sys.net.Host resolve to
-            // "sys_net_Host" instead of just "Host".
+            // their registered key instead of just "Host".
             let static_class_name = static_class_name.or_else(|| {
                 if let HirExprKind::Variable {
                     symbol: obj_sym, ..
                 } = &object.kind
                 {
                     let sym = self.symbol_table.get_symbol(*obj_sym)?;
-                    // 1) native_name  (e.g. "sys::net::Host" → "sys_net_Host")
+                    // 1) native_name  (e.g. "sys::net::Host" → "sys.net.Host")
                     if let Some(native) = sym.native_name {
                         if let Some(ns) = self.string_interner.get(native) {
-                            // "rayzor::runtime::CC" → "rayzor_runtime_CC"
-                            return Some(ns.split("::").collect::<Vec<_>>().join("_"));
+                            return Some(self.canonical_class_spelling(ns));
                         }
                     }
-                    // 2) qualified_name  (e.g. "sys.net.Host" → "sys_net_Host")
+                    // 2) qualified_name  (e.g. "sys.net.Host")
                     if let Some(qn) = sym.qualified_name {
                         if let Some(qs) = self.string_interner.get(qn) {
-                            return Some(qs.replace('.', "_"));
+                            return Some(self.canonical_class_spelling(qs));
                         }
                     }
                     // 3) bare name fallback

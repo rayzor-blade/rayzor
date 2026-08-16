@@ -626,15 +626,15 @@ impl<'a> HirToMirContext<'a> {
                 // MIR wrapper classes (extern abstracts like Ptr, Ref, Box,
                 // Usize) are zero-cost over Int, never heap-boxed.
                 if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
-                    // Try qualified name (e.g., "rayzor.Ptr" → "rayzor_Ptr"), then native name
+                    // Qualified name first ("rayzor.Ptr"), then native name.
                     let class_name = sym
                         .qualified_name
                         .and_then(|qn| self.string_interner.get(qn))
-                        .map(|qn| qn.replace(".", "_"))
+                        .map(|qn| qn.to_string())
                         .or_else(|| {
                             sym.native_name
                                 .and_then(|nn| self.string_interner.get(nn))
-                                .map(|nn| nn.replace("::", "_"))
+                                .map(|nn| nn.replace("::", "."))
                         });
                     if let Some(cn) = &class_name {
                         if self.stdlib_mapping.is_mir_wrapper_class(cn) {
