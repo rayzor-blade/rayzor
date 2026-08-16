@@ -759,6 +759,20 @@ impl CompilationConfig {
     }
 }
 
+/// The name of a type parameter a manifest type refers to, if that is all it
+/// is — a bare name with no package and no arguments.
+fn blade_type_param_name(ty: Option<&bsym::BladeType>) -> Option<&str> {
+    match ty? {
+        bsym::BladeType::Path {
+            package,
+            name,
+            sub: None,
+            params,
+        } if package.is_empty() && params.is_empty() => Some(name),
+        _ => None,
+    }
+}
+
 impl CompilationUnit {
     /// Create a new compilation unit with the given configuration
     pub fn new(config: CompilationConfig) -> Self {
@@ -2078,9 +2092,9 @@ impl CompilationUnit {
         let param_types: Vec<TypeId> = method
             .params
             .iter()
-            .map(|p| self.parse_type_string(&p.param_type))
+            .map(|p| self.resolve_blade_type_or_dynamic(p.param_type.as_ref()))
             .collect();
-        let return_type = self.parse_type_string(&method.return_type);
+        let return_type = self.resolve_blade_type_or_dynamic(method.return_type.as_ref());
 
         // Create function type
         let func_type = self
@@ -2149,7 +2163,7 @@ impl CompilationUnit {
         let field_symbol = self.symbol_table.create_field(field_name);
 
         // Parse field type
-        let field_type = self.parse_type_string(&field.field_type);
+        let field_type = self.resolve_blade_type_or_dynamic(field.field_type.as_ref());
 
         // Update symbol with type and flags
         if let Some(sym) = self.symbol_table.get_symbol_mut(field_symbol) {
@@ -2262,9 +2276,8 @@ impl CompilationUnit {
                     .params
                     .iter()
                     .map(|p| {
-                        type_param_map
-                            .get(&p.param_type)
-                            .copied()
+                        blade_type_param_name(p.param_type.as_ref())
+                            .and_then(|name| type_param_map.get(name).copied())
                             .unwrap_or(TypeId::invalid())
                     })
                     .collect();
@@ -2323,7 +2336,7 @@ impl CompilationUnit {
         }
 
         // Parse the target type string and create appropriate TypeId
-        let target_type = self.parse_type_string(&alias_info.target_type);
+        let target_type = self.resolve_blade_type(&alias_info.target_type);
 
         // Create type alias type
         let alias_type = self
@@ -2347,7 +2360,7 @@ impl CompilationUnit {
             .add_symbol_alias(symbol_id, ScopeId::first(), qualified_interned);
 
         trace!(
-            "[BLADE] Registered type alias: {} -> {}",
+            "[BLADE] Registered type alias: {} -> {:?}",
             qualified_name,
             alias_info.target_type
         );
@@ -2376,7 +2389,7 @@ impl CompilationUnit {
         self.index_manifest_short_name(&abstract_info.package, short_name, symbol_id);
 
         // Parse the underlying type
-        let underlying_type = self.parse_type_string(&abstract_info.underlying_type);
+        let underlying_type = self.resolve_blade_type(&abstract_info.underlying_type);
 
         // Update symbol metadata including the abstract scope
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
@@ -2434,6 +2447,161 @@ impl CompilationUnit {
     }
 
     /// Parse a type string (e.g., "Array<Int>", "String", "Null<Float>") and return a TypeId
+    /// Resolve a type the manifest recorded.
+    ///
+    /// The manifest stores the shape of a type, so this only has names left to
+    /// resolve — no syntax is re-derived, and a structure, an intersection or a
+    /// nested function type arrives intact instead of as a placeholder.
+    fn resolve_blade_type(&mut self, ty: &bsym::BladeType) -> TypeId {
+        use bsym::BladeType;
+        match ty {
+            BladeType::Path {
+                package,
+                name,
+                sub,
+                params,
+            } => self.resolve_blade_path(package, name, sub.as_deref(), params),
+            BladeType::Function { params, ret } => {
+                let params: Vec<TypeId> =
+                    params.iter().map(|p| self.resolve_blade_type(p)).collect();
+                let ret = self.resolve_blade_type(ret);
+                self.type_table
+                    .borrow_mut()
+                    .create_function_type(params, ret)
+            }
+            BladeType::Optional(inner) => {
+                let inner = self.resolve_blade_type(inner);
+                self.type_table.borrow_mut().create_optional_type(inner)
+            }
+            BladeType::Anonymous { fields } => {
+                let fields: Vec<crate::tast::core::AnonymousField> = fields
+                    .iter()
+                    .map(|f| crate::tast::core::AnonymousField {
+                        name: self.string_interner.intern(&f.name),
+                        type_id: self.resolve_blade_type(&f.ty),
+                        is_public: true,
+                        optional: matches!(f.ty, bsym::BladeType::Optional(_)),
+                    })
+                    .collect();
+                self.type_table
+                    .borrow_mut()
+                    .create_type(TypeKind::Anonymous { fields })
+            }
+            // The left side is what a value of an intersection is dispatched
+            // on; the constraint the right side adds has no representation.
+            BladeType::Intersection { left, .. } => self.resolve_blade_type(left),
+            // A type the source left to inference is not a type this pass can
+            // name, and `Dynamic` is what an unconstrained value already is.
+            BladeType::Wildcard => self.type_table.borrow().dynamic_type(),
+        }
+    }
+
+    /// A declared type, or `Dynamic` where the source annotated none.
+    fn resolve_blade_type_or_dynamic(&mut self, ty: Option<&bsym::BladeType>) -> TypeId {
+        match ty {
+            Some(ty) => self.resolve_blade_type(ty),
+            None => self.type_table.borrow().dynamic_type(),
+        }
+    }
+
+    fn resolve_blade_path(
+        &mut self,
+        package: &[String],
+        name: &str,
+        sub: Option<&str>,
+        params: &[bsym::BladeType],
+    ) -> TypeId {
+        // A parameter of the type being registered shadows everything else.
+        if package.is_empty() && sub.is_none() && params.is_empty() {
+            if let Some(type_id) = self.manifest_type_params.get(name) {
+                return *type_id;
+            }
+            match name {
+                "Int" => return self.type_table.borrow().int_type(),
+                "Float" => return self.type_table.borrow().float_type(),
+                "Bool" => return self.type_table.borrow().bool_type(),
+                "String" => return self.type_table.borrow().string_type(),
+                "Void" => return self.type_table.borrow().void_type(),
+                "Dynamic" => return self.type_table.borrow().dynamic_type(),
+                _ => {}
+            }
+        }
+
+        // `Null<T>` and `Array<T>` have representations of their own rather
+        // than being ordinary classes carrying a type argument.
+        if package.is_empty() && sub.is_none() && params.len() == 1 {
+            match name {
+                "Null" => {
+                    let inner = self.resolve_blade_type(&params[0]);
+                    return self.type_table.borrow_mut().create_optional_type(inner);
+                }
+                "Array" => {
+                    let element = self.resolve_blade_type(&params[0]);
+                    return self.type_table.borrow_mut().create_array_type(element);
+                }
+                _ => {}
+            }
+        }
+
+        let args: Vec<TypeId> = params.iter().map(|p| self.resolve_blade_type(p)).collect();
+
+        // Qualified first: a bare name is ambiguous between the library's
+        // declaration and a user's, and the manifest recorded which was meant.
+        // The unqualified case is most of them, and borrows rather than builds
+        // a name — this runs once per type in every signature in the library.
+        let qualified = (!package.is_empty() || sub.is_some()).then(|| {
+            let mut qualified = String::new();
+            for part in package {
+                qualified.push_str(part);
+                qualified.push('.');
+            }
+            qualified.push_str(name);
+            if let Some(sub) = sub {
+                qualified.push('.');
+                qualified.push_str(sub);
+            }
+            qualified
+        });
+        let lookup = qualified.as_deref().unwrap_or(name);
+
+        let symbol = self
+            .lookup_type_symbol(lookup)
+            .or_else(|| self.lookup_type_symbol(sub.unwrap_or(name)));
+
+        let Some(symbol_id) = symbol else {
+            let name = self.string_interner.intern(lookup);
+            return self
+                .type_table
+                .borrow_mut()
+                .create_type(TypeKind::Placeholder { name });
+        };
+
+        // A TypeAlias, Abstract or Enum already OWNS a type; wrapping its
+        // symbol in a Class type synthesises one no lookup can resolve back.
+        let own_type = self
+            .symbol_table
+            .get_symbol(symbol_id)
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    crate::tast::symbols::SymbolKind::TypeAlias
+                        | crate::tast::symbols::SymbolKind::Abstract
+                        | crate::tast::symbols::SymbolKind::Enum
+                )
+            })
+            .map(|s| s.type_id)
+            .filter(|t| t.is_valid());
+        if let Some(t) = own_type {
+            if args.is_empty() {
+                return t;
+            }
+        }
+
+        self.type_table
+            .borrow_mut()
+            .create_class_type(symbol_id, args)
+    }
+
     fn parse_type_string(&mut self, type_str: &str) -> TypeId {
         let type_str = type_str.trim();
 
