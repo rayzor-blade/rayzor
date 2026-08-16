@@ -139,6 +139,31 @@ impl BladeType {
     }
 }
 
+/// How a property is read or written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BladeAccess {
+    /// The field itself.
+    Default,
+    /// Readable or writable only from inside the class.
+    Null,
+    /// Not accessible.
+    Never,
+    /// Resolved at runtime.
+    Dynamic,
+    /// A named accessor method.
+    Method(String),
+}
+
+/// The accessors of a property, as declared.
+///
+/// A property reads and writes through methods, so a consumer that restores it
+/// as a plain field lowers `x.value` to a load from a slot that does not exist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BladeProperty {
+    pub getter: BladeAccess,
+    pub setter: BladeAccess,
+}
+
 /// A field of an anonymous structure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BladeAnonField {
@@ -161,6 +186,10 @@ pub struct BladeFieldInfo {
     pub is_final: bool,
     /// Does this field have a default value?
     pub has_default: bool,
+    /// Accessors, where the declaration is a property rather than a plain
+    /// field. `None` for an ordinary field.
+    #[serde(default)]
+    pub property: Option<BladeProperty>,
 }
 
 /// Parameter information for methods
@@ -445,6 +474,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                                 is_static,
                                 is_final: false,
                                 has_default: expr.is_some(),
+                                property: None,
                             };
                             if is_static {
                                 static_fields.push(field_info);
@@ -464,6 +494,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                                 is_static,
                                 is_final: true,
                                 has_default: expr.is_some(),
+                                property: None,
                             };
                             if is_static {
                                 static_fields.push(field_info);
@@ -472,7 +503,11 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             }
                         }
                         parser::ClassFieldKind::Property {
-                            name, type_hint, ..
+                            name,
+                            type_hint,
+                            getter,
+                            setter,
+                            ..
                         } => {
                             let field_info = BladeFieldInfo {
                                 name: name.clone(),
@@ -481,6 +516,10 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                                 is_static,
                                 is_final: false,
                                 has_default: false,
+                                property: Some(BladeProperty {
+                                    getter: access_to_blade(getter, name, true),
+                                    setter: access_to_blade(setter, name, false),
+                                }),
                             };
                             if is_static {
                                 static_fields.push(field_info);
@@ -810,6 +849,30 @@ fn type_to_qualified_name(ty: &parser::Type) -> String {
         }
         parser::Type::Parenthesis { inner, .. } => type_to_qualified_name(inner),
         other => format!("{:?}", std::mem::discriminant(other)),
+    }
+}
+
+/// Record a declared accessor. A bare `get`/`set` names a method derived from
+/// the field, which is the form the rest of the compiler resolves.
+fn access_to_blade(
+    access: &parser::PropertyAccess,
+    field_name: &str,
+    is_getter: bool,
+) -> BladeAccess {
+    match access {
+        parser::PropertyAccess::Default => BladeAccess::Default,
+        parser::PropertyAccess::Null => BladeAccess::Null,
+        parser::PropertyAccess::Never => BladeAccess::Never,
+        parser::PropertyAccess::Dynamic => BladeAccess::Dynamic,
+        parser::PropertyAccess::Custom(method) => {
+            let _ = is_getter;
+            let name = if method == "get" || method == "set" {
+                format!("{method}_{field_name}")
+            } else {
+                method.clone()
+            };
+            BladeAccess::Method(name)
+        }
     }
 }
 

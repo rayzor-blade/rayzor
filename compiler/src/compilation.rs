@@ -2165,6 +2165,28 @@ impl CompilationUnit {
         // Parse field type
         let field_type = self.resolve_blade_type_or_dynamic(field.field_type.as_ref());
 
+        // A property reads and writes through methods. Restoring it as a plain
+        // field leaves an access lowering to a load from a slot the class does
+        // not have, which surfaces as the field not existing at all.
+        if let Some(property) = &field.property {
+            let accessor = |access: &bsym::BladeAccess, interner: &mut StringInterner| match access
+            {
+                bsym::BladeAccess::Default => crate::tast::PropertyAccessor::Default,
+                bsym::BladeAccess::Null => crate::tast::PropertyAccessor::Null,
+                bsym::BladeAccess::Never => crate::tast::PropertyAccessor::Never,
+                bsym::BladeAccess::Dynamic => crate::tast::PropertyAccessor::Dynamic,
+                bsym::BladeAccess::Method(name) => {
+                    crate::tast::PropertyAccessor::Method(interner.intern(name))
+                }
+            };
+            let getter = accessor(&property.getter, &mut self.string_interner);
+            let setter = accessor(&property.setter, &mut self.string_interner);
+            self.import_property_access_map.insert(
+                field_symbol,
+                crate::tast::PropertyAccessInfo { getter, setter },
+            );
+        }
+
         // Update symbol with type and flags
         if let Some(sym) = self.symbol_table.get_symbol_mut(field_symbol) {
             sym.type_id = field_type;
