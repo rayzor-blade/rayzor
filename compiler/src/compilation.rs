@@ -773,6 +773,15 @@ fn blade_type_param_name(ty: Option<&bsym::BladeType>) -> Option<&str> {
     }
 }
 
+/// What declaring a class from a manifest publishes: enough for any sibling's
+/// signature to resolve it, and enough to register its members afterwards
+/// without deriving any of it again.
+struct DeclaredClass {
+    symbol_id: SymbolId,
+    class_scope: ScopeId,
+    type_params: BTreeMap<String, TypeId>,
+}
+
 impl CompilationUnit {
     /// Create a new compilation unit with the given configuration
     pub fn new(config: CompilationConfig) -> Self {
@@ -1867,6 +1876,12 @@ impl CompilationUnit {
             .find(|path| path.exists())
             .cloned();
 
+        // Two passes over the unit. A class's members are registered only
+        // after every class in the manifest exists, so a signature naming a
+        // sibling resolves to that sibling's type rather than to a placeholder
+        // — which it did whenever the sibling happened to be declared later.
+        let mut declared: Vec<(&BladeClassInfo, DeclaredClass)> = Vec::new();
+
         for module in &manifest.modules {
             // Mark this file as "loaded" so load_import_file_recursive will skip it
             // This prevents redundant re-parsing of files whose symbols are already cached
@@ -1877,10 +1892,9 @@ impl CompilationUnit {
             self.namespace_resolver.mark_file_loaded(source_path);
 
             for class_info in &module.types.classes {
-                let method_count = class_info.methods.len() + class_info.static_methods.len();
-                self.register_class_from_blade(class_info);
+                total_methods += class_info.methods.len() + class_info.static_methods.len();
+                declared.push((class_info, self.declare_class_from_blade(class_info)));
                 total_classes += 1;
-                total_methods += method_count;
             }
             for enum_info in &module.types.enums {
                 self.register_enum_from_blade(enum_info);
@@ -1896,6 +1910,10 @@ impl CompilationUnit {
                 total_abstracts += 1;
                 total_methods += method_count;
             }
+        }
+
+        for (class_info, declaration) in &declared {
+            self.define_class_members_from_blade(class_info, declaration);
         }
 
         debug!("[BLADE] Registered {} classes, {} enums, {} aliases, {} abstracts ({} methods) from manifest",
@@ -1934,7 +1952,14 @@ impl CompilationUnit {
     }
 
     /// Register a class from BLADE symbol info
-    fn register_class_from_blade(&mut self, class_info: &BladeClassInfo) -> SymbolId {
+    /// Publish a class's identity: symbol, scope, class type, aliases,
+    /// short-name index and type parameters.
+    ///
+    /// Nothing here resolves another declaration, so every class in a unit can
+    /// be declared before any signature is resolved — which is what stops a
+    /// signature naming a sibling from restoring as a placeholder purely
+    /// because that sibling was declared later.
+    fn declare_class_from_blade(&mut self, class_info: &BladeClassInfo) -> DeclaredClass {
         let short_name = self.string_interner.intern(&class_info.name);
         let qualified_name = if class_info.package.is_empty() {
             class_info.name.clone()
@@ -2005,6 +2030,27 @@ impl CompilationUnit {
                 .collect();
             self.symbol_table.set_class_type_params(symbol_id, ordered);
         }
+        DeclaredClass {
+            symbol_id,
+            class_scope,
+            type_params,
+        }
+    }
+
+    /// Register a class's members, once every declaration in the unit exists.
+    fn define_class_members_from_blade(
+        &mut self,
+        class_info: &BladeClassInfo,
+        declared: &DeclaredClass,
+    ) {
+        let symbol_id = declared.symbol_id;
+        let class_scope = declared.class_scope;
+        let type_params = declared.type_params.clone();
+        let qualified_name = if class_info.package.is_empty() {
+            class_info.name.clone()
+        } else {
+            format!("{}.{}", class_info.package.join("."), class_info.name)
+        };
         let outer_type_params = std::mem::replace(&mut self.manifest_type_params, type_params);
 
         // Register instance methods
@@ -2063,8 +2109,6 @@ impl CompilationUnit {
             class_info.fields.len() + class_info.static_fields.len(),
             class_scope
         );
-
-        symbol_id
     }
 
     /// Register a method from BLADE info into a class scope
@@ -4175,8 +4219,21 @@ impl CompilationUnit {
     ) -> BTreeMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)> {
         let mut class_map = BTreeMap::new();
 
-        for class_info in &symbols.classes {
-            let symbol_id = self.register_class_from_blade(class_info);
+        // Declare every class before registering any member, so a signature
+        // naming a sibling resolves to that sibling rather than to a
+        // placeholder — the order they appear in the module is not a
+        // statement about which may refer to which.
+        let declared: Vec<DeclaredClass> = symbols
+            .classes
+            .iter()
+            .map(|class_info| self.declare_class_from_blade(class_info))
+            .collect();
+        for (class_info, declaration) in symbols.classes.iter().zip(&declared) {
+            self.define_class_members_from_blade(class_info, declaration);
+        }
+
+        for (class_info, declaration) in symbols.classes.iter().zip(&declared) {
+            let symbol_id = declaration.symbol_id;
             let qualified_name = if class_info.package.is_empty() {
                 class_info.name.clone()
             } else {
