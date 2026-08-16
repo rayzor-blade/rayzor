@@ -105,7 +105,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The lowered standard library the shipped binary carries. Without it a
+      # user's first compile in a new project lowers the library from source,
+      # which is the cost the snapshot exists to remove — and the build script
+      # embeds at build time, so this has to come first.
+      - name: Generate the standard library snapshot
+        run: cargo run --release -p snapshot-gen -- target/stdlib_snapshot.bin
+
       - name: Build rayzor CLI
+        env:
+          RAYZOR_SNAPSHOT: target/stdlib_snapshot.bin
         run: cargo build -p rayzor --release
       - name: Build rayzor-wasm-opt helper
         # Bundled wasm optimizer. Compiles Binaryen from source (first build is

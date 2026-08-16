@@ -21,6 +21,10 @@ jobs:
   build:
     name: Build & Bundle
     runs-on: ubuntu-latest
+    env:
+      # Where the generator writes and the build script reads. Job-scoped so no
+      # step can silently fall back to the default path, which nothing writes.
+      RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
     steps:
       - uses: actions/checkout@v4
 
@@ -42,18 +46,22 @@ jobs:
       # The lowered standard library, built once here so no measured compile
       # pays to lower it. Generated before the binaries that use it: the CLI
       # embeds it at build time, so producing it afterwards would not reach the
-      # binary that ships. The generator needs only the front end, which is a
-      # different feature set from the CLI's and so compiles the compiler once
-      # more — the cache carries that between runs.
+      # binary that ships.
+      #
+      # The generator asks for the front end alone, a different feature set
+      # from the CLI's, so the compiler crate is built once more. rust-cache
+      # keeps dependencies, not workspace members, so that cost is paid every
+      # run rather than amortized — the price of the CLI actually carrying what
+      # it claims to.
       - name: Generate the standard library snapshot
         run: |
           mkdir -p target/release
           cargo run --release -p snapshot-gen -- target/release/stdlib_snapshot.bin
           ls -l target/release/stdlib_snapshot.bin
 
+      # The build script fails the build if this path is unreadable or holds an
+      # archive with no modules, so a binary that carries nothing cannot pass.
       - name: Build rayzor CLI
-        env:
-          RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
         run: cargo build --release --features llvm-backend
 
       # Built here so the kernel runners and `collect` only execute it. Their
