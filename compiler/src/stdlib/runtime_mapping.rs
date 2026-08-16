@@ -430,10 +430,23 @@ impl StdlibMapping {
     /// qualified convention). Without the dot arm, a bare `PrefillGraph` lookup
     /// fails to match `nue.engine.PrefillGraph` and the resolver falls through to
     /// a name-only path that collapses same-name externs (e.g. onto BertGraph).
+    ///
+    /// Compared in place. The callers scan the whole table for every call
+    /// expression they lower, so building the two candidate strings here
+    /// allocated twice per entry per lookup — which is most of what lowering
+    /// a program spent its time doing.
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
-        lookup == registered
-            || registered.ends_with(&format!("_{}", lookup))
-            || registered.ends_with(&format!(".{}", lookup))
+        if lookup == registered {
+            return true;
+        }
+        // `ends_with` puts the separator on a character boundary, and a UTF-8
+        // continuation byte is never `_` or `.`, so indexing here is safe.
+        let Some(separator) = registered.len().checked_sub(lookup.len()) else {
+            return false;
+        };
+        separator > 0
+            && registered.ends_with(lookup)
+            && matches!(registered.as_bytes()[separator - 1], b'_' | b'.')
     }
 
     /// Find a static method by class and method name
