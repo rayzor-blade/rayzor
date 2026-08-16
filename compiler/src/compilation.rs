@@ -1303,6 +1303,11 @@ impl CompilationUnit {
         let mut fields = Vec::new();
         let mut class_sizes = Vec::new();
 
+        // A member's owning class is its scope's class, needed once per function,
+        // field and property below. Answering it by searching the symbol table
+        // each time is quadratic in a table that does not change here.
+        let class_names_by_scope = self.class_names_by_scope();
+
         // Resolve a HIR TypeId to a qualified-name string for the cache.
         // Only Class/Interface types matter to Path 3 of
         // `maybe_materialize_for_call`; everything else (primitives,
@@ -1346,7 +1351,7 @@ impl CompilationUnit {
                     .to_string();
 
                 // Find the class this method belongs to by looking at its scope
-                let class_name = self.find_class_name_for_scope(sym.scope_id);
+                let class_name = class_names_by_scope.get(&sym.scope_id).cloned().flatten();
 
                 functions.push(BladeFuncEntry {
                     class_name: class_name.unwrap_or_default(),
@@ -1388,7 +1393,7 @@ impl CompilationUnit {
                     .get(symbol_id)
                     .cloned()
                     .or_else(|| self.import_field_class_names.get(symbol_id).cloned())
-                    .or_else(|| self.find_class_name_for_scope(sym.scope_id));
+                    .or_else(|| class_names_by_scope.get(&sym.scope_id).cloned().flatten());
 
                 fields.push(BladeFieldEntry {
                     class_name: class_name.unwrap_or_default(),
@@ -1424,7 +1429,7 @@ impl CompilationUnit {
                     .get(symbol_id)
                     .cloned()
                     .or_else(|| self.import_field_class_names.get(symbol_id).cloned())
-                    .or_else(|| self.find_class_name_for_scope(sym.scope_id));
+                    .or_else(|| class_names_by_scope.get(&sym.scope_id).cloned().flatten());
                 let to_blade = |acc: &crate::tast::PropertyAccessor| -> BladeAccessor {
                     match acc {
                         crate::tast::PropertyAccessor::Default => BladeAccessor::Default,
@@ -1582,22 +1587,28 @@ impl CompilationUnit {
 
     /// Find the qualified class name that owns a given scope.
     /// Used to convert scope-based symbol lookups to name-based keys for cache.
-    fn find_class_name_for_scope(&self, scope_id: ScopeId) -> Option<String> {
-        // Search all symbols for a class whose scope_id matches
-        // Class symbols have their scope_id set to the class member scope
+    /// Every class member scope mapped to that class's name.
+    ///
+    /// A scope shared by several class symbols resolves to the one declared
+    /// first, which is the class a search over the symbol table would reach.
+    fn class_names_by_scope(&self) -> std::collections::HashMap<ScopeId, Option<String>> {
+        let mut by_scope = std::collections::HashMap::new();
         for i in 0..self.symbol_table.len() {
             let sym_id = crate::tast::SymbolId::from_raw(i as u32);
-            if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                if matches!(sym.kind, crate::tast::SymbolKind::Class) && sym.scope_id == scope_id {
-                    return sym
-                        .qualified_name
-                        .and_then(|n| self.string_interner.get(n))
-                        .or_else(|| self.string_interner.get(sym.name))
-                        .map(|s| s.to_string());
-                }
+            let Some(sym) = self.symbol_table.get_symbol(sym_id) else {
+                continue;
+            };
+            if !matches!(sym.kind, crate::tast::SymbolKind::Class) {
+                continue;
             }
+            by_scope.entry(sym.scope_id).or_insert_with(|| {
+                sym.qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(sym.name))
+                    .map(|name| name.to_string())
+            });
         }
-        None
+        by_scope
     }
 
     /// Extract static inline var constants from a TypedFile for BLADE cache storage.
