@@ -788,21 +788,21 @@ fn simd_vector_class(ty: &IrType) -> &'static str {
             if matches!(element.as_ref(), IrType::I32 | IrType::U32) =>
         {
             if *count == 8 {
-                "rayzor_SIMD8i32"
+                "rayzor.SIMD8i32"
             } else {
-                "rayzor_SIMD4i32"
+                "rayzor.SIMD4i32"
             }
         }
         IrType::Vector { element, count }
             if matches!(element.as_ref(), IrType::I8 | IrType::U8) =>
         {
             if *count == 32 {
-                "rayzor_SIMD32i8"
+                "rayzor.SIMD32i8"
             } else {
-                "rayzor_SIMD16i8"
+                "rayzor.SIMD16i8"
             }
         }
-        _ => "rayzor_SIMD4f",
+        _ => "rayzor.SIMD4f",
     }
 }
 

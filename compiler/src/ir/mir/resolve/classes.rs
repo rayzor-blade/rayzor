@@ -151,14 +151,16 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
-    pub(crate) fn get_return_class_hint<'b>(dispatching_class: &'b str, method: &str) -> &'b str {
-        match (dispatching_class, method) {
-            (c, "lock" | "tryLock") if c.contains("Mutex") && !c.contains("MutexGuard") => {
-                "rayzor_concurrent_MutexGuard"
-            }
-            ("Array", "iterator") => "ArrayIterator",
-            ("Array", "keyValueIterator") => "ArrayKeyValueIterator",
-            _ => dispatching_class,
-        }
+    /// Class to dispatch against for the value `dispatching_class.method(..)`
+    /// returns. Answered by the mapping's declared return classes; a method
+    /// with no declared return class returns its own value's class unchanged.
+    pub(crate) fn get_return_class_hint<'b>(
+        &self,
+        dispatching_class: &'b str,
+        method: &str,
+    ) -> &'b str {
+        self.stdlib_mapping
+            .return_class(dispatching_class, method)
+            .unwrap_or(dispatching_class)
     }
 }

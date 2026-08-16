@@ -93,14 +93,16 @@ impl<'a> HirToMirContext<'a> {
                 // Not a vector, so a SIMD class named by the hint is stale and
                 // must be rejected before reaching the arith interception below.
                 // A non-SIMD hint (a genuine Bytes/Usize) is left intact.
-                let non_simd_hint = receiver_class_hint_owned
-                    .filter(|h| h != "rayzor_SIMD4f" && h != "rayzor_SIMD4i32");
+                let non_simd_hint = receiver_class_hint_owned.filter(|h| {
+                    !self.stdlib_mapping.same_class(h, "rayzor.SIMD4f")
+                        && !self.stdlib_mapping.same_class(h, "rayzor.SIMD4i32")
+                });
                 if non_simd_hint.is_some() {
                     non_simd_hint
                 } else if self.type_is_native_named(receiver_type, "rayzor::Atomic") {
                     // Atomic's type-map returns Ptr<I32> (not a vector), so is_vector()
                     // never fires; resolve it by the abstract's @:native name instead.
-                    Some("rayzor_Atomic".to_string())
+                    Some("rayzor.Atomic".to_string())
                 } else if let crate::ir::hir::HirExprKind::Variable {
                     symbol: recv_sym, ..
                 } = &receiver.kind
@@ -125,7 +127,7 @@ impl<'a> HirToMirContext<'a> {
             // method-call path routes them to a MIR wrapper that mishandles the
             // vector ABI. Restricted to rayzor_SIMD4f (f32x4) — integer
             // VectorBinOp miscompiles on the wasm backend.
-            if receiver_class_hint == Some("rayzor_SIMD4f") && args.len() == 2 {
+            if receiver_class_hint == Some("rayzor.SIMD4f") && args.len() == 2 {
                 let mname = self
                     .symbol_table
                     .get_symbol(*symbol)
@@ -142,7 +144,7 @@ impl<'a> HirToMirContext<'a> {
                 // non-vector operand.
                 let operands_are_simd4f = {
                     let t = self.convert_type(args[0].ty);
-                    t.is_vector() && simd_vector_class(&t) == "rayzor_SIMD4f"
+                    t.is_vector() && simd_vector_class(&t) == "rayzor.SIMD4f"
                 };
                 if let Some(bin_op) = vbop.filter(|_| operands_are_simd4f) {
                     let lhs_reg = self.lower_expression(&args[0])?;
@@ -177,7 +179,7 @@ impl<'a> HirToMirContext<'a> {
             // get_stdlib_runtime_info (whose FALLBACK2 excludes SIMD matches).
             let runtime_info = if matches!(
                 receiver_class_hint,
-                Some("rayzor_SIMD4f") | Some("rayzor_SIMD4i32")
+                Some("rayzor.SIMD4f") | Some("rayzor.SIMD4i32")
             ) {
                 let simd_cls = receiver_class_hint.unwrap();
                 let method_name_str = self
@@ -192,7 +194,7 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     None
                 }
-            } else if receiver_class_hint == Some("rayzor_Atomic") {
+            } else if receiver_class_hint == Some("rayzor.Atomic") {
                 // Atomic direct lookup: bypass FALLBACK2 (mirror of SIMD4f).
                 let method_name_str = self
                     .symbol_table
@@ -200,8 +202,8 @@ impl<'a> HirToMirContext<'a> {
                     .and_then(|s| self.string_interner.get(s.name));
                 method_name_str.and_then(|mn| {
                     self.stdlib_mapping
-                        .find_by_name_and_params("rayzor_Atomic", mn, param_count)
-                        .or_else(|| self.stdlib_mapping.find_by_name("rayzor_Atomic", mn))
+                        .find_by_name_and_params("rayzor.Atomic", mn, param_count)
+                        .or_else(|| self.stdlib_mapping.find_by_name("rayzor.Atomic", mn))
                         .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                 })
             } else {
@@ -342,7 +344,7 @@ impl<'a> HirToMirContext<'a> {
                         // Store class hint for result to enable disambiguation
                         // of subsequent method calls on TypeParameter receivers
                         {
-                            let return_class = Self::get_return_class_hint(class_name, method_name);
+                            let return_class = self.get_return_class_hint(class_name, method_name);
                             self.register_class_hints
                                 .insert(call_result, return_class.to_string());
                         }

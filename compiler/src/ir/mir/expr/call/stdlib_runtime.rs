@@ -254,7 +254,7 @@ impl<'a> HirToMirContext<'a> {
                         // returned class (Array.iterator() -> ArrayIterator, so
                         // .hasNext()/.next() reach ArrayIterator's methods).
                         if let Some(result_reg) = final_result {
-                            let return_class = Self::get_return_class_hint(class_name, method_name);
+                            let return_class = self.get_return_class_hint(class_name, method_name);
                             self.register_class_hints
                                 .insert(result_reg, return_class.to_string());
                         }
@@ -1620,7 +1620,7 @@ impl<'a> HirToMirContext<'a> {
                 )
             };
             if let Some(result_reg) = final_result {
-                let return_class = Self::get_return_class_hint(class_name, method_name);
+                let return_class = self.get_return_class_hint(class_name, method_name);
                 self.register_class_hints
                     .insert(result_reg, return_class.to_string());
             }

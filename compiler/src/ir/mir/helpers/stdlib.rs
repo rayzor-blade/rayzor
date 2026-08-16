@@ -24,193 +24,86 @@ use std::rc::Rc;
 impl<'a> HirToMirContext<'a> {
     /// Check if a symbol refers to a known stdlib class by trying native name then simple name
     pub(crate) fn is_stdlib_class_by_symbol(&self, symbol: &crate::tast::symbols::Symbol) -> bool {
-        // Try lowered @:native name first (e.g., "rayzor::concurrent::Arc" -> "rayzor_concurrent_Arc")
-        if let Some(native) = symbol.native_name {
-            if let Some(native_str) = self.string_interner.get(native) {
-                let lowered = native_str.replace("::", "_");
-                if self.stdlib_mapping.is_stdlib_class(&lowered) {
-                    return true;
-                }
-            }
-        }
-        // Fall back to simple name
-        if let Some(class_name) = self.string_interner.get(symbol.name) {
-            if self.stdlib_mapping.is_stdlib_class(class_name) {
-                return true;
-            }
-        }
-        false
+        self.canonical_stdlib_class_name(symbol).is_some()
     }
 
-    /// Resolve a stdlib class symbol to its canonical runtime-mapping key
-    /// (e.g., `Tensor` → `rayzor_ds_Tensor`, `QTensor` → `rayzor_ds_QTensor`,
-    /// `Arc` → `rayzor_concurrent_Arc`).
+    /// Resolve a stdlib class symbol to its registered runtime-mapping key
+    /// (e.g., `Tensor` → the key rayzor-tensors registered it under, `Arc` →
+    /// `rayzor.concurrent.Arc`).
     ///
     /// Returns `None` if the symbol isn't a registered stdlib class. The
-    /// resolution order is:
-    ///   1. `@:native("a::b::C")` annotation → `a_b_C` (the canonical form).
-    ///   2. Bare simple name (`Tensor`, `Arc`) — only when an extern class
-    ///      has no `@:native` but its registered mapping key matches by
-    ///      suffix (the `is_stdlib_class` legacy path).
+    /// `@:native("a::b::C")` annotation is the strongest name and is tried
+    /// first; the bare simple name covers extern classes without one. Either
+    /// spelling resolves through the mapping's alias index, so what comes
+    /// back is always the key the class is actually registered under.
     pub(crate) fn canonical_stdlib_class_name(
         &self,
         symbol: &crate::tast::symbols::Symbol,
     ) -> Option<String> {
         if let Some(native) = symbol.native_name {
             if let Some(native_str) = self.string_interner.get(native) {
-                let lowered = native_str.replace("::", "_");
-                if self.stdlib_mapping.is_stdlib_class(&lowered) {
-                    return Some(lowered);
+                let dotted = native_str.replace("::", ".");
+                if let Some(key) = self.stdlib_mapping.get_class_static_str(&dotted) {
+                    return Some(key.to_string());
                 }
             }
         }
-        if let Some(class_name) = self.string_interner.get(symbol.name) {
-            if self.stdlib_mapping.is_stdlib_class(class_name) {
-                // The mapping accepts both exact and suffix matches. Find
-                // the actual registered key so downstream consumers always
-                // see the canonical form.
-                for registered in self.stdlib_mapping.get_all_classes() {
-                    if registered == class_name || registered.ends_with(&format!("_{class_name}")) {
-                        return Some(registered.to_string());
-                    }
-                }
-                return Some(class_name.to_string());
-            }
-        }
-        None
+        let class_name = self.string_interner.get(symbol.name)?;
+        self.stdlib_mapping
+            .get_class_static_str(class_name)
+            .map(str::to_string)
     }
 
+    /// The stdlib class a call returns, read from the callee's declaration.
+    ///
+    /// `Arc.init` is declared `init<T>(v:T):Arc<T>`: the method symbol's
+    /// function type names the returned class even when the generic argument
+    /// is erased, so the answer comes from the signature the typechecker
+    /// already resolved — never from a list of method names, and never from
+    /// searching the registered classes for one that has a method of that
+    /// name. `None` means the declaration does not name a stdlib class,
+    /// which is not license to guess one.
     pub(crate) fn detect_stdlib_class_from_call(
         &self,
         callee: &HirExpr,
-        args: &[HirExpr],
+        _args: &[HirExpr],
     ) -> Option<String> {
-        // Case 1: static method call, `Arc.init(...)` — a Field access on a class type.
-        if let HirExprKind::Field { object, field, .. } = &callee.kind {
-            if let HirExprKind::Variable { symbol, .. } = &object.kind {
-                if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
-                    if let Some(class_name) = self.string_interner.get(sym_info.name) {
-                        if let Some(field_sym) = self.symbol_table.get_symbol(*field) {
-                            if let Some(method_name) = self.string_interner.get(field_sym.name) {
-                                // Methods that yield the same class: init/clone and the
-                                // factories (QTensor's fromFloat32, wrapQ4KM).
-                                let returns_same_class = matches!(
-                                    method_name,
-                                    "init"
-                                        | "clone"
-                                        | "new"
-                                        | "zeros"
-                                        | "ones"
-                                        | "full"
-                                        | "fromArray"
-                                        | "rand"
-                                        | "fromFloat32"
-                                        | "wrapQ4KM"
-                                        // Bytes factory methods return `Bytes`; tag the
-                                        // result so cross-module `var b = Bytes.ofString(s)`
-                                        // keeps a class handle for later `b.length` etc.
-                                        | "ofString"
-                                        | "alloc"
-                                        | "ofData"
-                                        | "ofHex"
-                                );
-                                if returns_same_class {
-                                    if let Some(runtime_class_name) =
-                                        self.canonical_stdlib_class_name(sym_info)
-                                    {
-                                        debug!(
-                                            "[STDLIB CLASS DETECT] Static call {}.{}() returns {}",
-                                            class_name, method_name, runtime_class_name
-                                        );
-                                        return Some(runtime_class_name);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let method_symbol = match &callee.kind {
+            // `Arc.init(...)` / `arc.clone()` — the field is the resolved
+            // method symbol.
+            HirExprKind::Field { field, .. } => *field,
+            // `init(data)` / `clone(shared)` — the callee resolved straight
+            // to a method symbol.
+            HirExprKind::Variable { symbol, .. } => *symbol,
+            _ => return None,
+        };
+        self.stdlib_class_of_declared_return(method_symbol)
+    }
 
-        // Case 2: instance method call on an already-tracked receiver, `arc.clone()`.
-        if let HirExprKind::Field { object, field, .. } = &callee.kind {
-            if let HirExprKind::Variable {
-                symbol: receiver_sym,
-                ..
-            } = &object.kind
-            {
-                if let Some(tracked_class) = self.monomorphized_var_types.get(receiver_sym) {
-                    if let Some(field_sym) = self.symbol_table.get_symbol(*field) {
-                        if let Some(method_name) = self.string_interner.get(field_sym.name) {
-                            let returns_same_class = matches!(method_name, "clone");
-                            if returns_same_class {
-                                debug!(
-                                    "[STDLIB CLASS DETECT] Instance call {}.{}() returns {}",
-                                    tracked_class, method_name, tracked_class
-                                );
-                                return Some(tracked_class.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Case 3: callee is a method-reference Variable — covers both `Arc.init(data)`
-        // resolved to a method symbol and `clone(shared)`.
-        if let HirExprKind::Variable { symbol, .. } = &callee.kind {
-            if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
-                if let Some(method_name) = self.string_interner.get(sym_info.name) {
-                    let factory_methods = [
-                        "init",
-                        "new",
-                        "clone",
-                        "zeros",
-                        "ones",
-                        "full",
-                        "fromArray",
-                        "rand",
-                    ];
-                    if factory_methods.contains(&method_name) {
-                        let stdlib_classes = self.stdlib_mapping.get_all_classes();
-                        for class_name in &stdlib_classes {
-                            let is_static_factory = matches!(
-                                method_name,
-                                "init" | "new" | "zeros" | "ones" | "full" | "fromArray" | "rand"
-                            );
-                            if is_static_factory {
-                                if let Some((_sig, _)) = self
-                                    .stdlib_mapping
-                                    .find_static_method(class_name, method_name)
-                                {
-                                    debug!(
-                                        "[DETECT-CLASS Case3] Found {}.{}() -> {}",
-                                        class_name, method_name, class_name
-                                    );
-                                    return Some(class_name.to_string());
-                                }
-                            } else if method_name == "clone" {
-                                if !args.is_empty() {
-                                    if let HirExprKind::Variable {
-                                        symbol: receiver_sym,
-                                        ..
-                                    } = &args[0].kind
-                                    {
-                                        if let Some(tracked_class) =
-                                            self.monomorphized_var_types.get(receiver_sym)
-                                        {
-                                            return Some(tracked_class.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        None
+    /// The registered stdlib class named by a method symbol's declared
+    /// return type, resolved through typedefs (`haxe.io.Bytes` →
+    /// `rayzor.Bytes`).
+    fn stdlib_class_of_declared_return(&self, method_symbol: SymbolId) -> Option<String> {
+        let sym = self.symbol_table.get_symbol(method_symbol)?;
+        let returned_class_symbol = {
+            let type_table = self.type_table;
+            let TypeKind::Function { return_type, .. } = &type_table.get(sym.type_id)?.kind else {
+                return None;
+            };
+            let returned = type_table.get(self.resolve_through_aliases(*return_type))?;
+            let TypeKind::Class { symbol_id, .. } = &returned.kind else {
+                return None;
+            };
+            *symbol_id
+        };
+        let class_sym = self.symbol_table.get_symbol(returned_class_symbol)?;
+        let key = self.canonical_stdlib_class_name(class_sym)?;
+        debug!(
+            "[STDLIB CLASS DETECT] declared return of {:?} is {}",
+            self.string_interner.get(sym.name),
+            key
+        );
+        Some(key)
     }
 
     pub(crate) fn try_stdlib_from_cast(

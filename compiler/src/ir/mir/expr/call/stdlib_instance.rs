@@ -210,9 +210,7 @@ impl<'a> HirToMirContext<'a> {
                                     let hinted: Vec<_> = filtered_classes
                                         .iter()
                                         .filter(|(class, _, _)| {
-                                            *class == hint.as_str()
-                                                || class.ends_with(&format!("_{}", hint))
-                                                || hint.ends_with(&format!("_{}", class))
+                                            self.stdlib_mapping.same_class(class, hint)
                                         })
                                         .copied()
                                         .collect();
@@ -475,10 +473,8 @@ impl<'a> HirToMirContext<'a> {
                                         // on the value disambiguate: Mutex.lock() yields a
                                         // MutexGuard, which then resolves .get()/.unlock().
                                         if let Some(result_reg) = final_result {
-                                            let return_class = Self::get_return_class_hint(
-                                                class_name,
-                                                method_name,
-                                            );
+                                            let return_class =
+                                                self.get_return_class_hint(class_name, method_name);
                                             self.register_class_hints
                                                 .insert(result_reg, return_class.to_string());
                                         }

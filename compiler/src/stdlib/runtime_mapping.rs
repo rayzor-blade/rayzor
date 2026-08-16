@@ -348,18 +348,34 @@ impl StdlibMapping {
 
         for (sig, call) in &self.mappings {
             if !class_meta.contains_key(sig.class) {
-                // A class contributes its own name plus every simple-name suffix
-                // that begins right after a separator, which is exactly the set
-                // of spellings `class_matches` accepts for it.
-                aliases.entry(sig.class.into()).or_default().push(sig.class);
-                for (offset, byte) in sig.class.bytes().enumerate() {
-                    if matches!(byte, b'_' | b'.') && offset + 1 < sig.class.len() {
-                        aliases
-                            .entry(sig.class[offset + 1..].into())
-                            .or_default()
-                            .push(sig.class);
+                // A class answers to its key, to every suffix beginning right
+                // after a separator, and to the same set spelled with the other
+                // separator. Keys are dotted FQNs; the underscore renderings
+                // are transitional, for callers that still build them from
+                // `@:native` paths, and go away when those callers pass FQNs.
+                let mut insert = |spelling: &str| {
+                    let list = aliases.entry(spelling.into()).or_default();
+                    if !list.contains(&sig.class) {
+                        list.push(sig.class);
+                    }
+                };
+                for rendered in [sig.class.replace('_', "."), sig.class.replace('.', "_")] {
+                    // A leading underscore is part of the name (`_Internal`),
+                    // not a separator.
+                    let rendered = if sig.class.starts_with('_') {
+                        sig.class.to_string()
+                    } else {
+                        rendered
+                    };
+                    insert(&rendered);
+                    for (offset, byte) in rendered.bytes().enumerate() {
+                        if offset > 0 && matches!(byte, b'_' | b'.') && offset + 1 < rendered.len()
+                        {
+                            insert(&rendered[offset + 1..]);
+                        }
                     }
                 }
+                insert(sig.class);
             }
 
             by_runtime_name
@@ -397,6 +413,49 @@ impl StdlibMapping {
             .get(lookup)
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// Whether two spellings can denote the same registered class, whichever
+    /// separator or degree of qualification each uses.
+    pub fn same_class(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let b_candidates = self.candidates(b);
+        self.candidates(a)
+            .iter()
+            .any(|class| b_candidates.contains(class))
+    }
+
+    /// Class of the value a method returns, for methods whose runtime return
+    /// type erases it to an opaque pointer. This is declaration knowledge —
+    /// `Mutex.lock(): MutexGuard<T>`, `Array.iterator(): ArrayIterator<T>` —
+    /// carried beside the table so dispatch on the returned value resolves
+    /// against the right class instead of guessing from names.
+    pub fn return_class(&self, class: &str, method: &str) -> Option<&'static str> {
+        const RETURN_CLASS: &[(&str, &str, &str)] = &[
+            (
+                "rayzor.concurrent.Mutex",
+                "lock",
+                "rayzor.concurrent.MutexGuard",
+            ),
+            (
+                "rayzor.concurrent.Mutex",
+                "tryLock",
+                "rayzor.concurrent.MutexGuard",
+            ),
+            ("Array", "iterator", "haxe.iterators.ArrayIterator"),
+            (
+                "Array",
+                "keyValueIterator",
+                "haxe.iterators.ArrayKeyValueIterator",
+            ),
+        ];
+        let candidates = self.candidates(class);
+        RETURN_CLASS
+            .iter()
+            .find(|(owner, m, _)| *m == method && candidates.contains(owner))
+            .map(|(_, _, returned)| *returned)
     }
 
     /// Every entry registered under `class`, in table order. A class occupies
@@ -532,29 +591,35 @@ impl StdlibMapping {
     }
 
     /// Check if a lookup class name matches a registered class name.
-    /// Supports exact match and simple-name suffix match against a qualified
-    /// registered name, for BOTH separators: underscore (`rayzor_concurrent_Arc`,
-    /// the stdlib convention) and dot (`nue.engine.PrefillGraph`, the package-
-    /// qualified convention). Without the dot arm, a bare `PrefillGraph` lookup
-    /// fails to match `nue.engine.PrefillGraph` and the resolver falls through to
-    /// a name-only path that collapses same-name externs (e.g. onto BertGraph).
+    ///
+    /// A spelling matches when, with `_` read as a package separator alongside
+    /// `.`, it is the registered name or a simple-name suffix of it starting
+    /// right after a separator. `rayzor_concurrent_Arc`, `concurrent.Arc` and
+    /// `Arc` all match `rayzor.concurrent.Arc`. A leading underscore is part
+    /// of the name (`_Internal`), never a separator.
     ///
     /// The alias index is built from this rule and the agreement test checks
     /// the two against each other over every spelling, so this stays as the
     /// definition of what a lookup accepts even though queries no longer call it.
     #[cfg(test)]
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
+        fn canon(name: &str) -> String {
+            match name.strip_prefix('_') {
+                Some(rest) => format!("_{}", rest.replace('_', ".")),
+                None => name.replace('_', "."),
+            }
+        }
+        let lookup = canon(lookup);
+        let registered = canon(registered);
         if lookup == registered {
             return true;
         }
-        // `ends_with` puts the separator on a character boundary, and a UTF-8
-        // continuation byte is never `_` or `.`, so indexing here is safe.
         let Some(separator) = registered.len().checked_sub(lookup.len()) else {
             return false;
         };
         separator > 0
-            && registered.ends_with(lookup)
-            && matches!(registered.as_bytes()[separator - 1], b'_' | b'.')
+            && registered.ends_with(&lookup)
+            && registered.as_bytes()[separator - 1] == b'.'
     }
 
     /// Find a static method by class and method name
@@ -1740,14 +1805,14 @@ impl StdlibMapping {
             map_method!(instance "Array", "keyValueIterator" => "array_kv_iterator", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
             // ArrayIterator methods — MIR wrappers implementing hasNext/next on the iterator object
-            map_method!(instance "ArrayIterator", "hasNext" => "ArrayIterator_hasNext", params: 0, mir_wrapper,
+            map_method!(instance "haxe.iterators.ArrayIterator", "hasNext" => "ArrayIterator_hasNext", params: 0, mir_wrapper,
                 types: &[PtrVoid] => I32),
-            map_method!(instance "ArrayIterator", "next" => "ArrayIterator_next", params: 0, mir_wrapper,
+            map_method!(instance "haxe.iterators.ArrayIterator", "next" => "ArrayIterator_next", params: 0, mir_wrapper,
                 types: &[PtrVoid] => I64),
             // ArrayKeyValueIterator methods
-            map_method!(instance "ArrayKeyValueIterator", "hasNext" => "ArrayKeyValueIterator_hasNext", params: 0, mir_wrapper,
+            map_method!(instance "haxe.iterators.ArrayKeyValueIterator", "hasNext" => "ArrayKeyValueIterator_hasNext", params: 0, mir_wrapper,
                 types: &[PtrVoid] => I32),
-            map_method!(instance "ArrayKeyValueIterator", "next" => "ArrayKeyValueIterator_next", params: 0, mir_wrapper,
+            map_method!(instance "haxe.iterators.ArrayKeyValueIterator", "next" => "ArrayKeyValueIterator_next", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
         ];
 
@@ -1934,32 +1999,32 @@ impl StdlibMapping {
 
         let mappings = vec![
             // File.getContent(path: String) -> String
-            map_method!(static "File", "getContent" => "haxe_file_get_content", params: 1, returns: complex,
+            map_method!(static "sys.io.File", "getContent" => "haxe_file_get_content", params: 1, returns: complex,
                 types: &[PtrVoid] => PtrString),
             // File.saveContent(path: String, content: String) -> Void
-            map_method!(static "File", "saveContent" => "haxe_file_save_content", params: 2, returns: void,
+            map_method!(static "sys.io.File", "saveContent" => "haxe_file_save_content", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
             // File.copy(srcPath: String, dstPath: String) -> Void
-            map_method!(static "File", "copy" => "haxe_file_copy", params: 2, returns: void,
+            map_method!(static "sys.io.File", "copy" => "haxe_file_copy", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
             // File.read(path: String, ?binary: Bool = true) -> FileInput
             // Uses MIR wrapper that defaults binary=true (1-param variant)
-            map_method!(static "File", "read" => "file_read_default", params: 1, returns: primitive,
+            map_method!(static "sys.io.File", "read" => "file_read_default", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // File.write(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "File", "write" => "file_write_default", params: 1, returns: primitive,
+            map_method!(static "sys.io.File", "write" => "file_write_default", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // File.append(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "File", "append" => "file_append_default", params: 1, returns: primitive,
+            map_method!(static "sys.io.File", "append" => "file_append_default", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // File.update(path: String, ?binary: Bool = true) -> FileOutput
-            map_method!(static "File", "update" => "file_update_default", params: 1, returns: primitive,
+            map_method!(static "sys.io.File", "update" => "file_update_default", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // File.getBytes(path: String) -> haxe.io.Bytes
-            map_method!(static "File", "getBytes" => "haxe_file_get_bytes", params: 1, returns: primitive,
+            map_method!(static "sys.io.File", "getBytes" => "haxe_file_get_bytes", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // File.saveBytes(path: String, bytes: haxe.io.Bytes) -> Void
-            map_method!(static "File", "saveBytes" => "haxe_file_save_bytes", params: 2, returns: void,
+            map_method!(static "sys.io.File", "saveBytes" => "haxe_file_save_bytes", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
         ];
 
@@ -1975,28 +2040,28 @@ impl StdlibMapping {
 
         let mappings = vec![
             // FileInput.readByte() -> Int
-            map_method!(instance "FileInput", "readByte" => "haxe_fileinput_read_byte", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "readByte" => "haxe_fileinput_read_byte", params: 0, returns: primitive,
                 types: &[PtrVoid] => I32),
             // FileInput.seek(p: Int, pos: FileSeek) -> Void
-            map_method!(instance "FileInput", "seek" => "haxe_fileinput_seek", params: 2, returns: void,
+            map_method!(instance "sys.io.FileInput", "seek" => "haxe_fileinput_seek", params: 2, returns: void,
                 types: &[PtrVoid, I64, I32]),
             // FileInput.tell() -> Int
-            map_method!(instance "FileInput", "tell" => "haxe_fileinput_tell", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "tell" => "haxe_fileinput_tell", params: 0, returns: primitive,
                 types: &[PtrVoid] => I64),
             // FileInput.eof() -> Bool
-            map_method!(instance "FileInput", "eof" => "haxe_fileinput_eof", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "eof" => "haxe_fileinput_eof", params: 0, returns: primitive,
                 types: &[PtrVoid] => Bool),
             // FileInput.close() -> Void
-            map_method!(instance "FileInput", "close" => "haxe_fileinput_close", params: 0, returns: void,
+            map_method!(instance "sys.io.FileInput", "close" => "haxe_fileinput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileInput.readBytes(s: Bytes, pos: Int, len: Int) -> Int
-            map_method!(instance "FileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
                 types: &[PtrVoid, PtrVoid, I32, I32] => I32),
             // FileInput.readLine() -> String
-            map_method!(instance "FileInput", "readLine" => "haxe_fileinput_read_line", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "readLine" => "haxe_fileinput_read_line", params: 0, returns: primitive,
                 types: &[PtrVoid] => PtrString),
             // FileInput.readAll() -> Bytes
-            map_method!(instance "FileInput", "readAll" => "haxe_fileinput_read_all", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileInput", "readAll" => "haxe_fileinput_read_all", params: 0, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
         ];
 
@@ -2012,22 +2077,22 @@ impl StdlibMapping {
 
         let mappings = vec![
             // FileOutput.writeByte(c: Int) -> Void
-            map_method!(instance "FileOutput", "writeByte" => "haxe_fileoutput_write_byte", params: 1, returns: void,
+            map_method!(instance "sys.io.FileOutput", "writeByte" => "haxe_fileoutput_write_byte", params: 1, returns: void,
                 types: &[PtrVoid, I32]),
             // FileOutput.seek(p: Int, pos: FileSeek) -> Void
-            map_method!(instance "FileOutput", "seek" => "haxe_fileoutput_seek", params: 2, returns: void,
+            map_method!(instance "sys.io.FileOutput", "seek" => "haxe_fileoutput_seek", params: 2, returns: void,
                 types: &[PtrVoid, I64, I32]),
             // FileOutput.tell() -> Int
-            map_method!(instance "FileOutput", "tell" => "haxe_fileoutput_tell", params: 0, returns: primitive,
+            map_method!(instance "sys.io.FileOutput", "tell" => "haxe_fileoutput_tell", params: 0, returns: primitive,
                 types: &[PtrVoid] => I64),
             // FileOutput.flush() -> Void
-            map_method!(instance "FileOutput", "flush" => "haxe_fileoutput_flush", params: 0, returns: void,
+            map_method!(instance "sys.io.FileOutput", "flush" => "haxe_fileoutput_flush", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileOutput.close() -> Void
-            map_method!(instance "FileOutput", "close" => "haxe_fileoutput_close", params: 0, returns: void,
+            map_method!(instance "sys.io.FileOutput", "close" => "haxe_fileoutput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
             // FileOutput.writeBytes(s: Bytes, pos: Int, len: Int) -> Int
-            map_method!(instance "FileOutput", "writeBytes" => "haxe_fileoutput_write_bytes_buf", params: 3, returns: primitive,
+            map_method!(instance "sys.io.FileOutput", "writeBytes" => "haxe_fileoutput_write_bytes_buf", params: 3, returns: primitive,
                 types: &[PtrVoid, PtrVoid, I32, I32] => I32),
         ];
 
@@ -2043,37 +2108,37 @@ impl StdlibMapping {
 
         let mappings = vec![
             // FileSystem.exists(path: String) -> Bool
-            map_method!(static "FileSystem", "exists" => "haxe_filesystem_exists", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "exists" => "haxe_filesystem_exists", params: 1, returns: primitive,
                 types: &[PtrVoid] => Bool),
             // FileSystem.isDirectory(path: String) -> Bool
-            map_method!(static "FileSystem", "isDirectory" => "haxe_filesystem_is_directory", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "isDirectory" => "haxe_filesystem_is_directory", params: 1, returns: primitive,
                 types: &[PtrVoid] => Bool),
             // FileSystem.isFile(path: String) -> Bool (extension - not in standard Haxe)
-            map_method!(static "FileSystem", "isFile" => "haxe_filesystem_is_file", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "isFile" => "haxe_filesystem_is_file", params: 1, returns: primitive,
                 types: &[PtrVoid] => Bool),
             // FileSystem.createDirectory(path: String) -> Void
-            map_method!(static "FileSystem", "createDirectory" => "haxe_filesystem_create_directory", params: 1, returns: void,
+            map_method!(static "sys.FileSystem", "createDirectory" => "haxe_filesystem_create_directory", params: 1, returns: void,
                 types: &[PtrVoid]),
             // FileSystem.deleteFile(path: String) -> Void
-            map_method!(static "FileSystem", "deleteFile" => "haxe_filesystem_delete_file", params: 1, returns: void,
+            map_method!(static "sys.FileSystem", "deleteFile" => "haxe_filesystem_delete_file", params: 1, returns: void,
                 types: &[PtrVoid]),
             // FileSystem.deleteDirectory(path: String) -> Void
-            map_method!(static "FileSystem", "deleteDirectory" => "haxe_filesystem_delete_directory", params: 1, returns: void,
+            map_method!(static "sys.FileSystem", "deleteDirectory" => "haxe_filesystem_delete_directory", params: 1, returns: void,
                 types: &[PtrVoid]),
             // FileSystem.rename(path: String, newPath: String) -> Void
-            map_method!(static "FileSystem", "rename" => "haxe_filesystem_rename", params: 2, returns: void,
+            map_method!(static "sys.FileSystem", "rename" => "haxe_filesystem_rename", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
             // FileSystem.fullPath(relPath: String) -> String (returns pointer directly)
-            map_method!(static "FileSystem", "fullPath" => "haxe_filesystem_full_path", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "fullPath" => "haxe_filesystem_full_path", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // FileSystem.absolutePath(relPath: String) -> String (returns pointer directly)
-            map_method!(static "FileSystem", "absolutePath" => "haxe_filesystem_absolute_path", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "absolutePath" => "haxe_filesystem_absolute_path", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // FileSystem.stat(path: String) -> FileStat (returns pointer directly)
-            map_method!(static "FileSystem", "stat" => "haxe_filesystem_stat", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "stat" => "haxe_filesystem_stat", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
             // FileSystem.readDirectory(path: String) -> Array<String> (returns pointer directly)
-            map_method!(static "FileSystem", "readDirectory" => "haxe_filesystem_read_directory", params: 1, returns: primitive,
+            map_method!(static "sys.FileSystem", "readDirectory" => "haxe_filesystem_read_directory", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
         ];
 
@@ -2096,46 +2161,46 @@ impl StdlibMapping {
         let mappings = vec![
             // Thread::spawn<T>(f: Void -> T) -> Thread<T>
             // MIR wrapper: takes closure (*u8), returns thread handle (*u8)
-            map_method!(static "rayzor_concurrent_Thread", "spawn" => "Thread_spawn", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "spawn" => "Thread_spawn", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Thread<T>::join() -> T
             // MIR wrapper: takes thread handle (*u8), returns result (*u8 for Dynamic)
-            map_method!(instance "rayzor_concurrent_Thread", "join" => "Thread_join", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Thread", "join" => "Thread_join", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Thread<T>::isFinished() -> Bool
             // MIR wrapper: takes thread handle (*u8), returns bool
-            map_method!(instance "rayzor_concurrent_Thread", "isFinished" => "Thread_isFinished", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Thread", "isFinished" => "Thread_isFinished", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // Thread::sleep(millis: Int) -> Void
             // MIR wrapper: takes millis (i32), returns void
-            map_method!(static "rayzor_concurrent_Thread", "sleep" => "Thread_sleep", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "sleep" => "Thread_sleep", params: 1, mir_wrapper,
                 types: &[I32]),
             // Thread::yieldNow() -> Void
             // MIR wrapper: no params, returns void
-            map_method!(static "rayzor_concurrent_Thread", "yieldNow" => "Thread_yieldNow", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "yieldNow" => "Thread_yieldNow", params: 0, mir_wrapper,
                 types: &[]),
             // Thread::cpuRelax() -> Void — PAUSE/YIELD spin-wait hint
-            map_method!(static "rayzor_concurrent_Thread", "cpuRelax" => "Thread_cpuRelax", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "cpuRelax" => "Thread_cpuRelax", params: 0, mir_wrapper,
                 types: &[]),
             // Thread::currentId() -> Int
             // MIR wrapper: no params, returns thread id (i64)
-            map_method!(static "rayzor_concurrent_Thread", "currentId" => "Thread_currentId", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "currentId" => "Thread_currentId", params: 0, mir_wrapper,
                 types: &[] => I64),
             // Thread::registerParkable() -> Int — hand the calling thread a
             // park id; Thread::unpark(id) wakes it (std park token, race-free)
-            map_method!(static "rayzor_concurrent_Thread", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
                 types: &[] => I64),
-            map_method!(static "rayzor_concurrent_Thread", "park" => "Thread_park", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "park" => "Thread_park", params: 0, mir_wrapper,
                 types: &[]),
-            map_method!(static "rayzor_concurrent_Thread", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Thread", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
                 types: &[I64]),
             // Parker.* — same runtime primitives, on a dedicated extern so
             // the members don't perturb Thread's cross-module member layout.
-            map_method!(static "rayzor_concurrent_Parker", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Parker", "registerParkable" => "Thread_registerParkable", params: 0, mir_wrapper,
                 types: &[] => I64),
-            map_method!(static "rayzor_concurrent_Parker", "park" => "Thread_park", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Parker", "park" => "Thread_park", params: 0, mir_wrapper,
                 types: &[]),
-            map_method!(static "rayzor_concurrent_Parker", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Parker", "unpark" => "Thread_unpark", params: 1, mir_wrapper,
                 types: &[I64]),
         ];
 
@@ -2156,50 +2221,50 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new Channel<T>(capacity: Int) -> Channel<T>
             // MIR wrapper: takes capacity (i32), returns channel handle (*u8)
-            map_method!(constructor "rayzor_concurrent_Channel", "new" => "Channel_init", params: 1, mir_wrapper,
+            map_method!(constructor "rayzor.concurrent.Channel", "new" => "Channel_init", params: 1, mir_wrapper,
                 types: &[I32] => PtrU8),
             // Channel::init<T>(capacity: Int) -> Channel<T> (for backwards compatibility)
-            map_method!(static "rayzor_concurrent_Channel", "init" => "Channel_init", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Channel", "init" => "Channel_init", params: 1, mir_wrapper,
                 types: &[I32] => PtrU8),
             // Channel<T>::send(value: T) -> Void
             // MIR wrapper: takes channel handle + value ptr
-            map_method!(instance "rayzor_concurrent_Channel", "send" => "Channel_send", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "send" => "Channel_send", params: 1, mir_wrapper,
                 types: &[PtrU8, PtrU8]),
             // Channel<T>::trySend(value: T) -> Bool
             // MIR wrapper: takes channel handle + value ptr, returns bool
-            map_method!(instance "rayzor_concurrent_Channel", "trySend" => "Channel_trySend", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "trySend" => "Channel_trySend", params: 1, mir_wrapper,
                 types: &[PtrU8, PtrU8] => Bool),
             // Channel<T>::receive() -> T
             // MIR wrapper: takes channel handle, returns value ptr
-            map_method!(instance "rayzor_concurrent_Channel", "receive" => "Channel_receive", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "receive" => "Channel_receive", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Channel<T>::tryReceive() -> Null<T>
             // MIR wrapper: takes channel handle, returns value ptr (or null)
-            map_method!(instance "rayzor_concurrent_Channel", "tryReceive" => "Channel_tryReceive", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "tryReceive" => "Channel_tryReceive", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Channel<T>::close() -> Void
             // MIR wrapper: takes channel handle
-            map_method!(instance "rayzor_concurrent_Channel", "close" => "Channel_close", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "close" => "Channel_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
             // Channel<T>::isClosed() -> Bool
             // MIR wrapper: takes channel handle, returns bool
-            map_method!(instance "rayzor_concurrent_Channel", "isClosed" => "Channel_isClosed", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "isClosed" => "Channel_isClosed", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // Channel<T>::len() -> Int
             // MIR wrapper: takes channel handle, returns i32
-            map_method!(instance "rayzor_concurrent_Channel", "len" => "Channel_len", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "len" => "Channel_len", params: 0, mir_wrapper,
                 types: &[PtrU8] => I32),
             // Channel<T>::capacity() -> Int
             // MIR wrapper: takes channel handle, returns i32
-            map_method!(instance "rayzor_concurrent_Channel", "capacity" => "Channel_capacity", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "capacity" => "Channel_capacity", params: 0, mir_wrapper,
                 types: &[PtrU8] => I32),
             // Channel<T>::isEmpty() -> Bool
             // MIR wrapper: takes channel handle, returns bool
-            map_method!(instance "rayzor_concurrent_Channel", "isEmpty" => "Channel_isEmpty", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "isEmpty" => "Channel_isEmpty", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // Channel<T>::isFull() -> Bool
             // MIR wrapper: takes channel handle, returns bool
-            map_method!(instance "rayzor_concurrent_Channel", "isFull" => "Channel_isFull", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Channel", "isFull" => "Channel_isFull", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
         ];
 
@@ -2219,19 +2284,19 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Select.recv(channels:Array<Dynamic>):SelectResult — blocks
-            map_method!(static "rayzor_concurrent_Select", "recv" => "Select_recv", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Select", "recv" => "Select_recv", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Select.tryRecv(channels:Array<Dynamic>):SelectResult — non-blocking
-            map_method!(static "rayzor_concurrent_Select", "tryRecv" => "Select_tryRecv", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Select", "tryRecv" => "Select_tryRecv", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // SelectResult.free():Void — releases the heap allocation
-            map_method!(instance "rayzor_concurrent_SelectResult", "free" => "rayzor_select_result_free", params: 0, returns: void,
+            map_method!(instance "rayzor.concurrent.SelectResult", "free" => "rayzor_select_result_free", params: 0, returns: void,
                 types: &[PtrU8]),
             // SelectResult.get_index():Int — property accessor for `index`
-            map_method!(instance "rayzor_concurrent_SelectResult", "get_index" => "rayzor_select_result_index", params: 0, returns: primitive,
+            map_method!(instance "rayzor.concurrent.SelectResult", "get_index" => "rayzor_select_result_index", params: 0, returns: primitive,
                 types: &[PtrU8] => I64),
             // SelectResult.get_value():Dynamic — property accessor for `value`
-            map_method!(instance "rayzor_concurrent_SelectResult", "get_value" => "rayzor_select_result_value", params: 0, returns: primitive,
+            map_method!(instance "rayzor.concurrent.SelectResult", "get_value" => "rayzor_select_result_value", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
         ];
 
@@ -2248,38 +2313,38 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new Arc<T>(value: T) -> Arc<T>
             // MIR wrapper: takes value ptr, returns arc handle (*u8)
-            map_method!(constructor "rayzor_concurrent_Arc", "new" => "Arc_init", params: 1, mir_wrapper,
+            map_method!(constructor "rayzor.concurrent.Arc", "new" => "Arc_init", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Arc::init<T>(value: T) -> Arc<T> (for backwards compatibility)
-            map_method!(static "rayzor_concurrent_Arc", "init" => "Arc_init", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Arc", "init" => "Arc_init", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Arc<T>::clone() -> Arc<T>
             // MIR wrapper: takes arc handle, returns cloned arc handle
-            map_method!(instance "rayzor_concurrent_Arc", "clone" => "Arc_clone", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "clone" => "Arc_clone", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Arc<T>::get() -> T
             // MIR wrapper: takes arc handle, returns value ptr
-            map_method!(instance "rayzor_concurrent_Arc", "get" => "Arc_get", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "get" => "Arc_get", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Arc<T>::strongCount() -> Int
             // MIR wrapper: takes arc handle, returns count (u64)
-            map_method!(instance "rayzor_concurrent_Arc", "strongCount" => "Arc_strongCount", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "strongCount" => "Arc_strongCount", params: 0, mir_wrapper,
                 types: &[PtrU8] => U64),
             // Arc<T>::tryUnwrap() -> Null<T>
             // MIR wrapper: takes arc handle, returns value ptr (or null)
-            map_method!(instance "rayzor_concurrent_Arc", "tryUnwrap" => "Arc_tryUnwrap", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "tryUnwrap" => "Arc_tryUnwrap", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Arc<T>::asPtr() -> Int
             // MIR wrapper: takes arc handle, returns ptr as u64
-            map_method!(instance "rayzor_concurrent_Arc", "asPtr" => "Arc_asPtr", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "asPtr" => "Arc_asPtr", params: 0, mir_wrapper,
                 types: &[PtrU8] => U64),
             // Arc<T>::asPtrTyped() -> Ptr<T>
             // MIR wrapper: same as asPtr but returns typed Ptr (i64 at runtime)
-            map_method!(instance "rayzor_concurrent_Arc", "asPtrTyped" => "Arc_asPtr", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "asPtrTyped" => "Arc_asPtr", params: 0, mir_wrapper,
                 types: &[PtrU8] => I64),
             // Arc<T>::asRef() -> Ref<T>
             // MIR wrapper: same as asPtr but returns typed Ref (i64 at runtime)
-            map_method!(instance "rayzor_concurrent_Arc", "asRef" => "Arc_asPtr", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Arc", "asRef" => "Arc_asPtr", params: 0, mir_wrapper,
                 types: &[PtrU8] => I64),
         ];
 
@@ -2296,30 +2361,30 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new Mutex<T>(value: T) -> Mutex<T>
             // MIR wrapper: takes value ptr, returns mutex handle (*u8)
-            map_method!(constructor "rayzor_concurrent_Mutex", "new" => "Mutex_init", params: 1, mir_wrapper,
+            map_method!(constructor "rayzor.concurrent.Mutex", "new" => "Mutex_init", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Mutex::init<T>(value: T) -> Mutex<T> (for backwards compatibility)
-            map_method!(static "rayzor_concurrent_Mutex", "init" => "Mutex_init", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Mutex", "init" => "Mutex_init", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Mutex<T>::lock() -> MutexGuard<T>
             // MIR wrapper: takes mutex handle, returns guard handle (*u8)
-            map_method!(instance "rayzor_concurrent_Mutex", "lock" => "Mutex_lock", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Mutex", "lock" => "Mutex_lock", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Mutex<T>::tryLock() -> Null<MutexGuard<T>>
             // MIR wrapper: takes mutex handle, returns guard handle (or null)
-            map_method!(instance "rayzor_concurrent_Mutex", "tryLock" => "Mutex_tryLock", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Mutex", "tryLock" => "Mutex_tryLock", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Mutex<T>::isLocked() -> Bool
             // MIR wrapper: takes mutex handle, returns bool
-            map_method!(instance "rayzor_concurrent_Mutex", "isLocked" => "Mutex_isLocked", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Mutex", "isLocked" => "Mutex_isLocked", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // MutexGuard<T>::get() -> T
             // MIR wrapper: takes guard handle, returns value ptr
-            map_method!(instance "rayzor_concurrent_MutexGuard", "get" => "MutexGuard_get", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.MutexGuard", "get" => "MutexGuard_get", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // MutexGuard<T>::unlock() -> Void
             // MIR wrapper: takes guard handle
-            map_method!(instance "rayzor_concurrent_MutexGuard", "unlock" => "MutexGuard_unlock", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.MutexGuard", "unlock" => "MutexGuard_unlock", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
@@ -2336,43 +2401,43 @@ impl StdlibMapping {
         let mappings = vec![
             // Future::create<T>(fn: Void->T) -> Future<T>
             // MIR wrapper: takes closure (*u8), returns future handle (*u8)
-            map_method!(static "rayzor_concurrent_Future", "create" => "Future_create", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Future", "create" => "Future_create", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Future<T>::await() -> T
             // MIR wrapper: takes future handle (*u8), returns result (*u8 / i64)
-            map_method!(instance "rayzor_concurrent_Future", "await" => "Future_await", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "await" => "Future_await", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Future<T>::then(callback: T->Void) -> Void
             // MIR wrapper: takes future handle + callback closure
-            map_method!(instance "rayzor_concurrent_Future", "then" => "Future_then", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "then" => "Future_then", params: 1, mir_wrapper,
                 types: &[PtrU8, PtrU8]),
             // Future<T>::poll() -> Null<T>
             // MIR wrapper: takes future handle, returns value or 0
-            map_method!(instance "rayzor_concurrent_Future", "poll" => "Future_poll", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "poll" => "Future_poll", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Future<T>::isReady() -> Bool
             // MIR wrapper: takes future handle, returns bool
-            map_method!(instance "rayzor_concurrent_Future", "isReady" => "Future_isReady", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "isReady" => "Future_isReady", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // Future::join() -> Void
             // MIR wrapper: waits for all outstanding futures/threads
-            map_method!(static "rayzor_concurrent_Future", "join" => "Future_join", params: 0, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Future", "join" => "Future_join", params: 0, mir_wrapper,
                 types: &[]),
             // Future::all(arr: Array<Future<T>>) -> Future<Array<T>>
             // MIR wrapper: spawns all sub-futures in parallel, returns combined future
-            map_method!(static "rayzor_concurrent_Future", "all" => "Future_all", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Future", "all" => "Future_all", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Future.awaitTimeout(millis: Int) -> Null<T>
-            map_method!(instance "rayzor_concurrent_Future", "awaitTimeout" => "Future_awaitTimeout", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "awaitTimeout" => "Future_awaitTimeout", params: 1, mir_wrapper,
                 types: &[PtrU8, I64] => PtrU8),
             // Future.race(futures: Array<Future<T>>) -> Future<T>
-            map_method!(static "rayzor_concurrent_Future", "race" => "Future_race", params: 1, mir_wrapper,
+            map_method!(static "rayzor.concurrent.Future", "race" => "Future_race", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Future.cancel() -> Bool
-            map_method!(instance "rayzor_concurrent_Future", "cancel" => "Future_cancel", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "cancel" => "Future_cancel", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // Future.isCancelled() -> Bool
-            map_method!(instance "rayzor_concurrent_Future", "isCancelled" => "Future_isCancelled", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.concurrent.Future", "isCancelled" => "Future_isCancelled", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
         ];
 
@@ -2388,49 +2453,49 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Socket.new() -> Socket
-            map_method!(constructor "sys_net_Socket", "new" => "sys_net_Socket_new", params: 0, mir_wrapper,
+            map_method!(constructor "sys.net.Socket", "new" => "sys_net_Socket_new", params: 0, mir_wrapper,
                 types: &[] => PtrU8),
             // socket.connect(host: Host, port: Int)
-            map_method!(instance "sys_net_Socket", "connect" => "sys_net_Socket_connect", params: 2, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "connect" => "sys_net_Socket_connect", params: 2, mir_wrapper,
                 types: &[PtrU8, PtrU8, I32]),
             // socket.bind(host: Host, port: Int)
-            map_method!(instance "sys_net_Socket", "bind" => "sys_net_Socket_bind", params: 2, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "bind" => "sys_net_Socket_bind", params: 2, mir_wrapper,
                 types: &[PtrU8, PtrU8, I32]),
             // socket.listen(connections: Int)
-            map_method!(instance "sys_net_Socket", "listen" => "sys_net_Socket_listen", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "listen" => "sys_net_Socket_listen", params: 1, mir_wrapper,
                 types: &[PtrU8, I32]),
             // socket.accept() -> Socket
-            map_method!(instance "sys_net_Socket", "accept" => "sys_net_Socket_accept", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "accept" => "sys_net_Socket_accept", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // socket.close()
-            map_method!(instance "sys_net_Socket", "close" => "sys_net_Socket_close", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "close" => "sys_net_Socket_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
             // socket.read() -> String
-            map_method!(instance "sys_net_Socket", "read" => "sys_net_Socket_read", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "read" => "sys_net_Socket_read", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrString),
             // socket.write(content: String)
-            map_method!(instance "sys_net_Socket", "write" => "sys_net_Socket_write", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "write" => "sys_net_Socket_write", params: 1, mir_wrapper,
                 types: &[PtrU8, PtrString]),
             // socket.shutdown(read: Bool, write: Bool)
-            map_method!(instance "sys_net_Socket", "shutdown" => "sys_net_Socket_shutdown", params: 2, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "shutdown" => "sys_net_Socket_shutdown", params: 2, mir_wrapper,
                 types: &[PtrU8, I32, I32]),
             // socket.setBlocking(b: Bool)
-            map_method!(instance "sys_net_Socket", "setBlocking" => "sys_net_Socket_setBlocking", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "setBlocking" => "sys_net_Socket_setBlocking", params: 1, mir_wrapper,
                 types: &[PtrU8, I32]),
             // socket.setTimeout(timeout: Float)
-            map_method!(instance "sys_net_Socket", "setTimeout" => "sys_net_Socket_setTimeout", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "setTimeout" => "sys_net_Socket_setTimeout", params: 1, mir_wrapper,
                 types: &[PtrU8, F64]),
             // socket.setFastSend(b: Bool)
-            map_method!(instance "sys_net_Socket", "setFastSend" => "sys_net_Socket_setFastSend", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "setFastSend" => "sys_net_Socket_setFastSend", params: 1, mir_wrapper,
                 types: &[PtrU8, I32]),
             // socket.waitForRead()
-            map_method!(instance "sys_net_Socket", "waitForRead" => "sys_net_Socket_waitForRead", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "waitForRead" => "sys_net_Socket_waitForRead", params: 0, mir_wrapper,
                 types: &[PtrU8]),
             // socket.input -> SocketInput (field accessor as 0-param method)
-            map_method!(instance "sys_net_Socket", "input" => "sys_net_Socket_input", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "input" => "sys_net_Socket_input", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // socket.output -> SocketOutput (field accessor as 0-param method)
-            map_method!(instance "sys_net_Socket", "output" => "sys_net_Socket_output", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Socket", "output" => "sys_net_Socket_output", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
         ];
 
@@ -2445,11 +2510,11 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(instance "sys_net_SocketInput", "readByte" => "sys_net_SocketInput_readByte", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.SocketInput", "readByte" => "sys_net_SocketInput_readByte", params: 0, mir_wrapper,
                 types: &[PtrU8] => I32),
-            map_method!(instance "sys_net_SocketInput", "readBytes" => "sys_net_SocketInput_readBytes", params: 3, mir_wrapper,
+            map_method!(instance "sys.net.SocketInput", "readBytes" => "sys_net_SocketInput_readBytes", params: 3, mir_wrapper,
                 types: &[PtrU8, PtrVoid, I32, I32] => I32),
-            map_method!(instance "sys_net_SocketInput", "close" => "sys_net_SocketInput_close", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.SocketInput", "close" => "sys_net_SocketInput_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
@@ -2464,15 +2529,15 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(instance "sys_net_SocketOutput", "writeByte" => "sys_net_SocketOutput_writeByte", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.SocketOutput", "writeByte" => "sys_net_SocketOutput_writeByte", params: 1, mir_wrapper,
                 types: &[PtrU8, I32]),
-            map_method!(instance "sys_net_SocketOutput", "writeBytes" => "sys_net_SocketOutput_writeBytes", params: 3, mir_wrapper,
+            map_method!(instance "sys.net.SocketOutput", "writeBytes" => "sys_net_SocketOutput_writeBytes", params: 3, mir_wrapper,
                 types: &[PtrU8, PtrVoid, I32, I32] => I32),
-            map_method!(instance "sys_net_SocketOutput", "writeString" => "sys_net_SocketOutput_writeString", params: 1, mir_wrapper,
+            map_method!(instance "sys.net.SocketOutput", "writeString" => "sys_net_SocketOutput_writeString", params: 1, mir_wrapper,
                 types: &[PtrU8, PtrString]),
-            map_method!(instance "sys_net_SocketOutput", "flush" => "sys_net_SocketOutput_flush", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.SocketOutput", "flush" => "sys_net_SocketOutput_flush", params: 0, mir_wrapper,
                 types: &[PtrU8]),
-            map_method!(instance "sys_net_SocketOutput", "close" => "sys_net_SocketOutput_close", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.SocketOutput", "close" => "sys_net_SocketOutput_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
@@ -2488,16 +2553,16 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Host.new(name: String) -> Host
-            map_method!(constructor "sys_net_Host", "new" => "sys_net_Host_new", params: 1, mir_wrapper,
+            map_method!(constructor "sys.net.Host", "new" => "sys_net_Host_new", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // host.toString() -> String
-            map_method!(instance "sys_net_Host", "toString" => "sys_net_Host_toString", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Host", "toString" => "sys_net_Host_toString", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // host.reverse() -> String
-            map_method!(instance "sys_net_Host", "reverse" => "sys_net_Host_reverse", params: 0, mir_wrapper,
+            map_method!(instance "sys.net.Host", "reverse" => "sys_net_Host_reverse", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // Host.localhost() -> String
-            map_method!(static "sys_net_Host", "localhost" => "sys_net_Host_localhost", params: 0, mir_wrapper,
+            map_method!(static "sys.net.Host", "localhost" => "sys_net_Host_localhost", params: 0, mir_wrapper,
                 types: &[] => PtrU8),
         ];
 
@@ -2669,26 +2734,26 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new StringMap<T>() -> StringMap<T>
             // Returns pointer directly (primitive return style)
-            map_method!(constructor "StringMap", "new" => "haxe_stringmap_new", params: 0, returns: primitive),
+            map_method!(constructor "haxe.ds.StringMap", "new" => "haxe_stringmap_new", params: 0, returns: primitive),
             // StringMap<T>::set(key: String, value: T) -> Void
             // Args: [self=map_ptr, key=String, value=u64]
             // Value is passed as raw u64 bits (no boxing) - high-performance inline storage
             // The compiler will cast the value to u64 at the call site
-            map_method!(instance "StringMap", "set" => "haxe_stringmap_set", params: 2, returns: void, raw_value_params: 0b100),
+            map_method!(instance "haxe.ds.StringMap", "set" => "haxe_stringmap_set", params: 2, returns: void, raw_value_params: 0b100),
             // StringMap<T>::get(key: String) -> T (as u64)
             // Returns raw u64 bits, compiler casts back to resolved type parameter T
-            map_method!(instance "StringMap", "get" => "haxe_stringmap_get", params: 1, returns: raw_value),
+            map_method!(instance "haxe.ds.StringMap", "get" => "haxe_stringmap_get", params: 1, returns: raw_value),
             // StringMap<T>::exists(key: String) -> Bool
-            map_method!(instance "StringMap", "exists" => "haxe_stringmap_exists", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.StringMap", "exists" => "haxe_stringmap_exists", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => Bool),
             // StringMap<T>::remove(key: String) -> Bool
-            map_method!(instance "StringMap", "remove" => "haxe_stringmap_remove", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.StringMap", "remove" => "haxe_stringmap_remove", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => Bool),
             // StringMap<T>::clear() -> Void
-            map_method!(instance "StringMap", "clear" => "haxe_stringmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.StringMap", "clear" => "haxe_stringmap_clear", params: 0, returns: void),
             // StringMap<T>::toString() -> String
             // Returns pointer directly
-            map_method!(instance "StringMap", "toString" => "haxe_stringmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.StringMap", "toString" => "haxe_stringmap_to_string", params: 0, returns: primitive),
         ];
 
         self.register_from_tuples(mappings);
@@ -2710,27 +2775,27 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new IntMap<T>() -> IntMap<T>
             // Returns pointer directly (primitive return style)
-            map_method!(constructor "IntMap", "new" => "haxe_intmap_new", params: 0, returns: primitive),
+            map_method!(constructor "haxe.ds.IntMap", "new" => "haxe_intmap_new", params: 0, returns: primitive),
             // IntMap<T>::set(key: Int, value: T) -> Void
             // Args: [self=map_ptr, key=i64(extended), value=u64(raw)]
             // Key is extended from i32 to i64, value is passed as raw u64 bits
-            map_method!(instance "IntMap", "set" => "haxe_intmap_set", params: 2, returns: void, raw_value_params: 0b100, extend_i64: 0b010),
+            map_method!(instance "haxe.ds.IntMap", "set" => "haxe_intmap_set", params: 2, returns: void, raw_value_params: 0b100, extend_i64: 0b010),
             // IntMap<T>::get(key: Int) -> T (as u64)
             // Key is extended from i32 to i64, returns raw u64 bits for type parameter T
-            map_method!(instance "IntMap", "get" => "haxe_intmap_get", params: 1, returns: raw_value, extend_i64: 0b010),
+            map_method!(instance "haxe.ds.IntMap", "get" => "haxe_intmap_get", params: 1, returns: raw_value, extend_i64: 0b010),
             // IntMap<T>::exists(key: Int) -> Bool
             // Key is extended from i32 to i64
-            map_method!(instance "IntMap", "exists" => "haxe_intmap_exists", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.IntMap", "exists" => "haxe_intmap_exists", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
             // IntMap<T>::remove(key: Int) -> Bool
             // Key is extended from i32 to i64
-            map_method!(instance "IntMap", "remove" => "haxe_intmap_remove", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.IntMap", "remove" => "haxe_intmap_remove", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
             // IntMap<T>::clear() -> Void
-            map_method!(instance "IntMap", "clear" => "haxe_intmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.IntMap", "clear" => "haxe_intmap_clear", params: 0, returns: void),
             // IntMap<T>::toString() -> String
             // Returns pointer directly
-            map_method!(instance "IntMap", "toString" => "haxe_intmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.IntMap", "toString" => "haxe_intmap_to_string", params: 0, returns: primitive),
         ];
 
         self.register_from_tuples(mappings);
@@ -2743,24 +2808,24 @@ impl StdlibMapping {
         // - 2: value (T, needs raw u64 conversion for set)
         let mappings = vec![
             // Constructor: new ObjectMap<K,V>() -> ObjectMap<K,V>
-            map_method!(constructor "ObjectMap", "new" => "haxe_objectmap_new", params: 0, returns: primitive),
+            map_method!(constructor "haxe.ds.ObjectMap", "new" => "haxe_objectmap_new", params: 0, returns: primitive),
             // ObjectMap<K,V>::set(key: K, value: V) -> Void
             // Only value (param 2) needs raw u64 conversion; key pointer is already 64-bit
-            map_method!(instance "ObjectMap", "set" => "haxe_objectmap_set", params: 2, returns: void, raw_value_params: 0b100),
+            map_method!(instance "haxe.ds.ObjectMap", "set" => "haxe_objectmap_set", params: 2, returns: void, raw_value_params: 0b100),
             // ObjectMap<K,V>::get(key: K) -> V (as u64)
-            map_method!(instance "ObjectMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
+            map_method!(instance "haxe.ds.ObjectMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
             // ObjectMap<K,V>::exists(key: K) -> Bool
-            map_method!(instance "ObjectMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.ObjectMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
             // ObjectMap<K,V>::remove(key: K) -> Bool
-            map_method!(instance "ObjectMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.ObjectMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
             // ObjectMap<K,V>::clear() -> Void
-            map_method!(instance "ObjectMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.ObjectMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
             // ObjectMap<K,V>::toString() -> String
-            map_method!(instance "ObjectMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.ObjectMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
             // ObjectMap<K,V>::copy() -> ObjectMap<K,V>
-            map_method!(instance "ObjectMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.ObjectMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
         ];
 
         self.register_from_tuples(mappings);
@@ -2835,216 +2900,167 @@ impl StdlibMapping {
         let mappings = vec![
             // Static methods
             // rayzor.Bytes.alloc(size: Int): Bytes
-            map_method!(static "rayzor_Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
+            map_method!(static "rayzor.Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             // rayzor.Bytes.ofString(s: String): Bytes
-            map_method!(static "rayzor_Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
+            map_method!(static "rayzor.Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
             // Property accessor
             // bytes.length: Int
-            map_method!(instance "rayzor_Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
             // bytes.free(): Void — release the backing buffer
-            map_method!(instance "rayzor_Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
+            map_method!(instance "rayzor.Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid]),
             // Instance methods
             // bytes.get(pos: Int): Int
-            map_method!(instance "rayzor_Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // bytes.set(pos: Int, value: Int): Void
-            map_method!(instance "rayzor_Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.sub(pos: Int, len: Int): Bytes
-            map_method!(instance "rayzor_Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             // bytes.subU64(posLo: Int, posHi: Int, len: Int): Bytes — view past 2 GiB
-            map_method!(instance "rayzor_Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             // bytes.subWithBase(base, offLo, offHi, len): Bytes — base + u64-offset view
-            map_method!(instance "rayzor_Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             // bytes.blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
-            map_method!(instance "rayzor_Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
+            map_method!(instance "rayzor.Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.fill(pos: Int, len: Int, value: Int): Void
-            map_method!(instance "rayzor_Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
+            map_method!(instance "rayzor.Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.compare(other: Bytes): Int
-            map_method!(instance "rayzor_Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
             // bytes.toString(): String
-            map_method!(instance "rayzor_Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
             // Integer getters (little-endian)
             // bytes.getInt16(pos: Int): Int
-            map_method!(instance "rayzor_Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // bytes.getInt32(pos: Int): Int
-            map_method!(instance "rayzor_Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // bytes.getInt64(pos: Int): Int64
-            map_method!(instance "rayzor_Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
             // bytes.address(): Usize — raw base address of the buffer (guest-resident
             // on wasm too), so a Haxe SIMD kernel can SIMD16i8.load straight from a Bytes.
-            map_method!(instance "rayzor_Bytes", "address" => "haxe_bytes_data_address", params: 0, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "address" => "haxe_bytes_data_address", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I64),
             // Float getters (little-endian)
             // bytes.getFloat(pos: Int): Float
-            map_method!(instance "rayzor_Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             // bytes.getDouble(pos: Int): Float
-            map_method!(instance "rayzor_Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
+            map_method!(instance "rayzor.Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             // Integer setters (little-endian)
             // bytes.setInt16(pos: Int, value: Int): Void
-            map_method!(instance "rayzor_Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.setInt32(pos: Int, value: Int): Void
-            map_method!(instance "rayzor_Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // bytes.loadI32AlignedUnchecked(pos: Int): Int
-            map_method!(instance "rayzor_Bytes", "loadI32AlignedUnchecked" => "rayzor_bytes_load_i32_aligned_unchecked", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Bytes", "loadI32AlignedUnchecked" => "rayzor_bytes_load_i32_aligned_unchecked", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
             // bytes.storeI32AlignedUnchecked(pos: Int, value: Int): Void
-            map_method!(instance "rayzor_Bytes", "storeI32AlignedUnchecked" => "rayzor_bytes_store_i32_aligned_unchecked", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.Bytes", "storeI32AlignedUnchecked" => "rayzor_bytes_store_i32_aligned_unchecked", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             // Mem.* — address-based unchecked loads/stores (raw Usize base
             // only scalar f32 access reachable from Haxe (Float is f64).
-            map_method!(static "rayzor_Mem", "loadF32" => "rayzor_mem_load_f32", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Mem", "loadF32" => "rayzor_mem_load_f32", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::F64),
-            map_method!(static "rayzor_Mem", "storeF32" => "rayzor_mem_store_f32", params: 2, mir_wrapper,
+            map_method!(static "rayzor.Mem", "storeF32" => "rayzor_mem_store_f32", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::F64]),
-            map_method!(static "rayzor_Mem", "loadF64" => "rayzor_mem_load_f64", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Mem", "loadF64" => "rayzor_mem_load_f64", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::F64),
-            map_method!(static "rayzor_Mem", "storeF64" => "rayzor_mem_store_f64", params: 2, mir_wrapper,
+            map_method!(static "rayzor.Mem", "storeF64" => "rayzor_mem_store_f64", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::F64]),
-            map_method!(static "rayzor_Mem", "loadU8" => "rayzor_mem_load_u8", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Mem", "loadU8" => "rayzor_mem_load_u8", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::I32),
-            map_method!(static "rayzor_Mem", "storeU8" => "rayzor_mem_store_u8", params: 2, mir_wrapper,
+            map_method!(static "rayzor.Mem", "storeU8" => "rayzor_mem_store_u8", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
-            map_method!(static "rayzor_Mem", "loadI32" => "rayzor_mem_load_i32", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Mem", "loadI32" => "rayzor_mem_load_i32", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I64] => IrTypeDescriptor::I32),
-            map_method!(static "rayzor_Mem", "storeI32" => "rayzor_mem_store_i32", params: 2, mir_wrapper,
+            map_method!(static "rayzor.Mem", "storeI32" => "rayzor_mem_store_i32", params: 2, mir_wrapper,
                 types: &[IrTypeDescriptor::I64, IrTypeDescriptor::I32]),
-            map_method!(static "rayzor_Mem", "f32FromBits" => "rayzor_mem_f32_from_bits", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Mem", "f32FromBits" => "rayzor_mem_f32_from_bits", params: 1, mir_wrapper,
                 types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             // Plain extern (NOT mir_wrapper): the LLVM backend replaces the
             // symbol with an llvm.prefetch wrapper; other tiers hit the
             // runtime no-op.
-            map_method!(static "rayzor_Mem", "prefetch" => "rayzor_mem_prefetch", params: 1, returns: void,
+            map_method!(static "rayzor.Mem", "prefetch" => "rayzor_mem_prefetch", params: 1, returns: void,
                 types: &[IrTypeDescriptor::I64]),
             // Mem.releaseFreePages(goalKb): Int — hand the allocator's free
             // regions back to the OS. Phase-scoped, never per token.
-            map_method!(static "rayzor_Mem", "releaseFreePages" => "rayzor_mem_release_free_pages", params: 1, returns: void,
+            map_method!(static "rayzor.Mem", "releaseFreePages" => "rayzor_mem_release_free_pages", params: 1, returns: void,
                 types: &[IrTypeDescriptor::I32]),
             // bytes.setInt64(pos: Int, value: Int64): Void
-            map_method!(instance "rayzor_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
             // Float setters (little-endian)
             // bytes.setFloat(pos: Int, value: Float): Void
-            map_method!(instance "rayzor_Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F32]),
             // bytes.setDouble(pos: Int, value: Float): Void
-            map_method!(instance "rayzor_Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
+            map_method!(instance "rayzor.Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F64]),
             // ==== haxe.io.Bytes (typedef to rayzor.Bytes) ====
             // When haxe.io.Bytes is used as a typedef, the type resolves to "haxe_io_Bytes"
             // so we need to map those as well. All point to the same runtime functions.
-            map_method!(static "haxe_io_Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
+            map_method!(static "haxe.io.Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(static "haxe_io_Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
+            map_method!(static "haxe.io.Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe_io_Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe_io_Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
+            map_method!(instance "haxe.io.Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid]),
-            map_method!(instance "haxe_io_Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe_io_Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe_io_Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe_io_Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe_io_Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "haxe_io_Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
+            map_method!(instance "haxe.io.Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe_io_Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
+            map_method!(instance "haxe.io.Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe_io_Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe_io_Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
-            map_method!(instance "haxe_io_Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe_io_Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "haxe_io_Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
-            map_method!(instance "haxe_io_Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "haxe_io_Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
+            map_method!(instance "haxe.io.Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "haxe_io_Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe_io_Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "haxe_io_Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
-            map_method!(instance "haxe_io_Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F32]),
-            map_method!(instance "haxe_io_Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F64]),
-            // ==== Simple "Bytes" class name (fallback when qualified_name isn't available) ====
-            // The symbol table may not always have the fully qualified name (rayzor_Bytes),
-            // so we need to support lookup by simple class name "Bytes" as well.
-            map_method!(static "Bytes", "alloc" => "haxe_bytes_alloc", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(static "Bytes", "ofString" => "haxe_bytes_of_string", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrString] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "Bytes", "length" => "haxe_bytes_length", params: 0, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "Bytes", "free" => "haxe_bytes_free", params: 0, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid]),
-            map_method!(instance "Bytes", "get" => "haxe_bytes_get", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "Bytes", "set" => "haxe_bytes_set", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
-            map_method!(instance "Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "Bytes", "compare" => "haxe_bytes_compare", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::I32),
-            map_method!(instance "Bytes", "toString" => "haxe_bytes_to_string", params: 0, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid] => IrTypeDescriptor::PtrString),
-            map_method!(instance "Bytes", "getInt16" => "haxe_bytes_get_int16", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "Bytes", "getInt32" => "haxe_bytes_get_int32", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I32),
-            map_method!(instance "Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
-            map_method!(instance "Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
-            map_method!(instance "Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "Bytes", "setInt32" => "haxe_bytes_set_int32", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
-            map_method!(instance "Bytes", "setInt64" => "haxe_bytes_set_int64", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
-            map_method!(instance "Bytes", "setFloat" => "haxe_bytes_set_float", params: 2, returns: void,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F32]),
-            map_method!(instance "Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
+            map_method!(instance "haxe.io.Bytes", "setDouble" => "haxe_bytes_set_double", params: 2, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::F64]),
         ];
 
@@ -3064,32 +3080,32 @@ impl StdlibMapping {
         let mappings = vec![
             // sys.thread.Thread.create(job: Void->Void) -> Thread
             // Uses Thread_spawn wrapper which extracts fn_ptr and env_ptr from closure object
-            map_method!(static "sys_thread_Thread", "create" => "Thread_spawn", params: 1, mir_wrapper,
+            map_method!(static "sys.thread.Thread", "create" => "Thread_spawn", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
             // sys.thread.Thread.current() -> Thread
-            map_method!(static "sys_thread_Thread", "current" => "sys_thread_current", params: 0, returns: complex,
+            map_method!(static "sys.thread.Thread", "current" => "sys_thread_current", params: 0, returns: complex,
                 types: &[] => PtrU8),
             // sys.thread.Thread.readMessage(block: Bool) -> Dynamic
             // Note: Message passing uses channels internally
-            map_method!(static "sys_thread_Thread", "readMessage" => "sys_thread_read_message", params: 1, returns: complex,
+            map_method!(static "sys.thread.Thread", "readMessage" => "sys_thread_read_message", params: 1, returns: complex,
                 types: &[Bool] => PtrU8),
             // thread.sendMessage(msg: Dynamic) -> Void
-            map_method!(instance "sys_thread_Thread", "sendMessage" => "sys_thread_send_message", params: 1, returns: void,
+            map_method!(instance "sys.thread.Thread", "sendMessage" => "sys_thread_send_message", params: 1, returns: void,
                 types: &[PtrU8, PtrU8]),
             // thread.isFinished() -> Bool
-            map_method!(instance "sys_thread_Thread", "isFinished" => "sys_thread_is_finished", params: 0, returns: primitive,
+            map_method!(instance "sys.thread.Thread", "isFinished" => "sys_thread_is_finished", params: 0, returns: primitive,
                 types: &[PtrU8] => Bool),
             // thread.join() -> Void
-            map_method!(instance "sys_thread_Thread", "join" => "sys_thread_join", params: 0, returns: void,
+            map_method!(instance "sys.thread.Thread", "join" => "sys_thread_join", params: 0, returns: void,
                 types: &[PtrU8]),
             // Thread.yield() -> Void
-            map_method!(static "sys_thread_Thread", "yield" => "sys_thread_yield", params: 0, returns: void,
+            map_method!(static "sys.thread.Thread", "yield" => "sys_thread_yield", params: 0, returns: void,
                 types: &[]),
             // Thread.sleep(seconds: Float) -> Void
-            map_method!(static "sys_thread_Thread", "sleep" => "sys_thread_sleep", params: 1, returns: void,
+            map_method!(static "sys.thread.Thread", "sleep" => "sys_thread_sleep", params: 1, returns: void,
                 types: &[F64]),
             // Thread.currentId() -> Int
-            map_method!(static "sys_thread_Thread", "currentId" => "rayzor_thread_current_id", params: 0, returns: primitive,
+            map_method!(static "sys.thread.Thread", "currentId" => "rayzor_thread_current_id", params: 0, returns: primitive,
                 types: &[] => I64),
         ];
 
@@ -3109,25 +3125,25 @@ impl StdlibMapping {
         let mappings = vec![
             // -- sys.thread.Tls<T> -- Thread-Local Storage --
             // Tls<T>() -> Tls<T>: allocate a fresh thread-local slot id
-            map_method!(constructor "sys_thread_Tls", "new" => "sys_tls_new", params: 0, returns: primitive,
+            map_method!(constructor "sys.thread.Tls", "new" => "sys_tls_new", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // tls.get_value() -> T: read this thread's value (null if unset)
-            map_method!(instance "sys_thread_Tls", "get_value" => "sys_tls_get_value", params: 0, returns: primitive,
+            map_method!(instance "sys.thread.Tls", "get_value" => "sys_tls_get_value", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // tls.set_value(v): write this thread's value
-            map_method!(instance "sys_thread_Tls", "set_value" => "sys_tls_set_value", params: 1, returns: void,
+            map_method!(instance "sys.thread.Tls", "set_value" => "sys_tls_set_value", params: 1, returns: void,
                 types: &[PtrU8, PtrU8]),
             // Constructor: new Mutex() -> Mutex
-            map_method!(constructor "sys_thread_Mutex", "new" => "sys_mutex_alloc", params: 0, returns: primitive,
+            map_method!(constructor "sys.thread.Mutex", "new" => "sys_mutex_alloc", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // mutex.acquire() -> Void (blocking)
-            map_method!(instance "sys_thread_Mutex", "acquire" => "sys_mutex_acquire", params: 0, returns: void,
+            map_method!(instance "sys.thread.Mutex", "acquire" => "sys_mutex_acquire", params: 0, returns: void,
                 types: &[PtrU8]),
             // mutex.tryAcquire() -> Bool
-            map_method!(instance "sys_thread_Mutex", "tryAcquire" => "sys_mutex_try_acquire", params: 0, returns: primitive,
+            map_method!(instance "sys.thread.Mutex", "tryAcquire" => "sys_mutex_try_acquire", params: 0, returns: primitive,
                 types: &[PtrU8] => Bool),
             // mutex.release() -> Void
-            map_method!(instance "sys_thread_Mutex", "release" => "sys_mutex_release", params: 0, returns: void,
+            map_method!(instance "sys.thread.Mutex", "release" => "sys_mutex_release", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -3149,19 +3165,19 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new Lock() -> Lock
             // MIR wrapper: creates semaphore with initial value 0, returns handle
-            map_method!(constructor "sys_thread_Lock", "new" => "Lock_init", params: 0, mir_wrapper,
+            map_method!(constructor "sys.thread.Lock", "new" => "Lock_init", params: 0, mir_wrapper,
                 types: &[] => PtrU8),
             // lock.wait() -> Bool (no timeout, blocks indefinitely until released)
             // MIR wrapper: takes handle, always returns true
-            map_method!(instance "sys_thread_Lock", "wait" => "Lock_wait", params: 0, mir_wrapper,
+            map_method!(instance "sys.thread.Lock", "wait" => "Lock_wait", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // lock.wait(timeout: Float) -> Bool (with timeout)
             // MIR wrapper: takes handle + timeout (f64), returns true if acquired
-            map_method!(instance "sys_thread_Lock", "wait" => "Lock_wait_timeout", params: 1, mir_wrapper,
+            map_method!(instance "sys.thread.Lock", "wait" => "Lock_wait_timeout", params: 1, mir_wrapper,
                 types: &[PtrU8, F64] => Bool),
             // lock.release() -> Void
             // Direct extern call: takes handle
-            map_method!(instance "sys_thread_Lock", "release" => "rayzor_semaphore_release", params: 0, returns: void,
+            map_method!(instance "sys.thread.Lock", "release" => "rayzor_semaphore_release", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -3180,23 +3196,23 @@ impl StdlibMapping {
         let mappings = vec![
             // Constructor: new Semaphore(value: Int) -> Semaphore
             // Direct extern: takes initial count (i32), returns handle
-            map_method!(constructor "sys_thread_Semaphore", "new" => "rayzor_semaphore_init", params: 1, returns: primitive,
+            map_method!(constructor "sys.thread.Semaphore", "new" => "rayzor_semaphore_init", params: 1, returns: primitive,
                 types: &[I32] => PtrU8),
             // semaphore.acquire() -> Void
             // Direct extern: takes handle, blocks until acquired
-            map_method!(instance "sys_thread_Semaphore", "acquire" => "rayzor_semaphore_acquire", params: 0, returns: void,
+            map_method!(instance "sys.thread.Semaphore", "acquire" => "rayzor_semaphore_acquire", params: 0, returns: void,
                 types: &[PtrU8]),
             // semaphore.tryAcquire() -> Bool (non-blocking, no timeout)
             // MIR wrapper: takes handle, returns true if acquired
-            map_method!(instance "sys_thread_Semaphore", "tryAcquire" => "Semaphore_tryAcquire", params: 0, mir_wrapper,
+            map_method!(instance "sys.thread.Semaphore", "tryAcquire" => "Semaphore_tryAcquire", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
             // semaphore.tryAcquire(timeout: Float) -> Bool (with timeout)
             // MIR wrapper: takes handle + timeout (f64), returns true if acquired
-            map_method!(instance "sys_thread_Semaphore", "tryAcquire" => "Semaphore_tryAcquire_timeout", params: 1, mir_wrapper,
+            map_method!(instance "sys.thread.Semaphore", "tryAcquire" => "Semaphore_tryAcquire_timeout", params: 1, mir_wrapper,
                 types: &[PtrU8, F64] => Bool),
             // semaphore.release() -> Void
             // Direct extern: takes handle
-            map_method!(instance "sys_thread_Semaphore", "release" => "rayzor_semaphore_release", params: 0, returns: void,
+            map_method!(instance "sys.thread.Semaphore", "release" => "rayzor_semaphore_release", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -3208,18 +3224,18 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Deque<T>() -> Deque<T>
-            map_method!(constructor "sys_thread_Deque", "new" => "sys_deque_alloc", params: 0, returns: primitive,
+            map_method!(constructor "sys.thread.Deque", "new" => "sys_deque_alloc", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // deque.add(item: T) -> Void
             // param 0 = self, param 1 = item (needs boxing for generic type T)
             // ptr_params: 0b10 = 2 means param index 1 needs ptr conversion (boxing)
-            map_method!(instance "sys_thread_Deque", "add" => "sys_deque_add", params: 1, returns: void, ptr_params: 2),
+            map_method!(instance "sys.thread.Deque", "add" => "sys_deque_add", params: 1, returns: void, ptr_params: 2),
             // deque.push(item: T) -> Void
             // Same as add - param 1 needs boxing
-            map_method!(instance "sys_thread_Deque", "push" => "sys_deque_push", params: 1, returns: void, ptr_params: 2),
+            map_method!(instance "sys.thread.Deque", "push" => "sys_deque_push", params: 1, returns: void, ptr_params: 2),
             // deque.pop(block: Bool) -> Null<T>
             // Returns boxed DynamicValue* which trace() can handle
-            map_method!(instance "sys_thread_Deque", "pop" => "sys_deque_pop", params: 1, returns: primitive,
+            map_method!(instance "sys.thread.Deque", "pop" => "sys_deque_pop", params: 1, returns: primitive,
                 types: &[PtrU8, Bool] => PtrU8),
         ];
 
@@ -3231,25 +3247,25 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Condition() -> Condition
-            map_method!(constructor "sys_thread_Condition", "new" => "sys_condition_alloc", params: 0, returns: primitive,
+            map_method!(constructor "sys.thread.Condition", "new" => "sys_condition_alloc", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // condition.acquire() -> Void
-            map_method!(instance "sys_thread_Condition", "acquire" => "sys_condition_acquire", params: 0, returns: void,
+            map_method!(instance "sys.thread.Condition", "acquire" => "sys_condition_acquire", params: 0, returns: void,
                 types: &[PtrU8]),
             // condition.tryAcquire() -> Bool
-            map_method!(instance "sys_thread_Condition", "tryAcquire" => "sys_condition_try_acquire", params: 0, returns: primitive,
+            map_method!(instance "sys.thread.Condition", "tryAcquire" => "sys_condition_try_acquire", params: 0, returns: primitive,
                 types: &[PtrU8] => Bool),
             // condition.release() -> Void
-            map_method!(instance "sys_thread_Condition", "release" => "sys_condition_release", params: 0, returns: void,
+            map_method!(instance "sys.thread.Condition", "release" => "sys_condition_release", params: 0, returns: void,
                 types: &[PtrU8]),
             // condition.wait() -> Void
-            map_method!(instance "sys_thread_Condition", "wait" => "sys_condition_wait", params: 0, returns: void,
+            map_method!(instance "sys.thread.Condition", "wait" => "sys_condition_wait", params: 0, returns: void,
                 types: &[PtrU8]),
             // condition.signal() -> Void
-            map_method!(instance "sys_thread_Condition", "signal" => "sys_condition_signal", params: 0, returns: void,
+            map_method!(instance "sys.thread.Condition", "signal" => "sys_condition_signal", params: 0, returns: void,
                 types: &[PtrU8]),
             // condition.broadcast() -> Void
-            map_method!(instance "sys_thread_Condition", "broadcast" => "sys_condition_broadcast", params: 0, returns: void,
+            map_method!(instance "sys.thread.Condition", "broadcast" => "sys_condition_broadcast", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -3324,22 +3340,22 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Box.init<T>(value: T): Box<T>  (static, allocates on heap)
-            map_method!(static "rayzor_Box", "init" => "Box_init", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Box", "init" => "Box_init", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // box.unbox(): T  (instance, reads value from heap)
-            map_method!(instance "rayzor_Box", "unbox" => "Box_unbox", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Box", "unbox" => "Box_unbox", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // box.asPtr(): Ptr<T>  (instance, identity — box IS the pointer)
-            map_method!(instance "rayzor_Box", "asPtr" => "Box_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Box", "asPtr" => "Box_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // box.asRef(): Ref<T>  (instance, identity — box IS the pointer)
-            map_method!(instance "rayzor_Box", "asRef" => "Box_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Box", "asRef" => "Box_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // box.raw(): Int  (instance, identity — returns heap address)
-            map_method!(instance "rayzor_Box", "raw" => "Box_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Box", "raw" => "Box_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // box.free(): Void  (instance, deallocates)
-            map_method!(instance "rayzor_Box", "free" => "Box_free", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Box", "free" => "Box_free", params: 0, mir_wrapper,
                 types: &[I64]),
         ];
 
@@ -3358,43 +3374,43 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Ptr.fromRaw<T>(address: Int): Ptr<T>  (static, identity cast)
-            map_method!(static "rayzor_Ptr", "fromRaw" => "Ptr_fromRaw", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Ptr", "fromRaw" => "Ptr_fromRaw", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // ptr.raw(): Int  (instance, identity cast)
-            map_method!(instance "rayzor_Ptr", "raw" => "Ptr_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "raw" => "Ptr_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // ptr.deref(): T  (instance, load from address)
-            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // ptr.write(value: T): Void  (instance, store to address)
-            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write", params: 1, mir_wrapper,
                 types: &[I64, I64]),
             // ptr.offset(n: Int): Ptr<T>  (instance, pointer arithmetic)
-            map_method!(instance "rayzor_Ptr", "offset" => "Ptr_offset", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "offset" => "Ptr_offset", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // ptr.isNull(): Bool  (instance, compare to 0)
-            map_method!(instance "rayzor_Ptr", "isNull" => "Ptr_isNull", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "isNull" => "Ptr_isNull", params: 0, mir_wrapper,
                 types: &[I64] => Bool),
             // Size-typed Ptr wrappers (L3). Selected at the call site by pointee
             // size (see hir_to_mir). Registered only so get_function_signature()
             // resolves param/return widths for these runtime names; find_by_name
             // still returns the default "offset"/"deref"/"write" row first, so an
             // un-redirected call stays byte-identical.
-            map_method!(instance "rayzor_Ptr", "offset" => "Ptr_offset_4", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "offset" => "Ptr_offset_4", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
-            map_method!(instance "rayzor_Ptr", "offset" => "Ptr_offset_1", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "offset" => "Ptr_offset_1", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
-            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_4", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_4", params: 0, mir_wrapper,
                 types: &[I64] => I32),
-            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_4f", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_4f", params: 0, mir_wrapper,
                 types: &[I64] => F32),
-            map_method!(instance "rayzor_Ptr", "deref" => "Ptr_deref_1", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "deref" => "Ptr_deref_1", params: 0, mir_wrapper,
                 types: &[I64] => U8),
-            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_4", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_4", params: 1, mir_wrapper,
                 types: &[I64, I32]),
-            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_4f", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_4f", params: 1, mir_wrapper,
                 types: &[I64, F32]),
-            map_method!(instance "rayzor_Ptr", "write" => "Ptr_write_1", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Ptr", "write" => "Ptr_write_1", params: 1, mir_wrapper,
                 types: &[I64, U8]),
         ];
 
@@ -3410,13 +3426,13 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Ref.fromRaw<T>(address: Int): Ref<T>  (static, identity cast)
-            map_method!(static "rayzor_Ref", "fromRaw" => "Ref_fromRaw", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Ref", "fromRaw" => "Ref_fromRaw", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // ref.raw(): Int  (instance, identity cast)
-            map_method!(instance "rayzor_Ref", "raw" => "Ref_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ref", "raw" => "Ref_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // ref.deref(): T  (instance, load from address)
-            map_method!(instance "rayzor_Ref", "deref" => "Ref_deref", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Ref", "deref" => "Ref_deref", params: 0, mir_wrapper,
                 types: &[I64] => I64),
         ];
 
@@ -3435,46 +3451,46 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Usize.fromInt(value: Int): Usize  (static, identity)
-            map_method!(static "rayzor_Usize", "fromInt" => "Usize_fromInt", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Usize", "fromInt" => "Usize_fromInt", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // usize.toInt(): Int  (instance, identity)
-            map_method!(instance "rayzor_Usize", "toInt" => "Usize_toInt", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "toInt" => "Usize_toInt", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // Usize.fromPtr<T>(ptr: Ptr<T>): Usize  (static, identity)
-            map_method!(static "rayzor_Usize", "fromPtr" => "Usize_fromInt", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Usize", "fromPtr" => "Usize_fromInt", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // Usize.fromRef<T>(ref: Ref<T>): Usize  (static, identity)
-            map_method!(static "rayzor_Usize", "fromRef" => "Usize_fromInt", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Usize", "fromRef" => "Usize_fromInt", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // usize.toPtr<T>(): Ptr<T>  (instance, identity)
-            map_method!(instance "rayzor_Usize", "toPtr" => "Usize_toInt", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "toPtr" => "Usize_toInt", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // usize.toRef<T>(): Ref<T>  (instance, identity)
-            map_method!(instance "rayzor_Usize", "toRef" => "Usize_toInt", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "toRef" => "Usize_toInt", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // usize.add(other: Usize): Usize  (instance, native add)
-            map_method!(instance "rayzor_Usize", "add" => "Usize_add", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "add" => "Usize_add", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.sub(other: Usize): Usize  (instance, native sub)
-            map_method!(instance "rayzor_Usize", "sub" => "Usize_sub", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "sub" => "Usize_sub", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.band(other: Usize): Usize  (instance, native AND)
-            map_method!(instance "rayzor_Usize", "band" => "Usize_band", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "band" => "Usize_band", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.bor(other: Usize): Usize  (instance, native OR)
-            map_method!(instance "rayzor_Usize", "bor" => "Usize_bor", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "bor" => "Usize_bor", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.shl(bits: Int): Usize  (instance, native shift left)
-            map_method!(instance "rayzor_Usize", "shl" => "Usize_shl", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "shl" => "Usize_shl", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.shr(bits: Int): Usize  (instance, native shift right unsigned)
-            map_method!(instance "rayzor_Usize", "shr" => "Usize_shr", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "shr" => "Usize_shr", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.alignUp(alignment: Usize): Usize  (instance, (self + align - 1) & ~(align - 1))
-            map_method!(instance "rayzor_Usize", "alignUp" => "Usize_alignUp", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "alignUp" => "Usize_alignUp", params: 1, mir_wrapper,
                 types: &[I64, I64] => I64),
             // usize.isZero(): Bool  (instance, compare to 0)
-            map_method!(instance "rayzor_Usize", "isZero" => "Usize_isZero", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Usize", "isZero" => "Usize_isZero", params: 0, mir_wrapper,
                 types: &[I64] => Bool),
         ];
 
@@ -3490,19 +3506,19 @@ impl StdlibMapping {
 
         let mappings = vec![
             // CString.from(s: String): CString  (static, copies String to null-terminated buffer)
-            map_method!(static "rayzor_CString", "from" => "rayzor_cstring_from", params: 1, returns: primitive,
+            map_method!(static "rayzor.CString", "from" => "rayzor_cstring_from", params: 1, returns: primitive,
                 types: &[PtrString] => I64),
             // cstring.toHaxeString(): String  (instance, creates HaxeString from null-terminated buffer)
-            map_method!(instance "rayzor_CString", "toHaxeString" => "rayzor_cstring_to_string", params: 0, returns: primitive,
+            map_method!(instance "rayzor.CString", "toHaxeString" => "rayzor_cstring_to_string", params: 0, returns: primitive,
                 types: &[I64] => PtrString),
             // cstring.raw(): Int  (instance, identity — CString IS the raw address)
-            map_method!(instance "rayzor_CString", "raw" => "CString_raw", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.CString", "raw" => "CString_raw", params: 0, mir_wrapper,
                 types: &[I64] => I64),
             // CString.fromRaw(addr: Int): CString  (static, identity cast)
-            map_method!(static "rayzor_CString", "from_raw" => "CString_fromRaw", params: 1, mir_wrapper,
+            map_method!(static "rayzor.CString", "from_raw" => "CString_fromRaw", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // cstring.free(): Void  (instance, frees the buffer)
-            map_method!(instance "rayzor_CString", "free" => "rayzor_cstring_free", params: 0, returns: void,
+            map_method!(instance "rayzor.CString", "free" => "rayzor_cstring_free", params: 0, returns: void,
                 types: &[I64]),
         ];
 
@@ -3522,75 +3538,75 @@ impl StdlibMapping {
 
         let mappings = vec![
             // SIMD4f.splat(v: Float): SIMD4f  (static, broadcast scalar to all lanes)
-            map_method!(static "rayzor_SIMD4f", "splat" => "SIMD4f_splat", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD4f", "splat" => "SIMD4f_splat", params: 1, mir_wrapper,
                 types: &[F32] => VecF32x4),
             // SIMD4f.make(x, y, z, w): SIMD4f  (static, construct from 4 scalars)
-            map_method!(static "rayzor_SIMD4f", "make" => "SIMD4f_make", params: 4, mir_wrapper,
+            map_method!(static "rayzor.SIMD4f", "make" => "SIMD4f_make", params: 4, mir_wrapper,
                 types: &[F32, F32, F32, F32] => VecF32x4),
             // SIMD4f.load(ptr): SIMD4f  (static, load 4 contiguous f32)
-            map_method!(static "rayzor_SIMD4f", "load" => "SIMD4f_load", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD4f", "load" => "SIMD4f_load", params: 1, mir_wrapper,
                 types: &[I64] => VecF32x4),
             // simd.store(ptr): Void  (instance, store 4 f32 to memory)
-            map_method!(instance "rayzor_SIMD4f", "store" => "SIMD4f_store", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "store" => "SIMD4f_store", params: 1, mir_wrapper,
                 types: &[VecF32x4, I64]),
             // simd.get(lane): Float  (instance, @:arrayAccess read — returns f64 to match Haxe Float)
-            map_method!(instance "rayzor_SIMD4f", "get" => "SIMD4f_extract", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "get" => "SIMD4f_extract", params: 1, mir_wrapper,
                 types: &[VecF32x4, I32] => F64),
             // simd.set(lane, value): SIMD4f  (instance, @:arrayAccess write)
-            map_method!(instance "rayzor_SIMD4f", "set" => "SIMD4f_insert", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "set" => "SIMD4f_insert", params: 2, mir_wrapper,
                 types: &[VecF32x4, I32, F32] => VecF32x4),
             // simd.sum(): Float  (instance, horizontal sum — returns f64 to match Haxe Float)
-            map_method!(instance "rayzor_SIMD4f", "sum" => "SIMD4f_sum", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "sum" => "SIMD4f_sum", params: 0, mir_wrapper,
                 types: &[VecF32x4] => F64),
             // simd.dot(other): Float  (instance, dot product — returns f64 to match Haxe Float)
-            map_method!(instance "rayzor_SIMD4f", "dot" => "SIMD4f_dot", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "dot" => "SIMD4f_dot", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => F64),
             // SIMD4f.fromArray(arr): SIMD4f  (static, @:from conversion)
-            map_method!(static "rayzor_SIMD4f", "fromArray" => "SIMD4f_fromArray", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD4f", "fromArray" => "SIMD4f_fromArray", params: 1, mir_wrapper,
                 types: &[PtrVoid] => VecF32x4),
             // --- Math operations ---
             // simd.sqrt(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "sqrt" => "SIMD4f_sqrt", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "sqrt" => "SIMD4f_sqrt", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.abs(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "abs" => "SIMD4f_abs", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "abs" => "SIMD4f_abs", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.neg(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "neg" => "SIMD4f_neg", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "neg" => "SIMD4f_neg", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.min(other): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "min" => "SIMD4f_min", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "min" => "SIMD4f_min", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => VecF32x4),
             // simd.max(other): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "max" => "SIMD4f_max", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "max" => "SIMD4f_max", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => VecF32x4),
             // simd.ceil(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "ceil" => "SIMD4f_ceil", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "ceil" => "SIMD4f_ceil", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.floor(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "floor" => "SIMD4f_floor", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "floor" => "SIMD4f_floor", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.round(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "round" => "SIMD4f_round", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "round" => "SIMD4f_round", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // --- Compound operations ---
             // simd.clamp(lo, hi): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "clamp" => "SIMD4f_clamp", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "clamp" => "SIMD4f_clamp", params: 2, mir_wrapper,
                 types: &[VecF32x4, VecF32x4, VecF32x4] => VecF32x4),
             // simd.lerp(other, t): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "lerp" => "SIMD4f_lerp", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "lerp" => "SIMD4f_lerp", params: 2, mir_wrapper,
                 types: &[VecF32x4, VecF32x4, F64] => VecF32x4),
             // simd.len(): Float
-            map_method!(instance "rayzor_SIMD4f", "len" => "SIMD4f_length", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "len" => "SIMD4f_length", params: 0, mir_wrapper,
                 types: &[VecF32x4] => F64),
             // simd.normalize(): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "normalize" => "SIMD4f_normalize", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "normalize" => "SIMD4f_normalize", params: 0, mir_wrapper,
                 types: &[VecF32x4] => VecF32x4),
             // simd.cross3(other): SIMD4f
-            map_method!(instance "rayzor_SIMD4f", "cross3" => "SIMD4f_cross3", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "cross3" => "SIMD4f_cross3", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => VecF32x4),
             // simd.distance(other): Float
-            map_method!(instance "rayzor_SIMD4f", "distance" => "SIMD4f_distance", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4f", "distance" => "SIMD4f_distance", params: 1, mir_wrapper,
                 types: &[VecF32x4, VecF32x4] => F64),
         ];
 
@@ -3608,38 +3624,38 @@ impl StdlibMapping {
 
         let mappings = vec![
             // SIMD4i32.splat(v: Int): SIMD4i32  (static, broadcast scalar to all lanes)
-            map_method!(static "rayzor_SIMD4i32", "splat" => "SIMD4i32_splat", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "splat" => "SIMD4i32_splat", params: 1, mir_wrapper,
                 types: &[I32] => VecI32x4),
             // SIMD4i32.make(x, y, z, w): SIMD4i32  (static, construct from 4 scalars)
-            map_method!(static "rayzor_SIMD4i32", "make" => "SIMD4i32_make", params: 4, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "make" => "SIMD4i32_make", params: 4, mir_wrapper,
                 types: &[I32, I32, I32, I32] => VecI32x4),
             // simd.get(lane): Int  (instance, @:arrayAccess read)
-            map_method!(instance "rayzor_SIMD4i32", "get" => "SIMD4i32_extract", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4i32", "get" => "SIMD4i32_extract", params: 1, mir_wrapper,
                 types: &[VecI32x4, I32] => I32),
             // simd.set(lane, value): SIMD4i32  (instance, @:arrayAccess write)
-            map_method!(instance "rayzor_SIMD4i32", "set" => "SIMD4i32_insert", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4i32", "set" => "SIMD4i32_insert", params: 2, mir_wrapper,
                 types: &[VecI32x4, I32, I32] => VecI32x4),
             // simd.sum(): Int  (instance, horizontal sum)
-            map_method!(instance "rayzor_SIMD4i32", "sum" => "SIMD4i32_sum", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD4i32", "sum" => "SIMD4i32_sum", params: 0, mir_wrapper,
                 types: &[VecI32x4] => I32),
             // SIMD4i32.dot(acc, a, b): SIMD4i32  (static, fused widening dot-accumulate:
             // acc + Σ a·b over 16 i8 lanes grouped by 4 → i32x4). Lowers to SDOT.
-            map_method!(static "rayzor_SIMD4i32", "dot" => "SIMD4i32_dot16", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "dot" => "SIMD4i32_dot16", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
             // SIMD4i32.dotI8I7(acc, a, b): same result as dot when b is in
             // i7 range. Q4/Q6 kernels use this to unlock x86 VPDPBUSD without
             // weakening the public signed*signed dot contract.
-            map_method!(static "rayzor_SIMD4i32", "dotI8I7" => "SIMD4i32_dot16_i8_i7", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "dotI8I7" => "SIMD4i32_dot16_i8_i7", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
             // SIMD4i32.dotI8U8(acc, a, b): signed lhs x unsigned rhs.
             // Q8 flash attention uses shifted query bytes plus a correction
             // term to recover signed*signed math while still unlocking VNNI.
-            map_method!(static "rayzor_SIMD4i32", "dotI8U8" => "SIMD4i32_dot16_i8_u8", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "dotI8U8" => "SIMD4i32_dot16_i8_u8", params: 3, mir_wrapper,
                 types: &[VecI32x4, VecI8x16, VecI8x16] => VecI32x4),
             // Byte-shuffle, result reinterpreted as i32x4 — the scale broadcast.
-            map_method!(static "rayzor_SIMD4i32", "shuffleBytes" => "SIMD4i32_shuffle_bytes", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "shuffleBytes" => "SIMD4i32_shuffle_bytes", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI32x4),
-            map_method!(static "rayzor_SIMD4i32", "load" => "SIMD4i32_load", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD4i32", "load" => "SIMD4i32_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI32x4),
         ];
 
@@ -3656,19 +3672,19 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(static "rayzor_SIMD8i32", "splat" => "SIMD8i32_splat", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD8i32", "splat" => "SIMD8i32_splat", params: 1, mir_wrapper,
                 types: &[I32] => VecI32x8),
-            map_method!(instance "rayzor_SIMD8i32", "get" => "SIMD8i32_extract", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD8i32", "get" => "SIMD8i32_extract", params: 1, mir_wrapper,
                 types: &[VecI32x8, I32] => I32),
-            map_method!(instance "rayzor_SIMD8i32", "set" => "SIMD8i32_insert", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.SIMD8i32", "set" => "SIMD8i32_insert", params: 2, mir_wrapper,
                 types: &[VecI32x8, I32, I32] => VecI32x8),
-            map_method!(instance "rayzor_SIMD8i32", "sum" => "SIMD8i32_sum", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.SIMD8i32", "sum" => "SIMD8i32_sum", params: 0, mir_wrapper,
                 types: &[VecI32x8] => I32),
-            map_method!(static "rayzor_SIMD8i32", "dot" => "SIMD8i32_dot32", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD8i32", "dot" => "SIMD8i32_dot32", params: 3, mir_wrapper,
                 types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
-            map_method!(static "rayzor_SIMD8i32", "dotI8I7" => "SIMD8i32_dot32_i8_i7", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD8i32", "dotI8I7" => "SIMD8i32_dot32_i8_i7", params: 3, mir_wrapper,
                 types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
-            map_method!(static "rayzor_SIMD8i32", "dotI8U8" => "SIMD8i32_dot32_i8_u8", params: 3, mir_wrapper,
+            map_method!(static "rayzor.SIMD8i32", "dotI8U8" => "SIMD8i32_dot32_i8_u8", params: 3, mir_wrapper,
                 types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
         ];
 
@@ -3682,23 +3698,23 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(static "rayzor_SIMD32i8", "splat" => "SIMD32i8_splat", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "splat" => "SIMD32i8_splat", params: 1, mir_wrapper,
                 types: &[I32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "load" => "SIMD32i8_load", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "load" => "SIMD32i8_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "and" => "SIMD32i8_and", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "and" => "SIMD32i8_and", params: 2, mir_wrapper,
                 types: &[VecI8x32, VecI8x32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "or" => "SIMD32i8_or", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "or" => "SIMD32i8_or", params: 2, mir_wrapper,
                 types: &[VecI8x32, VecI8x32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "xor" => "SIMD32i8_xor", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "xor" => "SIMD32i8_xor", params: 2, mir_wrapper,
                 types: &[VecI8x32, VecI8x32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "shl" => "SIMD32i8_shl", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "shl" => "SIMD32i8_shl", params: 2, mir_wrapper,
                 types: &[VecI8x32, I32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "shr" => "SIMD32i8_shr", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "shr" => "SIMD32i8_shr", params: 2, mir_wrapper,
                 types: &[VecI8x32, I32] => VecI8x32),
-            map_method!(static "rayzor_SIMD32i8", "ushr" => "SIMD32i8_ushr", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD32i8", "ushr" => "SIMD32i8_ushr", params: 2, mir_wrapper,
                 types: &[VecI8x32, I32] => VecI8x32),
-            map_method!(instance "rayzor_SIMD32i8", "get" => "SIMD32i8_extract", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD32i8", "get" => "SIMD32i8_extract", params: 1, mir_wrapper,
                 types: &[VecI8x32, I32] => I32),
         ];
 
@@ -3713,36 +3729,36 @@ impl StdlibMapping {
 
         let mappings = vec![
             // SIMD16i8.splat(v: Int): SIMD16i8  (static, broadcast a byte to all 16 lanes)
-            map_method!(static "rayzor_SIMD16i8", "splat" => "SIMD16i8_splat", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "splat" => "SIMD16i8_splat", params: 1, mir_wrapper,
                 types: &[I32] => VecI8x16),
             // SIMD16i8.load(ptr): SIMD16i8  (static, load 16 contiguous bytes)
-            map_method!(static "rayzor_SIMD16i8", "load" => "SIMD16i8_load", params: 1, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "load" => "SIMD16i8_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI8x16),
             // Lane-wise bitwise (vector & vector). AND masks the Q4 low nibble.
-            map_method!(static "rayzor_SIMD16i8", "and" => "SIMD16i8_and", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "and" => "SIMD16i8_and", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),
-            map_method!(static "rayzor_SIMD16i8", "or" => "SIMD16i8_or", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "or" => "SIMD16i8_or", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),
-            map_method!(static "rayzor_SIMD16i8", "xor" => "SIMD16i8_xor", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "xor" => "SIMD16i8_xor", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),
             // Shift-by-scalar (vector, i32 amount). USHR yields the Q4 high nibble.
-            map_method!(static "rayzor_SIMD16i8", "shl" => "SIMD16i8_shl", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "shl" => "SIMD16i8_shl", params: 2, mir_wrapper,
                 types: &[VecI8x16, I32] => VecI8x16),
-            map_method!(static "rayzor_SIMD16i8", "shr" => "SIMD16i8_shr", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "shr" => "SIMD16i8_shr", params: 2, mir_wrapper,
                 types: &[VecI8x16, I32] => VecI8x16),
-            map_method!(static "rayzor_SIMD16i8", "ushr" => "SIMD16i8_ushr", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "ushr" => "SIMD16i8_ushr", params: 2, mir_wrapper,
                 types: &[VecI8x16, I32] => VecI8x16),
             // Byte-lane shuffle (pshufb / tbl1 / i8x16.swizzle). Index contract
             // is on IrInstruction::VectorShuffle: 0..15 selects, bit 7 yields 0.
-            map_method!(static "rayzor_SIMD16i8", "shuffle" => "SIMD16i8_shuffle", params: 2, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "shuffle" => "SIMD16i8_shuffle", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),
             // 16 literals -> a constant byte vector, for shuffle masks.
-            map_method!(static "rayzor_SIMD16i8", "make16" => "SIMD16i8_make16", params: 16, mir_wrapper,
+            map_method!(static "rayzor.SIMD16i8", "make16" => "SIMD16i8_make16", params: 16, mir_wrapper,
                 types: &[I32, I32, I32, I32, I32, I32, I32, I32,
                          I32, I32, I32, I32, I32, I32, I32, I32] => VecI8x16),
             // v.get(lane): Int — read one i8 lane (sign-extended). In-guest byte
             // extraction for the Q4 block header (d/dmin/scales); mask &0xFF for unsigned.
-            map_method!(instance "rayzor_SIMD16i8", "get" => "SIMD16i8_extract", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.SIMD16i8", "get" => "SIMD16i8_extract", params: 1, mir_wrapper,
                 types: &[VecI8x16, I32] => I32),
         ];
 
@@ -3758,19 +3774,19 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Atomic.of(addr): Atomic   (static identity — returns the address)
-            map_method!(static "rayzor_Atomic", "of" => "Atomic_of", params: 1, mir_wrapper,
+            map_method!(static "rayzor.Atomic", "of" => "Atomic_of", params: 1, mir_wrapper,
                 types: &[I64] => I64),
             // a.load(): Int
-            map_method!(instance "rayzor_Atomic", "load" => "Atomic_load", params: 0, mir_wrapper,
+            map_method!(instance "rayzor.Atomic", "load" => "Atomic_load", params: 0, mir_wrapper,
                 types: &[I64] => I32),
             // a.store(v): Void
-            map_method!(instance "rayzor_Atomic", "store" => "Atomic_store", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Atomic", "store" => "Atomic_store", params: 1, mir_wrapper,
                 types: &[I64, I32]),
             // a.fetchAdd(v): Int   (returns old)
-            map_method!(instance "rayzor_Atomic", "fetchAdd" => "Atomic_fetch_add", params: 1, mir_wrapper,
+            map_method!(instance "rayzor.Atomic", "fetchAdd" => "Atomic_fetch_add", params: 1, mir_wrapper,
                 types: &[I64, I32] => I32),
             // a.compareExchange(expected, replacement): Int   (returns value read)
-            map_method!(instance "rayzor_Atomic", "compareExchange" => "Atomic_cas", params: 2, mir_wrapper,
+            map_method!(instance "rayzor.Atomic", "compareExchange" => "Atomic_cas", params: 2, mir_wrapper,
                 types: &[I64, I32, I32] => I32),
         ];
 
@@ -3875,34 +3891,34 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            map_method!(static "rayzor_concurrent_CpuTopology", "multiNode"
+            map_method!(static "rayzor.concurrent.CpuTopology", "multiNode"
                 => "rayzor_topology_multi_node",
                 params: 0, returns: primitive, types: &[] => Bool),
-            map_method!(static "rayzor_concurrent_CpuTopology", "nodeCount"
+            map_method!(static "rayzor.concurrent.CpuTopology", "nodeCount"
                 => "rayzor_topology_node_count",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "cpuCount"
+            map_method!(static "rayzor.concurrent.CpuTopology", "cpuCount"
                 => "rayzor_topology_cpu_count",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "perfCoreCount"
+            map_method!(static "rayzor.concurrent.CpuTopology", "perfCoreCount"
                 => "rayzor_topology_perf_core_count",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "poolRelaxDefault"
+            map_method!(static "rayzor.concurrent.CpuTopology", "poolRelaxDefault"
                 => "rayzor_pool_relax_default",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "poolSpinDefault"
+            map_method!(static "rayzor.concurrent.CpuTopology", "poolSpinDefault"
                 => "rayzor_pool_spin_default",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "cpuToNode"
+            map_method!(static "rayzor.concurrent.CpuTopology", "cpuToNode"
                 => "rayzor_topology_cpu_to_node",
                 params: 1, returns: primitive, types: &[I32] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "bindToNode"
+            map_method!(static "rayzor.concurrent.CpuTopology", "bindToNode"
                 => "rayzor_topology_bind_to_node",
                 params: 1, returns: primitive, types: &[I32] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "bindPerformance"
+            map_method!(static "rayzor.concurrent.CpuTopology", "bindPerformance"
                 => "rayzor_topology_bind_performance",
                 params: 0, returns: primitive, types: &[] => I32),
-            map_method!(static "rayzor_concurrent_CpuTopology", "unbind"
+            map_method!(static "rayzor.concurrent.CpuTopology", "unbind"
                 => "rayzor_topology_unbind",
                 params: 0, returns: primitive, types: &[] => I32),
         ];
@@ -3919,44 +3935,44 @@ impl StdlibMapping {
 
         let mappings = vec![
             // CC.create(): CC  (static, returns opaque TCC state pointer)
-            map_method!(static "rayzor_runtime_CC", "create" => "rayzor_tcc_create", params: 0, returns: primitive,
+            map_method!(static "rayzor.runtime.CC", "create" => "rayzor_tcc_create", params: 0, returns: primitive,
                 types: &[] => PtrVoid),
             // cc.compile(code: String): Bool  (instance, takes self + string ptr)
-            map_method!(instance "rayzor_runtime_CC", "compile" => "rayzor_tcc_compile", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "compile" => "rayzor_tcc_compile", params: 1, returns: primitive,
                 types: &[PtrVoid, PtrString] => I32),
             // cc.addSymbol(name: String, value: Int): Void  (instance)
-            map_method!(instance "rayzor_runtime_CC", "addSymbol" => "rayzor_tcc_add_symbol", params: 2, returns: void,
+            map_method!(instance "rayzor.runtime.CC", "addSymbol" => "rayzor_tcc_add_symbol", params: 2, returns: void,
                 types: &[PtrVoid, PtrString, I64]),
             // cc.relocate(): Bool  (instance)
-            map_method!(instance "rayzor_runtime_CC", "relocate" => "rayzor_tcc_relocate", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "relocate" => "rayzor_tcc_relocate", params: 1, returns: primitive,
                 types: &[PtrVoid] => I32),
             // cc.getSymbol(name: String): Dynamic  (instance, returns 64-bit pointer)
-            map_method!(instance "rayzor_runtime_CC", "getSymbol" => "rayzor_tcc_get_symbol", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "getSymbol" => "rayzor_tcc_get_symbol", params: 1, returns: primitive,
                 types: &[PtrVoid, PtrString] => PtrVoid),
             // cc.addFramework(name: String): Bool  (instance)
-            map_method!(instance "rayzor_runtime_CC", "addFramework" => "rayzor_tcc_add_framework", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "addFramework" => "rayzor_tcc_add_framework", params: 1, returns: primitive,
                 types: &[PtrVoid, PtrString] => I32),
             // cc.addIncludePath(path: String): Bool  (instance)
-            map_method!(instance "rayzor_runtime_CC", "addIncludePath" => "rayzor_tcc_add_include_path", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "addIncludePath" => "rayzor_tcc_add_include_path", params: 1, returns: primitive,
                 types: &[PtrVoid, PtrString] => I32),
             // cc.addFile(path: String): Bool  (instance)
-            map_method!(instance "rayzor_runtime_CC", "addFile" => "rayzor_tcc_add_file", params: 1, returns: primitive,
+            map_method!(instance "rayzor.runtime.CC", "addFile" => "rayzor_tcc_add_file", params: 1, returns: primitive,
                 types: &[PtrVoid, PtrString] => I32),
             // cc.delete(): Void  (instance)
-            map_method!(instance "rayzor_runtime_CC", "delete" => "rayzor_tcc_delete", params: 0, returns: void,
+            map_method!(instance "rayzor.runtime.CC", "delete" => "rayzor_tcc_delete", params: 0, returns: void,
                 types: &[PtrVoid]),
             // CC.call0(fnAddr): Int — call JIT function with 0 args
             // CC.call0(fnAddr): Int — call JIT function with 0 args
-            map_method!(static "rayzor_runtime_CC", "call0" => "rayzor_tcc_call0", params: 1, returns: primitive,
+            map_method!(static "rayzor.runtime.CC", "call0" => "rayzor_tcc_call0", params: 1, returns: primitive,
                 types: &[I64] => I64),
             // CC.call1(fnAddr, arg0): Int — call JIT function with 1 arg
-            map_method!(static "rayzor_runtime_CC", "call1" => "rayzor_tcc_call1", params: 2, returns: primitive,
+            map_method!(static "rayzor.runtime.CC", "call1" => "rayzor_tcc_call1", params: 2, returns: primitive,
                 types: &[I64, I64] => I64),
             // CC.call2(fnAddr, arg0, arg1): Int — call JIT function with 2 args
-            map_method!(static "rayzor_runtime_CC", "call2" => "rayzor_tcc_call2", params: 3, returns: primitive,
+            map_method!(static "rayzor.runtime.CC", "call2" => "rayzor_tcc_call2", params: 3, returns: primitive,
                 types: &[I64, I64, I64] => I64),
             // CC.call3(fnAddr, arg0, arg1, arg2): Int — call JIT function with 3 args
-            map_method!(static "rayzor_runtime_CC", "call3" => "rayzor_tcc_call3", params: 4, returns: primitive,
+            map_method!(static "rayzor.runtime.CC", "call3" => "rayzor_tcc_call3", params: 4, returns: primitive,
                 types: &[I64, I64, I64, I64] => I64),
         ];
 
@@ -4143,19 +4159,19 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Compress(level:Int) -> handle
-            map_method!(constructor "haxe_zip_Compress", "new" => "rayzor_compress_new", params: 1, returns: primitive,
+            map_method!(constructor "haxe.zip.Compress", "new" => "rayzor_compress_new", params: 1, returns: primitive,
                 types: &[I32] => PtrU8),
             // execute(src:Bytes, srcPos:Int, dst:Bytes, dstPos:Int):{done:Bool, read:Int, write:Int}
-            map_method!(instance "haxe_zip_Compress", "execute" => "rayzor_compress_execute", params: 4, returns: primitive,
+            map_method!(instance "haxe.zip.Compress", "execute" => "rayzor_compress_execute", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, I32, PtrU8, I32] => PtrU8),
             // setFlushMode(f:FlushMode):Void
-            map_method!(instance "haxe_zip_Compress", "setFlushMode" => "rayzor_compress_set_flush", params: 1, returns: void,
+            map_method!(instance "haxe.zip.Compress", "setFlushMode" => "rayzor_compress_set_flush", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // close():Void
-            map_method!(instance "haxe_zip_Compress", "close" => "rayzor_compress_close", params: 0, returns: void,
+            map_method!(instance "haxe.zip.Compress", "close" => "rayzor_compress_close", params: 0, returns: void,
                 types: &[PtrU8]),
             // static run(s:Bytes, level:Int):Bytes
-            map_method!(static "haxe_zip_Compress", "run" => "rayzor_compress_run", params: 2, returns: primitive,
+            map_method!(static "haxe.zip.Compress", "run" => "rayzor_compress_run", params: 2, returns: primitive,
                 types: &[PtrU8, I32] => PtrU8),
         ];
 
@@ -4167,20 +4183,20 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Uncompress(?windowBits:Int) -> handle
-            map_method!(constructor "haxe_zip_Uncompress", "new" => "rayzor_uncompress_new", params: 1, returns: primitive,
+            map_method!(constructor "haxe.zip.Uncompress", "new" => "rayzor_uncompress_new", params: 1, returns: primitive,
                 types: &[I32] => PtrU8),
             // Constructor: new Uncompress() with 0 params (optional windowBits defaults to 0)
             // Uses MIR wrapper that calls rayzor_uncompress_new(0)
-            map_method!(constructor "haxe_zip_Uncompress", "new" => "Uncompress_new_default", params: 0, mir_wrapper,
+            map_method!(constructor "haxe.zip.Uncompress", "new" => "Uncompress_new_default", params: 0, mir_wrapper,
                 types: &[] => PtrU8),
             // execute(src:Bytes, srcPos:Int, dst:Bytes, dstPos:Int):{done:Bool, read:Int, write:Int}
-            map_method!(instance "haxe_zip_Uncompress", "execute" => "rayzor_uncompress_execute", params: 4, returns: primitive,
+            map_method!(instance "haxe.zip.Uncompress", "execute" => "rayzor_uncompress_execute", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, I32, PtrU8, I32] => PtrU8),
             // setFlushMode(f:FlushMode):Void
-            map_method!(instance "haxe_zip_Uncompress", "setFlushMode" => "rayzor_uncompress_set_flush", params: 1, returns: void,
+            map_method!(instance "haxe.zip.Uncompress", "setFlushMode" => "rayzor_uncompress_set_flush", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // close():Void
-            map_method!(instance "haxe_zip_Uncompress", "close" => "rayzor_uncompress_close", params: 0, returns: void,
+            map_method!(instance "haxe.zip.Uncompress", "close" => "rayzor_uncompress_close", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -4192,16 +4208,16 @@ impl StdlibMapping {
 
         // WeakMap delegates to ObjectMap runtime functions (no GC = no weak semantics needed)
         let mappings = vec![
-            map_method!(constructor "WeakMap", "new" => "haxe_objectmap_new", params: 0, returns: primitive),
-            map_method!(instance "WeakMap", "set" => "haxe_objectmap_set", params: 2, returns: void, raw_value_params: 0b100),
-            map_method!(instance "WeakMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
-            map_method!(instance "WeakMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive,
+            map_method!(constructor "haxe.ds.WeakMap", "new" => "haxe_objectmap_new", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.WeakMap", "set" => "haxe_objectmap_set", params: 2, returns: void, raw_value_params: 0b100),
+            map_method!(instance "haxe.ds.WeakMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
+            map_method!(instance "haxe.ds.WeakMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
-            map_method!(instance "WeakMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive,
+            map_method!(instance "haxe.ds.WeakMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive,
                 types: &[PtrU8, I64] => Bool),
-            map_method!(instance "WeakMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
-            map_method!(instance "WeakMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
-            map_method!(instance "WeakMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.WeakMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
+            map_method!(instance "haxe.ds.WeakMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.WeakMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
         ];
 
         self.register_from_tuples(mappings);
@@ -4212,52 +4228,52 @@ impl StdlibMapping {
 
         let mappings = vec![
             // sys.ssl.Socket constructor
-            map_method!(constructor "sys_ssl_Socket", "new" => "rayzor_ssl_socket_new", params: 0, returns: primitive,
+            map_method!(constructor "sys.ssl.Socket", "new" => "rayzor_ssl_socket_new", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // connect(host:Host, port:Int):Void — host is Host handle (extract IP)
-            map_method!(instance "sys_ssl_Socket", "connect" => "rayzor_ssl_socket_connect", params: 2, returns: void,
+            map_method!(instance "sys.ssl.Socket", "connect" => "rayzor_ssl_socket_connect", params: 2, returns: void,
                 types: &[PtrU8, I32, I32]),
             // handshake():Void
-            map_method!(instance "sys_ssl_Socket", "handshake" => "rayzor_ssl_socket_handshake", params: 0, returns: void,
+            map_method!(instance "sys.ssl.Socket", "handshake" => "rayzor_ssl_socket_handshake", params: 0, returns: void,
                 types: &[PtrU8]),
             // setHostname(name:String):Void
-            map_method!(instance "sys_ssl_Socket", "setHostname" => "rayzor_ssl_socket_set_hostname", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setHostname" => "rayzor_ssl_socket_set_hostname", params: 1, returns: void,
                 types: &[PtrU8, PtrString]),
             // setCA(cert:Certificate):Void
-            map_method!(instance "sys_ssl_Socket", "setCA" => "rayzor_ssl_socket_set_ca", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setCA" => "rayzor_ssl_socket_set_ca", params: 1, returns: void,
                 types: &[PtrU8, PtrU8]),
             // setCertificate(cert:Certificate, key:Key):Void
-            map_method!(instance "sys_ssl_Socket", "setCertificate" => "rayzor_ssl_socket_set_certificate", params: 2, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setCertificate" => "rayzor_ssl_socket_set_certificate", params: 2, returns: void,
                 types: &[PtrU8, PtrU8, PtrU8]),
             // peerCertificate():Certificate
-            map_method!(instance "sys_ssl_Socket", "peerCertificate" => "rayzor_ssl_socket_peer_certificate", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Socket", "peerCertificate" => "rayzor_ssl_socket_peer_certificate", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // read():String
-            map_method!(instance "sys_ssl_Socket", "read" => "rayzor_ssl_socket_read", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Socket", "read" => "rayzor_ssl_socket_read", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrString),
             // write(data:String):Void
-            map_method!(instance "sys_ssl_Socket", "write" => "rayzor_ssl_socket_write", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "write" => "rayzor_ssl_socket_write", params: 1, returns: void,
                 types: &[PtrU8, PtrString]),
             // close():Void
-            map_method!(instance "sys_ssl_Socket", "close" => "rayzor_ssl_socket_close", params: 0, returns: void,
+            map_method!(instance "sys.ssl.Socket", "close" => "rayzor_ssl_socket_close", params: 0, returns: void,
                 types: &[PtrU8]),
             // setBlocking(b:Bool):Void
-            map_method!(instance "sys_ssl_Socket", "setBlocking" => "rayzor_ssl_socket_set_blocking", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setBlocking" => "rayzor_ssl_socket_set_blocking", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // setTimeout(seconds:Float):Void
-            map_method!(instance "sys_ssl_Socket", "setTimeout" => "rayzor_ssl_socket_set_timeout", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setTimeout" => "rayzor_ssl_socket_set_timeout", params: 1, returns: void,
                 types: &[PtrU8, F64]),
             // shutdown(read:Bool, write:Bool):Void
-            map_method!(instance "sys_ssl_Socket", "shutdown" => "rayzor_ssl_socket_shutdown", params: 2, returns: void,
+            map_method!(instance "sys.ssl.Socket", "shutdown" => "rayzor_ssl_socket_shutdown", params: 2, returns: void,
                 types: &[PtrU8, I32, I32]),
             // setFastSend(b:Bool):Void
-            map_method!(instance "sys_ssl_Socket", "setFastSend" => "rayzor_ssl_socket_set_fast_send", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Socket", "setFastSend" => "rayzor_ssl_socket_set_fast_send", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // input:SocketInput (property getter)
-            map_method!(instance "sys_ssl_Socket", "input" => "rayzor_ssl_socket_get_input", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Socket", "input" => "rayzor_ssl_socket_get_input", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // output:SocketOutput (property getter)
-            map_method!(instance "sys_ssl_Socket", "output" => "rayzor_ssl_socket_get_output", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Socket", "output" => "rayzor_ssl_socket_get_output", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
         ];
 
@@ -4269,43 +4285,43 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static loadFile(file:String):Certificate
-            map_method!(static "sys_ssl_Certificate", "loadFile" => "rayzor_ssl_cert_load_file", params: 1, returns: primitive,
+            map_method!(static "sys.ssl.Certificate", "loadFile" => "rayzor_ssl_cert_load_file", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static loadPath(path:String):Certificate
-            map_method!(static "sys_ssl_Certificate", "loadPath" => "rayzor_ssl_cert_load_path", params: 1, returns: primitive,
+            map_method!(static "sys.ssl.Certificate", "loadPath" => "rayzor_ssl_cert_load_path", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static fromString(str:String):Certificate
-            map_method!(static "sys_ssl_Certificate", "fromString" => "rayzor_ssl_cert_from_string", params: 1, returns: primitive,
+            map_method!(static "sys.ssl.Certificate", "fromString" => "rayzor_ssl_cert_from_string", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static loadDefaults():Certificate
-            map_method!(static "sys_ssl_Certificate", "loadDefaults" => "rayzor_ssl_cert_load_defaults", params: 0, returns: primitive,
+            map_method!(static "sys.ssl.Certificate", "loadDefaults" => "rayzor_ssl_cert_load_defaults", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // commonName:String (getter)
-            map_method!(instance "sys_ssl_Certificate", "get_commonName" => "rayzor_ssl_cert_common_name", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "get_commonName" => "rayzor_ssl_cert_common_name", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrString),
             // altNames:Array<String> (getter)
-            map_method!(instance "sys_ssl_Certificate", "get_altNames" => "rayzor_ssl_cert_alt_names", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "get_altNames" => "rayzor_ssl_cert_alt_names", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // notBefore:Date (getter, returns epoch float)
-            map_method!(instance "sys_ssl_Certificate", "get_notBefore" => "rayzor_ssl_cert_not_before", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "get_notBefore" => "rayzor_ssl_cert_not_before", params: 0, returns: primitive,
                 types: &[PtrU8] => F64),
             // notAfter:Date (getter, returns epoch float)
-            map_method!(instance "sys_ssl_Certificate", "get_notAfter" => "rayzor_ssl_cert_not_after", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "get_notAfter" => "rayzor_ssl_cert_not_after", params: 0, returns: primitive,
                 types: &[PtrU8] => F64),
             // subject(field:String):String
-            map_method!(instance "sys_ssl_Certificate", "subject" => "rayzor_ssl_cert_subject", params: 1, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "subject" => "rayzor_ssl_cert_subject", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrString),
             // issuer(field:String):String
-            map_method!(instance "sys_ssl_Certificate", "issuer" => "rayzor_ssl_cert_issuer", params: 1, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "issuer" => "rayzor_ssl_cert_issuer", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrString),
             // next():Certificate
-            map_method!(instance "sys_ssl_Certificate", "next" => "rayzor_ssl_cert_next", params: 0, returns: primitive,
+            map_method!(instance "sys.ssl.Certificate", "next" => "rayzor_ssl_cert_next", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // add(pem:String):Void
-            map_method!(instance "sys_ssl_Certificate", "add" => "rayzor_ssl_cert_add", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Certificate", "add" => "rayzor_ssl_cert_add", params: 1, returns: void,
                 types: &[PtrU8, PtrString]),
             // addDER(der:Bytes):Void
-            map_method!(instance "sys_ssl_Certificate", "addDER" => "rayzor_ssl_cert_add_der", params: 1, returns: void,
+            map_method!(instance "sys.ssl.Certificate", "addDER" => "rayzor_ssl_cert_add_der", params: 1, returns: void,
                 types: &[PtrU8, PtrU8]),
         ];
 
@@ -4317,17 +4333,17 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static loadFile(file:String, ?isPublic:Bool, ?pass:String):Key
-            map_method!(static "sys_ssl_Key", "loadFile" => "rayzor_ssl_key_load_file", params: 3, returns: primitive,
+            map_method!(static "sys.ssl.Key", "loadFile" => "rayzor_ssl_key_load_file", params: 3, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
-            map_method!(static "sys_ssl_Key", "loadFile" => "rayzor_ssl_key_load_file", params: 1, returns: primitive,
+            map_method!(static "sys.ssl.Key", "loadFile" => "rayzor_ssl_key_load_file", params: 1, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
             // static readPEM(data:String, isPublic:Bool, ?pass:String):Key
-            map_method!(static "sys_ssl_Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 3, returns: primitive,
+            map_method!(static "sys.ssl.Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 3, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
-            map_method!(static "sys_ssl_Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 2, returns: primitive,
+            map_method!(static "sys.ssl.Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 2, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
             // static readDER(data:Bytes, isPublic:Bool):Key
-            map_method!(static "sys_ssl_Key", "readDER" => "rayzor_ssl_key_read_der", params: 2, returns: primitive,
+            map_method!(static "sys.ssl.Key", "readDER" => "rayzor_ssl_key_read_der", params: 2, returns: primitive,
                 types: &[PtrU8, I32] => PtrU8),
         ];
 
@@ -4339,13 +4355,13 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static make(data:Bytes, alg:DigestAlgorithm):Bytes
-            map_method!(static "sys_ssl_Digest", "make" => "rayzor_ssl_digest_make", params: 2, returns: primitive,
+            map_method!(static "sys.ssl.Digest", "make" => "rayzor_ssl_digest_make", params: 2, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrU8),
             // static sign(data:Bytes, privKey:Key, alg:DigestAlgorithm):Bytes
-            map_method!(static "sys_ssl_Digest", "sign" => "rayzor_ssl_digest_sign", params: 3, returns: primitive,
+            map_method!(static "sys.ssl.Digest", "sign" => "rayzor_ssl_digest_sign", params: 3, returns: primitive,
                 types: &[PtrU8, PtrU8, PtrString] => PtrU8),
             // static verify(data:Bytes, signature:Bytes, pubKey:Key, alg:DigestAlgorithm):Bool
-            map_method!(static "sys_ssl_Digest", "verify" => "rayzor_ssl_digest_verify", params: 4, returns: primitive,
+            map_method!(static "sys.ssl.Digest", "verify" => "rayzor_ssl_digest_verify", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, PtrU8, PtrString] => Bool),
         ];
 
@@ -4362,13 +4378,13 @@ impl StdlibMapping {
             // with '.'→'_', same convention as haxe_io_Bytes). The bare "NativeStackTrace"
             // never matched — calls fell through to a bare-name bind onto haxe.CallStack's
             // same-named methods, which then trapped on toHaxe's arity.
-            map_method!(static "haxe_NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
+            map_method!(static "haxe.NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
             // callStack():String
-            map_method!(static "haxe_NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            map_method!(static "haxe.NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
             // exceptionStack():String
-            map_method!(static "haxe_NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            map_method!(static "haxe.NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
             // toHaxe(nativeStackTrace:Any, skip:Int = 0):Array<StackItem>
-            map_method!(static "haxe_NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
+            map_method!(static "haxe.NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
@@ -4406,10 +4422,10 @@ impl StdlibMapping {
             // does NOT wrap the HaxeString* in a DynamicValue; the runtime
             // dereferences the pointer as `*const HaxeString` and would
             // SIGSEGV if it received a Dynamic box instead.
-            map_method!(static "Json", "parse" => "haxe_json_parse", params: 1, returns: primitive,
+            map_method!(static "haxe.Json", "parse" => "haxe_json_parse", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // haxe.Json.stringify(value:Dynamic, ?replacer, ?space):String
-            map_method!(static "Json", "stringify" => "haxe_json_stringify", params: 1, returns: primitive,
+            map_method!(static "haxe.Json", "stringify" => "haxe_json_stringify", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // haxe.format.JsonParser.parse(str:String):Dynamic
             // Keyed by FQN — bare-name `JsonParser` would shadow user
@@ -4619,15 +4635,23 @@ mod tests {
         }
     }
 
-    /// Every spelling any lookup could use: each registered class name, plus
-    /// each simple-name suffix `class_matches` would accept for it.
+    /// Every spelling any lookup could use: each registered class name in both
+    /// separator renderings, plus each simple-name suffix of both.
     fn all_spellings(mapping: &StdlibMapping) -> BTreeSet<String> {
         let mut spellings = BTreeSet::new();
         for class in mapping.get_all_classes() {
             spellings.insert(class.to_string());
-            for (offset, byte) in class.bytes().enumerate() {
-                if matches!(byte, b'_' | b'.') && offset + 1 < class.len() {
-                    spellings.insert(class[offset + 1..].to_string());
+            let renderings = if class.starts_with('_') {
+                vec![class.to_string()]
+            } else {
+                vec![class.replace('_', "."), class.replace('.', "_")]
+            };
+            for rendered in renderings {
+                spellings.insert(rendered.clone());
+                for (offset, byte) in rendered.bytes().enumerate() {
+                    if matches!(byte, b'_' | b'.') && offset + 1 < rendered.len() {
+                        spellings.insert(rendered[offset + 1..].to_string());
+                    }
                 }
             }
         }
@@ -4912,7 +4936,7 @@ mod tests {
 
         // Test Channel constructor (MIR wrapper - returns pointer directly)
         let sig = MethodSignature {
-            class: "rayzor_concurrent_Channel",
+            class: "rayzor.concurrent.Channel",
             method: "new",
             is_static: true,
             is_constructor: true,

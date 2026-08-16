@@ -85,16 +85,16 @@ impl<'a> HirToMirContext<'a> {
                 }
                 if let Some(native) = sym.native_name {
                     if let Some(native_str) = self.string_interner.get(native) {
-                        return Some(native_str.replace("::", "_"));
+                        return Some(self.canonical_class_spelling(native_str));
                     }
                 }
-                // qualified_name ("sys.net.Host" → "sys_net_Host") covers extern
-                // classes whose native_name did not cross compilation contexts.
+                // qualified_name covers extern classes whose native_name did
+                // not cross compilation contexts.
                 if let Some(qn) = sym.qualified_name {
                     if let Some(qs) = self.string_interner.get(qn) {
                         // A separator-free name would map to itself; not worth taking.
                         if qs.contains('.') {
-                            return Some(qs.replace('.', "_"));
+                            return Some(self.canonical_class_spelling(qs));
                         }
                     }
                 }

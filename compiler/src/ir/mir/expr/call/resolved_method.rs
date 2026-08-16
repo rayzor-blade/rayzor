@@ -72,10 +72,10 @@ impl<'a> HirToMirContext<'a> {
                         let arg_count = args.len();
                         debug!("[wait lookup] method={}, arg_count={}", mn, arg_count);
                         self.stdlib_mapping
-                            .find_by_name_and_params("sys_thread_Lock", mn, arg_count)
+                            .find_by_name_and_params("sys.thread.Lock", mn, arg_count)
                             .or_else(|| {
                                 self.stdlib_mapping.find_by_name_and_params(
-                                    "sys_thread_Condition",
+                                    "sys.thread.Condition",
                                     mn,
                                     arg_count,
                                 )
@@ -94,7 +94,7 @@ impl<'a> HirToMirContext<'a> {
                         let arg_count = args.len();
                         debug!("[tryAcquire lookup] method={}, arg_count={}", mn, arg_count);
                         self.stdlib_mapping
-                            .find_by_name_and_params("sys_thread_Semaphore", mn, arg_count)
+                            .find_by_name_and_params("sys.thread.Semaphore", mn, arg_count)
                             .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                             .or_else(|| {
                                 self.get_stdlib_runtime_info(
