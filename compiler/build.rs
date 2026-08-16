@@ -40,6 +40,7 @@ fn main() {
     }
 
     generate_stdlib_manifest();
+    stage_stdlib_snapshot();
 
     // Emit a cache ABI build id. BLADE cache entries are tagged with this
     // value, so MIR cached by one compiler binary is only reused by another
@@ -70,6 +71,73 @@ fn main() {
 /// standard library changes, and the manifest is rebuilt from those same
 /// sources. A committed artifact could disagree with them; one produced here
 /// cannot.
+/// The lowered standard library, staged so the crate embeds it as a constant.
+///
+/// The archive lives at one place — `<workspace>/target/stdlib_snapshot.bin` —
+/// which is where `snapshot-gen` writes by default. Nothing names a path and
+/// nothing reads one at startup: the bytes become part of every binary built
+/// from this crate.
+///
+/// The generator produces the archive rather than this script because it must
+/// lower Haxe, which means linking the compiler; a build script that reached
+/// its own crate would put the runtime's cdylib in the host graph beside the
+/// target graph's copy. So the two are ordered — generate, then build — and a
+/// build that finds no archive embeds an empty one and lowers from source, as
+/// it did before a snapshot existed.
+fn stage_stdlib_snapshot() {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let dest = out_dir.join("stdlib_snapshot.bin");
+    let source = snapshot_path();
+
+    println!("cargo:rerun-if-changed={}", source.display());
+
+    // A stale or truncated archive still parses; it just indexes to nothing,
+    // which is the same empty binary by another route.
+    let bytes = match std::fs::read(&source) {
+        Ok(bytes) if snapshot_module_count(&bytes) > 0 => bytes,
+        _ => {
+            println!("cargo:warning=no standard library snapshot at {} — the library will be lowered from source; run `cargo run --release -p snapshot-gen` first", source.display());
+            empty_snapshot()
+        }
+    };
+
+    if bytes.len() > 8 {
+        println!(
+            "cargo:warning=embedding standard library snapshot ({} KB)",
+            bytes.len() / 1024
+        );
+    }
+    std::fs::write(&dest, bytes).expect("failed to stage the snapshot");
+}
+
+/// Where the archive lives, resolved from the manifest directory because a
+/// build script's working directory is its own crate, not the workspace.
+fn snapshot_path() -> PathBuf {
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
+    manifest
+        .parent()
+        .expect("the compiler crate sits inside the workspace")
+        .join("target/stdlib_snapshot.bin")
+}
+
+/// `RZSN` followed by a zero entry count — see `compiler::ir::snapshot`.
+fn empty_snapshot() -> Vec<u8> {
+    let mut bytes = b"RZSN".to_vec();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes
+}
+
+/// Entry count of an archive, or zero if it is not one. This reads the header
+/// `ir::snapshot::index` reads, spelled out again because a build script cannot
+/// depend on the crate it builds.
+fn snapshot_module_count(bytes: &[u8]) -> u32 {
+    if bytes.len() < 8 || &bytes[..4] != b"RZSN" {
+        return 0;
+    }
+    u32::from_le_bytes(bytes[4..8].try_into().expect("8 bytes checked above"))
+}
+
 /// Reserve for the parse below. A recursive-descent parser's stack depth
 /// follows how deeply the source nests, and the standard library has
 /// expressions deep enough to exceed the 1 MB a thread gets by default on

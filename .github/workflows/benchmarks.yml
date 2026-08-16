@@ -21,10 +21,6 @@ jobs:
   build:
     name: Build & Bundle
     runs-on: ubuntu-latest
-    env:
-      # Where the generator writes and the build script reads. Job-scoped so no
-      # step can silently fall back to the default path, which nothing writes.
-      RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
     steps:
       - uses: actions/checkout@v4
 
@@ -55,12 +51,10 @@ jobs:
       # it claims to.
       - name: Generate the standard library snapshot
         run: |
-          mkdir -p target/release
-          cargo run --release -p snapshot-gen -- target/release/stdlib_snapshot.bin
-          ls -l target/release/stdlib_snapshot.bin
+          cargo run --release -p snapshot-gen
+          ls -l target/stdlib_snapshot.bin
 
-      # The build script fails the build if this path is unreadable or holds an
-      # archive with no modules, so a binary that carries nothing cannot pass.
+      # Every binary built from here on embeds the archive above.
       - name: Build rayzor CLI
         run: cargo build --release --features llvm-backend
 
@@ -95,7 +89,6 @@ jobs:
             target/release/rayzor
             target/release/librayzor_runtime.a
             target/release/examples/benchmark_runner
-            target/release/stdlib_snapshot.bin
           retention-days: 1
 
   benchmark:
@@ -199,13 +192,7 @@ jobs:
       - name: Fix binary permissions
         run: chmod +x target/release/rayzor target/release/examples/benchmark_runner
 
-      # The harness drives the compiler as a library, so it is pointed at the
-      # snapshot the CLI embeds. Without this the measured compile lowers the
-      # standard library again and reports a figure for a configuration no
-      # released binary runs.
       - name: Run ${{ matrix.kernel }} benchmark
-        env:
-          RAYZOR_SNAPSHOT: target/release/stdlib_snapshot.bin
         run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
 
       # Each runner produces only its own kernel; `collect` merges them back
