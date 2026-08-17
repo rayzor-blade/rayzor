@@ -1233,22 +1233,34 @@ impl<'a> HirToMirContext<'a> {
                         let method_static: &'static str =
                             Box::leak(method_name.to_string().into_boxed_str());
 
-                        let mut found_mapping = None;
-                        for class_name in self.stdlib_mapping.get_all_classes() {
-                            if self.stdlib_mapping.class_has_static_methods(class_name) {
-                                let sig = crate::stdlib::MethodSignature {
-                                    class: class_name,
-                                    method: method_static,
-                                    is_static: true,
-                                    is_constructor: false, // Normal static method, not constructor
-                                    param_count: static_args.len(),
-                                };
-                                if let Some(mapping) = self.stdlib_mapping.get(&sig) {
-                                    found_mapping = Some((class_name, mapping));
-                                    break;
-                                }
-                            }
-                        }
+                        // The method symbol's qualified name names its owner
+                        // ("Math.sin" names Math), so the owner answers. Only
+                        // when the symbol carries no owner is the method name
+                        // consulted alone, and then only if it identifies one
+                        // binding — never a pick among classes that share it.
+                        let arity = static_args.len();
+                        let found_mapping = self
+                            .class_key_from_method_qname(
+                                sym_info
+                                    .qualified_name
+                                    .and_then(|qn| self.string_interner.get(qn)),
+                            )
+                            .and_then(|key| {
+                                self.stdlib_mapping
+                                    .get(&crate::stdlib::MethodSignature {
+                                        class: key,
+                                        method: method_static,
+                                        is_static: true,
+                                        is_constructor: false,
+                                        param_count: arity,
+                                    })
+                                    .map(|mapping| (key, mapping))
+                            })
+                            .or_else(|| {
+                                self.stdlib_mapping
+                                    .find_unique_static_by_name_and_params(method_static, arity)
+                                    .map(|(sig, mapping)| (sig.class, mapping))
+                            });
 
                         if let Some((class_name, mapping)) = found_mapping {
                             self.builder.call_label = Some(format!("STATIC_SEARCH:{}", class_name));

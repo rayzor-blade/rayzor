@@ -618,6 +618,30 @@ impl StdlibMapping {
         Some((first.0, first.1))
     }
 
+    /// Find a static mapping by method name and arity, accepted only when
+    /// exactly one class declares it. A name shared by several classes does
+    /// not identify one without a receiver, and picking the first would bind
+    /// the call to whichever class sorted earliest.
+    pub fn find_unique_static_by_name_and_params(
+        &self,
+        method: &str,
+        param_count: usize,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        let mut matches = self.mappings.iter().filter(|(sig, call)| {
+            sig.is_static
+                && !sig.is_constructor
+                && sig.method == method
+                && call.param_count == param_count
+        });
+        let first = matches.next()?;
+        // Entries that agree on the runtime symbol are one binding under
+        // several names, not a choice.
+        if matches.any(|(_, call)| call.runtime_name != first.1.runtime_name) {
+            return None;
+        }
+        Some(first)
+    }
+
     /// Find a stdlib method mapping by class, method name, AND parameter count
     /// This enables overloaded mappings where the same method has different implementations
     /// based on the number of arguments (e.g., indexOf with 1 vs 2 params)
