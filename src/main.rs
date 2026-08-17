@@ -1917,6 +1917,12 @@ fn run_file(
                         h.end_phase("tc.deps", detail.dependency_ms);
                         h.end_phase("tc.import-scan", detail.import_scan_ms);
                         h.end_phase("tc.imports", detail.import_load_ms + detail.import_hx_ms);
+                        h.end_phase("tc.imp-discover", detail.import_discover_ms);
+                        h.end_phase("tc.imp-toposort", detail.import_toposort_ms);
+                        h.end_phase("tc.imp-compile", detail.import_compile_ms);
+                        h.end_phase("tc.imp-cache-load", detail.import_cache_load_ms);
+                        h.end_phase("tc.imp-cache-save", detail.import_cache_save_ms);
+                        h.end_phase("tc.imp-compile-call", detail.import_compile_call_ms);
                         h.end_phase("tc.user", detail.user_files_ms);
                         h.end_phase("tc.file-parse", detail.file_parse_ms);
                         h.end_phase("tc.macro", detail.macro_ms);
