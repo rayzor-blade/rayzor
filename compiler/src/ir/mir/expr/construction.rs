@@ -251,66 +251,42 @@ impl<'a> HirToMirContext<'a> {
             // across the later self.lower_expression calls.
             let arg_count = args.len();
             let constructor_info: Option<(&'static str, bool, bool)> = {
-                let mut found = None;
-
-                // Param-count-aware lookup first, then any-param, so overloaded
-                // constructors (e.g. Uncompress with 0 or 1 args) select the
-                // correct overload.
-                macro_rules! try_find_ctor {
-                    ($name:expr) => {
-                        if found.is_none() {
-                            if let Some((_, rc)) = self
-                                .stdlib_mapping
-                                .find_constructor_with_params($name, arg_count)
-                            {
-                                found =
-                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
-                            } else if let Some((_, rc)) =
-                                self.stdlib_mapping.find_constructor($name)
-                            {
-                                found =
-                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
-                            }
-                        }
-                    };
+                // Resolve the class to its registered key once. The qualified
+                // HIR name is the authority: a subclass ctor must win over
+                // the symbol-based resolution, whose qualified_name resolves
+                // to the parent class. The symbol's @:native and qualified
+                // names cover receivers whose HIR name is unqualified, and
+                // the raw name (bare or Vec monomorph) comes last.
+                let ctor_key = if class_name.contains('.') {
+                    self.stdlib_mapping.get_class_static_str(class_name)
+                } else {
+                    None
                 }
+                .or_else(|| {
+                    let sym = self.symbol_table.get_symbol(actual_symbol_id?)?;
+                    sym.native_name
+                        .and_then(|n| self.string_interner.get(n))
+                        .and_then(|n| {
+                            self.stdlib_mapping
+                                .get_class_static_str(&n.replace("::", "."))
+                        })
+                        .or_else(|| {
+                            sym.qualified_name
+                                .and_then(|qn| self.string_interner.get(qn))
+                                .and_then(|qn| self.stdlib_mapping.get_class_static_str(qn))
+                        })
+                })
+                .or_else(|| self.stdlib_mapping.get_class_static_str(class_name));
 
-                // The qualified HIR name ("sys.ssl.Socket" -> "sys_ssl_Socket") is
-                // tried first: a subclass ctor must win over the symbol-based
-                // lookup, whose qualified_name resolves to the parent class.
-                if class_name.contains('.') {
-                    let qualified_hir = class_name.replace(".", "_");
-                    try_find_ctor!(&qualified_hir);
-                }
-                if found.is_none() {
-                    if let Some(sym_id) = actual_symbol_id {
-                        if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                            // @:native name, then qualified name.
-                            if let Some(native) = sym.native_name {
-                                if let Some(native_str) = self.string_interner.get(native) {
-                                    let native_class_name = native_str.replace("::", "_");
-                                    try_find_ctor!(&native_class_name);
-                                }
-                            }
-                            if found.is_none() {
-                                if let Some(qn) = sym.qualified_name {
-                                    if let Some(qual_name) = self.string_interner.get(qn) {
-                                        let qualified_class_name = qual_name.replace(".", "_");
-                                        try_find_ctor!(&qualified_class_name);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    try_find_ctor!(class_name);
-
-                    // Bare name for qualified paths (haxe.ds.ObjectMap -> ObjectMap).
-                    if found.is_none() && class_name.contains('.') {
-                        let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
-                        try_find_ctor!(bare_name);
-                    }
-                }
-                found
+                // Param-count-aware lookup first, then any-param, so
+                // overloaded constructors (e.g. Uncompress with 0 or 1 args)
+                // select the correct overload.
+                ctor_key.and_then(|key| {
+                    self.stdlib_mapping
+                        .find_constructor_with_params(key, arg_count)
+                        .or_else(|| self.stdlib_mapping.find_constructor(key))
+                        .map(|(_, rc)| (rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper))
+                })
             };
             if let Some((wrapper_name, needs_out_param, is_mir_wrapper)) = constructor_info {
                 let arg_regs: Vec<_> = args
