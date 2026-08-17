@@ -60,6 +60,11 @@ fn main() {
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&out, &archive).expect("failed to write the snapshot archive");
+    // The compiler that produced these artifacts. A cache entry is only valid
+    // for a compiler with the same id, so the build records it beside the
+    // archive and warns when the two have drifted apart.
+    std::fs::write(out.with_extension("build-id"), compiler::BUILD_ID)
+        .expect("failed to write the snapshot build id");
     let _ = std::fs::remove_dir_all(&staging);
 
     println!(
