@@ -105,7 +105,7 @@ impl<'a> HirToMirContext<'a> {
                         .symbol_table
                         .get_symbol(*symbol_id)
                         .and_then(|s| self.canonical_stdlib_class_name(s))
-                        .and_then(|key| self.stdlib_mapping.find_by_name(&key, "toString"))
+                        .and_then(|key| self.stdlib_mapping.find_by_name(key, "toString"))
                         .is_some();
 
                     if is_extern && !has_stdlib_tostring {

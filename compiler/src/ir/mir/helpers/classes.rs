@@ -420,6 +420,7 @@ impl<'a> HirToMirContext<'a> {
             return self.string_interner.get(cls.name).map(|name| {
                 self.stdlib_mapping
                     .unique_class_key(name)
+                    .map(|key| key.as_str())
                     .unwrap_or(name)
                     .to_string()
             });

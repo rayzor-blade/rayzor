@@ -1248,7 +1248,7 @@ impl<'a> HirToMirContext<'a> {
                             .and_then(|key| {
                                 self.stdlib_mapping
                                     .get(&crate::stdlib::MethodSignature {
-                                        class: key,
+                                        class: key.as_str(),
                                         method: method_static,
                                         is_static: true,
                                         is_constructor: false,
@@ -1259,7 +1259,9 @@ impl<'a> HirToMirContext<'a> {
                             .or_else(|| {
                                 self.stdlib_mapping
                                     .find_unique_static_by_name_and_params(method_static, arity)
-                                    .map(|(sig, mapping)| (sig.class, mapping))
+                                    .map(|(sig, mapping)| {
+                                        (self.stdlib_mapping.key(sig.class), mapping)
+                                    })
                             });
 
                         if let Some((class_name, mapping)) = found_mapping {

@@ -65,17 +65,25 @@ impl<'a> HirToMirContext<'a> {
                             mn, arg_count
                         );
                         self.stdlib_mapping
-                            .find_by_name_and_params("String", mn, arg_count)
+                            .find_by_name_and_params(
+                                self.stdlib_mapping.key("String"),
+                                mn,
+                                arg_count,
+                            )
                             .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                     } else if mn == "wait" {
                         // Lock.wait() has overloads: 0 params (blocking) vs 1 param (with timeout)
                         let arg_count = args.len();
                         debug!("[wait lookup] method={}, arg_count={}", mn, arg_count);
                         self.stdlib_mapping
-                            .find_by_name_and_params("sys.thread.Lock", mn, arg_count)
+                            .find_by_name_and_params(
+                                self.stdlib_mapping.key("sys.thread.Lock"),
+                                mn,
+                                arg_count,
+                            )
                             .or_else(|| {
                                 self.stdlib_mapping.find_by_name_and_params(
-                                    "sys.thread.Condition",
+                                    self.stdlib_mapping.key("sys.thread.Condition"),
                                     mn,
                                     arg_count,
                                 )
@@ -94,7 +102,11 @@ impl<'a> HirToMirContext<'a> {
                         let arg_count = args.len();
                         debug!("[tryAcquire lookup] method={}, arg_count={}", mn, arg_count);
                         self.stdlib_mapping
-                            .find_by_name_and_params("sys.thread.Semaphore", mn, arg_count)
+                            .find_by_name_and_params(
+                                self.stdlib_mapping.key("sys.thread.Semaphore"),
+                                mn,
+                                arg_count,
+                            )
                             .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                             .or_else(|| {
                                 self.get_stdlib_runtime_info(
@@ -143,7 +155,8 @@ impl<'a> HirToMirContext<'a> {
 
                         if let Some((_sig, mapping)) = self
                             .stdlib_mapping
-                            .find_by_name(&qualified_class, mir_method_name)
+                            .class_key(&qualified_class)
+                            .and_then(|key| self.stdlib_mapping.find_by_name(key, mir_method_name))
                         {
                             let runtime_func = mapping.runtime_name;
                             debug!(
@@ -546,10 +559,11 @@ impl<'a> HirToMirContext<'a> {
                 let receiver_class = self.find_receiver_class_name(object);
 
                 if let (Some(ref cls), Some(ref mn)) = (&receiver_class, &method_name_str) {
-                    let plugin_match = self
-                        .stdlib_mapping
-                        .find_by_name_and_params(cls, mn, args.len())
-                        .or_else(|| self.stdlib_mapping.find_by_name(cls, mn));
+                    let plugin_match = self.stdlib_mapping.class_key(cls).and_then(|key| {
+                        self.stdlib_mapping
+                            .find_by_name_and_params(key, mn, args.len())
+                            .or_else(|| self.stdlib_mapping.find_by_name(key, mn))
+                    });
 
                     if let Some((sig, runtime_call)) = plugin_match {
                         let runtime_func = runtime_call.runtime_name;
@@ -766,7 +780,8 @@ impl<'a> HirToMirContext<'a> {
                         // Look up in stdlib_mapping (try abstract's own name first, then @:forward underlying)
                         let stdlib_result = self
                             .stdlib_mapping
-                            .find_by_name(&class_name, method_name)
+                            .class_key(&class_name)
+                            .and_then(|key| self.stdlib_mapping.find_by_name(key, method_name))
                             .map(|(sig, m)| (sig.clone(), m.clone()))
                             .or_else(|| {
                                 let (underlying_type, forward_list) =
@@ -782,7 +797,10 @@ impl<'a> HirToMirContext<'a> {
                                 let underlying_class = self
                                     .resolve_type_class_name_with(&type_table, *underlying_type)?;
                                 self.stdlib_mapping
-                                    .find_by_name(&underlying_class, method_name)
+                                    .class_key(&underlying_class)
+                                    .and_then(|key| {
+                                        self.stdlib_mapping.find_by_name(key, method_name)
+                                    })
                                     .map(|(sig, m)| (sig.clone(), m.clone()))
                             });
 
@@ -1134,9 +1152,16 @@ impl<'a> HirToMirContext<'a> {
                             let arg_count = args.len();
                             let mapping_opt = self
                                 .stdlib_mapping
-                                .find_by_name_and_params("String", method_name, arg_count)
+                                .find_by_name_and_params(
+                                    self.stdlib_mapping.key("String"),
+                                    method_name,
+                                    arg_count,
+                                )
                                 .or_else(|| {
-                                    self.stdlib_mapping.find_by_name("String", method_name)
+                                    self.stdlib_mapping.find_by_name(
+                                        self.stdlib_mapping.key("String"),
+                                        method_name,
+                                    )
                                 });
 
                             if let Some((_sig, mapping)) = mapping_opt {

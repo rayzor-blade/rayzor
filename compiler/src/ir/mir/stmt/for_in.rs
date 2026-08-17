@@ -545,9 +545,13 @@ impl<'a> HirToMirContext<'a> {
         // For Dynamic-typed iterators (e.g., from arr.iterator()), class_sym is None.
         // Use register class hints to find the iterator class and resolve via stdlib mappings.
         if class_sym.is_none() {
-            if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
-                let hn_mapping = self.stdlib_mapping.find_by_name(&class_hint, "hasNext");
-                let n_mapping = self.stdlib_mapping.find_by_name(&class_hint, "next");
+            if let Some(class_hint) = self
+                .register_class_hints
+                .get(&obj_reg)
+                .and_then(|hint| self.stdlib_mapping.class_key(hint))
+            {
+                let hn_mapping = self.stdlib_mapping.find_by_name(class_hint, "hasNext");
+                let n_mapping = self.stdlib_mapping.find_by_name(class_hint, "next");
                 if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) = (hn_mapping, n_mapping) {
                     let hn_name = hn_rt.runtime_name.to_string();
                     let n_name = n_rt.runtime_name.to_string();
@@ -631,18 +635,22 @@ impl<'a> HirToMirContext<'a> {
                 .map(|s| s.to_string());
 
             // Extract runtime names first to avoid borrow conflict with get_or_register_extern_function
-            let stdlib_names = class_name_str.as_ref().and_then(|class_name| {
-                let hn_mapping = self.stdlib_mapping.find_by_name(class_name, "hasNext");
-                let n_mapping = self.stdlib_mapping.find_by_name(class_name, "next");
-                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) = (hn_mapping, n_mapping) {
-                    Some((
-                        hn_rt.runtime_name.to_string(),
-                        n_rt.runtime_name.to_string(),
-                    ))
-                } else {
-                    None
-                }
-            });
+            let stdlib_names = class_name_str
+                .as_deref()
+                .and_then(|name| self.stdlib_mapping.class_key(name))
+                .and_then(|class_name| {
+                    let hn_mapping = self.stdlib_mapping.find_by_name(class_name, "hasNext");
+                    let n_mapping = self.stdlib_mapping.find_by_name(class_name, "next");
+                    if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) = (hn_mapping, n_mapping)
+                    {
+                        Some((
+                            hn_rt.runtime_name.to_string(),
+                            n_rt.runtime_name.to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                });
             let stdlib_result = stdlib_names.map(|(hn_name, n_name)| {
                 let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                 let hn_fn = self.get_or_register_extern_function(
@@ -672,41 +680,44 @@ impl<'a> HirToMirContext<'a> {
                 // Also check for iterator/keyValueIterator via stdlib mapping (e.g., Array.iterator)
                 // Extract names first to avoid borrow conflicts
                 let stdlib_iter_names = if iterator_sym.is_none() {
-                    class_name_str.as_ref().and_then(|class_name| {
-                        let iter_mapping = self
-                            .stdlib_mapping
-                            .find_by_name(class_name, "iterator")
-                            .or_else(|| {
-                                self.stdlib_mapping
-                                    .find_by_name(class_name, "keyValueIterator")
-                            });
-                        if let Some((_sig, rt)) = iter_mapping {
-                            let iter_rt_name = rt.runtime_name.to_string();
-                            let is_kv = iter_rt_name.contains("kv_iterator");
-                            let iter_class_name = if is_kv {
-                                "haxe.iterators.ArrayKeyValueIterator"
-                            } else {
-                                "haxe.iterators.ArrayIterator"
-                            };
-                            let hn_mapping =
-                                self.stdlib_mapping.find_by_name(iter_class_name, "hasNext");
-                            let n_mapping =
-                                self.stdlib_mapping.find_by_name(iter_class_name, "next");
-                            if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
-                                (hn_mapping, n_mapping)
-                            {
-                                Some((
-                                    iter_rt_name,
-                                    hn_rt.runtime_name.to_string(),
-                                    n_rt.runtime_name.to_string(),
-                                ))
+                    class_name_str
+                        .as_deref()
+                        .and_then(|name| self.stdlib_mapping.class_key(name))
+                        .and_then(|class_name| {
+                            let iter_mapping = self
+                                .stdlib_mapping
+                                .find_by_name(class_name, "iterator")
+                                .or_else(|| {
+                                    self.stdlib_mapping
+                                        .find_by_name(class_name, "keyValueIterator")
+                                });
+                            if let Some((_sig, rt)) = iter_mapping {
+                                let iter_rt_name = rt.runtime_name.to_string();
+                                let is_kv = iter_rt_name.contains("kv_iterator");
+                                let iter_class_name = if is_kv {
+                                    "haxe.iterators.ArrayKeyValueIterator"
+                                } else {
+                                    "haxe.iterators.ArrayIterator"
+                                };
+                                let iter_key = self.stdlib_mapping.key(iter_class_name);
+                                let hn_mapping =
+                                    self.stdlib_mapping.find_by_name(iter_key, "hasNext");
+                                let n_mapping = self.stdlib_mapping.find_by_name(iter_key, "next");
+                                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
+                                    (hn_mapping, n_mapping)
+                                {
+                                    Some((
+                                        iter_rt_name,
+                                        hn_rt.runtime_name.to_string(),
+                                        n_rt.runtime_name.to_string(),
+                                    ))
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
-                        } else {
-                            None
-                        }
-                    })
+                        })
                 } else {
                     None
                 };

@@ -348,24 +348,18 @@ impl<'a> HirToMirContext<'a> {
         // and rayzor.concurrent.Thread collide.
         if parts.len() >= 2 {
             let qualified_class_name = parts[..parts.len() - 1].join(".");
-            let qualified_class_name = self
-                .stdlib_mapping
-                .get_class_static_str(&qualified_class_name)
-                .unwrap_or(&qualified_class_name);
-            if let Some(count) = param_count {
-                if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                    qualified_class_name,
-                    method_name,
-                    count,
-                ) {
+            if let Some(key) = self.stdlib_mapping.class_key(&qualified_class_name) {
+                if let Some(count) = param_count {
+                    if let Some((_sig, mapping)) =
+                        self.stdlib_mapping
+                            .find_by_name_and_params(key, method_name, count)
+                    {
+                        return Some(mapping.runtime_name);
+                    }
+                }
+                if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name) {
                     return Some(mapping.runtime_name);
                 }
-            }
-            if let Some((_sig, mapping)) = self
-                .stdlib_mapping
-                .find_by_name(qualified_class_name, method_name)
-            {
-                return Some(mapping.runtime_name);
             }
         }
 
@@ -387,14 +381,11 @@ impl<'a> HirToMirContext<'a> {
         // Inside a stdlib namespace the simple name may still be the only
         // spelling available; accept it when it names exactly one registered
         // class, and query that class's key.
-        let class_name = self
-            .stdlib_mapping
-            .unique_class_key(class_name)
-            .unwrap_or(class_name);
+        let class_key = self.stdlib_mapping.unique_class_key(class_name)?;
         if let Some(count) = param_count {
             if let Some((_sig, mapping)) =
                 self.stdlib_mapping
-                    .find_by_name_and_params(class_name, method_name, count)
+                    .find_by_name_and_params(class_key, method_name, count)
             {
                 return Some(mapping.runtime_name);
             }
@@ -402,7 +393,7 @@ impl<'a> HirToMirContext<'a> {
             // Callers can decide whether to do a global static fallback by (name, arity).
             return None;
         }
-        if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
+        if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(class_key, method_name) {
             return Some(mapping.runtime_name);
         }
 
@@ -427,14 +418,12 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn class_key_from_method_qname(
         &self,
         qualified_name: Option<&str>,
-    ) -> Option<&'static str> {
+    ) -> Option<crate::stdlib::ClassKey> {
         let (class_path, _) = qualified_name?.rsplit_once('.')?;
-        self.stdlib_mapping
-            .get_class_static_str(class_path)
-            .or_else(|| {
-                let simple = class_path.rsplit('.').next().unwrap_or(class_path);
-                self.stdlib_mapping.get_class_static_str(simple)
-            })
+        self.stdlib_mapping.class_key(class_path).or_else(|| {
+            let simple = class_path.rsplit('.').next().unwrap_or(class_path);
+            self.stdlib_mapping.class_key(simple)
+        })
     }
 
     pub(crate) fn get_stdlib_runtime_info(
@@ -552,7 +541,7 @@ impl<'a> HirToMirContext<'a> {
                             // its simple name onto `haxe.Json`.
                             let is_wrapper = self
                                 .canonical_stdlib_class_name(s)
-                                .map(|key| self.stdlib_mapping.is_mir_wrapper_class(&key))
+                                .map(|key| self.stdlib_mapping.is_mir_wrapper_class(key))
                                 .unwrap_or(false);
                             is_extern || is_wrapper || in_stdlib_ns
                         })
@@ -603,20 +592,20 @@ impl<'a> HirToMirContext<'a> {
                     let class_name = class_parts[class_parts.len() - 1];
                     let qualified_class_name = class_parts.join(".");
 
-                    if let Some(count) = param_count {
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                            &qualified_class_name,
-                            method_name,
-                            count,
-                        ) {
+                    if let Some(key) = self.stdlib_mapping.class_key(&qualified_class_name) {
+                        if let Some(count) = param_count {
+                            if let Some((sig, mapping)) = self
+                                .stdlib_mapping
+                                .find_by_name_and_params(key, method_name, count)
+                            {
+                                return Some((sig.class, sig.method, mapping));
+                            }
+                        }
+                        if let Some((sig, mapping)) =
+                            self.stdlib_mapping.find_by_name(key, method_name)
+                        {
                             return Some((sig.class, sig.method, mapping));
                         }
-                    }
-                    if let Some((sig, mapping)) = self
-                        .stdlib_mapping
-                        .find_by_name(&qualified_class_name, method_name)
-                    {
-                        return Some((sig.class, sig.method, mapping));
                     }
 
                     // Simple-class fallback stays confined to stdlib namespaces;
@@ -626,35 +615,39 @@ impl<'a> HirToMirContext<'a> {
                         || qualified_class_name.starts_with("sys_")
                         || qualified_class_name.starts_with("haxe_");
                     if method_is_extern && allow_simple_fallback {
-                        if let Some(count) = param_count {
-                            if let Some((sig, mapping)) = self
-                                .stdlib_mapping
-                                .find_by_name_and_params(class_name, method_name, count)
+                        if let Some(key) = self.stdlib_mapping.class_key(class_name) {
+                            if let Some(count) = param_count {
+                                if let Some((sig, mapping)) = self
+                                    .stdlib_mapping
+                                    .find_by_name_and_params(key, method_name, count)
+                                {
+                                    return Some((sig.class, sig.method, mapping));
+                                }
+                            }
+                            if let Some((sig, mapping)) =
+                                self.stdlib_mapping.find_by_name(key, method_name)
                             {
                                 return Some((sig.class, sig.method, mapping));
                             }
-                        }
-                        if let Some((sig, mapping)) =
-                            self.stdlib_mapping.find_by_name(class_name, method_name)
-                        {
-                            return Some((sig.class, sig.method, mapping));
                         }
 
                         let variants = self.stdlib_mapping.get_monomorphized_variants(class_name);
                         if !variants.is_empty() {
                             for variant in variants {
-                                if let Some(count) = param_count {
-                                    if let Some((sig, mapping)) = self
-                                        .stdlib_mapping
-                                        .find_by_name_and_params(variant, method_name, count)
+                                if let Some(key) = self.stdlib_mapping.class_key(variant) {
+                                    if let Some(count) = param_count {
+                                        if let Some((sig, mapping)) = self
+                                            .stdlib_mapping
+                                            .find_by_name_and_params(key, method_name, count)
+                                        {
+                                            return Some((sig.class, sig.method, mapping));
+                                        }
+                                    }
+                                    if let Some((sig, mapping)) =
+                                        self.stdlib_mapping.find_by_name(key, method_name)
                                     {
                                         return Some((sig.class, sig.method, mapping));
                                     }
-                                }
-                                if let Some((sig, mapping)) =
-                                    self.stdlib_mapping.find_by_name(variant, method_name)
-                                {
-                                    return Some((sig.class, sig.method, mapping));
                                 }
                             }
                         }
@@ -669,7 +662,8 @@ impl<'a> HirToMirContext<'a> {
                     let class_name_str = self.string_interner.get(class.name).unwrap_or("");
                     if let Some((sig, mapping)) = self
                         .stdlib_mapping
-                        .find_by_name(class_name_str, method_name)
+                        .class_key(class_name_str)
+                        .and_then(|key| self.stdlib_mapping.find_by_name(key, method_name))
                     {
                         debug!(
                             "[FALLBACK1.5] Found {}.{} via HIR type decl",
@@ -689,7 +683,9 @@ impl<'a> HirToMirContext<'a> {
                                     let native_str = self.string_interner.get(*s).unwrap_or("");
                                     let normalized = native_str.replace("::", ".");
                                     if let Some((sig, mapping)) =
-                                        self.stdlib_mapping.find_by_name(&normalized, method_name)
+                                        self.stdlib_mapping.class_key(&normalized).and_then(|key| {
+                                            self.stdlib_mapping.find_by_name(key, method_name)
+                                        })
                                     {
                                         debug!(
                                             "[FALLBACK1.5] Found {}.{} via @:native class name",
@@ -707,16 +703,19 @@ impl<'a> HirToMirContext<'a> {
             // Monomorphized extern classes (Vec<Int> -> VecI32) have no type_table
             // entry, but the New handler left a class hint on the receiver register.
             if let Some(hint) = receiver_class_hint {
-                if let Some(count) = param_count {
-                    if let Some((sig, mapping)) =
-                        self.stdlib_mapping
-                            .find_by_name_and_params(hint, method_name, count)
+                if let Some(key) = self.stdlib_mapping.class_key(hint) {
+                    if let Some(count) = param_count {
+                        if let Some((sig, mapping)) =
+                            self.stdlib_mapping
+                                .find_by_name_and_params(key, method_name, count)
+                        {
+                            return Some((sig.class, sig.method, mapping));
+                        }
+                    }
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
                     {
                         return Some((sig.class, sig.method, mapping));
                     }
-                }
-                if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(hint, method_name) {
-                    return Some((sig.class, sig.method, mapping));
                 }
             }
 
@@ -807,7 +806,10 @@ impl<'a> HirToMirContext<'a> {
                                 let qualified_name = target_name.to_string();
                                 if let Some((_sig, mapping)) = self
                                     .stdlib_mapping
-                                    .find_by_name(&qualified_name, method_name)
+                                    .class_key(&qualified_name)
+                                    .and_then(|key| {
+                                        self.stdlib_mapping.find_by_name(key, method_name)
+                                    })
                                 {
                                     return Some((_sig.class, _sig.method, mapping));
                                 }
@@ -857,7 +859,7 @@ impl<'a> HirToMirContext<'a> {
                     if matches!(&base_info.kind, TypeKind::Enum { .. }) {
                         return self
                             .stdlib_mapping
-                            .find_by_name("Enum", method_name)
+                            .find_by_name(self.stdlib_mapping.key("Enum"), method_name)
                             .map(|(sig, mapping)| (sig.class, sig.method, mapping));
                     }
                     let sym_id = match &base_info.kind {
@@ -901,9 +903,9 @@ impl<'a> HirToMirContext<'a> {
                 // its simple name is consulted only when the FQN names no
                 // registered class.
                 let ph_key = self.string_interner.get(*placeholder_name).and_then(|ph| {
-                    self.stdlib_mapping.get_class_static_str(ph).or_else(|| {
+                    self.stdlib_mapping.class_key(ph).or_else(|| {
                         let bare = ph.rsplit('.').next().unwrap_or(ph);
-                        self.stdlib_mapping.get_class_static_str(bare)
+                        self.stdlib_mapping.class_key(bare)
                     })
                 });
                 if let Some(key) = ph_key {
@@ -926,13 +928,10 @@ impl<'a> HirToMirContext<'a> {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
-                if let Some(hint) = receiver_class_hint {
-                    let hint = self
-                        .stdlib_mapping
-                        .get_class_static_str(hint)
-                        .unwrap_or(hint);
-                    if let Some((sig, mapping)) =
-                        self.stdlib_mapping.find_by_name(hint, method_name)
+                if let Some(key) =
+                    receiver_class_hint.and_then(|h| self.stdlib_mapping.class_key(h))
+                {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
                     {
                         return Some((sig.class, sig.method, mapping));
                     }
@@ -951,13 +950,10 @@ impl<'a> HirToMirContext<'a> {
                 }
                 // Try receiver_class_hint for disambiguation (e.g., guard.get() where guard
                 // is typed as Dynamic but hint names the guard class)
-                if let Some(hint) = receiver_class_hint {
-                    let hint = self
-                        .stdlib_mapping
-                        .get_class_static_str(hint)
-                        .unwrap_or(hint);
-                    if let Some((sig, mapping)) =
-                        self.stdlib_mapping.find_by_name(hint, method_name)
+                if let Some(key) =
+                    receiver_class_hint.and_then(|h| self.stdlib_mapping.class_key(h))
+                {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
                     {
                         return Some((sig.class, sig.method, mapping));
                     }
@@ -1026,37 +1022,36 @@ impl<'a> HirToMirContext<'a> {
         // registered class, resolves to that class's key. A name shared by
         // several classes is left as-is: choosing among them belongs to the
         // dispatch below, which has the method and arity to choose with.
-        let class_name = self
-            .stdlib_mapping
-            .unique_class_key(class_name)
-            .unwrap_or(class_name);
+        let class_key = self.stdlib_mapping.unique_class_key(class_name);
 
         // A fully qualified hint must be tried before anything else, so subclass
         // dispatch resolves exactly: sys.ssl.Socket.close is rayzor_ssl_socket_close,
         // not sys_net_Socket_close.
         if let Some(hint) = receiver_class_hint {
-            if hint.contains('.') {
-                let normalized_hint = hint.to_string();
+            if let Some(key) = hint
+                .contains('.')
+                .then(|| self.stdlib_mapping.class_key(hint))
+                .flatten()
+            {
                 if let Some(count) = param_count {
-                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                        &normalized_hint,
-                        method_name,
-                        count,
-                    ) {
+                    if let Some((sig, mapping)) =
+                        self.stdlib_mapping
+                            .find_by_name_and_params(key, method_name, count)
+                    {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
-                if let Some((sig, mapping)) = self
-                    .stdlib_mapping
-                    .find_by_name(&normalized_hint, method_name)
-                {
+                if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name) {
                     return Some((sig.class, sig.method, mapping));
                 }
             }
         }
 
         // Qualified name ("rayzor_Bytes") first, then the simple name.
-        if let Some(ref qn) = qualified_class_name {
+        if let Some(qn) = qualified_class_name
+            .as_deref()
+            .and_then(|qn| self.stdlib_mapping.class_key(qn))
+        {
             // param_count disambiguates overloads, so try it first.
             if let Some(count) = param_count {
                 if let Some((sig, mapping)) =
@@ -1082,20 +1077,22 @@ impl<'a> HirToMirContext<'a> {
                 return Some((sig.class, sig.method, mapping));
             }
         }
-        if let Some(count) = param_count {
-            if let Some((sig, mapping)) =
-                self.stdlib_mapping
-                    .find_by_name_and_params(class_name, method_name, count)
-            {
-                debug!(
-                    "[get_stdlib_runtime_info] Found {}.{} ({} params) -> {}",
-                    class_name, method_name, count, mapping.runtime_name
-                );
+        if let Some(key) = class_key {
+            if let Some(count) = param_count {
+                if let Some((sig, mapping)) =
+                    self.stdlib_mapping
+                        .find_by_name_and_params(key, method_name, count)
+                {
+                    debug!(
+                        "[get_stdlib_runtime_info] Found {}.{} ({} params) -> {}",
+                        key, method_name, count, mapping.runtime_name
+                    );
+                    return Some((sig.class, sig.method, mapping));
+                }
+            }
+            if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name) {
                 return Some((sig.class, sig.method, mapping));
             }
-        }
-        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
-            return Some((sig.class, sig.method, mapping));
         }
 
         // @:forward fallback: if the abstract's own name didn't match, try underlying type
@@ -1226,9 +1223,12 @@ impl<'a> HirToMirContext<'a> {
                                         .get(abs_sym.name)
                                         .map(|n| format!("rayzor.{}", n))
                                 });
-                            if let Some(class) = class_name {
+                            if let Some(class) = class_name
+                                .as_deref()
+                                .and_then(|c| self.stdlib_mapping.class_key(c))
+                            {
                                 if let Some((_, mapping)) =
-                                    self.stdlib_mapping.find_by_name(&class, method_name)
+                                    self.stdlib_mapping.find_by_name(class, method_name)
                                 {
                                     let runtime_func = mapping.runtime_name;
                                     let result_type = self.convert_type(target_type);

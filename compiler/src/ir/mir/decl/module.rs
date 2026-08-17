@@ -200,9 +200,10 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 qualified_class_name
                                     .as_ref()
-                                    .map(|qn| {
+                                    .and_then(|qn| self.stdlib_mapping.class_key(qn))
+                                    .map(|key| {
                                         self.stdlib_mapping.has_mapping(
-                                            qn,
+                                            key,
                                             method_name,
                                             method.is_static,
                                         )

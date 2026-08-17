@@ -39,19 +39,17 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn canonical_stdlib_class_name(
         &self,
         symbol: &crate::tast::symbols::Symbol,
-    ) -> Option<String> {
+    ) -> Option<crate::stdlib::ClassKey> {
         if let Some(native) = symbol.native_name {
             if let Some(native_str) = self.string_interner.get(native) {
                 let dotted = native_str.replace("::", ".");
-                if let Some(key) = self.stdlib_mapping.get_class_static_str(&dotted) {
-                    return Some(key.to_string());
+                if let Some(key) = self.stdlib_mapping.class_key(&dotted) {
+                    return Some(key);
                 }
             }
         }
         let class_name = self.string_interner.get(symbol.name)?;
-        self.stdlib_mapping
-            .get_class_static_str(class_name)
-            .map(str::to_string)
+        self.stdlib_mapping.class_key(class_name)
     }
 
     /// The stdlib class a call returns, read from the callee's declaration.
@@ -103,7 +101,7 @@ impl<'a> HirToMirContext<'a> {
             self.string_interner.get(sym.name),
             key
         );
-        Some(key)
+        Some(key.as_str().to_string())
     }
 
     pub(crate) fn try_stdlib_from_cast(
@@ -132,9 +130,10 @@ impl<'a> HirToMirContext<'a> {
         }?;
 
         // Search stdlib mapping for a static @:from method (e.g., "fromArray")
+        let class_key = self.stdlib_mapping.class_key(&class_name)?;
         let mapping_info = self
             .stdlib_mapping
-            .find_by_name(&class_name, "fromArray")
+            .find_by_name(class_key, "fromArray")
             .map(|(_, m)| (m.runtime_name.to_string(), m.is_mir_wrapper));
 
         let (runtime_func, is_mir_wrapper) = mapping_info?;
@@ -185,9 +184,10 @@ impl<'a> HirToMirContext<'a> {
 
         // The hint names the receiver's class; the mapping resolves whatever
         // spelling it arrived in.
+        let hint_key = self.stdlib_mapping.class_key(&hint)?;
         let runtime_name = self
             .stdlib_mapping
-            .find_by_name(&hint, &field_name)
+            .find_by_name(hint_key, &field_name)
             .map(|(_, call)| call.runtime_name)?;
 
         let field_kind = self.type_table.get(field_ty).map(|t| t.kind.clone());
@@ -235,9 +235,8 @@ impl<'a> HirToMirContext<'a> {
         // expected_param_count = args.len() - 1 because args includes `this`
         let expected_extra = args.len().saturating_sub(1);
 
-        let candidate_classes = [dot_form.as_str()];
         let mut found: Option<(String, IrType, Vec<IrType>, bool)> = None;
-        for cn in &candidate_classes {
+        for cn in self.stdlib_mapping.class_key(&dot_form) {
             if let Some((_sig, mapping)) = self
                 .stdlib_mapping
                 .find_by_name_and_params(cn, method_name, expected_extra)
@@ -336,10 +335,11 @@ impl<'a> HirToMirContext<'a> {
         let class_name = self
             .symbol_table
             .get_symbol(class_symbol)
-            .and_then(|s| self.canonical_stdlib_class_name(s))
-            .unwrap_or_default();
+            .and_then(|s| self.canonical_stdlib_class_name(s));
 
-        if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(&class_name, "toString") {
+        if let Some((_sig, mapping)) =
+            class_name.and_then(|k| self.stdlib_mapping.find_by_name(k, "toString"))
+        {
             let runtime_name = mapping.runtime_name;
             let is_mir_wrapper = mapping.is_mir_wrapper;
             let ptr_void = IrType::Ptr(Box::new(IrType::Void));

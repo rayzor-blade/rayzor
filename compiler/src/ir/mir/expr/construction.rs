@@ -258,7 +258,7 @@ impl<'a> HirToMirContext<'a> {
                 // names cover receivers whose HIR name is unqualified, and
                 // the raw name (bare or Vec monomorph) comes last.
                 let ctor_key = if class_name.contains('.') {
-                    self.stdlib_mapping.get_class_static_str(class_name)
+                    self.stdlib_mapping.class_key(class_name)
                 } else {
                     None
                 }
@@ -266,17 +266,14 @@ impl<'a> HirToMirContext<'a> {
                     let sym = self.symbol_table.get_symbol(actual_symbol_id?)?;
                     sym.native_name
                         .and_then(|n| self.string_interner.get(n))
-                        .and_then(|n| {
-                            self.stdlib_mapping
-                                .get_class_static_str(&n.replace("::", "."))
-                        })
+                        .and_then(|n| self.stdlib_mapping.class_key(&n.replace("::", ".")))
                         .or_else(|| {
                             sym.qualified_name
                                 .and_then(|qn| self.string_interner.get(qn))
-                                .and_then(|qn| self.stdlib_mapping.get_class_static_str(qn))
+                                .and_then(|qn| self.stdlib_mapping.class_key(qn))
                         })
                 })
-                .or_else(|| self.stdlib_mapping.get_class_static_str(class_name));
+                .or_else(|| self.stdlib_mapping.class_key(class_name));
 
                 // Param-count-aware lookup first, then any-param, so
                 // overloaded constructors (e.g. Uncompress with 0 or 1 args)

@@ -8509,7 +8509,9 @@ impl CompilationUnit {
                 // shadow the correct one (Thread_spawn, a dylib descriptor's
                 // export) and fail at JIT link time. The dotted class name is
                 // enough: the mapping resolves every spelling of it.
-                let builtin_match = builtin_mapping.find_by_name(&class_dot_name, &method_name);
+                let builtin_match = builtin_mapping
+                    .class_key(&class_dot_name)
+                    .and_then(|key| builtin_mapping.find_by_name(key, &method_name));
                 if let Some((_sig, call)) = builtin_match {
                     // DECLARATION vs RUNTIME arity. The lookup above is three
                     // name-only attempts with no arity awareness, so a method

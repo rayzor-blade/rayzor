@@ -264,7 +264,11 @@ impl<'a> HirToMirContext<'a> {
                                 );
                                 let runtime_func = runtime_call.runtime_name;
 
-                                if self.stdlib_mapping.is_mir_wrapper_class(class_name) {
+                                if self
+                                    .stdlib_mapping
+                                    .class_key(class_name)
+                                    .is_some_and(|k| self.stdlib_mapping.is_mir_wrapper_class(k))
+                                {
                                     // Use runtime_name directly as the MIR wrapper function name
                                     // (e.g., "Arc_init" not "rayzor_concurrent_Arc_init")
                                     let mir_func_name = runtime_func.to_string();
@@ -630,11 +634,14 @@ impl<'a> HirToMirContext<'a> {
                                 // spelling and the runtime symbol stay independent.
                                 let wrapper = self
                                     .stdlib_mapping
-                                    .find_by_name_and_params(
-                                        &mono_class,
-                                        method_name,
-                                        args.len().saturating_sub(1),
-                                    )
+                                    .class_key(&mono_class)
+                                    .and_then(|key| {
+                                        self.stdlib_mapping.find_by_name_and_params(
+                                            key,
+                                            method_name,
+                                            args.len().saturating_sub(1),
+                                        )
+                                    })
                                     .filter(|(_, call)| call.is_mir_wrapper)
                                     .map(|(_, call)| call.runtime_name);
 
@@ -694,7 +701,7 @@ impl<'a> HirToMirContext<'a> {
                             self.symbol_table.get_symbol(*symbol_id)
                                 .and_then(|s| self.canonical_stdlib_class_name(s))
                                 .map(|key| {
-                                    let is_mir_wrapper = self.stdlib_mapping.is_mir_wrapper_class(&key);
+                                    let is_mir_wrapper = self.stdlib_mapping.is_mir_wrapper_class(key);
                                     if is_mir_wrapper {
                                         debug!("[GUARD] Receiver type is {} class (MIR wrapper), skipping instance method path", key);
                                     }
