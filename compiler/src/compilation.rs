@@ -39,6 +39,16 @@ pub struct TypecheckStageTimings {
     pub dependency_ms: f64,
     pub import_scan_ms: f64,
     pub import_load_ms: f64,
+    /// Reading and parsing every import purely to discover its dependencies,
+    /// before any of them is compiled.
+    pub import_discover_ms: f64,
+    pub import_toposort_ms: f64,
+    pub import_compile_ms: f64,
+    /// Looking an import up in the BLADE cache, and writing it back after a miss.
+    pub import_cache_load_ms: f64,
+    pub import_cache_save_ms: f64,
+    /// The import's own compile, separated from the bookkeeping around it.
+    pub import_compile_call_ms: f64,
     pub import_hx_ms: f64,
     pub user_files_ms: f64,
     pub result_stdlib_ms: f64,
@@ -3515,6 +3525,7 @@ impl CompilationUnit {
         }
         let mut visited: BTreeSet<String> = BTreeSet::new();
 
+        let t_discover = profile_timer(self.config.profile_typecheck);
         while let Some(qualified_path) = to_process.pop_front() {
             if is_stdtypes_ambient_import(&qualified_path) || visited.contains(&qualified_path) {
                 continue;
@@ -3604,7 +3615,10 @@ impl CompilationUnit {
             self.typecheck_timings.imports_collected += all_files.len();
         }
 
+        add_profile_ms(&mut self.typecheck_timings.import_discover_ms, t_discover);
+
         // Step 2: Topological sort using Kahn's algorithm
+        let t_toposort = profile_timer(self.config.profile_typecheck);
         // Use BTreeMap for deterministic iteration order
         let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
         let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3745,6 +3759,9 @@ impl CompilationUnit {
             }
         }
 
+        add_profile_ms(&mut self.typecheck_timings.import_toposort_ms, t_toposort);
+
+        let t_import_compile = profile_timer(self.config.profile_typecheck);
         // Step 3: Compile in topological order with retry for files that fail
         // due to unresolved symbols (dependency ordering issues from cycles).
         debug!(
@@ -3811,6 +3828,10 @@ impl CompilationUnit {
         // a later pass resolved them. Each call into a truly-failed module lowers
         // to a forward-ref trap stub (udf #0xc11f / wasm `unreachable`), so this
         // is the difference between a clean run and a silent SIGILL.
+        add_profile_ms(
+            &mut self.typecheck_timings.import_compile_ms,
+            t_import_compile,
+        );
         for name in &final_failures {
             if let Some(errs) = self.last_import_errors.get(name) {
                 eprintln!(
@@ -3876,7 +3897,12 @@ impl CompilationUnit {
         // resolve the alias target in the current compilation context.
         let source_has_typedef = source.contains("typedef ");
         let cache_hit = if self.config.enable_cache {
+            let t_cache_load = profile_timer(self.config.profile_typecheck);
             let hit = self.try_load_import_from_cache(&filename, source);
+            add_profile_ms(
+                &mut self.typecheck_timings.import_cache_load_ms,
+                t_cache_load,
+            );
             if self.config.profile_typecheck {
                 if hit {
                     self.typecheck_timings.import_cache_hits += 1;
@@ -3920,12 +3946,14 @@ impl CompilationUnit {
         // Stdlib imports (EReg, StringTools, etc.) still need the merge because their Haxe
         // source has placeholder method bodies that must be replaced by MIR wrappers.
         let skip_stdlib_merge = !is_stdlib;
-        match self.compile_file_with_shared_state_ex(
-            &filename,
-            source,
-            is_stdlib,
-            skip_stdlib_merge,
-        ) {
+        let t_compile_call = profile_timer(self.config.profile_typecheck);
+        let compile_outcome =
+            self.compile_file_with_shared_state_ex(&filename, source, is_stdlib, skip_stdlib_merge);
+        add_profile_ms(
+            &mut self.typecheck_timings.import_compile_call_ms,
+            t_compile_call,
+        );
+        match compile_outcome {
             Ok(typed_file) => {
                 if self.config.profile_typecheck {
                     self.typecheck_timings.import_fresh_compiles += 1;
@@ -3959,6 +3987,7 @@ impl CompilationUnit {
                         if let Some(ref mut maps) = cached_maps {
                             maps.inline_vars = inline_vars;
                         }
+                        let t_cache_save = profile_timer(self.config.profile_typecheck);
                         self.save_blade_cached(
                             &filename,
                             source,
@@ -3966,6 +3995,10 @@ impl CompilationUnit {
                             deps,
                             type_info,
                             cached_maps,
+                        );
+                        add_profile_ms(
+                            &mut self.typecheck_timings.import_cache_save_ms,
+                            t_cache_save,
                         );
                     }
 
