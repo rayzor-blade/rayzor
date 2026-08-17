@@ -322,11 +322,9 @@ impl NativePlugin {
             ))
             .to_string();
 
-            let class_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                desc.class_name,
-                desc.class_name_len,
-            ))
-            .to_string();
+            let class_name = normalize_class_name(std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(desc.class_name, desc.class_name_len),
+            ));
 
             let method_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
                 desc.method_name,
@@ -375,7 +373,7 @@ impl NativePlugin {
             .into_iter()
             .map(|e| NativeMethodInfo {
                 symbol_name: e.symbol_name,
-                class_name: e.class_name,
+                class_name: normalize_class_name(&e.class_name),
                 method_name: e.method_name,
                 is_static: e.is_static,
                 param_count: e.param_count,
@@ -401,6 +399,17 @@ fn native_type_to_descriptor(tag: u8) -> IrTypeDescriptor {
         4 => IrTypeDescriptor::Bool,
         _ => IrTypeDescriptor::I64, // fallback
     }
+}
+
+/// A plugin's class name in the mapping's key form.
+///
+/// The mapping is keyed by the Haxe dotted name and a class must register
+/// under exactly one key, or a lookup through its other spelling finds a
+/// different method set. Only the `::` path separator is rewritten: an
+/// underscore is a legal character in a class name, so a plugin that means
+/// a package path must declare it with separators.
+fn normalize_class_name(name: &str) -> String {
+    name.replace("::", ".")
 }
 
 /// Convert a native_type tag to an IrType.

@@ -384,6 +384,13 @@ impl<'a> HirToMirContext<'a> {
         if !in_stdlib_ns {
             return None;
         }
+        // Inside a stdlib namespace the simple name may still be the only
+        // spelling available; accept it when it names exactly one registered
+        // class, and query that class's key.
+        let class_name = self
+            .stdlib_mapping
+            .unique_class_key(class_name)
+            .unwrap_or(class_name);
         if let Some(count) = param_count {
             if let Some((_sig, mapping)) =
                 self.stdlib_mapping
@@ -417,7 +424,10 @@ impl<'a> HirToMirContext<'a> {
     /// authority; the simple name is consulted only when the path names no
     /// registered class, covering methods whose package did not survive a
     /// compilation-context boundary.
-    fn class_key_from_method_qname(&self, qualified_name: Option<&str>) -> Option<&'static str> {
+    pub(crate) fn class_key_from_method_qname(
+        &self,
+        qualified_name: Option<&str>,
+    ) -> Option<&'static str> {
         let (class_path, _) = qualified_name?.rsplit_once('.')?;
         self.stdlib_mapping
             .get_class_static_str(class_path)

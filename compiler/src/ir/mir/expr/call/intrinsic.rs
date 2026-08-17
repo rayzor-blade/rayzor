@@ -100,10 +100,12 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(false);
 
                     // Extern classes are skipped unless stdlib_mapping gives them a
-                    // toString (StringMap, IntMap, Date).
+                    // toString (StringMap, IntMap, Date), asked under the key.
                     let has_stdlib_tostring = self
-                        .stdlib_mapping
-                        .find_by_name(class_name_str, "toString")
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| self.canonical_stdlib_class_name(s))
+                        .and_then(|key| self.stdlib_mapping.find_by_name(&key, "toString"))
                         .is_some();
 
                     if is_extern && !has_stdlib_tostring {

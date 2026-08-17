@@ -8465,9 +8465,14 @@ impl CompilationUnit {
             if class_native_name.is_empty() {
                 continue;
             }
-            // Also get the dot-separated qualified name for stdlib mapping lookups
-            // (MIR lowerer queries with dots, not ::)
+            // The dot-separated name is what the mapping is keyed by; an
+            // already-registered class resolves to its own key, so the skip
+            // check below asks about exactly the class it means.
             let class_dot_name = class_native_name.replace("::", ".");
+            let class_dot_name = builtin_mapping
+                .get_class_static_str(&class_dot_name)
+                .map(str::to_string)
+                .unwrap_or(class_dot_name);
 
             // Extract method entries
             for method in &class.methods {

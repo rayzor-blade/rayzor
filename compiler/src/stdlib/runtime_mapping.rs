@@ -426,6 +426,17 @@ impl StdlibMapping {
         self.instance_method_names = instance_method_names;
     }
 
+    /// The compiler frame that reached the alias log, for the log line.
+    fn alias_log_caller() -> String {
+        let trace = std::backtrace::Backtrace::force_capture().to_string();
+        trace
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("at "))
+            .find(|at| at.contains("compiler/src/") && !at.contains("runtime_mapping.rs"))
+            .map(|at| at.trim_start_matches("./").to_string())
+            .unwrap_or_else(|| "<unknown>".to_string())
+    }
+
     /// Registered class names the given spelling may denote, in table order.
     ///
     /// Quiet on alias hits: this also serves the sanctioned resolvers
@@ -438,37 +449,28 @@ impl StdlibMapping {
             .unwrap_or_default()
     }
 
-    /// `candidates` for the query paths, which are supposed to be handed the
-    /// registered key. The migration to FQN-keyed lookups is finished when
-    /// this reports nothing under RAYZOR_STDLIB_ALIAS_LOG: every line is a
-    /// query still resolving through an alias instead of the key.
+    /// `candidates` for the query paths, which must be handed a registered
+    /// class key.
+    ///
+    /// A spelling that names a class without BEING its key is a resolution
+    /// bug in the caller: it means the class was identified by some other
+    /// name and never resolved. Resolving it here is what let a simple name
+    /// silently pick among same-named classes, so it is refused. Callers
+    /// resolve first — `get_class_static_str` for a known class,
+    /// `unique_class_key` where only a simple name survives — and both refuse
+    /// to choose between candidates.
     fn query_candidates(&self, lookup: &str) -> &[&'static str] {
         let found = self.candidates(lookup);
-        static LOG_ALIASES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *LOG_ALIASES.get_or_init(|| std::env::var_os("RAYZOR_STDLIB_ALIAS_LOG").is_some())
-            && !found.is_empty()
-            && !found.contains(&lookup)
-        {
-            eprintln!("[stdlib-alias] {lookup:?} -> {found:?}");
-            // Name a spelling here to learn which call path produces it.
-            static TRAP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-            if TRAP
-                .get_or_init(|| {
-                    std::env::var("RAYZOR_STDLIB_ALIAS_TRAP")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                })
-                .as_deref()
-                == Some(lookup)
-            {
-                eprintln!(
-                    "[stdlib-alias-trap]\n{}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-                std::process::exit(3);
-            }
+        if found.is_empty() || found.contains(&lookup) {
+            return found;
         }
-        found
+        panic!(
+            "stdlib mapping: queried with {lookup:?}, which names {found:?} but is not a \
+             registered key. Resolve the class first — get_class_static_str, or \
+             unique_class_key when only a simple name is available — and query the key \
+             it returns.\nQuery site: {}",
+            Self::alias_log_caller(),
+        );
     }
 
     /// The registered key for a spelling that names exactly one class.
@@ -4725,6 +4727,18 @@ mod tests {
             );
 
             assert_eq!(
+                mapping.get_class_static_str(spelling),
+                oracle::get_class_static_str(&mapping, spelling),
+                "get_class_static_str({spelling:?})"
+            );
+
+            // The query paths take a registered key and refuse any other
+            // spelling, so the oracle comparison applies to keys.
+            if !classes.contains(&spelling.as_str()) {
+                continue;
+            }
+
+            assert_eq!(
                 mapping.is_stdlib_class(spelling),
                 oracle::is_stdlib_class(&mapping, spelling),
                 "is_stdlib_class({spelling:?})"
@@ -4738,11 +4752,6 @@ mod tests {
                 mapping.class_has_static_methods(spelling),
                 oracle::class_has_static_methods(&mapping, spelling),
                 "class_has_static_methods({spelling:?})"
-            );
-            assert_eq!(
-                mapping.get_class_static_str(spelling),
-                oracle::get_class_static_str(&mapping, spelling),
-                "get_class_static_str({spelling:?})"
             );
             assert_eq!(
                 mapping.is_mir_wrapper_class(spelling),
@@ -4854,6 +4863,15 @@ mod tests {
         assert_eq!(mapping.class_priority("NotAClass"), 10);
     }
 
+    /// A query handed a spelling that is not a registered key is refused:
+    /// resolving it there is what let a simple name pick among classes.
+    #[test]
+    #[should_panic(expected = "is not a registered key")]
+    fn query_with_a_non_key_spelling_is_refused() {
+        let mapping = StdlibMapping::new();
+        mapping.find_by_name("Arc", "get");
+    }
+
     /// A typedef's own FQN resolves to the class it names, in any spelling.
     #[test]
     fn typedef_aliases_resolve() {
@@ -4871,8 +4889,11 @@ mod tests {
                 "{spelling:?} should name rayzor.Bytes"
             );
         }
-        assert!(mapping.find_by_name("haxe.io.Bytes", "subU64").is_some());
-        assert!(mapping.find_by_name("haxe.io.Bytes", "address").is_some());
+        let key = mapping
+            .get_class_static_str("haxe.io.Bytes")
+            .expect("haxe.io.Bytes names a class");
+        assert!(mapping.find_by_name(key, "subU64").is_some());
+        assert!(mapping.find_by_name(key, "address").is_some());
     }
 
     /// A mapping registered after construction must be visible to the indexes.
@@ -4898,12 +4919,15 @@ mod tests {
         assert!(mapping
             .find_static_method("zz.late.Registered", "go")
             .is_some());
-        // The suffix arm still resolves short spellings at this stage.
-        assert!(mapping.find_static_method("Registered", "go").is_some());
-        assert!(mapping
-            .find_static_method("late.Registered", "go")
-            .is_some());
         assert!(mapping.class_has_static_methods("zz.late.Registered"));
+        // Other spellings resolve TO the key; they are not themselves queryable.
+        for spelling in ["Registered", "late.Registered", "zz_late_Registered"] {
+            assert_eq!(
+                mapping.get_class_static_str(spelling),
+                Some("zz.late.Registered"),
+                "{spelling:?} should resolve to the key"
+            );
+        }
         assert_eq!(
             mapping
                 .find_by_runtime_name(runtime_name)

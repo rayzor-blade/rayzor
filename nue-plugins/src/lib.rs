@@ -175,21 +175,21 @@ rayzor_plugin::export_abi_version!();
 
 declare_native_methods! {
     NUE_METHODS;
-    "nue_transformer_KvCacheQ8", "alloc",             static,   "rayzor_kv_cache_q8_alloc",
+    "nue.transformer.KvCacheQ8", "alloc",             static,   "rayzor_kv_cache_q8_alloc",
         [I64, I64, I64]                                                       => Ptr;
-    "nue_transformer_KvCacheQ8", "free",              instance, "rayzor_kv_cache_q8_free",
+    "nue.transformer.KvCacheQ8", "free",              instance, "rayzor_kv_cache_q8_free",
         [Ptr]                                                                 => Void;
-    "nue_transformer_KvCacheQ8", "append",            instance, "rayzor_kv_cache_q8_append",
+    "nue.transformer.KvCacheQ8", "append",            instance, "rayzor_kv_cache_q8_append",
         [Ptr, I64, Ptr]                                                       => I64;
-    "nue_transformer_KvCacheQ8", "dequantView",       instance, "rayzor_kv_cache_q8_dequant_view",
+    "nue.transformer.KvCacheQ8", "dequantView",       instance, "rayzor_kv_cache_q8_dequant_view",
         [Ptr, I64]                                                            => Ptr;
-    "nue_transformer_KvCacheQ8", "dataPtr",           instance, "rayzor_kv_q8_data_ptr",
+    "nue.transformer.KvCacheQ8", "dataPtr",           instance, "rayzor_kv_q8_data_ptr",
         [Ptr]                                                                 => I64;
-    "nue_transformer_KvCacheQ8", "rowBytes",          instance, "rayzor_kv_q8_row_bytes",
+    "nue.transformer.KvCacheQ8", "rowBytes",          instance, "rayzor_kv_q8_row_bytes",
         [Ptr]                                                                 => I64;
-    "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
+    "nue.transformer.KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
-    "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8Host", instance, "rayzor_tensor_flash_attn_q8_host",
+    "nue.transformer.KvCacheQ8", "flashAttnDecodeQ8Host", instance, "rayzor_tensor_flash_attn_q8_host",
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
 }
 
