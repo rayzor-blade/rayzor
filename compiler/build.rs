@@ -101,6 +101,25 @@ fn stage_stdlib_snapshot() {
         }
     };
 
+    // Every entry carries the id of the compiler that lowered it, and a
+    // consumer rejects one that is not its own — so an archive produced by an
+    // earlier build is silently inert. It goes stale on any change under
+    // `src/`, and it cannot be regenerated from here: the generator links this
+    // crate. Say so, rather than embed 700KB nothing reads.
+    let recorded = std::fs::read_to_string(source.with_extension("build-id"));
+    let build_id = cache_build_id();
+    match recorded {
+        Ok(recorded) if recorded.trim() == build_id => {}
+        Ok(recorded) => println!(
+            "cargo:warning=the standard library snapshot was built by compiler {} but this is {} — it will be ignored and the library lowered from source; re-run `cargo run --release -p snapshot-gen` and build again",
+            recorded.trim(),
+            build_id
+        ),
+        Err(_) => println!(
+            "cargo:warning=the standard library snapshot records no compiler id — re-run `cargo run --release -p snapshot-gen` and build again"
+        ),
+    }
+
     if bytes.len() > 8 {
         println!(
             "cargo:warning=embedding standard library snapshot ({} KB)",
