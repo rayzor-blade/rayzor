@@ -89,8 +89,12 @@ impl<'a> HirToMirContext<'a> {
             if let (Some(ref cls), Some(ref mn)) = (&static_class_name, &static_method_name) {
                 let static_stdlib_info = self
                     .stdlib_mapping
-                    .find_by_name_and_params(cls, mn, args.len())
-                    .or_else(|| self.stdlib_mapping.find_by_name(cls, mn))
+                    .class_key(cls)
+                    .and_then(|key| {
+                        self.stdlib_mapping
+                            .find_by_name_and_params(key, mn, args.len())
+                            .or_else(|| self.stdlib_mapping.find_by_name(key, mn))
+                    })
                     .map(|(sig, mapping)| (sig.class, sig.method, mapping));
 
                 if let Some((sc_class_name, sc_method_name, runtime_call)) = static_stdlib_info {

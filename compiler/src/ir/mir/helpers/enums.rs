@@ -338,7 +338,7 @@ impl<'a> HirToMirContext<'a> {
 
         let (_, runtime_func) = self
             .stdlib_mapping
-            .find_by_name("Enum", &method_name)
+            .find_by_name(self.stdlib_mapping.key("Enum"), &method_name)
             .map(|(sig, call)| (sig.method, call.runtime_name))?;
 
         // Gather compile-time enum metadata

@@ -636,7 +636,10 @@ impl<'a> HirToMirContext<'a> {
                                 .and_then(|nn| self.string_interner.get(nn))
                                 .map(|nn| nn.replace("::", "."))
                         });
-                    if let Some(cn) = &class_name {
+                    if let Some(cn) = class_name
+                        .as_deref()
+                        .and_then(|n| self.stdlib_mapping.class_key(n))
+                    {
                         if self.stdlib_mapping.is_mir_wrapper_class(cn) {
                             debug!(
                                 "[UNBOXING] Skipping unbox for MIR wrapper class '{}' (extern abstract)",

@@ -160,7 +160,8 @@ impl<'a> HirToMirContext<'a> {
         method: &str,
     ) -> &'b str {
         self.stdlib_mapping
-            .return_class(dispatching_class, method)
+            .class_key(dispatching_class)
+            .and_then(|key| self.stdlib_mapping.return_class(key, method))
             .unwrap_or(dispatching_class)
     }
 }

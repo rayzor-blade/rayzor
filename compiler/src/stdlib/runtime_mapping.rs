@@ -211,6 +211,29 @@ pub struct MethodSignature {
     pub param_count: usize,
 }
 
+/// A class name the mapping is keyed by.
+///
+/// Constructible only by the mapping's resolvers, so a class-keyed query
+/// cannot be reached with a name that was never resolved — the caller has
+/// to say which class it means before it can ask anything about it. A class
+/// answers to several spellings (its `@:native` path, a typedef's name, its
+/// simple name); exactly one of them is the key, and resolving is what turns
+/// the others into it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ClassKey(&'static str);
+
+impl ClassKey {
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ClassKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// Facts about a registered class that the class-keyed queries would otherwise
 /// recompute by scanning the whole table.
 #[derive(Default, Clone)]
@@ -426,22 +449,7 @@ impl StdlibMapping {
         self.instance_method_names = instance_method_names;
     }
 
-    /// The compiler frame that reached the alias log, for the log line.
-    fn alias_log_caller() -> String {
-        let trace = std::backtrace::Backtrace::force_capture().to_string();
-        trace
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("at "))
-            .find(|at| at.contains("compiler/src/") && !at.contains("runtime_mapping.rs"))
-            .map(|at| at.trim_start_matches("./").to_string())
-            .unwrap_or_else(|| "<unknown>".to_string())
-    }
-
     /// Registered class names the given spelling may denote, in table order.
-    ///
-    /// Quiet on alias hits: this also serves the sanctioned resolvers
-    /// (`get_class_static_str`, `same_class`), which exist to accept any
-    /// spelling once and hand back the key.
     fn candidates(&self, lookup: &str) -> &[&'static str] {
         self.aliases
             .get(lookup)
@@ -449,38 +457,33 @@ impl StdlibMapping {
             .unwrap_or_default()
     }
 
-    /// `candidates` for the query paths, which must be handed a registered
-    /// class key.
+    /// The key a spelling resolves to, preferring an exact key match.
     ///
-    /// A spelling that names a class without BEING its key is a resolution
-    /// bug in the caller: it means the class was identified by some other
-    /// name and never resolved. Resolving it here is what let a simple name
-    /// silently pick among same-named classes, so it is refused. Callers
-    /// resolve first — `get_class_static_str` for a known class,
-    /// `unique_class_key` where only a simple name survives — and both refuse
-    /// to choose between candidates.
-    fn query_candidates(&self, lookup: &str) -> &[&'static str] {
-        let found = self.candidates(lookup);
-        if found.is_empty() || found.contains(&lookup) {
-            return found;
-        }
-        panic!(
-            "stdlib mapping: queried with {lookup:?}, which names {found:?} but is not a \
-             registered key. Resolve the class first — get_class_static_str, or \
-             unique_class_key when only a simple name is available — and query the key \
-             it returns.\nQuery site: {}",
-            Self::alias_log_caller(),
-        );
+    /// This and `unique_class_key` are the only ways to obtain a `ClassKey`,
+    /// so every class-keyed query is downstream of a caller having said which
+    /// class it means.
+    pub fn class_key(&self, spelling: &str) -> Option<ClassKey> {
+        self.candidates(spelling).first().copied().map(ClassKey)
     }
 
-    /// The registered key for a spelling that names exactly one class.
+    /// The key for a spelling that names exactly one registered class.
     /// Ambiguous spellings (a simple name shared by several classes) return
     /// None — choosing among them is dispatch's job, not a name's.
-    pub fn unique_class_key(&self, spelling: &str) -> Option<&'static str> {
+    pub fn unique_class_key(&self, spelling: &str) -> Option<ClassKey> {
         match self.candidates(spelling) {
-            [one] => Some(one),
+            [one] => Some(ClassKey(one)),
             _ => None,
         }
+    }
+
+    /// The key for a class this compiler names literally.
+    ///
+    /// A literal in compiler source naming no registered class is a bug in
+    /// the compiler rather than in a program it compiles, so it fails here
+    /// instead of quietly resolving to nothing.
+    pub fn key(&self, literal: &'static str) -> ClassKey {
+        self.class_key(literal)
+            .unwrap_or_else(|| panic!("stdlib mapping: {literal:?} names no registered class"))
     }
 
     /// Whether two spellings can denote the same registered class, whichever
@@ -500,7 +503,7 @@ impl StdlibMapping {
     /// `Mutex.lock(): MutexGuard<T>`, `Array.iterator(): ArrayIterator<T>` —
     /// carried beside the table so dispatch on the returned value resolves
     /// against the right class instead of guessing from names.
-    pub fn return_class(&self, class: &str, method: &str) -> Option<&'static str> {
+    pub fn return_class(&self, class: ClassKey, method: &str) -> Option<&'static str> {
         const RETURN_CLASS: &[(&str, &str, &str)] = &[
             (
                 "rayzor.concurrent.Mutex",
@@ -519,10 +522,9 @@ impl StdlibMapping {
                 "haxe.iterators.ArrayKeyValueIterator",
             ),
         ];
-        let candidates = self.candidates(class);
         RETURN_CLASS
             .iter()
-            .find(|(owner, m, _)| *m == method && candidates.contains(owner))
+            .find(|(owner, m, _)| *m == method && *owner == class.as_str())
             .map(|(_, _, returned)| *returned)
     }
 
@@ -542,16 +544,6 @@ impl StdlibMapping {
         self.mappings
             .range(start..)
             .take_while(move |(sig, _)| sig.class == class)
-    }
-
-    /// Every entry any spelling of `lookup` denotes, in table order.
-    fn matching_entries(
-        &self,
-        lookup: &str,
-    ) -> impl Iterator<Item = (&MethodSignature, &RuntimeFunctionCall)> {
-        self.query_candidates(lookup)
-            .iter()
-            .flat_map(|class| self.class_entries(class))
     }
 
     /// Look up the runtime function for a stdlib method call
@@ -587,8 +579,8 @@ impl StdlibMapping {
     }
 
     /// Check if a method is a stdlib method with runtime mapping
-    pub fn has_mapping(&self, class: &str, method: &str, is_static: bool) -> bool {
-        self.matching_entries(class)
+    pub fn has_mapping(&self, class: ClassKey, method: &str, is_static: bool) -> bool {
+        self.class_entries(class.as_str())
             .any(|(sig, _)| sig.method == method && sig.is_static == is_static)
     }
 
@@ -596,10 +588,10 @@ impl StdlibMapping {
     /// Returns the signature and runtime function call if found
     pub fn find_by_name(
         &self,
-        class: &str,
+        class: ClassKey,
         method: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.matching_entries(class)
+        self.class_entries(class.as_str())
             .find(|(sig, _)| sig.method == method)
     }
 
@@ -648,11 +640,11 @@ impl StdlibMapping {
     /// Returns the signature and runtime function call if found
     pub fn find_by_name_and_params(
         &self,
-        class: &str,
+        class: ClassKey,
         method: &str,
         param_count: usize,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.matching_entries(class)
+        self.class_entries(class.as_str())
             .find(|(sig, call)| sig.method == method && call.param_count == param_count)
     }
 
@@ -718,11 +710,16 @@ impl StdlibMapping {
     /// Returns the signature and runtime function call if found
     pub fn find_static_method(
         &self,
-        class: &str,
+        class: ClassKey,
         method: &str,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.matching_entries(class)
+        self.class_entries(class.as_str())
             .find(|(sig, _)| sig.method == method && sig.is_static)
+    }
+
+    /// Every registered class, as keys.
+    pub fn all_class_keys(&self) -> Vec<ClassKey> {
+        self.get_all_classes().into_iter().map(ClassKey).collect()
     }
 
     /// Get all unique stdlib class names that have registered methods
@@ -734,25 +731,27 @@ impl StdlibMapping {
     }
 
     /// Check if a class name is a registered stdlib class.
-    /// Matches both exact names (e.g., "rayzor_concurrent_Arc") and simple suffixes
-    /// (e.g., "Arc" matches "rayzor_concurrent_Arc") to handle cases where the full
-    /// qualified name isn't available (e.g., EXTERN flag not propagated, no native_name).
+    /// Whether a spelling names a registered class, in any of the spellings
+    /// that class answers to.
     pub fn is_stdlib_class(&self, class_name: &str) -> bool {
-        !self.query_candidates(class_name).is_empty()
+        self.class_key(class_name).is_some()
     }
 
     /// Check if methods of this class are typically static
     /// Used to determine the default method type for a class
-    pub fn class_has_static_methods(&self, class_name: &str) -> bool {
-        self.query_candidates(class_name)
-            .iter()
-            .any(|class| self.class_meta[class].has_static)
+    pub fn class_has_static_methods(&self, class: ClassKey) -> bool {
+        self.class_meta
+            .get(class.as_str())
+            .is_some_and(|meta| meta.has_static)
     }
 
-    /// Get the class name as a 'static str if it exists in the mapping
-    /// This is useful for converting owned/borrowed strings to 'static references
+    /// The registered class name a spelling denotes, as a string.
+    ///
+    /// For callers that need the NAME — a receiver hint carried as a String,
+    /// a diagnostic. To ask the table something, resolve to a `ClassKey`
+    /// instead.
     pub fn get_class_static_str(&self, class_name: &str) -> Option<&'static str> {
-        self.candidates(class_name).first().copied()
+        self.class_key(class_name).map(ClassKey::as_str)
     }
 
     /// Get all classes that have registered constructors (method="new", is_constructor=true)
@@ -853,9 +852,9 @@ impl StdlibMapping {
     /// Returns the MethodSignature and RuntimeFunctionCall if found
     pub fn find_constructor(
         &self,
-        class: &str,
+        class: ClassKey,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.matching_entries(class)
+        self.class_entries(class.as_str())
             .find(|(sig, _)| sig.method == "new" && sig.is_constructor)
     }
 
@@ -864,10 +863,10 @@ impl StdlibMapping {
     /// ensures the correct overload is selected based on the actual arg count.
     pub fn find_constructor_with_params(
         &self,
-        class: &str,
+        class: ClassKey,
         param_count: usize,
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
-        self.matching_entries(class).find(|(sig, call)| {
+        self.class_entries(class.as_str()).find(|(sig, call)| {
             sig.method == "new" && sig.is_constructor && call.param_count == param_count
         })
     }
@@ -924,16 +923,16 @@ impl StdlibMapping {
     ///
     /// NOTE: This uses name-based detection for backward compatibility with existing class mappings.
     /// The `is_mir_wrapper` field on RuntimeFunctionCall is more precise for per-function checks.
-    pub fn is_mir_wrapper_class(&self, class_name: &str) -> bool {
+    pub fn is_mir_wrapper_class(&self, class: ClassKey) -> bool {
         // Check if any method of this class is registered as a MIR wrapper
-        self.query_candidates(class_name)
-            .iter()
-            .any(|class| self.class_meta[class].has_mir_wrapper)
+        self.class_meta
+            .get(class.as_str())
+            .is_some_and(|meta| meta.has_mir_wrapper)
     }
 
     /// Check if any method of the given class is registered in the stdlib mapping
     pub fn class_has_any_method(&self, class_name: &str) -> bool {
-        !self.query_candidates(class_name).is_empty()
+        self.class_key(class_name).is_some()
     }
 
     /// Register a stdlib method -> runtime function mapping (internal)
@@ -4756,11 +4755,14 @@ mod tests {
                 "get_class_static_str({spelling:?})"
             );
 
-            // The query paths take a registered key and refuse any other
-            // spelling, so the oracle comparison applies to keys.
+            // The query paths take a key, so the oracle comparison applies
+            // to spellings that are keys.
             if !classes.contains(&spelling.as_str()) {
                 continue;
             }
+            let key = mapping
+                .class_key(spelling)
+                .expect("a registered class name resolves");
 
             assert_eq!(
                 mapping.is_stdlib_class(spelling),
@@ -4773,26 +4775,24 @@ mod tests {
                 "class_has_any_method({spelling:?})"
             );
             assert_eq!(
-                mapping.class_has_static_methods(spelling),
+                mapping.class_has_static_methods(key),
                 oracle::class_has_static_methods(&mapping, spelling),
                 "class_has_static_methods({spelling:?})"
             );
             assert_eq!(
-                mapping.is_mir_wrapper_class(spelling),
+                mapping.is_mir_wrapper_class(key),
                 oracle::is_mir_wrapper_class(&mapping, spelling),
                 "is_mir_wrapper_class({spelling:?})"
             );
             assert_eq!(
-                mapping
-                    .find_constructor(spelling)
-                    .map(|(_, c)| c.runtime_name),
+                mapping.find_constructor(key).map(|(_, c)| c.runtime_name),
                 oracle::find_constructor(&mapping, spelling),
                 "find_constructor({spelling:?})"
             );
             for &arity in &arities {
                 assert_eq!(
                     mapping
-                        .find_constructor_with_params(spelling, arity)
+                        .find_constructor_with_params(key, arity)
                         .map(|(_, c)| c.runtime_name),
                     oracle::find_constructor_with_params(&mapping, spelling, arity),
                     "find_constructor_with_params({spelling:?}, {arity})"
@@ -4802,21 +4802,21 @@ mod tests {
             for method in &methods {
                 assert_eq!(
                     mapping
-                        .find_by_name(spelling, method)
+                        .find_by_name(key, method)
                         .map(|(_, c)| c.runtime_name),
                     oracle::find_by_name(&mapping, spelling, method),
                     "find_by_name({spelling:?}, {method:?})"
                 );
                 assert_eq!(
                     mapping
-                        .find_static_method(spelling, method)
+                        .find_static_method(key, method)
                         .map(|(_, c)| c.runtime_name),
                     oracle::find_static_method(&mapping, spelling, method),
                     "find_static_method({spelling:?}, {method:?})"
                 );
                 for is_static in [true, false] {
                     assert_eq!(
-                        mapping.has_mapping(spelling, method, is_static),
+                        mapping.has_mapping(key, method, is_static),
                         oracle::has_mapping(&mapping, spelling, method, is_static),
                         "has_mapping({spelling:?}, {method:?}, {is_static})"
                     );
@@ -4824,7 +4824,7 @@ mod tests {
                 for &arity in &arities {
                     assert_eq!(
                         mapping
-                            .find_by_name_and_params(spelling, method, arity)
+                            .find_by_name_and_params(key, method, arity)
                             .map(|(_, c)| c.runtime_name),
                         oracle::find_by_name_and_params(&mapping, spelling, method, arity),
                         "find_by_name_and_params({spelling:?}, {method:?}, {arity})"
@@ -4887,13 +4887,21 @@ mod tests {
         assert_eq!(mapping.class_priority("NotAClass"), 10);
     }
 
-    /// A query handed a spelling that is not a registered key is refused:
-    /// resolving it there is what let a simple name pick among classes.
+    /// Only a resolver mints a `ClassKey`, and the strict one refuses a
+    /// spelling that names more than one class. (That a query cannot be
+    /// reached without a key is enforced by the type, not by a test.)
     #[test]
-    #[should_panic(expected = "is not a registered key")]
-    fn query_with_a_non_key_spelling_is_refused() {
+    fn resolvers_are_the_only_source_of_keys() {
         let mapping = StdlibMapping::new();
-        mapping.find_by_name("Arc", "get");
+        assert_eq!(
+            mapping.class_key("Arc").map(|k| k.as_str()),
+            Some("rayzor.concurrent.Arc")
+        );
+        // `Socket` names two classes, so the strict resolver declines.
+        assert!(mapping.candidates("Socket").len() > 1);
+        assert!(mapping.unique_class_key("Socket").is_none());
+        assert!(mapping.class_key("NotAClass").is_none());
+        assert!(mapping.unique_class_key("NotAClass").is_none());
     }
 
     /// A typedef's own FQN resolves to the class it names, in any spelling.
@@ -4914,7 +4922,7 @@ mod tests {
             );
         }
         let key = mapping
-            .get_class_static_str("haxe.io.Bytes")
+            .class_key("haxe.io.Bytes")
             .expect("haxe.io.Bytes names a class");
         assert!(mapping.find_by_name(key, "subU64").is_some());
         assert!(mapping.find_by_name(key, "address").is_some());
@@ -4932,7 +4940,7 @@ mod tests {
             param_count: 0,
         };
         let call = mapping
-            .find_by_name("Math", "abs")
+            .find_by_name(mapping.key("Math"), "abs")
             .expect("Math.abs is mapped")
             .1
             .clone();
@@ -4940,10 +4948,9 @@ mod tests {
         mapping.register_mapping(sig, call);
 
         assert!(mapping.is_stdlib_class("zz.late.Registered"));
-        assert!(mapping
-            .find_static_method("zz.late.Registered", "go")
-            .is_some());
-        assert!(mapping.class_has_static_methods("zz.late.Registered"));
+        let late = mapping.key("zz.late.Registered");
+        assert!(mapping.find_static_method(late, "go").is_some());
+        assert!(mapping.class_has_static_methods(late));
         // Other spellings resolve TO the key; they are not themselves queryable.
         for spelling in ["Registered", "late.Registered", "zz_late_Registered"] {
             assert_eq!(
@@ -5029,9 +5036,9 @@ mod tests {
     fn test_has_mapping() {
         let mapping = StdlibMapping::new();
 
-        assert!(mapping.has_mapping("String", "charAt", false));
-        assert!(mapping.has_mapping("Math", "sin", true));
-        assert!(!mapping.has_mapping("String", "nonexistent", false));
+        assert!(mapping.has_mapping(mapping.key("String"), "charAt", false));
+        assert!(mapping.has_mapping(mapping.key("Math"), "sin", true));
+        assert!(!mapping.has_mapping(mapping.key("String"), "nonexistent", false));
     }
 
     #[test]

@@ -68,7 +68,9 @@ impl<'a> HirToMirContext<'a> {
                                 let is_rayzor_concurrent =
                                     qual_name_str.starts_with("rayzor.concurrent.");
                                 if is_rayzor_concurrent
-                                    && self.stdlib_mapping.is_mir_wrapper_class(class_name)
+                                    && self.stdlib_mapping.class_key(class_name).is_some_and(|k| {
+                                        self.stdlib_mapping.is_mir_wrapper_class(k)
+                                    })
                                 {
                                     // Use capitalized class names for rayzor.concurrent (Thread, Channel, etc.)
                                     let mir_func_name = format!("{}_{}", class_name, method_name);
@@ -285,8 +287,12 @@ impl<'a> HirToMirContext<'a> {
                             class_candidates.push(parts[parts.len() - 2].to_string());
 
                             for class_name in class_candidates {
+                                let Some(class_key) = self.stdlib_mapping.class_key(&class_name)
+                                else {
+                                    continue;
+                                };
                                 if let Some(found) = self.stdlib_mapping.find_by_name_and_params(
-                                    &class_name,
+                                    class_key,
                                     method_name,
                                     static_args.len(),
                                 ) {

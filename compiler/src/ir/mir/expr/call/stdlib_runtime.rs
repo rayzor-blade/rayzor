@@ -894,7 +894,7 @@ impl<'a> HirToMirContext<'a> {
                             };
 
                             if let Some(class_name) = inferred_class {
-                                if self.stdlib_mapping.is_mir_wrapper_class(&class_name) {
+                                if self.stdlib_mapping.is_mir_wrapper_class(class_name) {
                                     // The mapping is the source of truth for the wrapper's
                                     // name — synthesizing it by the
                                     // `{class.lowercase()}_{method}` convention produces a
@@ -906,13 +906,17 @@ impl<'a> HirToMirContext<'a> {
                                     // identify the entry instead.
                                     let mir_func_name = self
                                         .stdlib_mapping
-                                        .find_by_name(&class_name, method_name)
+                                        .find_by_name(class_name, method_name)
                                         .or_else(|| {
                                             self.stdlib_mapping.find_unique_by_method(method_name)
                                         })
                                         .map(|(_, call)| call.runtime_name.to_string())
                                         .unwrap_or_else(|| {
-                                            format!("{}_{}", class_name.to_lowercase(), method_name)
+                                            format!(
+                                                "{}_{}",
+                                                class_name.as_str().to_lowercase(),
+                                                method_name
+                                            )
                                         });
                                     debug!(
                                         "[STDLIB MIR] Detected stdlib MIR function: {}",
@@ -1064,11 +1068,11 @@ impl<'a> HirToMirContext<'a> {
                         );
                             // No MIR-wrapper-class detection here: this loop tries every
                             // class and would match the wrong one.
-                            let stdlib_classes = self.stdlib_mapping.get_all_classes();
+                            let stdlib_classes = self.stdlib_mapping.all_class_keys();
                             for class_name in &stdlib_classes {
                                 if let Some((sig, mapping)) =
                                     self.stdlib_mapping.find_by_name_and_params(
-                                        class_name,
+                                        *class_name,
                                         method_name,
                                         actual_arg_count,
                                     )

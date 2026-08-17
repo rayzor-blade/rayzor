@@ -222,7 +222,11 @@ impl<'a> HirToMirContext<'a> {
                                         .and_then(|nn| self.string_interner.get(nn))
                                         .map(|nn| nn.replace("::", "_"))
                                 });
-                            qn.filter(|name| self.stdlib_mapping.is_mir_wrapper_class(name))
+                            qn.filter(|name| {
+                                self.stdlib_mapping
+                                    .class_key(name)
+                                    .is_some_and(|k| self.stdlib_mapping.is_mir_wrapper_class(k))
+                            })
                         })
                         .is_some();
                     if is_systems_type {

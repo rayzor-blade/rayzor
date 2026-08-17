@@ -69,7 +69,7 @@ use crate::ir::{mir_builder::MirBuilder, IrModule};
 
 // Re-export runtime mapping types
 pub use runtime_mapping::{
-    FunctionSource, IrTypeDescriptor, MethodSignature, RuntimeFunctionCall, StdlibMapping,
+    ClassKey, FunctionSource, IrTypeDescriptor, MethodSignature, RuntimeFunctionCall, StdlibMapping,
 };
 
 // Re-export Hashlink compatibility types

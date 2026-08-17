@@ -1500,11 +1500,12 @@ impl<'a> TastToHirContext<'a> {
 
         // Determine if methods are static by checking the mapping
         // This replaces hardcoded matches!(class_name, "Math" | "Sys")
-        let is_static = self.stdlib_mapping.class_has_static_methods(class_name);
+        let class_key = self.stdlib_mapping.class_key(class_name)?;
+        let is_static = self.stdlib_mapping.class_has_static_methods(class_key);
 
         if self
             .stdlib_mapping
-            .has_mapping(class_name, method_name, is_static)
+            .has_mapping(class_key, method_name, is_static)
         {
             // For method names, we need to use a leaked string for now
             // In production, we'd maintain a static registry

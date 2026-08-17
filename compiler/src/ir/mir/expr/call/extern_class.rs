@@ -186,10 +186,11 @@ impl<'a> HirToMirContext<'a> {
                     .symbol_table
                     .get_symbol(*symbol)
                     .and_then(|s| self.string_interner.get(s.name));
-                if let Some(mn) = method_name_str {
+                let simd_key = self.stdlib_mapping.class_key(simd_cls);
+                if let (Some(mn), Some(simd_key)) = (method_name_str, simd_key) {
                     self.stdlib_mapping
-                        .find_by_name_and_params(simd_cls, mn, param_count)
-                        .or_else(|| self.stdlib_mapping.find_by_name(simd_cls, mn))
+                        .find_by_name_and_params(simd_key, mn, param_count)
+                        .or_else(|| self.stdlib_mapping.find_by_name(simd_key, mn))
                         .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                 } else {
                     None
@@ -202,8 +203,15 @@ impl<'a> HirToMirContext<'a> {
                     .and_then(|s| self.string_interner.get(s.name));
                 method_name_str.and_then(|mn| {
                     self.stdlib_mapping
-                        .find_by_name_and_params("rayzor.Atomic", mn, param_count)
-                        .or_else(|| self.stdlib_mapping.find_by_name("rayzor.Atomic", mn))
+                        .find_by_name_and_params(
+                            self.stdlib_mapping.key("rayzor.Atomic"),
+                            mn,
+                            param_count,
+                        )
+                        .or_else(|| {
+                            self.stdlib_mapping
+                                .find_by_name(self.stdlib_mapping.key("rayzor.Atomic"), mn)
+                        })
                         .map(|(sig, mapping)| (sig.class, sig.method, mapping))
                 })
             } else {
