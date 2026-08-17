@@ -163,6 +163,47 @@ In progress: standard library coverage and optimization tuning.
 
 ## Contributing
 
+### LLVM
+
+The LLVM backend needs **LLVM 21**, and `llvm-sys` finds it through
+`LLVM_SYS_211_PREFIX`:
+
+```bash
+# macOS
+brew install llvm@21
+export LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)
+
+# Debian / Ubuntu
+sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+export LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
+```
+
+LLVM is most of the binary, so it links two ways:
+
+```bash
+cargo build --release
+# Links the system libLLVM — ~51 MB. The default, and what you want while
+# working on rayzor: it links far faster. The binary then needs that same
+# LLVM present to run, and LLVM's C++ ABI does not hold across major
+# versions, so 21 cannot be swapped for 20 or 22.
+
+cargo build --release --no-default-features --features llvm-static
+# Links LLVM's component archives in — ~223 MB, depends on nothing. This is
+# what release downloads are built with, so a user needs no LLVM installed.
+```
+
+Both shapes are checked on every pull request, and if you touch either you
+should build both — only one of them is exercised by a normal `cargo build`.
+
+The CLI always links LLVM: `--no-default-features` drops rayzor's own
+features but not the `compiler` crate's, which carry the backend. A
+Cranelift-only build is a property of that crate, not the binary —
+`cargo test -p compiler --no-default-features --features cranelift-backend`,
+which is how the Windows CI job runs, since the official LLVM release for
+Windows ships neither `llvm-config` nor the component archives.
+
+### Build and test
+
 ```bash
 cargo build
 cargo test
