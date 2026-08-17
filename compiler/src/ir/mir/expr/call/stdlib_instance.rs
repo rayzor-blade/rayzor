@@ -692,11 +692,11 @@ impl<'a> HirToMirContext<'a> {
                     .map(|ti| {
                         if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &ti.kind {
                             self.symbol_table.get_symbol(*symbol_id)
-                                .and_then(|s| self.string_interner.get(s.name))
-                                .map(|name| {
-                                    let is_mir_wrapper = self.stdlib_mapping.is_mir_wrapper_class(name);
+                                .and_then(|s| self.canonical_stdlib_class_name(s))
+                                .map(|key| {
+                                    let is_mir_wrapper = self.stdlib_mapping.is_mir_wrapper_class(&key);
                                     if is_mir_wrapper {
-                                        debug!("[GUARD] Receiver type is {} class (MIR wrapper), skipping instance method path", name);
+                                        debug!("[GUARD] Receiver type is {} class (MIR wrapper), skipping instance method path", key);
                                     }
                                     is_mir_wrapper
                                 })

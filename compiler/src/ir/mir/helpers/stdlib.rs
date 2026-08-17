@@ -332,13 +332,12 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Fallback for stdlib classes (StringMap, IntMap, Date, Bytes): a toString()
-        // registered in stdlib_mapping.
+        // registered in stdlib_mapping, looked up under the class's key.
         let class_name = self
             .symbol_table
             .get_symbol(class_symbol)
-            .and_then(|s| self.string_interner.get(s.name))
-            .unwrap_or("")
-            .to_string();
+            .and_then(|s| self.canonical_stdlib_class_name(s))
+            .unwrap_or_default();
 
         if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(&class_name, "toString") {
             let runtime_name = mapping.runtime_name;

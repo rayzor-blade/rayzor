@@ -867,8 +867,10 @@ impl<'a> HirToMirContext<'a> {
                                         if let Some(class_sym) =
                                             self.symbol_table.get_symbol(*symbol_id)
                                         {
+                                            // The returned class's registered key, so the
+                                            // wrapper check below asks about that class.
                                             let class_name =
-                                                self.string_interner.get(class_sym.name);
+                                                self.canonical_stdlib_class_name(class_sym);
                                             debug!(
                                             "[INFER CLASS] Inferred class from return type: {:?}",
                                             class_name
@@ -892,7 +894,7 @@ impl<'a> HirToMirContext<'a> {
                             };
 
                             if let Some(class_name) = inferred_class {
-                                if self.stdlib_mapping.is_mir_wrapper_class(class_name) {
+                                if self.stdlib_mapping.is_mir_wrapper_class(&class_name) {
                                     // The mapping is the source of truth for the wrapper's
                                     // name — synthesizing it by the
                                     // `{class.lowercase()}_{method}` convention produces a
@@ -904,7 +906,7 @@ impl<'a> HirToMirContext<'a> {
                                     // identify the entry instead.
                                     let mir_func_name = self
                                         .stdlib_mapping
-                                        .find_by_name(class_name, method_name)
+                                        .find_by_name(&class_name, method_name)
                                         .or_else(|| {
                                             self.stdlib_mapping.find_unique_by_method(method_name)
                                         })

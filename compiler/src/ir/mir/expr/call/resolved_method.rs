@@ -734,27 +734,31 @@ impl<'a> HirToMirContext<'a> {
                     // Derive the class from the field's qualified name: the field symbol
                     // knows its package, so sys.thread.Thread.sleep does not resolve via
                     // rayzor.concurrent.Thread when the class symbol is shared.
-                    let class_name_from_field = self
+                    let field_qname = self
                         .symbol_table
                         .get_symbol(*field)
                         .and_then(|s| s.qualified_name)
-                        .and_then(|qn| self.string_interner.get(qn))
-                        .and_then(|qn_str| {
-                            let parts: Vec<&str> = qn_str.split('.').collect();
-                            if parts.len() >= 2 {
-                                Some(parts[..parts.len() - 1].join("."))
-                            } else {
-                                None
-                            }
+                        .and_then(|qn| self.string_interner.get(qn));
+                    let class_name_from_field = self
+                        .class_key_from_method_qname(field_qname)
+                        .map(|key| key.to_string())
+                        .or_else(|| {
+                            // Not a stdlib class: keep the declared path, which
+                            // the lookup below will simply not find.
+                            let (class_path, _) = field_qname?.rsplit_once('.')?;
+                            Some(class_path.to_string())
                         });
 
                     let class_name_opt = class_name_from_field.or(class_name_from_obj);
 
+                    // Last resort, the abstract's own simple name, accepted
+                    // only when it identifies exactly one registered class.
                     let class_name_opt = class_name_opt.or_else(|| {
                         self.symbol_table
                             .get_symbol(sym_id)
                             .and_then(|s| self.string_interner.get(s.name))
-                            .map(|s| s.to_string())
+                            .and_then(|name| self.stdlib_mapping.unique_class_key(name))
+                            .map(|key| key.to_string())
                     });
 
                     if let (Some(class_name), Some(method_name)) = (class_name_opt, method_name_opt)
