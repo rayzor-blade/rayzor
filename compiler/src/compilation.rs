@@ -1125,6 +1125,21 @@ impl CompilationUnit {
         h.finish()
     }
 
+    /// Whether a source file belongs to the standard library.
+    fn is_stdlib_source(&self, source_path: &str) -> bool {
+        let path = Path::new(source_path);
+        let canonical = path.canonicalize();
+        let candidate = canonical.as_deref().unwrap_or(path);
+        self.config
+            .stdlib_paths
+            .iter()
+            .any(|root| match root.canonicalize() {
+                // A root that does not exist cannot contain the file.
+                Ok(root) => candidate.starts_with(&root),
+                Err(_) => false,
+            })
+    }
+
     fn hash_source_for_config(&self, source_path: &str, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1154,7 +1169,22 @@ impl CompilationUnit {
         // runtime entry point, unbounded recursion in type resolution — and
         // they depend on cache warmth, so the same test passes cold and fails
         // warm. Sharing can return when the restore path is proven equivalent.
-        self.user_program_hash().hash(&mut hasher);
+        // The standard library is the exception: its modules lower to the same
+        // thing for every program, so keying them on the program means a fresh
+        // project lowers the whole library again — 222ms for a program whose
+        // only statement is `Sys.println`, against 22ms when it can be reused.
+        //
+        // Restoring a module is only equivalent to compiling it when the
+        // declarations it resolves against are present, and those come from
+        // the `.bsym` manifest. Without it — `lazy_stdlib`, which skips the
+        // manifest — a restored library module resolves against declarations
+        // that were never registered, and the failures are silent and varied
+        // (a method lowered to another class's runtime entry, unbounded
+        // recursion in type resolution ending as a stack overflow). So the
+        // library shares its cache exactly when the manifest is loaded.
+        if !(self.stdlib_manifest_loaded && self.is_stdlib_source(source_path)) {
+            self.user_program_hash().hash(&mut hasher);
+        }
         // Fold in a content hash of the TRANSITIVE import set. The cache key was
         // previously the entry file's own bytes + defines only, so editing a
         // DEPENDENCY (a `.hx` imported by this entry, directly or transitively)
