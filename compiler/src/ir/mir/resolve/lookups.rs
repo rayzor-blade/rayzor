@@ -343,13 +343,18 @@ impl<'a> HirToMirContext<'a> {
         let parts: Vec<&str> = qualified_name.split('.').collect();
         let class_name = parts.iter().rev().nth(1)?; // Second-to-last part is class name
 
-        // The qualified class name ("sys.thread.Thread") must be tried
-        // first, otherwise sys.thread.Thread and rayzor.concurrent.Thread collide.
+        // The qualified class name ("sys.thread.Thread"), resolved to its
+        // registered key, must be tried first, otherwise sys.thread.Thread
+        // and rayzor.concurrent.Thread collide.
         if parts.len() >= 2 {
             let qualified_class_name = parts[..parts.len() - 1].join(".");
+            let qualified_class_name = self
+                .stdlib_mapping
+                .get_class_static_str(&qualified_class_name)
+                .unwrap_or(&qualified_class_name);
             if let Some(count) = param_count {
                 if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                    &qualified_class_name,
+                    qualified_class_name,
                     method_name,
                     count,
                 ) {
@@ -358,7 +363,7 @@ impl<'a> HirToMirContext<'a> {
             }
             if let Some((_sig, mapping)) = self
                 .stdlib_mapping
-                .find_by_name(&qualified_class_name, method_name)
+                .find_by_name(qualified_class_name, method_name)
             {
                 return Some(mapping.runtime_name);
             }
@@ -405,6 +410,21 @@ impl<'a> HirToMirContext<'a> {
         name: &str,
     ) -> Option<(Vec<IrType>, IrType)> {
         self.stdlib_mapping.get_function_signature(name)
+    }
+
+    /// The registered class key named by a method's qualified name
+    /// ("rayzor.Bytes.set" names rayzor.Bytes). The full class path is the
+    /// authority; the simple name is consulted only when the path names no
+    /// registered class, covering methods whose package did not survive a
+    /// compilation-context boundary.
+    fn class_key_from_method_qname(&self, qualified_name: Option<&str>) -> Option<&'static str> {
+        let (class_path, _) = qualified_name?.rsplit_once('.')?;
+        self.stdlib_mapping
+            .get_class_static_str(class_path)
+            .or_else(|| {
+                let simple = class_path.rsplit('.').next().unwrap_or(class_path);
+                self.stdlib_mapping.get_class_static_str(simple)
+            })
     }
 
     pub(crate) fn get_stdlib_runtime_info(
@@ -868,56 +888,39 @@ impl<'a> HirToMirContext<'a> {
                 name: placeholder_name,
             } => {
                 // The Placeholder name is the dotted FQN ("rayzor.Bytes");
-                // fall back to the simple name only if the FQN misses.
-                let ph_name = self
-                    .string_interner
-                    .get(*placeholder_name)
-                    .map(|s| s.to_string());
-                if let Some(ref ph) = ph_name {
-                    let underscore_name = ph.clone();
-                    let bare_name = ph.rsplit('.').next().unwrap_or(ph);
+                // its simple name is consulted only when the FQN names no
+                // registered class.
+                let ph_key = self.string_interner.get(*placeholder_name).and_then(|ph| {
+                    self.stdlib_mapping.get_class_static_str(ph).or_else(|| {
+                        let bare = ph.rsplit('.').next().unwrap_or(ph);
+                        self.stdlib_mapping.get_class_static_str(bare)
+                    })
+                });
+                if let Some(key) = ph_key {
                     if let Some(count) = param_count {
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                            &underscore_name,
-                            method_name,
-                            count,
-                        ) {
-                            return Some((sig.class, sig.method, mapping));
-                        }
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
-                            bare_name,
-                            method_name,
-                            count,
-                        ) {
-                            return Some((sig.class, sig.method, mapping));
-                        }
-                    }
-                    if let Some((sig, mapping)) = self
-                        .stdlib_mapping
-                        .find_by_name(&underscore_name, method_name)
-                    {
-                        return Some((sig.class, sig.method, mapping));
-                    }
-                    if let Some((sig, mapping)) =
-                        self.stdlib_mapping.find_by_name(bare_name, method_name)
-                    {
-                        return Some((sig.class, sig.method, mapping));
-                    }
-                }
-                if let Some(qname) = qualified_name {
-                    let parts: Vec<&str> = qname.split('.').collect();
-                    if parts.len() >= 2 {
-                        let class_parts = &parts[..parts.len() - 1];
-                        let underscore_class = class_parts.join(".");
-                        if let Some((sig, mapping)) = self
-                            .stdlib_mapping
-                            .find_by_name(&underscore_class, method_name)
+                        if let Some((sig, mapping)) =
+                            self.stdlib_mapping
+                                .find_by_name_and_params(key, method_name, count)
                         {
                             return Some((sig.class, sig.method, mapping));
                         }
                     }
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
+                    {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                }
+                if let Some(key) = self.class_key_from_method_qname(qualified_name) {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
+                    {
+                        return Some((sig.class, sig.method, mapping));
+                    }
                 }
                 if let Some(hint) = receiver_class_hint {
+                    let hint = self
+                        .stdlib_mapping
+                        .get_class_static_str(hint)
+                        .unwrap_or(hint);
                     if let Some((sig, mapping)) =
                         self.stdlib_mapping.find_by_name(hint, method_name)
                     {
@@ -927,30 +930,22 @@ impl<'a> HirToMirContext<'a> {
                 return None;
             }
             TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Unknown => {
-                // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
-                if let Some(qname) = qualified_name {
-                    let parts: Vec<&str> = qname.split('.').collect();
-                    if parts.len() >= 2 {
-                        let class_parts = &parts[..parts.len() - 1];
-                        let underscore_class = class_parts.join(".");
-                        if let Some((sig, mapping)) = self
-                            .stdlib_mapping
-                            .find_by_name(&underscore_class, method_name)
-                        {
-                            return Some((sig.class, sig.method, mapping));
-                        }
-                        if let Some(&class_name) = parts.iter().rev().nth(1) {
-                            if let Some((sig, mapping)) =
-                                self.stdlib_mapping.find_by_name(class_name, method_name)
-                            {
-                                return Some((sig.class, sig.method, mapping));
-                            }
-                        }
+                // The method's qualified name carries its owner
+                // ("rayzor.Bytes.set" names rayzor.Bytes); a user class's
+                // qualified name resolves to no key and falls through.
+                if let Some(key) = self.class_key_from_method_qname(qualified_name) {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(key, method_name)
+                    {
+                        return Some((sig.class, sig.method, mapping));
                     }
                 }
                 // Try receiver_class_hint for disambiguation (e.g., guard.get() where guard
-                // is typed as Dynamic but hint says "rayzor_concurrent_MutexGuard")
+                // is typed as Dynamic but hint names the guard class)
                 if let Some(hint) = receiver_class_hint {
+                    let hint = self
+                        .stdlib_mapping
+                        .get_class_static_str(hint)
+                        .unwrap_or(hint);
                     if let Some((sig, mapping)) =
                         self.stdlib_mapping.find_by_name(hint, method_name)
                     {
@@ -1017,6 +1012,14 @@ impl<'a> HirToMirContext<'a> {
             .as_deref()
             .or(receiver_class_hint)
             .unwrap_or(base_class_name);
+        // The receiver's simple name, when it identifies exactly one
+        // registered class, resolves to that class's key. A name shared by
+        // several classes is left as-is: choosing among them belongs to the
+        // dispatch below, which has the method and arity to choose with.
+        let class_name = self
+            .stdlib_mapping
+            .unique_class_key(class_name)
+            .unwrap_or(class_name);
 
         // A fully qualified hint must be tried before anything else, so subclass
         // dispatch resolves exactly: sys.ssl.Socket.close is rayzor_ssl_socket_close,
@@ -1083,23 +1086,6 @@ impl<'a> HirToMirContext<'a> {
         }
         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
             return Some((sig.class, sig.method, mapping));
-        }
-
-        // Bare-name fallback: if class_name is qualified (e.g., "haxe.ds.ObjectMap"),
-        // try the bare class name (e.g., "ObjectMap") for methods registered with simple names.
-        if class_name.contains('.') {
-            let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
-            if let Some(count) = param_count {
-                if let Some((sig, mapping)) =
-                    self.stdlib_mapping
-                        .find_by_name_and_params(bare_name, method_name, count)
-                {
-                    return Some((sig.class, sig.method, mapping));
-                }
-            }
-            if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(bare_name, method_name) {
-                return Some((sig.class, sig.method, mapping));
-            }
         }
 
         // @:forward fallback: if the abstract's own name didn't match, try underlying type

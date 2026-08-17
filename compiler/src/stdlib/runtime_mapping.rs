@@ -471,6 +471,16 @@ impl StdlibMapping {
         found
     }
 
+    /// The registered key for a spelling that names exactly one class.
+    /// Ambiguous spellings (a simple name shared by several classes) return
+    /// None — choosing among them is dispatch's job, not a name's.
+    pub fn unique_class_key(&self, spelling: &str) -> Option<&'static str> {
+        match self.candidates(spelling) {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
     /// Whether two spellings can denote the same registered class, whichever
     /// separator or degree of qualification each uses.
     pub fn same_class(&self, a: &str, b: &str) -> bool {

@@ -413,7 +413,16 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
             }
-            return self.string_interner.get(cls.name).map(|s| s.to_string());
+            // No @:native: the declaration's own name. A simple name that
+            // unambiguously identifies one registered class resolves to its
+            // key; an ambiguous one is left alone, since picking among
+            // classes is dispatch's decision, not a name's.
+            return self.string_interner.get(cls.name).map(|name| {
+                self.stdlib_mapping
+                    .unique_class_key(name)
+                    .unwrap_or(name)
+                    .to_string()
+            });
         }
         None
     }
