@@ -4256,6 +4256,17 @@ impl CompilationUnit {
             Ok((mir, metadata, symbols, cached_maps)) => {
                 let current_hash = self.hash_source_for_config(source_path, source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
+                // Why a cached module was rejected. The `trace!` below says
+                // which check failed but not what the values were, and the
+                // embedded snapshot fails BOTH when it is stale: the build id
+                // changes with every compiler source change, and the source
+                // hash carries the program.
+                if std::env::var_os("RAYZOR_DEBUG_BLADE").is_some() {
+                    eprintln!(
+                        "[blade] {source_path}\n        hash  {} vs {current_hash}\n        build {} vs {current_build_id}",
+                        metadata.source_hash, metadata.build_id
+                    );
+                }
                 if metadata.source_hash != current_hash {
                     debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
                     None
