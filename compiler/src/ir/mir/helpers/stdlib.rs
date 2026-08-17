@@ -235,26 +235,20 @@ impl<'a> HirToMirContext<'a> {
         // expected_param_count = args.len() - 1 because args includes `this`
         let expected_extra = args.len().saturating_sub(1);
 
-        let mut found: Option<(String, IrType, Vec<IrType>, bool)> = None;
-        for cn in self.stdlib_mapping.class_key(&dot_form) {
-            if let Some((_sig, mapping)) = self
-                .stdlib_mapping
-                .find_by_name_and_params(cn, method_name, expected_extra)
-                .or_else(|| self.stdlib_mapping.find_by_name(cn, method_name))
-            {
-                let runtime_name = mapping.runtime_name.to_string();
+        let cn = self.stdlib_mapping.class_key(&dot_form)?;
+        let (runtime_name, ret_ty, param_types, is_mir_wrapper) = self
+            .stdlib_mapping
+            .find_by_name_and_params(cn, method_name, expected_extra)
+            .or_else(|| self.stdlib_mapping.find_by_name(cn, method_name))
+            .map(|(_sig, mapping)| {
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let param_types = vec![ptr_u8.clone(); args.len()];
-                found = Some((
-                    runtime_name,
+                (
+                    mapping.runtime_name.to_string(),
                     return_type.clone(),
-                    param_types,
+                    vec![ptr_u8; args.len()],
                     mapping.is_mir_wrapper,
-                ));
-                break;
-            }
-        }
-        let (runtime_name, ret_ty, param_types, is_mir_wrapper) = found?;
+                )
+            })?;
         // MIR-wrapper names (e.g. `array_length`) must go through forward-ref to share one
         // FuncId with the wrapper's body; registering them as an extern declares an Import
         // the backend can then never define.
