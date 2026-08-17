@@ -112,8 +112,13 @@ jobs:
       - name: Generate the standard library snapshot
         run: cargo run --release -p snapshot-gen
 
+      # The self-contained shape. This tarball is a plain download with no
+      # package manager behind it, so it cannot assume a version-matched
+      # libLLVM is installed — LLVM's C++ ABI does not hold across majors.
+      # The default build links the system libLLVM and is ~51 MB against
+      # ~223 MB here; that trade belongs to packaged builds, not this one.
       - name: Build rayzor CLI
-        run: cargo build -p rayzor --release
+        run: cargo build -p rayzor --release --no-default-features --features llvm-static
       - name: Build rayzor-wasm-opt helper
         # Bundled wasm optimizer. Compiles Binaryen from source (first build is
         # slow, ~5-10 min). Kept a SEPARATE binary so Binaryen's ~1890 llvm::

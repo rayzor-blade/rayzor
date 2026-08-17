@@ -31,12 +31,30 @@ edition = "2021"
 [features]
 # LLVM backend ON by default: the LLVM tier (auto-upgrade after main entry)
 # must be available without an opt-in flag. LLVM 21 is a required toolchain
-# dependency, not optional. `--no-default-features` still gives a Cranelift-only build.
-default = ["llvm-backend"]
+# dependency, not optional — and `--no-default-features` does NOT drop it,
+# since the `compiler` dependency below carries its own default features.
+# Cranelift-only is a shape of that crate, not of this binary.
+#
+# Two release shapes, because LLVM is most of the binary — 223 MB linked
+# statically against 51 MB linked shared:
+#
+#   cargo build --release
+#       Links the system libLLVM. The default, for anything with a package
+#       manager behind it (homebrew, apt, a dev checkout) since it can depend
+#       on llvm@21, and for distros whose `llvm-<v>-dev` lists Polly as a
+#       static component but ships no libPolly.a (Debian/Ubuntu).
+#
+#   cargo build --release --no-default-features --features llvm-static
+#       Links LLVM's component archives into the binary. For a standalone
+#       download: LLVM's C++ ABI does not hold across major versions, so a
+#       shared-linked binary needs a version-matched libLLVM already present.
+default = ["llvm-backend", "llvm-dynamic"]
 llvm-backend = ["compiler/llvm-backend"]
-# Opt-in: link LLVM dynamically (for distros missing libPolly.a, e.g. apt
-# llvm-<v>-dev on Debian/Ubuntu). `cargo build --features llvm-dynamic`.
 llvm-dynamic = ["compiler/llvm-dynamic"]
+# The self-contained shape. Nothing to enable — LLVM links statically when
+# `llvm-dynamic` is absent — so this only names the build, which is why it
+# has to be reached through `--no-default-features`.
+llvm-static = ["llvm-backend"]
 # Heap + CPU profiler. Off by default; see rayzor-runtime's `profile`
 # feature for details. Activate with `cargo build --release --features profile`
 # then use RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH / RAYZOR_CPU_PROFILE.

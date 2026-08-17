@@ -39,6 +39,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Both release shapes have to keep resolving. The default links the
+      # system libLLVM; the tarball built by packages.yml links LLVM's
+      # component archives so a plain download needs no LLVM installed. Only
+      # the packaging job links either one, and it runs on tags — checking
+      # both here catches a broken feature set on the pull request instead.
+      - name: Both LLVM link shapes resolve
+        run: |
+          cargo check -p rayzor --bin rayzor
+          cargo check -p rayzor --bin rayzor --no-default-features --features llvm-static
+
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
