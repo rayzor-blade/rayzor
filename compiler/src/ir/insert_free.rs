@@ -759,7 +759,55 @@ fn insert_free_for_function(
         if already {
             continue;
         }
-        if let Some(block) = function.cfg.blocks.get_mut(&latch) {
+        let Some(block) = function.cfg.blocks.get_mut(&latch) else {
+            continue;
+        };
+        // Release it the way its allocator requires. A per-iteration temporary
+        // is no different from one released at a return: a string's header is
+        // reclaimed by `haxe_string_free`, an array's buffer by
+        // `haxe_array_free` before its header, and only a plain allocation is a
+        // bare `Free`. Freeing a string header with `Free` aborts the process —
+        // the header is not a libc block, and the string's buffer leaks.
+        if string_alloc_ids.contains(&alloc_id) {
+            if let Some(free_id) = string_free_id {
+                block.instructions.push(IrInstruction::CallDirect {
+                    dest: None,
+                    func_id: free_id,
+                    args: vec![alloc_id],
+                    arg_ownership: vec![OwnershipMode::Move],
+                    type_args: vec![],
+                    is_tail_call: false,
+                });
+                inserted += 1;
+            }
+        } else if array_alloc_ids.contains(&alloc_id) {
+            if let Some(free_id) = array_free_id {
+                block.instructions.push(IrInstruction::CallDirect {
+                    dest: None,
+                    func_id: free_id,
+                    args: vec![alloc_id],
+                    arg_ownership: vec![OwnershipMode::Move],
+                    type_args: vec![],
+                    is_tail_call: false,
+                });
+                block
+                    .instructions
+                    .push(IrInstruction::Free { ptr: alloc_id });
+                inserted += 1;
+            }
+        } else if anon_alloc_ids.contains(&alloc_id) {
+            if let Some(drop_id) = anon_drop_id {
+                block.instructions.push(IrInstruction::CallDirect {
+                    dest: None,
+                    func_id: drop_id,
+                    args: vec![alloc_id],
+                    arg_ownership: vec![OwnershipMode::Move],
+                    type_args: vec![],
+                    is_tail_call: false,
+                });
+                inserted += 1;
+            }
+        } else {
             block
                 .instructions
                 .push(IrInstruction::Free { ptr: alloc_id });
