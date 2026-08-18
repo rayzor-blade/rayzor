@@ -223,6 +223,28 @@ class GGUFLoader implements ModelLoader {
      * Each architecture family uses the same prefix as its name in
      * `general.architecture`, so we read with that dynamic prefix.
      */
+    /**
+     * Shape keys that no generic field covers, read under the file's own
+     * architecture prefix and carried in `ModelMetadata.extras`.
+     *
+     * A hybrid model interleaves state-space blocks with attention ones, so it
+     * states a recurrent shape (`ssm.*`) and how often a full-attention layer
+     * appears; a model whose attention head is not `hidden / heads` states its
+     * key and value lengths. Reading them by name mirrors how the generic
+     * fields are read — the file names its keys, and a key it does not carry
+     * simply stays out of the map.
+     */
+    static final ARCH_EXTRA_KEYS:Array<String> = [
+        "ssm.conv_kernel",
+        "ssm.state_size",
+        "ssm.group_count",
+        "ssm.time_step_rank",
+        "ssm.inner_size",
+        "full_attention_interval",
+        "attention.key_length",
+        "attention.value_length"
+    ];
+
     private static function metadataFromReader(reader:GGUFReader):ModelMetadata {
         var arch = reader.metaString("general.architecture");
         var p = arch + ".";
@@ -252,6 +274,22 @@ class GGUFLoader implements ModelLoader {
         var ropeBase = readFloatOr(reader, p + "rope.freq_base", 10000.0);
         var tieEmbed = readBoolOr(reader, p + "tie_word_embeddings", false);
 
+        // A hybrid architecture carries its own shape keys beside the generic
+        // ones — a state-space block has no head count, and only some layers
+        // keep a KV cache. Carry them verbatim so the arch builder reads its
+        // own configuration rather than re-opening the file. Keys absent from
+        // the file stay absent from the map; the builder decides what it needs.
+        var extras = new Map<String, String>();
+        for (key in ARCH_EXTRA_KEYS) {
+            if (reader.findMeta(p + key) == null) continue;
+            extras.set(key, Std.string(readIntOr(reader, p + key, 0)));
+        }
+
+        // `head_dim` is not always `hidden / heads`: a model may size its
+        // attention head independently of the embedding width, and states it
+        // as key_length. Prefer what the file declares over the derivation.
+        headDim = readIntOr(reader, p + "attention.key_length", headDim);
+
         return {
             architecture: arch,
             hiddenSize: hiddenSize,
@@ -264,9 +302,11 @@ class GGUFLoader implements ModelLoader {
             maxSeqLen: maxSeqLen,
             normEps: normEps,
             ropeBase: ropeBase,
-            tieWordEmbeddings: tieEmbed
+            tieWordEmbeddings: tieEmbed,
+            extras: extras
         };
     }
+
 
     /** Vocab size from the `token_embd.weight` shape — one dim is the hidden
      *  size, the other is the vocabulary. Authoritative when the metadata
