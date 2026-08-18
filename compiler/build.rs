@@ -40,6 +40,7 @@ fn main() {
     }
 
     generate_stdlib_manifest();
+    generate_stdlib_defines();
     stage_stdlib_snapshot();
 
     // Emit a cache ABI build id. BLADE cache entries are tagged with this
@@ -187,6 +188,112 @@ fn generate_stdlib_manifest() {
     if let Err(e) = bsym::save_symbol_manifest(out_dir.join("stdlib.bsym"), modules) {
         panic!("failed to write the stdlib symbol manifest: {e}");
     }
+}
+
+/// Collect the preprocessor flags the standard library actually tests, into
+/// `OUT_DIR/stdlib_defines.rs`.
+///
+/// A define reaches a module only through `#if`/`#elseif`, so a flag the
+/// library never names cannot change what it lowers to. Recording the ones it
+/// does name lets the library's cache key ignore the rest — without that, a
+/// flag from somewhere else entirely (a loaded plugin contributes one per
+/// plugin) moves the key and the library is lowered again from source.
+fn generate_stdlib_defines() {
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let mut names = std::collections::BTreeSet::new();
+    collect_condition_idents(&PathBuf::from("haxe-std"), &mut names);
+    if names.is_empty() {
+        panic!("no #if conditions found under haxe-std; the define set would be empty");
+    }
+
+    let mut out = String::from(
+        "/// Preprocessor flags named by a `#if`/`#elseif` anywhere in the standard\n\
+         /// library. Generated from `haxe-std` by `build.rs`.\n\
+         pub static STDLIB_OBSERVED_DEFINES: &[&str] = &[\n",
+    );
+    for name in &names {
+        out.push_str(&format!("    {name:?},\n"));
+    }
+    out.push_str("];\n");
+    std::fs::write(out_dir.join("stdlib_defines.rs"), out)
+        .expect("failed to write the stdlib define set");
+}
+
+/// Walk `.hx` sources and record every identifier appearing in a conditional
+/// directive, so `#if (cpp && !cppia)` contributes both names.
+fn collect_condition_idents(dir: &Path, names: &mut std::collections::BTreeSet<String>) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_condition_idents(&path, names);
+            continue;
+        }
+        if path.extension().is_some_and(|e| e == "hx") {
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                for line in source.lines() {
+                    let trimmed = line.trim_start();
+                    let condition = trimmed
+                        .strip_prefix("#if")
+                        .or_else(|| trimmed.strip_prefix("#elseif"));
+                    let Some(condition) = condition else { continue };
+                    // Only a directive: `#ifdef`-style run-ons are not one.
+                    if condition
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        continue;
+                    }
+                    for ident in condition_idents(condition) {
+                        names.insert(ident);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Identifiers in the condition that opens a conditional directive.
+///
+/// The condition is either one identifier or a parenthesised expression, and
+/// guarded code may follow it on the same line (`#if cpp trace("x"); #end`), so
+/// the scan stops at the end of the condition rather than the end of the line.
+fn condition_idents(condition: &str) -> Vec<String> {
+    let rest = condition.trim_start_matches([' ', '\t']);
+    let expression = if rest.starts_with('(') {
+        let mut depth = 0usize;
+        let mut end = rest.len();
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[..end]
+    } else {
+        let start = rest.trim_start_matches('!');
+        let end = start
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(start.len());
+        &start[..end]
+    };
+
+    expression
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .filter(|s| !s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn cache_build_id() -> String {
