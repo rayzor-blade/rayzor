@@ -1007,12 +1007,42 @@ pub fn lower_hir_to_mir_with_function_map(
     // Reverse map func_id -> qualified_name for external functions: lets the
     // blade cache resolve cross-module references when function ids change
     // between sessions (different renumbering bases).
-    if !context.external_function_name_map.is_empty() {
+    if !context.external_function_name_map.is_empty() || !context.external_function_map.is_empty() {
         let mut ext_id_to_name: BTreeMap<IrFunctionId, String> = BTreeMap::new();
         for (name, &func_id) in &context.external_function_name_map {
             ext_id_to_name
                 .entry(func_id)
                 .or_insert_with(|| name.clone());
+        }
+        // A call can also bind through the symbol-keyed map, which carries no
+        // name. Function ids are assigned per session, so an id recorded
+        // without one can never be rebound when the module it came from is
+        // restored rather than compiled: the merge drops that module's MIR and
+        // both repair passes look the target up BY NAME. Take the name from the
+        // symbol's own declaration, so every out-of-module target carries one.
+        for (&symbol_id, &func_id) in &context.external_function_map {
+            if ext_id_to_name.contains_key(&func_id) {
+                continue;
+            }
+            let Some(symbol) = symbol_table.get_symbol(symbol_id) else {
+                continue;
+            };
+            let Some(qualified) = symbol
+                .qualified_name
+                .and_then(|name| string_interner.get(name))
+            else {
+                continue;
+            };
+            ext_id_to_name.insert(func_id, qualified.to_string());
+        }
+        // Constructors bind through their own map and carry no name either.
+        // They are the common case for this: `new C()` on an imported class
+        // lowers to a direct call, and the class it names may come from a
+        // module that is restored rather than compiled.
+        for (class_name, &func_id) in &context.constructor_name_map {
+            ext_id_to_name
+                .entry(func_id)
+                .or_insert_with(|| format!("{}.new", class_name));
         }
         for func in module.functions.values() {
             for block in func.cfg.blocks.values() {
@@ -1031,6 +1061,13 @@ pub fn lower_hir_to_mir_with_function_map(
                         {
                             if let Some(name) = ext_id_to_name.get(&fid) {
                                 module.external_function_names.insert(fid, name.clone());
+                            } else if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                                // Nothing downstream can rebind this: both
+                                // repair passes look a stale target up by name.
+                                eprintln!(
+                                    "[nameless-ext] {:?} referenced by {} carries no external name",
+                                    fid, func.name
+                                );
                             }
                         }
                     }
