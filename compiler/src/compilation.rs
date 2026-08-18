@@ -3,6 +3,8 @@
 //! This module provides the proper architecture for compiling multiple source files
 //! together, including standard library loading, package management, and symbol resolution.
 
+include!(concat!(env!("OUT_DIR"), "/stdlib_defines.rs"));
+
 use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
@@ -671,12 +673,42 @@ impl CompilationConfig {
     /// hand. Folding the sorted defines into the cache directory gives native
     /// and wasm fully separate cache trees.
     pub fn cache_discriminator(&self) -> String {
+        Self::discriminator_for(&self.extra_defines)
+    }
+
+    /// Target discriminator for the standard library's cache entries.
+    ///
+    /// A define reaches a module only through `#if`/`#elseif`, so one the
+    /// library never names cannot change what it lowers to. The library's key
+    /// therefore counts only the defines it actually tests
+    /// ([`STDLIB_OBSERVED_DEFINES`], generated from `haxe-std`). Counting the
+    /// rest lets an unrelated flag move the key — the CLI contributes one
+    /// define per loaded plugin — so the carried snapshot holds no entry under
+    /// the discriminator asked for and the library is lowered from source again.
+    pub fn stdlib_cache_discriminator(&self) -> String {
+        Self::discriminator_for(&self.stdlib_relevant_defines())
+    }
+
+    /// The defines that can change what a standard-library module lowers to:
+    /// the ones its own sources test, plus the target selector the compiler
+    /// itself branches on. `wasm` names a different set of runtime bindings
+    /// rather than a `#if`, so it separates artifacts even though no library
+    /// source mentions it.
+    pub fn stdlib_relevant_defines(&self) -> Vec<String> {
+        self.extra_defines
+            .iter()
+            .filter(|d| d.as_str() == "wasm" || STDLIB_OBSERVED_DEFINES.contains(&d.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    fn discriminator_for(defines: &[String]) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        if self.extra_defines.is_empty() {
+        if defines.is_empty() {
             return "native".to_string();
         }
-        let mut defines = self.extra_defines.clone();
+        let mut defines = defines.to_vec();
         defines.sort();
         let tag = if defines.iter().any(|d| d == "wasm") {
             "wasm"
@@ -691,6 +723,17 @@ impl CompilationConfig {
     /// Get or create the cache directory (target-discriminated — see
     /// [`cache_discriminator`]).
     pub fn get_cache_dir(&self) -> PathBuf {
+        self.cache_dir_for(&self.cache_discriminator())
+    }
+
+    /// The cache directory a standard-library module belongs in — keyed by the
+    /// defines the library can observe, so an unrelated flag does not file it
+    /// somewhere nothing looks up. See [`stdlib_cache_discriminator`].
+    pub fn get_stdlib_cache_dir(&self) -> PathBuf {
+        self.cache_dir_for(&self.stdlib_cache_discriminator())
+    }
+
+    fn cache_dir_for(&self, discriminator: &str) -> PathBuf {
         // Base is `.rayzor/blade/cache` (separate from the Rust target folder),
         // or an explicit `--cache-dir`. Either way the per-target subdir keeps
         // native and wasm artifacts from colliding.
@@ -698,7 +741,7 @@ impl CompilationConfig {
             .cache_dir
             .clone()
             .unwrap_or_else(|| PathBuf::from(".rayzor/blade/cache"));
-        let dir = base.join(self.cache_discriminator());
+        let dir = base.join(discriminator);
 
         // Try to create it if it doesn't exist
         if !dir.exists() {
@@ -1005,7 +1048,11 @@ impl CompilationUnit {
     /// Falls back to the filename only if nothing matches; that path is the
     /// least desirable because it loses the package and risks collisions.
     fn blade_cache_path(&self, source_path: &str) -> Option<PathBuf> {
-        let cache_dir = self.config.get_cache_dir();
+        let cache_dir = if self.is_stdlib_source(source_path) {
+            self.config.get_stdlib_cache_dir()
+        } else {
+            self.config.get_cache_dir()
+        };
         let normalized = source_path.replace('\\', "/");
 
         let module_part: String = if let Some(pos) = normalized.rfind("haxe-std/") {
@@ -1068,9 +1115,12 @@ impl CompilationUnit {
     /// This module's artifact in the standard library carried by the binary,
     /// if it holds one for the configuration being compiled.
     fn embedded_snapshot_entry(&self, source_path: &str) -> Option<&'static [u8]> {
+        if !self.is_stdlib_source(source_path) {
+            return None;
+        }
         let file = self.blade_cache_path(source_path)?;
         let file = file.file_name()?.to_str()?;
-        let key = crate::ir::snapshot::key_for(&self.config.cache_discriminator(), file);
+        let key = crate::ir::snapshot::key_for(&self.config.stdlib_cache_discriminator(), file);
         crate::ir::snapshot::installed().get(key.as_str()).copied()
     }
 
@@ -1086,7 +1136,12 @@ impl CompilationUnit {
     fn prepared_blade_path(&self, source_path: &str) -> Option<PathBuf> {
         let root = Self::prepared_cache_root()?;
         let file = self.blade_cache_path(source_path)?.file_name()?.to_owned();
-        Some(root.join(self.config.cache_discriminator()).join(file))
+        let discriminator = if self.is_stdlib_source(source_path) {
+            self.config.stdlib_cache_discriminator()
+        } else {
+            self.config.cache_discriminator()
+        };
+        Some(root.join(discriminator).join(file))
     }
 
     /// Root of the shared prepared store. `RAYZOR_PREPARED_CACHE` overrides it.
@@ -1146,7 +1201,16 @@ impl CompilationUnit {
         let mut hasher = DefaultHasher::new();
         "rayzor-blade-source-v4".hash(&mut hasher);
         source.hash(&mut hasher);
-        let mut defines = self.config.extra_defines.clone();
+        // A standard-library module counts only the defines it can observe, for
+        // the same reason its cache directory does: a flag it never names
+        // cannot change what it lowers to, and counting the rest means an
+        // unrelated one (a plugin contributes a define per plugin) invalidates
+        // the whole library.
+        let mut defines: Vec<String> = if self.is_stdlib_source(source_path) {
+            self.config.stdlib_relevant_defines()
+        } else {
+            self.config.extra_defines.clone()
+        };
         defines.sort();
         defines.hash(&mut hasher);
         // A cached USER module carries state assigned relative to the whole
