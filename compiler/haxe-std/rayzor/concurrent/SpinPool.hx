@@ -83,8 +83,8 @@ class SpinPool {
         cell 0 = pending, 1 = shutdown, 2 = cursor, 3 = rows, 4 = chunk,
         5 = accumulated band wall (us), 6 = accumulated quantize wall (us),
         7 = dispatch count, 8 = inter-dispatch gap EWMA (us), 9 = last
-        dispatch timestamp (us, wrapping), then per worker w in 1..n-1:
-        state at 10+(w-1), pid at 10+(n-1)+(w-1). */
+        dispatch timestamp (us, wrapping), 10 = dispatch lease, then per
+        worker w in 1..n-1: state at 11+(w-1), pid at 11+(n-1)+(w-1). */
     inline function cell(i:Int):Atomic<Int> {
         var p:Ptr<Int> = Ptr.fromRaw(_ctl.address() + Usize.fromInt(i * 128));
         return Atomic.of(p);
@@ -110,14 +110,21 @@ class SpinPool {
 
     inline function lastDispatchUs():Atomic<Int> return cell(9);
 
-    inline function stateOf(w:Int):Atomic<Int> return cell(10 + (w - 1));
+    /** Dispatch lease. The control block below holds exactly ONE dispatch —
+        one cursor, one row count, one closure, one completion counter — so two
+        threads dispatching at once do not merely interleave, they overwrite
+        each other's band description. Whoever holds this cell owns that block
+        from the moment it is filled until the join completes. */
+    inline function lease():Atomic<Int> return cell(10);
 
-    inline function pidOf(w:Int):Atomic<Int> return cell(10 + (_n - 1) + (w - 1));
+    inline function stateOf(w:Int):Atomic<Int> return cell(11 + (w - 1));
+
+    inline function pidOf(w:Int):Atomic<Int> return cell(11 + (_n - 1) + (w - 1));
 
     /** Profile-mode per-participant counters; participant 0 is the caller. */
-    inline function busyUsOf(w:Int):Atomic<Int> return cell(10 + 2 * (_n - 1) + w);
+    inline function busyUsOf(w:Int):Atomic<Int> return cell(11 + 2 * (_n - 1) + w);
 
-    inline function claimsOf(w:Int):Atomic<Int> return cell(10 + 2 * (_n - 1) + _n + w);
+    inline function claimsOf(w:Int):Atomic<Int> return cell(11 + 2 * (_n - 1) + _n + w);
 
     /** Spawn `n - 1` persistent workers (the caller is also a claimant).
         `spinBudget` (0 = platform default), `relaxHint` (-1 = platform
@@ -128,7 +135,7 @@ class SpinPool {
         if (n < 1) n = 1;
         _n = n;
         _threads = [];
-        var cells = 10 + (n > 1 ? (n - 1) * 2 : 0) + n * 2;
+        var cells = 11 + (n > 1 ? (n - 1) * 2 : 0) + n * 2;
         _ctl = Bytes.alloc(cells * 128);
         for (i in 0...cells) cell(i).store(0);
         _alive = true;
@@ -308,6 +315,16 @@ class SpinPool {
             fn(0, rows, 0);
             return;
         }
+        // Take the dispatch lease before touching any of the shared control
+        // cells. Yield rather than spin: a waiting dispatcher is not doing
+        // useful work, and on a machine whose cores are already saturated by
+        // the holder's band, spinning here steals a core from the very
+        // dispatch being waited on.
+        var lz = lease();
+        while (lz.compareExchange(0, 1) != 0) {
+            Thread.yieldNow();
+        }
+
         // Resolve platform-derived defaults for any config the caller left
         // unset (spinBudget 0 / relaxHint -1). These come from the runtime
         // (arch/thermal profile), not hand-set constants. The pool is
@@ -372,6 +389,9 @@ class SpinPool {
             bandUs().fetchAdd(Std.int((Sys.time() - t0) * 1e6));
             dispatches().fetchAdd(1);
         }
+        // Every worker has decremented `pending`, so the control block is idle
+        // and the next dispatcher may fill it.
+        lz.store(0);
     }
 
     /** Accumulate externally-timed quantize wall (microseconds). */
