@@ -6441,8 +6441,23 @@ impl CompilationUnit {
         // Skip if any class has @:safety annotation — opted out of ownership tracking
         let has_safety_opt_out = typed_file.classes.iter().any(|c| c.has_safety_annotation());
         let t_ownership = profile_timer(self.config.profile_typecheck);
-        if !is_stdlib && self.config.emit_safety_warnings && !has_safety_opt_out {
-            let ownership_diagnostics = self.check_ownership_violations(&typed_file);
+        if !is_stdlib {
+            let mut ownership_diagnostics = self.check_ownership_violations(&typed_file);
+            // Advisory diagnostics are configurable. A `@:move` violation is not:
+            // it is a compile error on every path that produces an artifact.
+            //
+            // Both suppressions here used to switch the WHOLE check off, and each
+            // was reachable by accident. `@:safety` opts a file INTO manual memory
+            // management, yet any occurrence of it silenced the file — so the
+            // annotation `@:move`'s own documentation calls a prerequisite was the
+            // way to disable the checking it enables. And `emit_safety_warnings` is
+            // cleared by the bundle and AOT drivers, so the artifacts we actually
+            // ship were the only ones never checked: a program `rayzor run`
+            // rejected would bundle cleanly and then run the use-after-move.
+            if has_safety_opt_out || !self.config.emit_safety_warnings {
+                ownership_diagnostics
+                    .retain(|d| matches!(d.severity, diagnostics::DiagnosticSeverity::Error));
+            }
             if !ownership_diagnostics.is_empty() {
                 // Print everything (so the user sees warnings AND the error
                 // labels/help text), then if any diagnostic was strict
