@@ -1118,6 +1118,12 @@ impl CompilationUnit {
         if !self.is_stdlib_source(source_path) {
             return None;
         }
+        // The generator that PRODUCES the carried library must not consume it:
+        // restoring a module writes no artifact, so a build whose snapshot is
+        // already valid would regenerate an empty one.
+        if std::env::var_os("RAYZOR_IGNORE_EMBEDDED_SNAPSHOT").is_some() {
+            return None;
+        }
         let file = self.blade_cache_path(source_path)?;
         let file = file.file_name()?.to_str()?;
         let key = crate::ir::snapshot::key_for(&self.config.stdlib_cache_discriminator(), file);
