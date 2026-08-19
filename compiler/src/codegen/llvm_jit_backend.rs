@@ -174,6 +174,11 @@ pub struct LLVMJitBackend<'ctx> {
     /// Extern function IDs (no hidden env parameter)
     extern_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
+    /// LLVM names declared with the C ABI, so no hidden `env`/sret parameter.
+    /// A Haxe function must never reuse one of these declarations, however well
+    /// the arities line up — see `declare_function`.
+    extern_decl_names: std::collections::BTreeSet<String>,
+
     /// Byte offset each GEP names within the object it starts from, when that
     /// is decidable. Feeds the TBAA tags; see `tbaa_tag_for_offset`.
     gep_byte_offsets: BTreeMap<IrId, i64>,
@@ -300,6 +305,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             target_data: Some(target_data),
             runtime_symbols: BTreeMap::new(),
             extern_function_ids: std::collections::BTreeSet::new(),
+            extern_decl_names: std::collections::BTreeSet::new(),
             math_intrinsic_ids: std::collections::BTreeSet::new(),
             gep_byte_offsets: BTreeMap::new(),
             gep_results: std::collections::BTreeSet::new(),
@@ -1315,6 +1321,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         };
 
         let func_name = Self::mangle_function_name(&extern_fn.name);
+        self.extern_decl_names.insert(func_name.clone());
 
         // Replace known math runtime functions with LLVM intrinsic wrappers
         // so LLVM can inline them (e.g. fsqrt instruction instead of function call).
@@ -2489,6 +2496,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             || function.signature.calling_convention == crate::ir::CallingConvention::C;
         if is_c_abi {
             self.extern_function_ids.insert(func_id);
+            self.extern_decl_names.insert(func_name.clone());
 
             // Translate parameter types (NO env param for extern C functions)
             let param_types: Result<Vec<BasicMetadataTypeEnum>, _> = function
@@ -2568,7 +2576,30 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         // Check if this function was already declared (from a previous module)
-        // Reuse if it has basic blocks (was already compiled) AND signatures match
+        // Reuse if it has basic blocks (was already compiled) AND signatures match.
+        //
+        // A declaration made for the C ABI is never a candidate, whatever the
+        // arities say. The comparison below weighs this function's USER
+        // parameters against the other declaration's real ones, and a C
+        // declaration carries no hidden `env`, so the two line up exactly when
+        // the other side is extern — a Haxe `free()` (receiver only) reads as
+        // compatible with libc `free(ptr)`. Reusing it binds the method to a
+        // signature one parameter short of the ABI its body is then lowered
+        // under: the env slot swallows the only parameter, the receiver is
+        // never bound, and lowering fails at its first field access.
+        if self.extern_decl_names.contains(&func_name) {
+            // Give the method a symbol of its own instead of colliding with the
+            // C one. Named after the function id so it stays greppable.
+            let unique_name = format!("{}_{}", func_name, func_id.0);
+            if let Some(unique_func) = self.module.get_function(&unique_name) {
+                self.function_map.insert(func_id, unique_func);
+                if function.signature.uses_sret {
+                    self.sret_function_ids.insert(func_id);
+                }
+                return Ok(unique_func);
+            }
+            return self.declare_function_with_name(func_id, function, &unique_name);
+        }
         if let Some(existing_func) = self.module.get_function(&func_name) {
             // Build expected signature to compare
             let expected_param_types: Result<Vec<BasicMetadataTypeEnum>, _> = function
