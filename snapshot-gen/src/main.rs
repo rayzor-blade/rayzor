@@ -78,6 +78,11 @@ fn main() {
 fn lower_for(tier: &str, staging: &Path) {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
+    // Lower from source, never from the library this binary already carries:
+    // a restored module writes no artifact, so a build whose carried snapshot
+    // is still valid would otherwise produce an empty archive.
+    std::env::set_var("RAYZOR_IGNORE_EMBEDDED_SNAPSHOT", "1");
+
     let config = CompilationConfig {
         extra_defines: vec![tier.to_string()],
         cache_dir: Some(staging.to_path_buf()),
