@@ -375,6 +375,40 @@ impl Drop for FreeGraphFlush {
     }
 }
 
+/// Whether this value is already released anywhere in the function.
+///
+/// A release takes four shapes — a bare `Free` for a plain allocation, and a
+/// call for a string, an array buffer or an anonymous object. Recognising only
+/// the bare form makes the other three invisible, and the pass runs repeatedly
+/// over the same function: each run then inserts another release for a value
+/// that already had one. Releasing a string twice frees its header twice,
+/// because `haxe_string_free` reclaims the header on every call.
+fn already_released(
+    function: &IrFunction,
+    value: IrId,
+    string_free_id: Option<IrFunctionId>,
+    array_free_id: Option<IrFunctionId>,
+    anon_drop_id: Option<IrFunctionId>,
+) -> bool {
+    function.cfg.blocks.values().any(|b| {
+        b.instructions.iter().any(|i| match i {
+            IrInstruction::Free { ptr } => *ptr == value,
+            IrInstruction::CallDirect {
+                func_id,
+                args,
+                dest: None,
+                ..
+            } => {
+                args.first() == Some(&value)
+                    && (Some(*func_id) == string_free_id
+                        || Some(*func_id) == array_free_id
+                        || Some(*func_id) == anon_drop_id)
+            }
+            _ => false,
+        })
+    })
+}
+
 fn insert_free_for_function(
     function: &mut IrFunction,
     ids: &AllocFuncIds,
@@ -762,12 +796,13 @@ fn insert_free_for_function(
     for (latch, alloc_id) in
         find_iteration_temporaries(function, &needing_free_set, &temp_handled, &derived_sets)
     {
-        let already = function.cfg.blocks.values().any(|b| {
-            b.instructions
-                .iter()
-                .any(|i| matches!(i, IrInstruction::Free { ptr } if *ptr == alloc_id))
-        });
-        if already {
+        if already_released(
+            function,
+            alloc_id,
+            string_free_id,
+            array_free_id,
+            anon_drop_id,
+        ) {
             continue;
         }
         let Some(block) = function.cfg.blocks.get_mut(&latch) else {
