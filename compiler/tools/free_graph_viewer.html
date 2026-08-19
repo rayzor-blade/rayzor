@@ -1,0 +1,493 @@
+<title>Free Graph</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+  :root {
+    --ground: #f6f7fa;
+    --surface: #ffffff;
+    --surface-2: #eef0f6;
+    --ink: #1a1c24;
+    --ink-2: #4a4f60;
+    --muted: #767c90;
+    --line: #dde0ea;
+    --accent: #4a63d8;
+    --released: #2f8f70;
+    --unreleased: #a9761c;
+    --mismatch: #c4393f;
+    --latch: #7c5cd6;
+    --shadow: 0 1px 2px rgba(20, 22, 34, .06), 0 8px 24px rgba(20, 22, 34, .05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1117;
+      --surface: #171a22;
+      --surface-2: #1e222c;
+      --ink: #e6e8f0;
+      --ink-2: #b3b8c9;
+      --muted: #838999;
+      --line: #272c38;
+      --accent: #6c8cff;
+      --released: #4bb894;
+      --unreleased: #d9a441;
+      --mismatch: #e0575b;
+      --latch: #a78bfa;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f1117;
+    --surface: #171a22;
+    --surface-2: #1e222c;
+    --ink: #e6e8f0;
+    --ink-2: #b3b8c9;
+    --muted: #838999;
+    --line: #272c38;
+    --accent: #6c8cff;
+    --released: #4bb894;
+    --unreleased: #d9a441;
+    --mismatch: #e0575b;
+    --latch: #a78bfa;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 28px 24px 64px; }
+
+  header { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
+  h1 {
+    margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -.01em;
+    text-wrap: balance;
+  }
+  .sub { color: var(--muted); max-width: 66ch; }
+  .sub code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .92em; color: var(--ink-2);
+    background: var(--surface-2); padding: 1px 5px; border-radius: 4px;
+  }
+
+  /* summary before detail */
+  .totals { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; min-width: 116px; box-shadow: var(--shadow);
+  }
+  .stat .n {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums;
+    display: block; line-height: 1.2;
+  }
+  .stat .k {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); font-weight: 600;
+  }
+  .stat.bad .n { color: var(--mismatch); }
+  .stat.warn .n { color: var(--unreleased); }
+  .stat.ok .n { color: var(--released); }
+
+  .panes { display: grid; grid-template-columns: minmax(230px, 300px) 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .panes { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .card > h2 {
+    margin: 0; padding: 11px 14px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    border-bottom: 1px solid var(--line); background: var(--surface-2);
+  }
+
+  .filter { padding: 10px; border-bottom: 1px solid var(--line); }
+  .filter input {
+    width: 100%; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--ground); color: var(--ink);
+    font: inherit;
+  }
+  .filter input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .fnlist { max-height: 68vh; overflow-y: auto; }
+  .fn {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 8px 12px; border: 0; border-bottom: 1px solid var(--line);
+    background: transparent; color: var(--ink); font: inherit;
+    text-align: left; cursor: pointer;
+  }
+  .fn:hover { background: var(--surface-2); }
+  .fn[aria-current="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .fn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .fn .nm {
+    flex: 1; min-width: 0; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.mismatch { background: var(--mismatch); }
+  .dot.unreleased { background: var(--unreleased); }
+  .dot.clean { background: var(--line); }
+  .fn .ct {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+    color: var(--muted); font-variant-numeric: tabular-nums; flex: none;
+  }
+
+  .detail { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+  .scroll { overflow-x: auto; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th {
+    text-align: left; padding: 8px 12px; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr.flagged { background: color-mix(in srgb, var(--mismatch) 8%, transparent); }
+  tbody tr.warned { background: color-mix(in srgb, var(--unreleased) 9%, transparent); }
+  .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  td.inst { color: var(--ink-2); font-size: 11.5px; max-width: 520px; }
+  td.inst div { overflow-wrap: anywhere; }
+
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+    border: 1px solid currentColor; white-space: nowrap;
+  }
+  .pill.string { color: var(--accent); }
+  .pill.array { color: var(--latch); }
+  .pill.anon { color: var(--released); }
+  .pill.plain { color: var(--muted); }
+
+  .rel { display: flex; flex-wrap: wrap; gap: 4px; }
+  .rel span {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .rel span.latch { color: var(--latch); }
+  .none { color: var(--unreleased); font-weight: 600; font-size: 11.5px; }
+
+  .why { font-size: 11.5px; color: var(--mismatch); font-weight: 500; }
+  .why.warn { color: var(--unreleased); }
+
+  /* control-flow graph */
+  .cfg { padding: 14px; }
+  .cfg svg { display: block; min-width: 100%; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 14px; padding: 0 14px 14px;
+    font-size: 11px; color: var(--muted);
+  }
+  .legend i { display: inline-flex; align-items: center; gap: 5px; font-style: normal; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+
+  .drop {
+    margin-top: 18px; padding: 12px 14px; border: 1px dashed var(--line);
+    border-radius: 8px; color: var(--muted); font-size: 12px;
+  }
+  .drop.over { border-color: var(--accent); color: var(--ink); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Free Graph</h1>
+    <p class="sub">
+      What the free-insertion pass decided for every allocation it saw: what it believes the thing is,
+      and where — if anywhere — it released it. Produced by
+      <code>RAYZOR_DUMP_FREE_GRAPH=graph.json</code>. Drop another dump on this page to read it.
+    </p>
+  </header>
+
+  <div class="totals" id="totals"></div>
+
+  <div class="panes">
+    <section class="card">
+      <h2>Functions</h2>
+      <div class="filter">
+        <input id="q" type="search" placeholder="Filter functions" aria-label="Filter functions">
+      </div>
+      <div class="fnlist" id="fnlist"></div>
+    </section>
+
+    <div class="detail">
+      <section class="card">
+        <h2 id="allocTitle">Allocations</h2>
+        <div class="scroll"><table id="allocs"></table></div>
+      </section>
+      <section class="card">
+        <h2>Control flow</h2>
+        <div class="cfg scroll" id="cfg"></div>
+        <div class="legend">
+          <i><span class="swatch" style="background:var(--latch)"></span>loop body</i>
+          <i><span class="swatch" style="background:var(--released)"></span>releases here</i>
+          <i><span class="swatch" style="background:var(--line)"></span>plain block</i>
+          <i>ring = loop latch</i>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="drop" id="drop">Drop a <strong>graph.json</strong> here to replace the loaded dump.</div>
+</div>
+
+<script>
+  const EMBEDDED = /*__DATA__*/[]/*__DATA__*/;
+
+  let data = [];
+  let selected = 0;
+
+  // An allocation the pass believes is a string must be released by the string
+  // route, an array by its buffer-then-header pair, and so on. A release that
+  // does not match, or is missing entirely, is the shape of every memory bug
+  // this pass has produced.
+  function audit(a) {
+    const flags = [];
+    const kinds = a.releases.map(r => r.how);
+    if (a.needs_free && kinds.length === 0) {
+      flags.push({ level: "warn", text: "needs release, none inserted" });
+    }
+    if (a.kind === "string" && kinds.some(k => k === "PlainFree")) {
+      flags.push({ level: "bad", text: "string released as a plain allocation" });
+    }
+    if (a.kind === "anon" && kinds.some(k => k === "PlainFree")) {
+      flags.push({ level: "bad", text: "anonymous object released as a plain allocation" });
+    }
+    if (a.kind === "array") {
+      const buf = kinds.filter(k => k === "ArrayFreeThenHeader").length;
+      const hdr = kinds.filter(k => k === "PlainFree").length;
+      if (buf > 0 && hdr === 0) flags.push({ level: "bad", text: "array buffer released, header kept" });
+      if (buf === 0 && hdr > 0) flags.push({ level: "bad", text: "array header released, buffer leaked" });
+    } else if (kinds.length > 1) {
+      flags.push({ level: "bad", text: "released more than once" });
+    }
+    return flags;
+  }
+
+  const worst = fn => {
+    let w = 0;
+    for (const a of fn.allocs) for (const f of audit(a)) w = Math.max(w, f.level === "bad" ? 2 : 1);
+    return w;
+  };
+
+  function renderTotals() {
+    const fns = data.length;
+    const allocs = data.reduce((n, f) => n + f.allocs.length, 0);
+    let bad = 0, warn = 0, latch = 0;
+    for (const f of data) for (const a of f.allocs) {
+      const fl = audit(a);
+      if (fl.some(x => x.level === "bad")) bad++;
+      else if (fl.length) warn++;
+      if (a.releases.some(r => r.site === "Latch")) latch++;
+    }
+    const cells = [
+      ["functions", fns, ""],
+      ["allocations", allocs, ""],
+      ["released per iteration", latch, "ok"],
+      ["no release", warn, "warn"],
+      ["wrong release", bad, "bad"],
+    ];
+    document.getElementById("totals").innerHTML = cells.map(([k, n, cls]) =>
+      `<div class="stat ${n > 0 ? cls : ""}"><span class="n">${n}</span><span class="k">${k}</span></div>`
+    ).join("");
+  }
+
+  function renderList() {
+    const q = document.getElementById("q").value.trim().toLowerCase();
+    const rows = data
+      .map((f, i) => ({ f, i, w: worst(f) }))
+      .filter(({ f }) => !q || (f.qualified_name || f.name).toLowerCase().includes(q))
+      .sort((a, b) => b.w - a.w || b.f.allocs.length - a.f.allocs.length);
+
+    document.getElementById("fnlist").innerHTML = rows.length ? rows.map(({ f, i, w }) => {
+      const cls = w === 2 ? "mismatch" : w === 1 ? "unreleased" : "clean";
+      const name = f.qualified_name || f.name;
+      return `<button class="fn" data-i="${i}" aria-current="${i === selected}">
+        <span class="dot ${cls}"></span>
+        <span class="nm" title="${esc(name)}">${esc(name)}</span>
+        <span class="ct">${f.allocs.length}</span>
+      </button>`;
+    }).join("") : `<div class="empty">No function matches.</div>`;
+
+    for (const b of document.querySelectorAll(".fn")) {
+      b.onclick = () => { selected = +b.dataset.i; renderList(); renderDetail(); };
+    }
+  }
+
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  const RELEASE_LABEL = {
+    StringFree: "string free",
+    ArrayFreeThenHeader: "array buffer",
+    AnonDrop: "drop",
+    PlainFree: "free",
+  };
+
+  function renderDetail() {
+    const fn = data[selected];
+    const table = document.getElementById("allocs");
+    if (!fn) { table.innerHTML = ""; document.getElementById("cfg").innerHTML = `<div class="empty">Nothing loaded.</div>`; return; }
+
+    document.getElementById("allocTitle").textContent =
+      `Allocations — ${fn.qualified_name || fn.name}` +
+      (fn.passes > 1 ? ` (final of ${fn.passes} passes)` : "");
+
+    if (!fn.allocs.length) {
+      table.innerHTML = `<tbody><tr><td class="empty">This function allocates nothing.</td></tr></tbody>`;
+    } else {
+      const body = fn.allocs.map(a => {
+        const fl = audit(a);
+        const bad = fl.some(x => x.level === "bad");
+        const cls = bad ? "flagged" : fl.length ? "warned" : "";
+        const rel = a.releases.length
+          ? `<div class="rel">${a.releases.map(r =>
+              `<span class="${r.site === "Latch" ? "latch" : ""}">${RELEASE_LABEL[r.how] || r.how} · b${r.block}${r.site === "Latch" ? " · latch" : ""}</span>`
+            ).join("")}</div>`
+          : `<span class="none">none</span>`;
+        return `<tr class="${cls}">
+          <td class="mono">%${a.id}</td>
+          <td><span class="pill ${a.kind}">${a.kind}</span></td>
+          <td class="mono">${a.def_block === null ? "—" : "b" + a.def_block}</td>
+          <td>${rel}</td>
+          <td class="mono">${a.derived.length}</td>
+          <td class="inst"><div>${esc(a.def_inst)}</div>${
+            fl.map(f => `<div class="why ${f.level === "warn" ? "warn" : ""}">${f.text}</div>`).join("")
+          }</td>
+        </tr>`;
+      }).join("");
+      table.innerHTML = `<thead><tr>
+          <th>value</th><th>kind</th><th>defined</th><th>released</th><th>aliases</th><th>producing instruction</th>
+        </tr></thead><tbody>${body}</tbody>`;
+    }
+
+    renderCfg(fn);
+  }
+
+  // Layered by distance from the entry block: enough structure to see where a
+  // loop sits and which block a release landed in, without pretending to be a
+  // full graph layout.
+  function renderCfg(fn) {
+    const host = document.getElementById("cfg");
+    if (!fn.blocks.length) { host.innerHTML = `<div class="empty">No blocks.</div>`; return; }
+
+    const byId = new Map(fn.blocks.map(b => [b.id, b]));
+    const entry = fn.blocks[0].id;
+    const depth = new Map([[entry, 0]]);
+    const queue = [entry];
+    while (queue.length) {
+      const id = queue.shift();
+      for (const s of (byId.get(id)?.successors || [])) {
+        if (!depth.has(s) && byId.has(s)) { depth.set(s, depth.get(id) + 1); queue.push(s); }
+      }
+    }
+    for (const b of fn.blocks) if (!depth.has(b.id)) depth.set(b.id, 0);
+
+    const rows = new Map();
+    for (const b of fn.blocks) {
+      const d = depth.get(b.id);
+      if (!rows.has(d)) rows.set(d, []);
+      rows.get(d).push(b.id);
+    }
+
+    const loopBlocks = new Set(fn.loops.flatMap(l => l.body));
+    const latchBlocks = new Set(fn.loops.map(l => l.latch));
+    const releaseBlocks = new Set(fn.allocs.flatMap(a => a.releases.map(r => r.block)));
+
+    const W = 78, H = 34, GX = 22, GY = 30;
+    const depths = [...rows.keys()].sort((a, b) => a - b);
+    const widest = Math.max(...depths.map(d => rows.get(d).length));
+    const width = Math.max(360, widest * (W + GX) + GX);
+    const height = depths.length * (H + GY) + GY;
+
+    const pos = new Map();
+    depths.forEach((d, row) => {
+      const ids = rows.get(d);
+      const rowW = ids.length * (W + GX) - GX;
+      ids.forEach((id, i) => pos.set(id, {
+        x: (width - rowW) / 2 + i * (W + GX),
+        y: GY / 2 + row * (H + GY),
+      }));
+    });
+
+    const edges = [];
+    for (const b of fn.blocks) {
+      const from = pos.get(b.id);
+      for (const s of b.successors) {
+        const to = pos.get(s);
+        if (!from || !to) continue;
+        const back = to.y <= from.y;
+        edges.push(`<path d="M ${from.x + W / 2} ${from.y + H} C ${from.x + W / 2} ${from.y + H + 18}, ${to.x + W / 2} ${to.y - 18}, ${to.x + W / 2} ${to.y}"
+          fill="none" stroke="${back ? "var(--latch)" : "var(--line)"}" stroke-width="${back ? 1.6 : 1.2}"
+          ${back ? 'stroke-dasharray="3 3"' : ""} />`);
+      }
+    }
+
+    const nodes = fn.blocks.map(b => {
+      const p = pos.get(b.id);
+      const fill = releaseBlocks.has(b.id)
+        ? "color-mix(in srgb, var(--released) 22%, var(--surface))"
+        : loopBlocks.has(b.id)
+          ? "color-mix(in srgb, var(--latch) 15%, var(--surface))"
+          : "var(--surface)";
+      const stroke = latchBlocks.has(b.id) ? "var(--latch)" : "var(--line)";
+      return `<g>
+        <rect x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="7"
+              fill="${fill}" stroke="${stroke}" stroke-width="${latchBlocks.has(b.id) ? 2 : 1}" />
+        <text x="${p.x + W / 2}" y="${p.y + 15}" text-anchor="middle"
+              font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink)">b${b.id}</text>
+        <text x="${p.x + W / 2}" y="${p.y + 27}" text-anchor="middle"
+              font-family="IBM Plex Sans, sans-serif" font-size="9" fill="var(--muted)">${esc(b.terminator)}</text>
+      </g>`;
+    });
+
+    host.innerHTML = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img"
+      aria-label="Control flow graph with ${fn.blocks.length} blocks">${edges.join("")}${nodes.join("")}</svg>`;
+  }
+
+  // The pass runs once per pipeline iteration, so a raw dump holds the same
+  // function several times. Only the last state is the code that ships; keep
+  // that one and say how many times the function was seen.
+  function load(next) {
+    const seen = new Map();
+    for (const f of Array.isArray(next) ? next : []) {
+      const key = f.qualified_name || f.name;
+      const prev = seen.get(key);
+      seen.set(key, Object.assign({}, f, { passes: (prev ? prev.passes : 0) + 1 }));
+    }
+    data = [...seen.values()];
+    selected = 0;
+    renderTotals(); renderList(); renderDetail();
+  }
+
+  document.getElementById("q").oninput = renderList;
+
+  const drop = document.getElementById("drop");
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => {
+    e.preventDefault(); drop.classList.remove("over");
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    file.text().then(t => {
+      try { load(JSON.parse(t)); drop.textContent = `Loaded ${file.name}.`; }
+      catch { drop.textContent = `${file.name} is not valid JSON.`; }
+    });
+  });
+
+  load(EMBEDDED);
+</script>
