@@ -6437,24 +6437,28 @@ impl CompilationUnit {
         } // end if !is_stdlib
         add_profile_ms(&mut self.typecheck_timings.send_sync_ms, t_send_sync);
 
-        // Ownership analysis: use-after-move detection (user files only)
-        // Skip if any class has @:safety annotation — opted out of ownership tracking
-        let has_safety_opt_out = typed_file.classes.iter().any(|c| c.has_safety_annotation());
+        // Ownership analysis: use-after-move detection (user files only).
+        //
+        // `@:safety` is an OPT-IN (docs/architecture/MEMORY_MANAGEMENT.md): with no
+        // annotation a class is runtime-managed and gets no analysis. That default
+        // is what lets libraries written for the Haxe ecosystem — which alias
+        // freely and assume a GC — keep compiling untouched.
+        let opted_into_safety = typed_file.classes.iter().any(|c| c.has_safety_annotation());
         let t_ownership = profile_timer(self.config.profile_typecheck);
         if !is_stdlib {
             let mut ownership_diagnostics = self.check_ownership_violations(&typed_file);
-            // Advisory diagnostics are configurable. A `@:move` violation is not:
-            // it is a compile error on every path that produces an artifact.
+            // Advisory diagnostics belong to code that asked for them; a `@:move`
+            // violation is a compile error everywhere, on every path that produces
+            // an artifact.
             //
-            // Both suppressions here used to switch the WHOLE check off, and each
-            // was reachable by accident. `@:safety` opts a file INTO manual memory
-            // management, yet any occurrence of it silenced the file — so the
-            // annotation `@:move`'s own documentation calls a prerequisite was the
-            // way to disable the checking it enables. And `emit_safety_warnings` is
-            // cleared by the bundle and AOT drivers, so the artifacts we actually
-            // ship were the only ones never checked: a program `rayzor run`
-            // rejected would bundle cleanly and then run the use-after-move.
-            if has_safety_opt_out || !self.config.emit_safety_warnings {
+            // The polarity here was inverted, and each half was reachable by
+            // accident. `@:safety` SUPPRESSED a file rather than enrolling it, so
+            // the annotation `@:move`'s own documentation calls a prerequisite was
+            // the way to disable the checking it enables. And `emit_safety_warnings`
+            // is cleared by the bundle and AOT drivers, so the artifacts we ship
+            // were the only ones never checked — a program `rayzor run` rejected
+            // would bundle cleanly and then run the use-after-move.
+            if !opted_into_safety || !self.config.emit_safety_warnings {
                 ownership_diagnostics
                     .retain(|d| matches!(d.severity, diagnostics::DiagnosticSeverity::Error));
             }
