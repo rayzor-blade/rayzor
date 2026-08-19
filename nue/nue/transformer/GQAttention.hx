@@ -165,28 +165,40 @@ class GQAttention implements Attention {
         // buffer is never decremented). Capture the matmul into a local,
         // reshape, then drop the local — leaves only the view refcount on
         // the storage.
-        var useHaxeMat = Linear.useHaxeMatmul();
+        // The route this layer was built for, when the builder decided one.
+        // Zero means it did not, and then the decision is made here exactly as
+        // it always was.
+        var useHaxeMat = (planHaxeMat != 0)
+            ? (planHaxeMat == 1 || planHaxeMat == 3)
+            : Linear.useHaxeMatmul();
         // Row-wise (INT8/Q8_0) triples fuse by default — a separate, cheaper
         // mechanism than the opt-in k-quant row-space fusion: only the shared
         // activation quantise is hoisted, so Q/K/V quantise the post-attn-norm
         // activation ONCE instead of three times. Bit-identical output.
-        var useFusedMat = !useHaxeMat || nue.Q4Matmul.useFusedMatmul()
-            || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq);
-        // While verifying, the planned route is checked against the live one on
-        // every forward and the LIVE one is still used, so a disagreement is
-        // reported without changing what runs.
-        if (planFusedQkv >= 3 && (planFusedQkv == 3) != useFusedMat) {
-            Sys.println("[nue-graph] MISMATCH attn.fusedQkv planned="
-                + (planFusedQkv == 3) + " live=" + useFusedMat);
-        }
-        if (planHaxeMat >= 3 && (planHaxeMat == 3) != useHaxeMat) {
-            Sys.println("[nue-graph] MISMATCH attn.haxeMat planned="
-                + (planHaxeMat == 3) + " live=" + useHaxeMat);
+        var useFusedMat = (planFusedQkv != 0)
+            ? (planFusedQkv == 1 || planFusedQkv == 3)
+            : (!useHaxeMat || nue.Q4Matmul.useFusedMatmul()
+                || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq));
+        // While verifying, work the route out again the old way and say so if
+        // the two disagree. The planned one is still what runs, so this reports
+        // a divergence rather than hiding it behind a fallback.
+        if (planHaxeMat >= 3 || planFusedQkv >= 3) {
+            var liveHaxeMat = Linear.useHaxeMatmul();
+            var liveFusedMat = !liveHaxeMat || nue.Q4Matmul.useFusedMatmul()
+                || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq);
+            if (useHaxeMat != liveHaxeMat) {
+                Sys.println("[nue-graph] MISMATCH attn.haxeMat planned="
+                    + useHaxeMat + " live=" + liveHaxeMat);
+            }
+            if (useFusedMat != liveFusedMat) {
+                Sys.println("[nue-graph] MISMATCH attn.fusedQkv planned="
+                    + useFusedMat + " live=" + liveFusedMat);
+            }
         }
         nue.Q4Matmul.noteFusionSite(true, qWq != null && kWq != null && vWq != null, useHaxeMat);
         if (qWq != null && kWq != null && vWq != null && useFusedMat) {
             var triple:Array<Tensor>;
-            if (Linear.useHaxeMatmul()) {
+            if (useHaxeMat) {
                 triple = nue.Q4Matmul.matmulFused(qWq, kWq, vWq, x, qProj.pool);
             } else {
                 // Slots stay null on kernel gate-miss; the null-check below
