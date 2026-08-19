@@ -67,7 +67,7 @@ class LlamaBlock {
         }
     }
 
-    public function forward(x:Tensor):Tensor {
+    public function forwardWith(x:Tensor, kv:KVCache):Tensor {
         var dbg = debugShapeMode();
         var traceShapes = dbg == 3;
         var checkShapes = dbg == 1 || dbg == 3;
@@ -89,7 +89,7 @@ class LlamaBlock {
             checkShape(label, "after_attn_norm x=", x, hiddenSize, traceShapes);
             checkShape(label, "after_attn_norm norm=", t, hiddenSize, traceShapes);
         }
-        var attnOut = attn.forward(t);
+        var attnOut = attn.forwardWith(t, kv);
         t.free();
         var _tAttn = profileSplit ? Sys.time() : 0.0;
         if (checkShapes) {
@@ -132,6 +132,11 @@ class LlamaBlock {
         }
         if (checkShapes) checkShape(label, "exit h=", h1, hiddenSize, traceShapes);
         return h1;
+    }
+
+    /** `Module` conformance: run against this block's own attention cache. */
+    public function forward(x:Tensor):Tensor {
+        return forwardWith(x, attn.cache);
     }
 
     public function parameters():Array<NamedTensor> {

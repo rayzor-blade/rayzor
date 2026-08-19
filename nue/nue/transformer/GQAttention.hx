@@ -132,13 +132,19 @@ class GQAttention implements Attention {
     }
 
     /**
-     * Forward pass on x of shape [seq_q, hidden_size]. Mutates the
-     * underlying KVCache by appending the new K/V slices.
+     * Forward pass on x of shape [seq_q, hidden_size], reading and appending
+     * to the caller's `kv`.
+     *
+     * The cache is a parameter rather than the module's own field because it
+     * is the only per-conversation state in the block: weights are read-only
+     * and shareable, so passing the cache in is what lets one set of weights
+     * serve several independent conversations at once. `forward` keeps the
+     * `Module` signature by supplying this module's own cache.
      */
-    public function forward(x:Tensor):Tensor {
+    public function forwardWith(x:Tensor, kv:KVCache):Tensor {
         var _t0 = attnProfEnabled() ? Sys.time() : 0.0;
         var seqQ = x.shape()[0];
-        var positionOffset = cache.currentLen;
+        var positionOffset = kv.currentLen;
 
         // 1) Project to Q, K, V.
         //    hidden_size = numQHeads * headDim  (Q out)
@@ -268,9 +274,9 @@ class GQAttention implements Attention {
         qRaw.free();
         kRaw.free();
 
-        // 3) Push the new K/V into the cache. Subsequent reads use the
+        // 3) Push the new K/V into the kv. Subsequent reads use the
         //    full active slice (prior tokens + just-added).
-        cache.append(k, v);
+        kv.append(k, v);
         // append() copies rows into the cache's own storage (F32
         // appendAlong0 or Q8 quantise-on-write) — k and v are dead.
         k.free();
@@ -292,9 +298,9 @@ class GQAttention implements Attention {
         // dequantising into a 32-f32 stack buffer per block.
         // Pure-Haxe Q8 decode attention (guest-owned cache + SDOT kernel,
         // banded across kv-heads on the matmul pool).
-        if (seqQ == 1 && cache.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
+        if (seqQ == 1 && kv.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
             var ctx = FlashDecode.decode(
-                cache.keysQ8H, cache.valuesQ8H, q, cache.currentLen,
+                kv.keysQ8H, kv.valuesQ8H, q, kv.currentLen,
                 numQHeads, scale, qProj.pool
             );
             if (ctx != null) {
@@ -310,9 +316,9 @@ class GQAttention implements Attention {
             }
         }
         if (seqQ > 1 && seqQ <= FlashDecode.batchMax()
-            && cache.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
+            && kv.useQ8H && FlashDecode.enabled() && qProj.pool != null) {
             var ctx = FlashDecode.decodeBatch(
-                cache.keysQ8H, cache.valuesQ8H, q, positionOffset, seqQ,
+                kv.keysQ8H, kv.valuesQ8H, q, positionOffset, seqQ,
                 numQHeads, scale, qProj.pool
             );
             if (ctx != null) {
@@ -327,18 +333,18 @@ class GQAttention implements Attention {
                 return out;
             }
         }
-        if (seqQ == 1 && cache.useQ8) {
+        if (seqQ == 1 && kv.useQ8) {
             // Prefer the host-parallel kernel: on the wasm run target it bands
             // attention across the embedder's native worker pool (otherwise idle
             // during serial guest attention). Returns null off that path — a
             // browser/no-host build or any native target — so fall back to the
             // serial Q8 kernel, which has identical numerics.
-            var ctx = cache.keysQ8.flashAttnDecodeQ8Host(
-                q, cache.valuesQ8, cache.currentLen, numQHeads, scale
+            var ctx = kv.keysQ8.flashAttnDecodeQ8Host(
+                q, kv.valuesQ8, kv.currentLen, numQHeads, scale
             );
             if (ctx == null) {
-                ctx = cache.keysQ8.flashAttnDecodeQ8(
-                    q, cache.valuesQ8, cache.currentLen, numQHeads, scale
+                ctx = kv.keysQ8.flashAttnDecodeQ8(
+                    q, kv.valuesQ8, kv.currentLen, numQHeads, scale
                 );
             }
             if (ctx != null) {
@@ -354,8 +360,8 @@ class GQAttention implements Attention {
             }
         }
 
-        var kAll = cache.keysView();   // [cache.currentLen, numKvHeads, headDim]
-        var vAll = cache.valuesView(); // same shape
+        var kAll = kv.keysView();   // [kv.currentLen, numKvHeads, headDim]
+        var vAll = kv.valuesView(); // same shape
         if (seqQ == 1) {
             // F32 cache fast path: same fused kernel against the live view.
             // `flashAttnDecode` returns the same [1, numQHeads, headDim]
@@ -450,6 +456,11 @@ class GQAttention implements Attention {
         q.free();
 
         return out;
+    }
+
+    /** `Module` conformance: run against this module's own cache. */
+    public function forward(x:Tensor):Tensor {
+        return forwardWith(x, cache);
     }
 
     /**

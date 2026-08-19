@@ -46,6 +46,14 @@ class KVCache {
     public var keysQ8H:Q8Cache;
     public var valuesQ8H:Q8Cache;
     public var useQ8H:Bool;
+    // What the builder asked for, kept beside what it got. `useQ8`/`useQ8H`
+    // are the resolved answers — a request downgrades when the head dimension
+    // is not a multiple of 32, or when the plugin allocation fails — so they
+    // cannot be replayed to build a second cache like this one. `cloneEmpty`
+    // needs the request, not the outcome.
+    public var reqQ8:Bool;
+    public var reqHaxeQ8:Bool;
+    public var numQHeads:Int;
 
     public function new(
         maxSeqLen:Int, numKvHeads:Int, headDim:Int, dtype:DType,
@@ -56,6 +64,9 @@ class KVCache {
         this.headDim = headDim;
         this.dtype = dtype;
         this.currentLen = 0;
+        this.reqQ8 = useQ8;
+        this.reqHaxeQ8 = useHaxeQ8;
+        this.numQHeads = numQHeads;
         // Q8_0 super-block is 32 elements; head_dim must be a multiple
         // of 32 or we fall back to F32. (Llama 3.2 1B's head_dim=64 is
         // fine; Qwen 0.5B's 64 too; Mistral 7B's 128 too — every
@@ -199,5 +210,27 @@ class KVCache {
             throw "KVCache rewind beyond current length: " + len + " > " + currentLen;
         }
         currentLen = len;
+    }
+
+    /** A second cache configured exactly like this one, holding no tokens.
+        Conversations are independent runs over the same weights, so each needs
+        its own cache; this builds one without the caller having to know how
+        this one was configured. */
+    public function cloneEmpty():KVCache {
+        return new KVCache(maxSeqLen, numKvHeads, headDim, dtype,
+            reqQ8, reqHaxeQ8, numQHeads);
+    }
+
+    /** Release the backing storage. The F32 buffers may never have been
+        allocated (see `ensureF32`), and only one quantized backing is ever
+        live, so every side is checked rather than assumed. */
+    public function free():Void {
+        if (keys != null) { keys.free(); keys = null; }
+        if (values != null) { values.free(); values = null; }
+        if (keysQ8 != null) { keysQ8.free(); keysQ8 = null; }
+        if (valuesQ8 != null) { valuesQ8.free(); valuesQ8 = null; }
+        if (keysQ8H != null) { keysQ8H.free(); keysQ8H = null; }
+        if (valuesQ8H != null) { valuesQ8H.free(); valuesQ8H = null; }
+        currentLen = 0;
     }
 }
