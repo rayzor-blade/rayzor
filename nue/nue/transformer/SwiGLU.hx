@@ -63,24 +63,30 @@ class SwiGLU implements Module {
         // gate/up share the post-FFN-norm activation, so a row-wise (INT8/Q8_0)
         // pair fuses by default — one activation quantise instead of two.
         // Separate, cheaper mechanism than the opt-in k-quant fusion.
-        var useHaxeMat = Linear.useHaxeMatmul();
-        // See GQAttention: while verifying, the live route still decides and a
-        // disagreement is only reported.
-        if (planFusedPair >= 3) {
+        // The route this layer was built for; zero means decide it here, as
+        // before. Kept separate from attention's: this site treats a disabled
+        // Haxe matmul as "split", where attention treats it as "fused".
+        var useHaxeMat = (planHaxeMat != 0)
+            ? (planHaxeMat == 1 || planHaxeMat == 3)
+            : Linear.useHaxeMatmul();
+        var useFusedPair = (planFusedPair != 0)
+            ? (planFusedPair == 1 || planFusedPair == 3)
+            : (nue.Q4Matmul.useFusedMatmul() || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null));
+        if (planHaxeMat >= 3 || planFusedPair >= 3) {
+            var liveHaxeMat = Linear.useHaxeMatmul();
             var livePair = nue.Q4Matmul.useFusedMatmul()
                 || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null);
-            if ((planFusedPair == 3) != livePair) {
+            if (useHaxeMat != liveHaxeMat) {
+                Sys.println("[nue-graph] MISMATCH ffn.haxeMat planned="
+                    + useHaxeMat + " live=" + liveHaxeMat);
+            }
+            if (useFusedPair != livePair) {
                 Sys.println("[nue-graph] MISMATCH ffn.fusedPair planned="
-                    + (planFusedPair == 3) + " live=" + livePair);
+                    + useFusedPair + " live=" + livePair);
             }
         }
-        if (planHaxeMat >= 3 && (planHaxeMat == 3) != useHaxeMat) {
-            Sys.println("[nue-graph] MISMATCH ffn.haxeMat planned="
-                + (planHaxeMat == 3) + " live=" + useHaxeMat);
-        }
         nue.Q4Matmul.noteFusionSite(false, gwq != null && uwq != null, useHaxeMat);
-        if (useHaxeMat && gwq != null && uwq != null
-            && (nue.Q4Matmul.useFusedMatmul() || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null))) {
+        if (useHaxeMat && gwq != null && uwq != null && useFusedPair) {
             var pair = nue.Q4Matmul.matmulFused(gwq, uwq, null, x, gate.pool);
             gLin = pair[0];
             u = pair[1];
