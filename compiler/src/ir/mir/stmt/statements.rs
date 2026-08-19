@@ -398,7 +398,18 @@ impl<'a> HirToMirContext<'a> {
                             } = &init_expr.kind
                             {
                                 if let Some(&src_reg) = self.symbol_map.get(src_symbol) {
-                                    if self.strict_move_locals.contains(&src_reg) {
+                                    // Only when the value actually changed register.
+                                    // `var d = b` needs no cast, so `d` IS `b`'s
+                                    // register; marking the source moved would poison
+                                    // the binding just created from it, and the
+                                    // Cranelift liveness check — the one backend that
+                                    // enforces this — then traps on correct code.
+                                    // A move that relocates (`$9 = cast $2`) still
+                                    // marks `$2`, whose reads all belong to the old
+                                    // binding.
+                                    if src_reg != final_value
+                                        && self.strict_move_locals.contains(&src_reg)
+                                    {
                                         let _ = self.builder.build_mark_moved(src_reg);
                                     }
                                 }
