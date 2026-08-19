@@ -24,6 +24,18 @@ class SwiGLU implements Module {
     public var up:Linear;
     public var down:Linear;
 
+    // ---- planned route ------------------------------------------------
+    // Which route this module takes, decided once when the model is built
+    // instead of re-derived from environment flags on every forward.
+    //
+    // Zero means unplanned, and unplanned means "work it out live, exactly as
+    // before" — a module built outside the planner (the standalone examples do
+    // this) keeps today's behaviour without edit. Appended rather than
+    // inserted: an importing module resolves fields by declaration order.
+    //   0 unplanned   1 on   2 off   3 on and verify   4 off and verify
+    public var planHaxeMat:Int = 0;
+    public var planFusedPair:Int = 0;
+
     public function new(gate:Linear, up:Linear, down:Linear) {
         this.gate = gate;
         this.up = up;
@@ -52,6 +64,20 @@ class SwiGLU implements Module {
         // pair fuses by default — one activation quantise instead of two.
         // Separate, cheaper mechanism than the opt-in k-quant fusion.
         var useHaxeMat = Linear.useHaxeMatmul();
+        // See GQAttention: while verifying, the live route still decides and a
+        // disagreement is only reported.
+        if (planFusedPair >= 3) {
+            var livePair = nue.Q4Matmul.useFusedMatmul()
+                || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null);
+            if ((planFusedPair == 3) != livePair) {
+                Sys.println("[nue-graph] MISMATCH ffn.fusedPair planned="
+                    + (planFusedPair == 3) + " live=" + livePair);
+            }
+        }
+        if (planHaxeMat >= 3 && (planHaxeMat == 3) != useHaxeMat) {
+            Sys.println("[nue-graph] MISMATCH ffn.haxeMat planned="
+                + (planHaxeMat == 3) + " live=" + useHaxeMat);
+        }
         nue.Q4Matmul.noteFusionSite(false, gwq != null && uwq != null, useHaxeMat);
         if (useHaxeMat && gwq != null && uwq != null
             && (nue.Q4Matmul.useFusedMatmul() || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null))) {

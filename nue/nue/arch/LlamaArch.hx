@@ -288,13 +288,55 @@ class LlamaArch implements ArchBuilder {
             meta.normEps, "weight"
         );
 
+        // Bound to locals so the route can be decided from the weights this
+        // layer actually got: per-layer promotion means a Q6_K projection can
+        // appear on some layers and not others, so the route is per layer.
+        var ffnGate = buildLinear(weights, prefix + "ffn_gate.weight", null, sp);
+        var ffnUp = buildLinear(weights, prefix + "ffn_up.weight", null, sp);
+        var ffnDown = buildLinear(weights, prefix + "ffn_down.weight", null, sp);
         var ffn = new SwiGLU(
-            buildLinear(weights, prefix + "ffn_gate.weight", null, sp),
-            buildLinear(weights, prefix + "ffn_up.weight", null, sp),
-            buildLinear(weights, prefix + "ffn_down.weight", null, sp)
+            ffnGate,
+            ffnUp,
+            ffnDown
         );
 
+        // Decide each site's route here, where the weights are in scope, and
+        // lower it onto the module. The two expressions are NOT the same and
+        // must not be merged: attention treats a disabled Haxe matmul as
+        // "fused" and routes to the platform kernel, while the feed-forward
+        // treats it as "split". Assigned after construction, the shape already
+        // used for `rope.neox` and `lmHead.pool`.
+        // Already read in `build` before the first layer, so this is a
+        // memoised read and cannot move a first-read side effect.
+        var useHaxeMat = Linear.useHaxeMatmul();
+        var planned = planState(useHaxeMat);
+        attn.planHaxeMat = planned;
+        attn.planFusedQkv = planState(!useHaxeMat
+            || Q4Matmul.useFusedMatmul()
+            || Q4Matmul.canFuseRowwise(qProj.qweight, kProj.qweight, vProj.qweight));
+        ffn.planHaxeMat = planned;
+        ffn.planFusedPair = planState(Q4Matmul.useFusedMatmul()
+            || Q4Matmul.canFuseRowwise(ffnGate.qweight, ffnUp.qweight, null));
+
         return new LlamaBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+    }
+
+    /** A route as the modules encode it. Verification is a separate state
+        rather than a separate field, so the hot path reads one Int. */
+    static function planState(on:Bool):Int {
+        if (verifyPlan()) return on ? 3 : 4;
+        return on ? 1 : 2;
+    }
+
+    /** Compare the planned route against the live one on every forward. Read
+        once; off unless asked for. */
+    static var _verifyPlan:Int = 0;
+    static function verifyPlan():Bool {
+        if (_verifyPlan == 0) {
+            var v = Sys.getEnvOr("NUE_PLAN_VERIFY", "RAYZOR_PLAN_VERIFY");
+            _verifyPlan = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
+        }
+        return _verifyPlan == 1;
     }
 
     /** Build a Linear from a weight name, picking the QTensor path when
