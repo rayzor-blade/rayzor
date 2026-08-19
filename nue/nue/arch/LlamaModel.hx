@@ -8,6 +8,8 @@ import nue.transformer.RoPE;
 import nue.transformer.RMSNorm;
 import nue.transformer.GQAttention;
 import nue.transformer.LlamaBlock;
+import nue.transformer.KVCache;
+import nue.transformer.KVSession;
 import nue.engine.PrefillGraph;
 import rayzor.Bytes;
 import nue.model.ModelMetadata;
@@ -258,6 +260,54 @@ class LlamaModel implements CausalLanguageModel {
                 attn.cache.rewind(len);
             }
         }
+    }
+
+    /**
+     * A fresh conversation over these weights.
+     *
+     * Each layer's cache is configured exactly like the one the model was
+     * built with, so a session decodes identically to the model's own path —
+     * it differs only in which storage it writes to. Weights are untouched,
+     * so sessions cost their caches and nothing else.
+     */
+    public function newSession():KVSession {
+        var caches:Array<KVCache> = [];
+        for (i in 0...blocks.length) {
+            var attn = blocks[i].attn;
+            if (attn == null || attn.cache == null) {
+                throw "LlamaModel.newSession: block " + i + " has no attention cache";
+            }
+            caches.push(attn.cache.cloneEmpty());
+        }
+        return new KVSession(caches);
+    }
+
+    /**
+     * Decode `tokenIds` against `session` rather than the model's own caches.
+     *
+     * This is the path that lets several conversations share one loaded model:
+     * nothing it touches is per-model mutable state, so concurrent callers with
+     * distinct sessions do not interfere.
+     *
+     * The fused prefill graph is deliberately not taken here. It seeds the
+     * caches the model was built with, which are not this session's, so the
+     * fast route would fill the wrong storage. Prefill for a session runs the
+     * per-op path until the graph learns to write where it is told.
+     */
+    public function forwardIdsWith(tokenIds:Array<Int>, session:KVSession):Tensor {
+        if (session.layers() != blocks.length) {
+            throw "LlamaModel.forwardIdsWith: session has " + session.layers()
+                + " layers, model has " + blocks.length;
+        }
+        var h = embedTokens.lookup(tokenIds);
+        for (i in 0...blocks.length) {
+            h = blocks[i].forwardWith(h, session.cacheFor(i));
+        }
+        var normed = outputNorm.forward(h);
+        var result = lmHead.forward(normed);
+        normed.free();
+        h.free();
+        return result;
     }
 
     public function parameters():Array<nue.Module.NamedTensor> {
