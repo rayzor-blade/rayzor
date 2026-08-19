@@ -106,6 +106,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.propagate_js_import(symbol_id, func_id, this_type);
 
+        self.check_move_flow();
         self.builder.finish_function();
     }
 
@@ -229,6 +230,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.propagate_js_import(symbol_id, func_id, this_type);
 
+        self.check_move_flow();
         self.builder.finish_function();
     }
 
@@ -294,6 +296,7 @@ impl<'a> HirToMirContext<'a> {
             self.constructor_map.insert(fallback_type_id, func_id);
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
     }
 
@@ -366,6 +369,7 @@ impl<'a> HirToMirContext<'a> {
             self.constructor_map.insert(fallback_type_id, func_id);
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
     }
 

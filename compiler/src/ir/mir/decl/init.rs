@@ -73,6 +73,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         let globals_to_reset: Vec<(IrGlobalId, IrType, IrValue)> = self
             .builder
@@ -146,6 +147,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.build_return(None);
+        self.check_move_flow();
         self.builder.finish_function();
 
         self.symbol_map = saved_symbol_map;
@@ -179,6 +181,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         for (class_type_id, ctor_func_id) in ctor_entries {
             if self
@@ -224,14 +227,17 @@ impl<'a> HirToMirContext<'a> {
 
             let (obj_reg, args_reg) = {
                 let Some(func) = self.builder.current_function() else {
+                    self.check_move_flow();
                     self.builder.finish_function();
                     continue;
                 };
                 let Some(obj) = func.get_param_reg(0) else {
+                    self.check_move_flow();
                     self.builder.finish_function();
                     continue;
                 };
                 let Some(args) = func.get_param_reg(1) else {
+                    self.check_move_flow();
                     self.builder.finish_function();
                     continue;
                 };
@@ -311,6 +317,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder
                 .build_call_direct(ctor_func_id, ctor_args, IrType::Void);
             self.builder.build_return(None);
+            self.check_move_flow();
             self.builder.finish_function();
 
             self.constructor_reflect_wrappers

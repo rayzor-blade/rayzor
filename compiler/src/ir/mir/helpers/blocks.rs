@@ -142,6 +142,10 @@ impl<'a> HirToMirContext<'a> {
             anon_views: self.anon_views.clone(),
             raw_anon_symbols: self.raw_anon_symbols.clone(),
             strict_move_locals: self.strict_move_locals.clone(),
+            move_symbols: self.move_symbols.clone(),
+            move_events: self.move_events.clone(),
+            move_event_order: self.move_event_order,
+            move_events_func: self.move_events_func,
         }
     }
 
@@ -162,6 +166,10 @@ impl<'a> HirToMirContext<'a> {
         self.anon_views = state.anon_views;
         self.raw_anon_symbols = state.raw_anon_symbols;
         self.strict_move_locals = state.strict_move_locals;
+        self.move_symbols = state.move_symbols;
+        self.move_events = state.move_events;
+        self.move_event_order = state.move_event_order;
+        self.move_events_func = state.move_events_func;
     }
 
     /// Emit a while loop that calls hasNext/next on an iterator object.

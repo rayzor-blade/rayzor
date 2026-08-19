@@ -80,6 +80,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         let thunk_id = self
             .builder
@@ -87,6 +88,7 @@ impl<'a> HirToMirContext<'a> {
 
         let call_args = {
             let Some(func) = self.builder.current_function() else {
+                self.check_move_flow();
                 self.builder.finish_function();
                 self.builder.current_function = saved_current_function;
                 self.builder.current_block = saved_current_block;
@@ -99,6 +101,7 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(reg) = func.get_param_reg(i + 1) {
                     args.push(reg);
                 } else {
+                    self.check_move_flow();
                     self.builder.finish_function();
                     self.builder.current_function = saved_current_function;
                     self.builder.current_block = saved_current_block;
@@ -122,6 +125,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_return(result);
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;
@@ -198,6 +202,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         let restore = |s: &mut Self| {
             s.builder.finish_function();
@@ -242,6 +247,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_return(result);
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;
@@ -312,6 +318,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         let thunk_id = self
             .builder
@@ -321,6 +328,7 @@ impl<'a> HirToMirContext<'a> {
         // parameter registers.
         let (env_reg, forward_regs) = {
             let Some(func) = self.builder.current_function() else {
+                self.check_move_flow();
                 self.builder.finish_function();
                 self.builder.current_function = saved_current_function;
                 self.builder.current_block = saved_current_block;
@@ -329,6 +337,7 @@ impl<'a> HirToMirContext<'a> {
                 return None;
             };
             let Some(env) = func.get_param_reg(0) else {
+                self.check_move_flow();
                 self.builder.finish_function();
                 self.builder.current_function = saved_current_function;
                 self.builder.current_block = saved_current_block;
@@ -360,6 +369,7 @@ impl<'a> HirToMirContext<'a> {
         });
 
         let Some(this_arg) = this_arg else {
+            self.check_move_flow();
             self.builder.finish_function();
             self.symbol_map = saved_symbol_map;
             self.strict_move_locals = saved_strict_move_locals;
@@ -382,6 +392,7 @@ impl<'a> HirToMirContext<'a> {
             self.builder.build_return(result);
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
 
         // Restore outer function/block context.
@@ -417,6 +428,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
 
         let vtable_init_fn = self.get_or_register_extern_function(
             "haxe_vtable_init",
@@ -626,6 +638,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.build_return(None);
+        self.check_move_flow();
         self.builder.finish_function();
         self.symbol_map = saved_symbol_map;
         self.strict_move_locals = saved_strict_move_locals;

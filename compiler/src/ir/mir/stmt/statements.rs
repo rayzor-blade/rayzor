@@ -3,6 +3,7 @@
 use super::*;
 use crate::ir::drop_analysis::{DropBehavior, DropPointAnalyzer, DropPoints};
 use crate::ir::hir::*;
+use crate::ir::mir::moveflow::MoveEventKind;
 use crate::ir::{
     BinaryOp, CallingConvention, CompareOp, EnvironmentLayout, FunctionKind,
     FunctionSignatureBuilder, IrBasicBlock, IrBlockId, IrBuilder, IrEnumVariant, IrField,
@@ -383,14 +384,35 @@ impl<'a> HirToMirContext<'a> {
                         // the initializer consumed another strict-move local, emit
                         // `MarkMoved` for the source so later reads trip CheckLive.
                         {
-                            let bound_class_sym = var_type
-                                .and_then(|t| self.get_class_symbol(t))
-                                .or_else(|| self.get_class_symbol(init_expr.ty));
-                            let is_move_class = bound_class_sym
-                                .map(|s| self.derive_move_classes.contains(&s))
-                                .unwrap_or(false);
+                            let is_move_class = var_type
+                                .map(|t| self.type_is_move_class(t))
+                                .unwrap_or(false)
+                                || self.type_is_move_class(init_expr.ty);
                             if is_move_class {
                                 self.strict_move_locals.insert(final_value);
+                            }
+                            // The move-flow recorder works on bindings. A move
+                            // out of the initializer is recorded before the new
+                            // binding, which is the order `var d = b` happens in.
+                            if let HirExprKind::Variable {
+                                symbol: src_symbol, ..
+                            } = &init_expr.kind
+                            {
+                                self.record_move_event(
+                                    MoveEventKind::Move,
+                                    *src_symbol,
+                                    init_expr.source_location,
+                                );
+                            }
+                            if is_move_class {
+                                if let HirPattern::Variable { symbol, .. } = pattern {
+                                    self.enroll_move_symbol(*symbol);
+                                    self.record_move_event(
+                                        MoveEventKind::Bind,
+                                        *symbol,
+                                        init_expr.source_location,
+                                    );
+                                }
                             }
                             // Variable-on-RHS is a move-by-consume site.
                             if let HirExprKind::Variable {
@@ -574,6 +596,40 @@ impl<'a> HirToMirContext<'a> {
                 }
                 let rhs_value = self.lower_expression(rhs);
                 self.object_literal_target_ty = prev_anon_target;
+
+                // Move-flow: the RHS consumes a binding, the LHS starts a new
+                // one. A plain reassignment is therefore what revives a moved
+                // binding — the kill has to be recorded, or every later read
+                // of a reassigned variable reports against the stale move.
+                if op.is_none() {
+                    if let HirExprKind::Variable {
+                        symbol: rhs_symbol, ..
+                    } = &rhs.kind
+                    {
+                        self.record_move_event(
+                            MoveEventKind::Move,
+                            *rhs_symbol,
+                            rhs.source_location,
+                        );
+                    }
+                    if let Some(lhs_sym) = lhs_symbol {
+                        let lhs_is_move = self
+                            .symbol_table
+                            .get_symbol(lhs_sym)
+                            .map(|s| s.type_id)
+                            .filter(|t| *t != TypeId::invalid())
+                            .map(|t| self.type_is_move_class(t))
+                            .unwrap_or(false);
+                        if lhs_is_move {
+                            self.enroll_move_symbol(lhs_sym);
+                            self.record_move_event(
+                                MoveEventKind::Bind,
+                                lhs_sym,
+                                rhs.source_location,
+                            );
+                        }
+                    }
+                }
 
                 let (rhs_value, rhs_was_copied) =
                     if let (Some(class_sym), Some(val)) = (assign_copy_class, rhs_value) {

@@ -29,6 +29,7 @@ impl<'a> HirToMirContext<'a> {
     /// subsequent interface dispatch on reads breaks.
     pub(crate) fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
         let result = self.lower_expression_inner(expr)?;
+        self.record_argument_moves(expr);
         // Fires only when expr.ty IS an interface AND `kind` reveals an
         // underlying class. Interface-typed variables and Let/Cast results
         // yield no class here, so an already-wrapped value is never wrapped
@@ -48,6 +49,43 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         Some(result)
+    }
+
+    /// A by-value argument transfers ownership, so passing a `@:move` binding
+    /// to a call or a constructor ends it.
+    ///
+    /// Recorded AFTER the call is lowered, not before: the argument's own read
+    /// is recorded while it lowers, and a move ordered ahead of it would make
+    /// the first call report against itself.
+    fn record_argument_moves(&mut self, expr: &HirExpr) {
+        // A method call is desugared to `method(receiver, args…)`, so for one
+        // the receiver occupies args[0]. Skip it: methods take `this` by
+        // reference, and counting it as a move would end the binding at the
+        // first `a.f()`.
+        let (args, skip) = match &expr.kind {
+            HirExprKind::Call {
+                args, is_method, ..
+            } => (args, usize::from(*is_method)),
+            HirExprKind::New { args, .. } => (args, 0),
+            _ => return,
+        };
+        let moved: Vec<(SymbolId, SourceLocation)> = args
+            .iter()
+            .skip(skip)
+            .filter_map(|arg| match &arg.kind {
+                HirExprKind::Variable { symbol, .. } if self.is_move_symbol(*symbol) => {
+                    Some((*symbol, arg.source_location))
+                }
+                _ => None,
+            })
+            .collect();
+        for (symbol, location) in moved {
+            self.record_move_event(
+                crate::ir::mir::moveflow::MoveEventKind::Move,
+                symbol,
+                location,
+            );
+        }
     }
 
     /// Lower if statement/expression

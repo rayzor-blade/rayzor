@@ -134,6 +134,14 @@ impl<'a> HirToMirContext<'a> {
                 let loc = self.convert_source_location(&expr.source_location);
                 let _ = self.builder.build_check_live(reg, loc);
             }
+            // Move-flow records the read against the BINDING. The register
+            // guard above cannot: two bindings share a register whenever the
+            // copy needs no cast.
+            self.record_move_event(
+                crate::ir::mir::moveflow::MoveEventKind::Read,
+                lookup_symbol,
+                expr.source_location,
+            );
             // Captured variables are stored as i64 in the closure environment
             // and need casting back to their original type (e.g. i32).
             if let Some(actual_type) = self.builder.get_register_type(reg) {
