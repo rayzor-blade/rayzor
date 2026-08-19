@@ -595,6 +595,19 @@ pub extern "C" fn haxe_string_split_array(
 /// dealloc so we never read through a freed header.
 /// Env-gated (`RZT_DBG_STRFREE=1`) call counter — proves the InsertFree
 /// string-release path fires at runtime (mirrors haxe_array_free's counter).
+/// Whether to keep released headers so a second release can be recognised.
+/// Read once; the diagnostic leaks, so it is opt-in.
+fn strfree_keep_headers() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RZT_DBG_STRFREE").is_some())
+}
+
+/// Written into a released header's length so a second release can recognise
+/// it — reported under `RZT_DBG_STRFREE`. Only readable while the freed block
+/// is still untouched, so its absence proves nothing.
+const FREED_MARK: usize = 0xF4EE_D0F4_EED0;
+
 fn strfree_dbg_count() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
@@ -617,9 +630,36 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
     strfree_dbg_count();
 
     unsafe {
-        // Snapshot the buffer pointer/cap, then poison the header fields so a
-        // duplicate haxe_string_free on the same handle becomes a no-op
-        // instead of double-freeing the inner byte buffer.
+        // Calling this twice on one handle is a DOUBLE FREE, and nothing here
+        // can make it safe: the header itself is reclaimed below, so a second
+        // call reads and writes memory that is already back with the allocator.
+        //
+        // Clearing the fields first is damage limitation, not a guarantee. It
+        // holds only while the freed header happens to be untouched, and buys
+        // exactly one thing: a second call sees a null buffer pointer and so
+        // does not release the byte buffer twice as well. The caller is still
+        // responsible for releasing a string once.
+        // Under `RZT_DBG_STRFREE` the header is KEPT rather than reclaimed, so
+        // the mark below survives and a second release on the same handle can
+        // be named instead of corrupting the heap silently. That leaks a header
+        // per string, which is the price of the diagnostic; it is off by
+        // default and must stay off outside an investigation.
+        if strfree_keep_headers() {
+            if (*s).len == FREED_MARK {
+                eprintln!("[strfree] DOUBLE FREE of {s:p} — already released");
+                return;
+            }
+            let buf_ptr = (*s).ptr;
+            let buf_cap = (*s).cap;
+            (*s).ptr = std::ptr::null_mut();
+            (*s).len = FREED_MARK;
+            (*s).cap = 0;
+            if !buf_ptr.is_null() && buf_cap > 0 {
+                dealloc(buf_ptr, Layout::from_size_align_unchecked(buf_cap, 1));
+            }
+            return;
+        }
+
         let buf_ptr = (*s).ptr;
         let buf_cap = (*s).cap;
         (*s).ptr = std::ptr::null_mut();
