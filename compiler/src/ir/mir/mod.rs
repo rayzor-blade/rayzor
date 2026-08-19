@@ -520,6 +520,27 @@ pub struct HirToMirContext<'a> {
     /// receive a `CheckLive` guard; consumes receive a `MarkMoved` marker.
     strict_move_locals: BTreeSet<IrId>,
 
+    /// Bindings of `@:move` classes in the function being lowered. Keyed on
+    /// SymbolId because the property is about bindings: `var d = b` needs no
+    /// cast, so both share one register and a register cannot tell them apart.
+    move_symbols: BTreeSet<SymbolId>,
+
+    /// Bind / move / read events for those bindings, replayed against the
+    /// finished CFG by `check_move_flow`.
+    move_events: Vec<moveflow::MoveEvent>,
+
+    /// Program-order counter for `move_events`, reset per function.
+    move_event_order: u32,
+
+    /// The function `move_events` were recorded for. Lowering is interrupted
+    /// mid-function to emit forward-declaration stubs, which finish a function
+    /// that is not the one being recorded; the analysis must not fire there and
+    /// must not consume the enclosing function's events.
+    move_events_func: Option<crate::ir::IrFunctionId>,
+
+    /// One use-after-move report per (binding, use site) across the module.
+    move_diag_seen: BTreeSet<(SymbolId, u32, u32, u32)>,
+
     /// Tier B: extern classes whose @:derive(Clone) delegates to a runtime function
     /// (e.g. rayzor.ds.Tensor → "rayzor_tensor_clone"). Looked up in lower_derived_clone
     /// before field-by-field synthesis; if present, emits a single direct call.
@@ -681,6 +702,13 @@ pub(crate) struct SavedLoweringState {
     // lambda/async/inner function so the outer body's MarkMoved/CheckLive
     // emission resumes correctly after restore.
     strict_move_locals: BTreeSet<IrId>,
+    // The move-flow recorder is per-function for the same reason: a lambda
+    // body lowers into its own CFG, so its events must not join the enclosing
+    // function's.
+    move_symbols: BTreeSet<SymbolId>,
+    move_events: Vec<moveflow::MoveEvent>,
+    move_event_order: u32,
+    move_events_func: Option<crate::ir::IrFunctionId>,
 }
 
 /// Process-global class field layouts, keyed by NAME.
@@ -712,6 +740,63 @@ static CLASS_NAME_ALIAS: std::sync::OnceLock<
 fn class_field_layouts(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>> {
     CLASS_FIELD_LAYOUTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Canonical names of `@:move` classes, and of `@:shared` ones which override
+/// them. `derive_move_classes` is filled from the classes THIS context lowers,
+/// so a `@:move` class reached through an import is invisible to it and its
+/// bindings go unchecked. Keyed by name because SymbolIds are per-context.
+static MOVE_CLASS_NAMES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::OnceLock::new();
+
+fn move_class_names() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
+    MOVE_CLASS_NAMES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Publish a class's move status under its canonical name, and register the
+/// bare-name alias so a consumer that only knows the short name can still
+/// resolve it — or fail, when two classes share it.
+fn record_move_class(qualified: Option<&str>, bare: &str, is_move: bool) {
+    let canonical = qualified.unwrap_or(bare);
+    if std::env::var_os("RAYZOR_DEBUG_MOVECLASS").is_some() {
+        eprintln!(
+            "[moveclass] record canonical={} bare={} is_move={}",
+            canonical, bare, is_move
+        );
+    }
+    if let Ok(mut m) = move_class_names().lock() {
+        m.insert(canonical.to_string(), is_move);
+    }
+    if let Ok(mut a) = class_name_alias().lock() {
+        match a.get(bare) {
+            None => {
+                a.insert(bare.to_string(), Some(canonical.to_string()));
+            }
+            Some(Some(existing)) if existing != canonical => {
+                a.insert(bare.to_string(), None);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a class name denotes a `@:move` class. An ambiguous bare name
+/// resolves to nothing rather than to whichever class registered first.
+fn lookup_move_class(class_name: &str) -> bool {
+    let canonical: String = match class_name_alias().lock() {
+        Ok(a) => match a.get(class_name) {
+            Some(Some(c)) => c.clone(),
+            Some(None) => return false,
+            None => class_name.to_string(),
+        },
+        Err(_) => return false,
+    };
+    move_class_names()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&canonical).copied())
+        .unwrap_or(false)
 }
 
 fn class_name_alias() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<String>>>
@@ -767,6 +852,7 @@ mod decl;
 mod expr;
 mod field;
 mod helpers;
+mod moveflow;
 /// `HirToMirContext`'s methods, split out to keep this file navigable.
 mod resolve;
 mod stmt;
@@ -1215,6 +1301,11 @@ impl<'a> HirToMirContext<'a> {
             derive_hash_classes: BTreeSet::new(),
             derive_clone_classes: BTreeSet::new(),
             derive_move_classes: BTreeSet::new(),
+            move_symbols: BTreeSet::new(),
+            move_events: Vec::new(),
+            move_event_order: 0,
+            move_events_func: None,
+            move_diag_seen: BTreeSet::new(),
             derive_shared_classes: BTreeSet::new(),
             strict_move_locals: BTreeSet::new(),
             derive_clone_extern_fns: BTreeMap::new(),

@@ -394,6 +394,20 @@ impl<'a> HirToMirContext<'a> {
         // `@:shared` classes.
         let mut has_move_attr = false;
         let mut has_shared_attr = false;
+        // RAYZOR_DEBUG_MOVECLASS lists every class this context lowers. A
+        // class missing from the list was never lowered here, which is a
+        // different problem from an annotation that was read and ignored.
+        if std::env::var_os("RAYZOR_DEBUG_MOVECLASS").is_some() {
+            eprintln!(
+                "[moveclass] lowering {:?} metadata={:?}",
+                self.string_interner.get(class.name),
+                class
+                    .metadata
+                    .iter()
+                    .filter_map(|a| self.string_interner.get(a.name))
+                    .collect::<Vec<_>>()
+            );
+        }
         for attr in &class.metadata {
             if let Some(attr_name) = self.string_interner.get(attr.name) {
                 match attr_name {
@@ -526,6 +540,24 @@ impl<'a> HirToMirContext<'a> {
             }
             if has_shared_attr {
                 self.derive_shared_classes.insert(class.symbol_id);
+            }
+            // Publish under the class's name too, so an importer — which lowers
+            // its own classes only and never sees this one's metadata — still
+            // enforces the annotation.
+            if has_move_attr || has_shared_attr {
+                let (qn, cn) = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .map(|sym| {
+                        (
+                            sym.qualified_name.and_then(|q| self.string_interner.get(q)),
+                            self.string_interner.get(sym.name),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                if let Some(cn) = cn {
+                    record_move_class(qn, cn, has_move_attr && !has_shared_attr);
+                }
             }
 
             // Check for @:manualDrop metadata

@@ -143,6 +143,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A by-value parameter of a `@:move` class owns its value, so it is a
+        // binding the move-flow analysis tracks from function entry.
+        self.enroll_move_params(hir_func);
+
         if let Some(body) = &hir_func.body {
             let stmt_count = body.statements.len();
             let has_expr = body.expr.is_some();
@@ -153,6 +157,7 @@ impl<'a> HirToMirContext<'a> {
             self.ensure_terminator();
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
 
         // Clear per-function state
@@ -162,6 +167,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
         self.block_map.clear();
     }
 
@@ -434,6 +440,7 @@ impl<'a> HirToMirContext<'a> {
             self.ensure_terminator();
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
 
         if let Some(start) = profile_start {
@@ -458,6 +465,7 @@ impl<'a> HirToMirContext<'a> {
         // strict_move_locals holds IrIds in THIS function's SSA namespace;
         // stale entries would mis-emit MarkMoved/CheckLive in the next one.
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
         self.block_map.clear();
         self.current_this_type = None;
     }
@@ -517,6 +525,7 @@ impl<'a> HirToMirContext<'a> {
             // Per-function isolation: inner async closure has its own SSA namespace;
             // saved_state already snapshotted strict_move_locals for restore.
             self.strict_move_locals.clear();
+            self.reset_move_recorder();
             self.current_env_layout = inner_context.env_layout.clone();
 
             // Clear drop tracking for inner function
@@ -734,6 +743,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A by-value parameter of a `@:move` class owns its value, so it is a
+        // binding the move-flow analysis tracks from function entry.
+        self.enroll_move_params(hir_func);
+
         // Lower the function body
         if let Some(body) = &hir_func.body {
             debug!(
@@ -787,6 +800,7 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
 
         // Clear per-function state
@@ -796,6 +810,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
         self.block_map.clear();
     }
 
@@ -1032,6 +1047,7 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        self.check_move_flow();
         self.builder.finish_function();
 
         if let Some(start) = profile_start {
@@ -1054,6 +1070,7 @@ impl<'a> HirToMirContext<'a> {
         self.interface_call_result_types.clear();
         self.boxed_value_regs.clear();
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
         self.block_map.clear();
     }
 }

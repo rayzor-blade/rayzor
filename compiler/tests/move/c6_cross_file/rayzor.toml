@@ -1,0 +1,6 @@
+[project]
+name = "c6_cross_file"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

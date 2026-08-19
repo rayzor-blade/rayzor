@@ -6697,6 +6697,40 @@ impl CompilationUnit {
             self.print_mir_diagnostics(&mir_result.diagnostics);
         }
 
+        // An ownership violation found at MIR is fatal. Printing it and
+        // carrying on would emit a binary the analysis just said is unsound,
+        // and — because a successful compile populates the cache — the next
+        // run would skip lowering and never report it again.
+        let fatal: Vec<&diagnostics::Diagnostic> = mir_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == diagnostics::DiagnosticSeverity::Error
+                    && matches!(d.code.as_deref(), Some("E0382") | Some("E0300"))
+            })
+            .collect();
+        if !fatal.is_empty() {
+            // One summary, not one per diagnostic: each has already been
+            // rendered above with its source spans, and repeating the message
+            // as a bare error line only doubles it.
+            let first = fatal[0];
+            return Err(vec![CompilationError {
+                message: format!(
+                    "ownership check failed: {} use-after-move error(s)",
+                    fatal.len()
+                ),
+                location: SourceLocation {
+                    file_id: first.span.file_id.as_usize() as u32,
+                    byte_offset: first.span.start.byte_offset as u32,
+                    line: first.span.start.line as u32,
+                    column: first.span.start.column as u32,
+                },
+                category: ErrorCategory::TypeError,
+                suggestion: first.help.first().cloned(),
+                related_errors: Vec::new(),
+            }]);
+        }
+
         // Capture user-defined function IDs before module is consumed
         let mir_result_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
             mir_result.function_map.values().copied().collect();

@@ -131,6 +131,7 @@ impl<'a> HirToMirContext<'a> {
         // Per-function isolation: lambda body has its own SSA register namespace;
         // saved_state already snapshotted strict_move_locals for restore on exit.
         self.strict_move_locals.clear();
+        self.reset_move_recorder();
         // Lambda body lowers its own loops with a fresh loop-carried stack.
         self.loop_carried_symbols.clear();
         self.current_env_layout = env_layout.clone();

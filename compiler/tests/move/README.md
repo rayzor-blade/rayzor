@@ -9,17 +9,29 @@ file declares its expectation in `check.sh`:
 Run with `./check.sh` (needs `target/release/rayzor` built).
 
 These are deliberately kept out of `compiler/tests/haxe/`, which the main suite
-globs and scores by exit code. Two cases fail today; that is the point. They
-record the gap rather than hide it.
+globs and scores by exit code — these cases are about whether a diagnostic
+fires, not about what the program prints.
 
 | case | expects | why it matters |
 | --- | --- | --- |
-| `c1_double_move` | ERROR | the same value passed to two calls — missed entirely today |
+| `c1_double_move` | ERROR | the same value passed to two calls |
 | `c2_return_branch` | SILENT | the move is on a path that returns, so the later read is unreachable |
 | `c3_loop` | ERROR | moved in a loop body, still moved on the next iteration |
 | `c4_reassign` | SILENT | reassignment revives the binding |
 | `c5_legacy` | SILENT | no `@:safety` anywhere — legacy Haxe must never be analysed |
+| `c6_cross_file` | ERROR | the `@:move` class is reached through an import |
+| `c7_field_read` | ERROR | reading a field of a moved binding is still a use |
+| `c8_method_receiver` | SILENT | `a.f()` observes the receiver, it does not consume it |
+| `c9_branch_join` | ERROR | moved on one branch, read after the two rejoin |
 
-`c2` and `c4` need branch and reassignment awareness to stay silent for the
-right reason; a checker that detects nothing also passes them, which is why
-`c1` and `c3` are the ones that measure progress.
+`c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
+silent for the right reason; a checker that detects nothing also passes them.
+The silent cases are what stop the checker being made to fire by making it
+fire on everything.
+
+`c6` is a directory rather than a file: an imported class only reaches MIR
+lowering in the importing compilation when the project declares a class-path,
+so the case carries its own `rayzor.toml`.
+
+Every case runs cold. A warm cache skips MIR lowering, and with it the
+analysis, so a second run of a failing case would score the cache.

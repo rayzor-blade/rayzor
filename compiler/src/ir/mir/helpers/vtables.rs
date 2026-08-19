@@ -244,6 +244,7 @@ impl<'a> HirToMirContext<'a> {
             .builder
             .start_function(stub_symbol, thunk_name.clone(), sig);
         // The body stays empty (forward declaration); merge supplies the real one.
+        self.check_move_flow();
         self.builder.finish_function();
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;
