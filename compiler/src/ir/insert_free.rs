@@ -80,6 +80,7 @@ impl OptimizationPass for InsertFreePass {
 
     fn run_on_module(&mut self, module: &mut IrModule) -> OptimizationResult {
         let mut total_inserted = 0;
+        let _flush_free_graph = FreeGraphFlush;
 
         // Identify malloc, free, and anon object function IDs
         let mut ids = AllocFuncIds {
@@ -364,6 +365,16 @@ fn is_safe_array_op(name: &str) -> bool {
 
 /// Insert Free instructions for non-escaping allocations in a single function.
 /// Returns the number of Free instructions inserted.
+/// Writes the recorded graph when the pass finishes a module, including on the
+/// early returns, so a failure later in the build still leaves a readable file.
+struct FreeGraphFlush;
+
+impl Drop for FreeGraphFlush {
+    fn drop(&mut self) {
+        crate::ir::free_graph::flush();
+    }
+}
+
 fn insert_free_for_function(
     function: &mut IrFunction,
     ids: &AllocFuncIds,
@@ -833,7 +844,160 @@ fn insert_free_for_function(
         }
     }
 
+    if crate::ir::free_graph::enabled() {
+        record_free_graph(
+            function,
+            &alloc_ids,
+            &allocs_needing_free,
+            &derived_sets,
+            &string_alloc_ids,
+            &array_alloc_ids,
+            &anon_alloc_ids,
+            string_free_id,
+            array_free_id,
+            anon_drop_id,
+        );
+    }
+
     inserted
+}
+
+/// Describe what this function's allocations are and how each was released.
+///
+/// Read from the FINISHED cfg rather than from the decisions as they are made:
+/// what matters when reading the graph is the code that exists, and a release
+/// the pass intended but did not emit is exactly the kind of gap worth seeing.
+#[allow(clippy::too_many_arguments)]
+fn record_free_graph(
+    function: &IrFunction,
+    alloc_ids: &[IrId],
+    allocs_needing_free: &[IrId],
+    derived_sets: &BTreeMap<IrId, BTreeSet<IrId>>,
+    string_alloc_ids: &BTreeSet<IrId>,
+    array_alloc_ids: &BTreeSet<IrId>,
+    anon_alloc_ids: &BTreeSet<IrId>,
+    string_free_id: Option<IrFunctionId>,
+    array_free_id: Option<IrFunctionId>,
+    anon_drop_id: Option<IrFunctionId>,
+) {
+    use crate::ir::free_graph as fg;
+
+    let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+    let loop_info = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+    let mut loops = Vec::new();
+    let mut latches: BTreeSet<IrBlockId> = BTreeSet::new();
+    for natural in loop_info.loops_by_depth() {
+        latches.insert(natural.back_edge_source);
+        loops.push(fg::LoopRecord {
+            header: natural.header.0,
+            latch: natural.back_edge_source.0,
+            body: natural.blocks.iter().map(|b| b.0).collect(),
+        });
+    }
+
+    let blocks: Vec<fg::BlockRecord> = function
+        .cfg
+        .blocks
+        .iter()
+        .map(|(id, block)| fg::BlockRecord {
+            id: id.0,
+            successors: block.successors().iter().map(|b| b.0).collect(),
+            terminator: format!("{:?}", block.terminator)
+                .split_whitespace()
+                .next()
+                .unwrap_or("?")
+                .trim_end_matches('{')
+                .to_string(),
+            instructions: block.instructions.len(),
+        })
+        .collect();
+
+    // Where each allocation is released, and by which of the four routes.
+    let mut releases: BTreeMap<IrId, Vec<fg::ReleaseRecord>> = BTreeMap::new();
+    for (bid, block) in &function.cfg.blocks {
+        let site = if latches.contains(bid) {
+            fg::Site::Latch
+        } else if matches!(block.terminator, IrTerminator::Return { .. }) {
+            fg::Site::Exit
+        } else {
+            fg::Site::LastUse
+        };
+        for inst in &block.instructions {
+            let (target, how) = match inst {
+                IrInstruction::Free { ptr } => (*ptr, fg::Release::PlainFree),
+                IrInstruction::CallDirect {
+                    func_id,
+                    args,
+                    dest: None,
+                    ..
+                } if args.len() == 1 => {
+                    let how = if Some(*func_id) == string_free_id {
+                        fg::Release::StringFree
+                    } else if Some(*func_id) == array_free_id {
+                        fg::Release::ArrayFreeThenHeader
+                    } else if Some(*func_id) == anon_drop_id {
+                        fg::Release::AnonDrop
+                    } else {
+                        continue;
+                    };
+                    (args[0], how)
+                }
+                _ => continue,
+            };
+            releases.entry(target).or_default().push(fg::ReleaseRecord {
+                block: bid.0,
+                how,
+                site: site.clone(),
+            });
+        }
+    }
+
+    let needing: BTreeSet<IrId> = allocs_needing_free.iter().copied().collect();
+    let allocs = alloc_ids
+        .iter()
+        .map(|id| {
+            let kind = if string_alloc_ids.contains(id) {
+                "string"
+            } else if array_alloc_ids.contains(id) {
+                "array"
+            } else if anon_alloc_ids.contains(id) {
+                "anon"
+            } else {
+                "plain"
+            };
+            let def = function
+                .cfg
+                .blocks
+                .iter()
+                .find_map(|(bid, b)| {
+                    b.instructions
+                        .iter()
+                        .find(|i| i.dest() == Some(*id))
+                        .map(|i| (bid.0, format!("{:?}", i)))
+                })
+                .unwrap_or((u32::MAX, "<no defining instruction>".to_string()));
+            fg::AllocRecord {
+                id: id.0,
+                kind: kind.to_string(),
+                def_block: (def.0 != u32::MAX).then_some(def.0),
+                def_inst: def.1.chars().take(240).collect(),
+                needs_free: needing.contains(id),
+                derived: derived_sets
+                    .get(id)
+                    .map(|d| d.iter().map(|v| v.0).collect())
+                    .unwrap_or_default(),
+                releases: releases.get(id).cloned().unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    fg::record(fg::FunctionRecord {
+        name: function.name.clone(),
+        qualified_name: function.qualified_name.clone(),
+        blocks,
+        loops,
+        allocs,
+    });
 }
 
 /// Loop-carried rotation: a header phi whose incoming values are all fresh,
