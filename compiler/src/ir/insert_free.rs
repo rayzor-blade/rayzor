@@ -379,10 +379,20 @@ impl Drop for FreeGraphFlush {
 ///
 /// A release takes four shapes — a bare `Free` for a plain allocation, and a
 /// call for a string, an array buffer or an anonymous object. Recognising only
-/// the bare form makes the other three invisible, and the pass runs repeatedly
-/// over the same function: each run then inserts another release for a value
-/// that already had one. Releasing a string twice frees its header twice,
-/// because `haxe_string_free` reclaims the header on every call.
+/// the bare form makes the other three invisible.
+///
+/// That matters within a SINGLE run of the pass, not across runs: the set of
+/// values still needing a release is computed once, before any release is
+/// inserted, and is not pruned as they are added. Three rules place releases —
+/// on a path leaving the function, at the end of the defining block, and at a
+/// loop latch — so a value matching two of them is released twice unless each
+/// rule can see what the others already emitted. (Across runs the value is
+/// already excluded, because the needing-release scan does recognise a call.)
+///
+/// Releasing a string twice frees its header twice: `haxe_string_free` poisons
+/// the header so the byte buffer cannot go twice, but reclaims the header on
+/// every call — so the second call frees a block that is already gone, and
+/// reads it on the way.
 fn already_released(
     function: &IrFunction,
     value: IrId,
