@@ -187,7 +187,64 @@ class LlamaArch implements ArchBuilder {
 
         var model = new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
         model.spinPool = sp;
+
+        // Write down what was just built, under the flag that already asks for
+        // the kernel census. Everything recorded is a value this function
+        // already holds or can read back off the model, so describing the build
+        // cannot change it — in particular no fusion gate is consulted here,
+        // which would move the census's own first-read line.
+        var censusEnv = Sys.getEnvOr("NUE_DUMP_Q4_GATES", "RAYZOR_DUMP_Q4_GATES");
+        if (censusEnv != null && censusEnv != "0" && censusEnv != "" && censusEnv != "false") {
+            var plan = new NuePlan();
+            plan.architecture = meta.architecture;
+            plan.layers = meta.numLayers;
+            plan.heads = meta.numHeads;
+            plan.kvHeads = meta.numKvHeads;
+            plan.headDim = meta.headDim;
+            plan.ropeNeox = rope.neox;
+            plan.haxeMatmul = haxeMatmul;
+            plan.kvQ8 = useKvQ8;
+            plan.haxeFlash = useHaxeQ8;
+            plan.requantLmHead = Sys.getEnvOr("NUE_REQUANT_LM_HEAD", "RAYZOR_REQUANT_LM_HEAD") != "0";
+            plan.requantQ6K = Sys.getEnvOr("NUE_REQUANT_Q6K", "RAYZOR_REQUANT_Q6K") == "1";
+            plan.poolWorkers = Q4Matmul.workerCount();
+            plan.poolSpins = Q4Matmul.poolSpins();
+            plan.poolRelax = Q4Matmul.poolRelax();
+            plan.poolProfiling = Q4Matmul.poolProfiling();
+            plan.poolAdaptive = Q4Matmul.poolAdaptive();
+            plan.lmHeadScheme = schemeOrdinal(lmHead);
+            plan.addEmbedding(schemeOrdinal(null));
+            for (i in 0...blocks.length) {
+                var attn = blocks[i].attn;
+                plan.addLayer(i,
+                    schemeOrdinal(attn.qProj), schemeOrdinal(attn.kProj), schemeOrdinal(attn.vProj),
+                    cacheKind(attn.cache));
+            }
+            plan.addHead(plan.lmHeadScheme);
+            plan.dump();
+        }
         return model;
+    }
+
+    /** The scheme a projection's weights were built from, as the ordinal
+        `NuePlan` records. A dense weight has no scheme. */
+    static function schemeOrdinal(lin:Null<Linear>):Int {
+        if (lin == null) return NuePlan.SCHEME_NONE;
+        var qw = lin.qweight;
+        if (qw == null) return NuePlan.SCHEME_NONE;
+        return switch (qw.scheme()) {
+            case INT8: NuePlan.SCHEME_INT8;
+            case Q4_K_M: NuePlan.SCHEME_Q4_K_M;
+            case Q6_K: NuePlan.SCHEME_Q6_K;
+            case Q8_0: NuePlan.SCHEME_Q8_0;
+        };
+    }
+
+    /** The cache a layer actually got, which is not always the one requested. */
+    static function cacheKind(cache:KVCache):Int {
+        if (cache.useQ8H) return NuePlan.CACHE_Q8_HAXE;
+        if (cache.useQ8) return NuePlan.CACHE_Q8;
+        return NuePlan.CACHE_F32;
     }
 
     static function buildBlock(

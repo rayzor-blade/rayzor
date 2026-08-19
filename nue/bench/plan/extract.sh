@@ -6,7 +6,7 @@
 # gate line is COUNTED rather than compared — its print is a first-read side
 # effect, so relocating the first read moves the line without changing routing.
 f="$1"
-{ grep -a '^\[nue-plan\]\|^\[q4-census\]\|^\[kv-cache\]\|^\[lm_head\]' "$f"
+{ grep -a '^\[nue-plan\]\|^\[nue-graph\]\|^\[q4-census\]\|^\[kv-cache\]\|^\[lm_head\]' "$f"
   grep -ao 'dispatches=[0-9]*' "$f"
   grep -ac '^\[q4-gate\]' "$f" | sed 's/^/q4gate_lines=/'
   sed -n '/^\[output\] /,$p' "$f"
