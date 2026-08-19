@@ -8074,7 +8074,13 @@ impl CompilationUnit {
                 // no `@:move` annotation.
                 let mut strict = false;
                 if let Some(node) = ownership_graph.variables.get(&variable) {
-                    if node.variable_type.is_valid() {
+                    // An unresolved type cannot be shown to have move semantics.
+                    // Reporting one anyway turns a resolution gap into a
+                    // use-after-move accusation against code that has none.
+                    if !node.variable_type.is_valid() {
+                        continue;
+                    }
+                    {
                         // `@:shared` short-circuits the entire diagnostic.
                         // Bindings of shared classes (e.g. rayzor.ds.Tensor)
                         // are reference-counted at runtime; aliasing them
@@ -8087,7 +8093,18 @@ impl CompilationUnit {
                             continue;
                         }
                         let strict_q = trait_checker.requires_strict_move(node.variable_type);
-                        if !strict_q && trait_checker.is_copy(node.variable_type) {
+                        // Copy OR Clone: neither is consumed by being read. Copy
+                        // covers Int/Float/Bool; Clone additionally covers String,
+                        // which owns a heap buffer (so it is not Copy) but is
+                        // immutable and duplicable — passing one to a function
+                        // does not end the caller's binding, and reporting that it
+                        // does was the single remaining false positive on ordinary
+                        // Haxe. `@:move` still wins: an explicit opt-in to move
+                        // semantics is never overridden by a derivable trait.
+                        if !strict_q
+                            && (trait_checker.is_copy(node.variable_type)
+                                || trait_checker.is_clone(node.variable_type))
+                        {
                             continue;
                         }
                         strict = strict_q;
