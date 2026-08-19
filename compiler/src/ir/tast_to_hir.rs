@@ -620,11 +620,28 @@ impl<'a> TastToHirContext<'a> {
         let mut class_metadata: Vec<HirAttribute> = Vec::new();
         use crate::tast::node::MemoryAnnotation;
         for ann in &class.memory_annotations {
+            // Exhaustive on purpose — no `_` arm. `manualDrop` was parsed here and
+            // read by MIR (`manual_drop_classes`) but never forwarded, so every
+            // annotated class silently stayed on the auto-drop path and the
+            // compiler freed what the user had been told to free. A wildcard is
+            // what let that sit; listing every variant makes a new annotation a
+            // compile error until someone decides what it means.
             let name_str = match ann {
                 MemoryAnnotation::Move => Some("move"),
                 MemoryAnnotation::Managed => Some("managed"),
                 MemoryAnnotation::Shared => Some("shared"),
-                _ => None,
+                MemoryAnnotation::ManualDrop => Some("manualDrop"),
+                // Parsed today, consumed by nothing downstream.
+                MemoryAnnotation::SafetyWithMode(_)
+                | MemoryAnnotation::Unique
+                | MemoryAnnotation::Borrow
+                | MemoryAnnotation::Owned
+                | MemoryAnnotation::Linear
+                | MemoryAnnotation::Affine
+                | MemoryAnnotation::Box
+                | MemoryAnnotation::Arc
+                | MemoryAnnotation::Atomic
+                | MemoryAnnotation::Rc => None,
             };
             if let Some(n) = name_str {
                 class_metadata.push(HirAttribute {
