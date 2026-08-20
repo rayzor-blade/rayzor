@@ -37,12 +37,17 @@ expect_for() {
     c26_borrow_laundered_ctor) echo ERROR ;;
     c27_borrow_laundered_local) echo ERROR ;;
     c28_borrow_arg_passthrough) echo SILENT ;;
+    c29_move_out_of_field) echo ERROR ;;
+    c30_borrow_out_of_field) echo SILENT ;;
+    c31_field_method_receiver) echo SILENT ;;
+    c32_handle_double_acquire) echo ERROR ;;
+    c33_owner_read_while_held) echo ERROR ;;
     *)                echo UNKNOWN ;;
   esac
 }
 classify() {
-  if echo "$1" | grep -qaE "Error: \[E03(82|83|00)\]"; then echo ERROR
-  elif echo "$1" | grep -qaE "Warning: \[E03(82|83|00)\]"; then echo WARN
+  if echo "$1" | grep -qaE "Error: \[E03(82|83|84|00)\]"; then echo ERROR
+  elif echo "$1" | grep -qaE "Warning: \[E03(82|83|84|00)\]"; then echo WARN
   else echo SILENT; fi
 }
 score() {

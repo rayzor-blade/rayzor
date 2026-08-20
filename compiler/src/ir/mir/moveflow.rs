@@ -343,6 +343,55 @@ impl HirToMirContext<'_> {
         }
     }
 
+    /// Reject moving a `@:move` value out of a field.
+    ///
+    /// The analysis is keyed on bindings, and a field is not one: it has no
+    /// symbol to track, so `take(h.r); take(h.r);` would move the same value
+    /// twice with nothing to notice. Refusing is the honest answer — the
+    /// alternative is a place domain, and silence is not a third option.
+    ///
+    /// Borrowing a field is unaffected, and so is reading through one: what is
+    /// refused is taking the value away.
+    pub(crate) fn check_move_out_of_field(&mut self, expr: &crate::ir::hir::HirExpr, what: &str) {
+        use crate::ir::hir::HirExprKind;
+        let HirExprKind::Field { field, .. } = &expr.kind else {
+            return;
+        };
+        if !self.type_is_move_class(expr.ty) {
+            return;
+        }
+        let loc = expr.source_location;
+        if !self
+            .move_diag_seen
+            .insert((*field, loc.file_id, loc.line, loc.column))
+        {
+            return;
+        }
+        let name = self
+            .symbol_table
+            .get_symbol(*field)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("<field>")
+            .to_string();
+        let span = Self::source_location_to_span(&loc);
+        let diag = diagnostics::DiagnosticBuilder::error(
+            format!("cannot move `{}` out of a field", name),
+            span.clone(),
+        )
+        .code("E0384")
+        .label(span, format!("{} here", what))
+        .note(
+            "Move checking tracks bindings, and a field is not one — a value taken out of a field twice cannot be told apart from one taken once."
+                .to_string(),
+        )
+        .help(
+            "Borrow it instead (`@:borrow` on the parameter), or call through the field rather than taking the value out of it."
+                .to_string(),
+        )
+        .build();
+        self.diagnostics.push(diag);
+    }
+
     /// The borrowed binding an expression carries out, if any.
     ///
     /// A bare variable carries itself. A CONSTRUCTOR carries its arguments: a

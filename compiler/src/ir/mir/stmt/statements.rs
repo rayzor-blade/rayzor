@@ -409,6 +409,7 @@ impl<'a> HirToMirContext<'a> {
                                     self.propagate_borrow(*dst, src);
                                 }
                             }
+                            self.check_move_out_of_field(init_expr, "bound");
                             if is_move_class {
                                 if let HirPattern::Variable { symbol, .. } = pattern {
                                     self.enroll_move_symbol(*symbol);
@@ -614,6 +615,9 @@ impl<'a> HirToMirContext<'a> {
                     (lhs, &rhs.kind)
                 {
                     self.propagate_borrow(*dst, *src);
+                }
+                if op.is_none() {
+                    self.check_move_out_of_field(rhs, "assigned");
                 }
 
                 // Move-flow: the RHS consumes a binding, the LHS starts a new

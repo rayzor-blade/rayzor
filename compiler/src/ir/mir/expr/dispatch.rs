@@ -119,6 +119,26 @@ impl<'a> HirToMirContext<'a> {
                 location,
             );
         }
+
+        // Same positions, for a field rather than a binding. A borrowed
+        // parameter is exempt: borrowing out of a field takes nothing away.
+        let fields: Vec<HirExpr> = args
+            .iter()
+            .skip(skip)
+            .enumerate()
+            .filter(|(i, _)| match i.checked_sub(param_shift) {
+                None => true,
+                Some(p) => ownership
+                    .as_ref()
+                    .and_then(|o| o.get(p))
+                    .map(|o| *o != crate::tast::ParamOwnership::Borrowed)
+                    .unwrap_or(true),
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+        for arg in fields {
+            self.check_move_out_of_field(&arg, "passed by value");
+        }
     }
 
     /// Capturing a binding in a closure observes it, so capturing one that has
