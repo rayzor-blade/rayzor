@@ -40,6 +40,9 @@ fires, not about what the program prints.
 | `c23_borrow_field_read` | SILENT | `return r.v` reads a field; it does not return the borrow |
 | `c24_borrow_stored` | ERROR | a borrow written into a field |
 | `c25_borrow_captured` | ERROR | a borrow captured by a closure |
+| `c26_borrow_laundered_ctor` | ERROR | a borrow wrapped in a constructor and handed back |
+| `c27_borrow_laundered_local` | ERROR | the same, bound to a local first |
+| `c28_borrow_arg_passthrough` | SILENT | returning a call's *result* is not returning the borrow |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.
