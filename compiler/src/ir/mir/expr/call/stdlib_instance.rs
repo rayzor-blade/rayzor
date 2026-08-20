@@ -174,6 +174,41 @@ impl<'a> HirToMirContext<'a> {
                                 method_name, actual_param_count
                             );
 
+                            // The scan below matches on METHOD NAME ALONE, so a
+                            // receiver whose own class does not declare the method
+                            // still reaches whichever stdlib class happens to own
+                            // that name — `someRef.free()` finding `Box.free`, for
+                            // one. When the receiver's declared type IS a stdlib
+                            // class, it is the answer; a miss there is an error, not
+                            // an invitation to look elsewhere.
+                            // RAYZOR_DEBUG_RECV shows which calls reach the by-name
+                            // scan and what their receiver resolved to. A call that
+                            // prints nothing here was claimed by an earlier probe.
+                            if std::env::var_os("RAYZOR_DEBUG_RECV").is_some() {
+                                eprintln!(
+                                    "[recv] method={} receiver_type={:?} stdlib_class={:?}",
+                                    method_name,
+                                    self.type_table
+                                        .get(receiver_type)
+                                        .map(|t| format!("{:?}", t.kind)),
+                                    self.stdlib_class_name_of(receiver_type)
+                                );
+                            }
+                            if let Some(recv_class) = self.stdlib_class_name_of(receiver_type) {
+                                if let Some(key) = self.stdlib_mapping.class_key(recv_class) {
+                                    if !self.stdlib_mapping.has_mapping(key, method_name, false) {
+                                        self.errors.push(LoweringError {
+                                            message: format!(
+                                                "`{}` has no method `{}`",
+                                                recv_class, method_name
+                                            ),
+                                            location: expr.source_location,
+                                        });
+                                        return None;
+                                    }
+                                }
+                            }
+
                             let matching_classes =
                                 self.stdlib_mapping.find_classes_with_method(method_name);
                             debug!(
