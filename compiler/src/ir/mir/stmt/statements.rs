@@ -404,12 +404,10 @@ impl<'a> HirToMirContext<'a> {
                                     init_expr.source_location,
                                 );
                             }
-                            if let (
-                                HirPattern::Variable { symbol: dst, .. },
-                                HirExprKind::Variable { symbol: src, .. },
-                            ) = (pattern, &init_expr.kind)
-                            {
-                                self.propagate_borrow(*dst, *src);
+                            if let HirPattern::Variable { symbol: dst, .. } = pattern {
+                                if let Some(src) = self.expr_borrow_root(init_expr) {
+                                    self.propagate_borrow(*dst, src);
+                                }
                             }
                             if is_move_class {
                                 if let HirPattern::Variable { symbol, .. } = pattern {
@@ -608,8 +606,8 @@ impl<'a> HirToMirContext<'a> {
                 // lent it. An assignment to a LOCAL is not an escape - it is
                 // just another name - so only field and index targets count.
                 if !matches!(lhs, HirLValue::Variable(_)) {
-                    if let HirExprKind::Variable { symbol, .. } = &rhs.kind {
-                        self.check_borrow_escape(*symbol, "is stored", rhs.source_location);
+                    if let Some(symbol) = self.expr_borrow_root(rhs) {
+                        self.check_borrow_escape(symbol, "is stored", rhs.source_location);
                     }
                 }
                 if let (HirLValue::Variable(dst), HirExprKind::Variable { symbol: src, .. }) =
@@ -1007,12 +1005,10 @@ impl<'a> HirToMirContext<'a> {
                 });
                 // A borrow may be read and passed on, but returning it hands the
                 // caller a reference that outlives the call it was lent for.
-                if let Some(sym) = returned_symbol {
-                    let loc = value
-                        .as_ref()
-                        .map(|e| e.source_location)
-                        .unwrap_or_else(SourceLocation::unknown);
-                    self.check_borrow_escape(sym, "is returned", loc);
+                if let Some(e) = value.as_ref() {
+                    if let Some(sym) = self.expr_borrow_root(e) {
+                        self.check_borrow_escape(sym, "is returned", e.source_location);
+                    }
                 }
                 let ret_value = value.as_ref().and_then(|e| {
                     debug!(

@@ -34,6 +34,9 @@ expect_for() {
     c23_borrow_field_read) echo SILENT ;;
     c24_borrow_stored) echo ERROR ;;
     c25_borrow_captured) echo ERROR ;;
+    c26_borrow_laundered_ctor) echo ERROR ;;
+    c27_borrow_laundered_local) echo ERROR ;;
+    c28_borrow_arg_passthrough) echo SILENT ;;
     *)                echo UNKNOWN ;;
   esac
 }

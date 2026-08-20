@@ -343,6 +343,25 @@ impl HirToMirContext<'_> {
         }
     }
 
+    /// The borrowed binding an expression carries out, if any.
+    ///
+    /// A bare variable carries itself. A CONSTRUCTOR carries its arguments: a
+    /// handle built around a borrow is the borrow, and returning the handle
+    /// hands the caller a reference it was only lent. Reading a FIELD does not
+    /// carry the borrow — `return r.v` yields a value, not the reference — and
+    /// a plain call does not either, since whether the callee kept its argument
+    /// is not knowable here and assuming it did would reject `return peek(r)`.
+    pub(crate) fn expr_borrow_root(&self, expr: &crate::ir::hir::HirExpr) -> Option<SymbolId> {
+        use crate::ir::hir::HirExprKind;
+        match &expr.kind {
+            HirExprKind::Variable { symbol, .. } if self.borrow_roots.contains_key(symbol) => {
+                Some(*symbol)
+            }
+            HirExprKind::New { args, .. } => args.iter().find_map(|a| self.expr_borrow_root(a)),
+            _ => None,
+        }
+    }
+
     /// Report a borrowed value reaching somewhere that outlives the call.
     /// `site` names the escape in the message.
     ///
