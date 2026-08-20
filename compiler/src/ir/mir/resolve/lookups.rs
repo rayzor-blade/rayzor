@@ -141,6 +141,38 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Check if a type is a class type and return its SymbolId
+    /// The stdlib class or abstract a receiver type names, when it names one.
+    ///
+    /// Returns None for a user type or an unresolved one, which leaves the
+    /// by-name scan as the only option there — that is the case it exists for.
+    pub(crate) fn stdlib_class_name_of(&self, type_id: TypeId) -> Option<&'static str> {
+        let name = {
+            let type_table = self.type_table;
+            // `Ref<Int>` is a GenericInstance over the abstract, not the
+            // abstract itself, so walk to the base before asking for a name.
+            let mut current = type_id;
+            let mut seen = BTreeSet::new();
+            let symbol_id = loop {
+                if !seen.insert(current) {
+                    return None;
+                }
+                match type_table.get(current).map(|t| t.kind.clone()) {
+                    Some(TypeKind::Abstract { symbol_id, .. }) => break symbol_id,
+                    Some(TypeKind::Class { symbol_id, .. }) => break symbol_id,
+                    Some(TypeKind::GenericInstance { base_type, .. }) => current = base_type,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => current = target_type,
+                    _ => return None,
+                }
+            };
+            let sym = self.symbol_table.get_symbol(symbol_id)?;
+            sym.qualified_name
+                .and_then(|q| self.string_interner.get(q))
+                .or_else(|| self.string_interner.get(sym.name))?
+                .to_string()
+        };
+        self.stdlib_mapping.get_class_static_str(&name)
+    }
+
     pub(crate) fn get_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         self.resolve_receiver_class_symbol(type_id)
     }
