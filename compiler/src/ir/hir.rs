@@ -168,6 +168,9 @@ pub struct HirFunction {
     pub is_main: bool,
     /// Preserve function regardless of reachability (from @:keep metadata)
     pub is_keep: bool,
+    /// `@:consume` — calling this method ends the caller's binding on the
+    /// receiver. Read at the call site by the move analysis.
+    pub is_consume: bool,
     /// Source location of the function definition (for stack traces)
     pub source_location: crate::tast::symbols::SourceLocation,
     /// @:async function — returns lazy Future<T> instead of T

@@ -246,6 +246,40 @@ impl HirToMirContext<'_> {
         self.function_param_ownership.insert(symbol_id, owns);
     }
 
+    /// Publish `@:consume` on a method, by SymbolId here and by qualified name
+    /// for callers in another lowering context.
+    pub(crate) fn record_consume_method(
+        &mut self,
+        symbol_id: SymbolId,
+        hir_func: &crate::ir::hir::HirFunction,
+    ) {
+        if !hir_func.is_consume {
+            return;
+        }
+        if let Some(qualified) = self
+            .symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))
+        {
+            super::record_consume_method_by_name(qualified);
+        }
+        self.consume_methods.insert(symbol_id);
+    }
+
+    /// Whether calling `callee` ends the caller's binding on the receiver.
+    pub(crate) fn callee_consumes_receiver(&self, callee: SymbolId) -> bool {
+        if self.consume_methods.contains(&callee) {
+            return true;
+        }
+        self.symbol_table
+            .get_symbol(callee)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))
+            .map(super::lookup_consume_method_by_name)
+            .unwrap_or(false)
+    }
+
     /// Ownership of the callee's parameters, or None when the callee is not
     /// known — an indirect call through a function value, say. Unknown means
     /// the positional default applies, which is what the analysis did before

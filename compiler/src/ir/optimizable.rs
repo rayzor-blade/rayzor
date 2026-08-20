@@ -534,6 +534,7 @@ mod tests {
             calling_convention: HirCallingConvention::Haxe,
             is_main,
             is_keep,
+            is_consume: false,
             source_location: SourceLocation::unknown(),
             is_async: false,
         }

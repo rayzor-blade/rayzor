@@ -28,13 +28,17 @@ fires, not about what the program prints.
 | `c12_capture_after_move` | ERROR | a closure captures a binding that was moved |
 | `c13_capture_before_move` | SILENT | captured while still live |
 | `c14_cross_file_borrow` | SILENT | the `@:borrow` is declared in another module |
+| `c15_consume_receiver` | ERROR | `@:consume` ends the receiver, so the next call is a use after move |
+| `c16_consume_last` | SILENT | nothing follows the consuming call |
+| `c17_consume_borrowed_param` | SILENT | a consumed receiver shifts the declared parameters by one |
+| `c18_cross_file_consume` | ERROR | the `@:consume` is declared in another module |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.
 The silent cases are what stop the checker being made to fire by making it
 fire on everything.
 
-`c6` and `c14` are directories rather than files: an imported declaration only
+`c6`, `c14` and `c18` are directories rather than files: an imported declaration only
 reaches MIR lowering in the importing compilation when the project declares a
 class-path, so those cases carry their own `rayzor.toml`. Both have a control —
 removing the annotation must flip the result — because a case that is silent

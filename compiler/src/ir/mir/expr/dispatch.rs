@@ -61,32 +61,43 @@ impl<'a> HirToMirContext<'a> {
     /// the first call report against itself.
     fn record_argument_moves(&mut self, expr: &HirExpr) {
         // A method call is desugared to `method(receiver, args…)`, so for one
-        // the receiver occupies args[0]. Skip it: a receiver has no parameter
-        // to annotate, so it is borrowed, and counting it as a move would end
-        // the binding at the first `a.f()`.
+        // the receiver occupies args[0]. It is borrowed by default — a receiver
+        // has no parameter to annotate, and counting it as a move would end the
+        // binding at the first `a.f()` — unless the method says `@:consume`,
+        // which is how a method that invalidates its receiver declares itself.
+        let callee = self.callee_of(expr);
+        let consumes_receiver = callee
+            .map(|c| self.callee_consumes_receiver(c))
+            .unwrap_or(false);
         let (args, skip) = match &expr.kind {
             HirExprKind::Call {
                 args, is_method, ..
-            } => (args, usize::from(*is_method)),
+            } => (args, usize::from(*is_method && !consumes_receiver)),
             HirExprKind::New { args, .. } => (args, 0),
             _ => return,
         };
-        // After the receiver is skipped, argument i is the callee's parameter
-        // i. A callee that cannot be named — an indirect call through a
-        // function value — leaves every argument at the default.
-        let ownership = self
-            .callee_of(expr)
-            .and_then(|c| self.callee_param_ownership(c));
+        // Argument i is the callee's parameter i once the receiver is skipped.
+        // A consumed receiver is NOT skipped, so it holds slot 0 and the
+        // declared parameters shift by one. A callee that cannot be named — an
+        // indirect call through a function value — leaves every argument at the
+        // default.
+        let param_shift = usize::from(consumes_receiver);
+        let ownership = callee.and_then(|c| self.callee_param_ownership(c));
         let moved: Vec<(SymbolId, SourceLocation)> = args
             .iter()
             .skip(skip)
             .enumerate()
             .filter(|(i, _)| {
-                ownership
-                    .as_ref()
-                    .and_then(|o| o.get(*i))
-                    .map(|o| *o != crate::tast::ParamOwnership::Borrowed)
-                    .unwrap_or(true)
+                // Slot 0 of a consuming call IS the receiver: no declared
+                // parameter, and a move by definition.
+                match i.checked_sub(param_shift) {
+                    None => true,
+                    Some(p) => ownership
+                        .as_ref()
+                        .and_then(|o| o.get(p))
+                        .map(|o| *o != crate::tast::ParamOwnership::Borrowed)
+                        .unwrap_or(true),
+                }
             })
             .filter_map(|(_, arg)| match &arg.kind {
                 HirExprKind::Variable { symbol, .. } if self.is_move_symbol(*symbol) => {

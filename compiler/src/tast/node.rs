@@ -386,6 +386,15 @@ pub enum MemoryAnnotation {
     /// Requires @:safety on the class
     Unique,
 
+    /// @:consume - The method ends its receiver: after the call, the binding
+    /// the method was called on is no longer usable.
+    ///
+    /// A receiver has no parameter to annotate — `this` is implicit in Haxe
+    /// and always lowers to a pointer — so the annotation sits on the method.
+    /// It belongs in the signature rather than the body because the caller,
+    /// not the callee, is the one whose binding ends.
+    Consume,
+
     /// @:borrow - Parameter is borrowed (reference semantics, not owned)
     /// Used with @:safety classes
     Borrow,
@@ -433,6 +442,7 @@ impl MemoryAnnotation {
             "move" => Some(MemoryAnnotation::Move),
             "shared" => Some(MemoryAnnotation::Shared),
             "unique" => Some(MemoryAnnotation::Unique),
+            "consume" => Some(MemoryAnnotation::Consume),
             "borrow" => Some(MemoryAnnotation::Borrow),
             "owned" => Some(MemoryAnnotation::Owned),
             "linear" => Some(MemoryAnnotation::Linear),

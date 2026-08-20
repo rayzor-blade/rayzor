@@ -631,6 +631,9 @@ impl<'a> TastToHirContext<'a> {
                 MemoryAnnotation::Managed => Some("managed"),
                 MemoryAnnotation::Shared => Some("shared"),
                 MemoryAnnotation::ManualDrop => Some("manualDrop"),
+                // Read from the METHOD it sits on (HirFunction::is_consume),
+                // not from the class, so it carries nothing here.
+                MemoryAnnotation::Consume => None,
                 // Parsed today, consumed by nothing downstream.
                 MemoryAnnotation::SafetyWithMode(_)
                 | MemoryAnnotation::Unique
@@ -962,6 +965,10 @@ impl<'a> TastToHirContext<'a> {
             calling_convention: HirCallingConvention::Haxe,
             is_main,
             is_keep,
+            is_consume: function
+                .metadata
+                .memory_annotations
+                .contains(&crate::tast::MemoryAnnotation::Consume),
             source_location: function.source_location,
             is_async: matches!(
                 function.effects.async_kind,

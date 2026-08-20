@@ -23,6 +23,10 @@ expect_for() {
     c12_capture_after_move) echo ERROR ;;
     c13_capture_before_move) echo SILENT ;;
     c14_cross_file_borrow) echo SILENT ;;
+    c15_consume_receiver) echo ERROR ;;
+    c16_consume_last) echo SILENT ;;
+    c17_consume_borrowed_param) echo SILENT ;;
+    c18_cross_file_consume) echo ERROR ;;
     *)                echo UNKNOWN ;;
   esac
 }
