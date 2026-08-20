@@ -66,25 +66,12 @@ class SwiGLU implements Module {
         // The route this layer was built for; zero means decide it here, as
         // before. Kept separate from attention's: this site treats a disabled
         // Haxe matmul as "split", where attention treats it as "fused".
-        var useHaxeMat = (planHaxeMat != 0)
-            ? (planHaxeMat == 1 || planHaxeMat == 3)
+        var useHaxeMat = planHaxeMat != 0
+            ? planHaxeMat == 1
             : Linear.useHaxeMatmul();
-        var useFusedPair = (planFusedPair != 0)
-            ? (planFusedPair == 1 || planFusedPair == 3)
+        var useFusedPair = planFusedPair != 0
+            ? planFusedPair == 1
             : (nue.Q4Matmul.useFusedMatmul() || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null));
-        if (planHaxeMat >= 3 || planFusedPair >= 3) {
-            var liveHaxeMat = Linear.useHaxeMatmul();
-            var livePair = nue.Q4Matmul.useFusedMatmul()
-                || nue.Q4Matmul.canFuseRowwise(gwq, uwq, null);
-            if (useHaxeMat != liveHaxeMat) {
-                Sys.println("[nue-graph] MISMATCH ffn.haxeMat planned="
-                    + useHaxeMat + " live=" + liveHaxeMat);
-            }
-            if (useFusedPair != livePair) {
-                Sys.println("[nue-graph] MISMATCH ffn.fusedPair planned="
-                    + useFusedPair + " live=" + livePair);
-            }
-        }
         nue.Q4Matmul.noteFusionSite(false, gwq != null && uwq != null, useHaxeMat);
         if (useHaxeMat && gwq != null && uwq != null && useFusedPair) {
             var pair = nue.Q4Matmul.matmulFused(gwq, uwq, null, x, gate.pool);

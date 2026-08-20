@@ -174,33 +174,17 @@ class GQAttention implements Attention {
         // The route this layer was built for, when the builder decided one.
         // Zero means it did not, and then the decision is made here exactly as
         // it always was.
-        var useHaxeMat = (planHaxeMat != 0)
-            ? (planHaxeMat == 1 || planHaxeMat == 3)
+        var useHaxeMat = planHaxeMat != 0
+            ? planHaxeMat == 1
             : Linear.useHaxeMatmul();
         // Row-wise (INT8/Q8_0) triples fuse by default — a separate, cheaper
         // mechanism than the opt-in k-quant row-space fusion: only the shared
         // activation quantise is hoisted, so Q/K/V quantise the post-attn-norm
         // activation ONCE instead of three times. Bit-identical output.
-        var useFusedMat = (planFusedQkv != 0)
-            ? (planFusedQkv == 1 || planFusedQkv == 3)
+        var useFusedMat = planFusedQkv != 0
+            ? planFusedQkv == 1
             : (!useHaxeMat || nue.Q4Matmul.useFusedMatmul()
                 || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq));
-        // While verifying, work the route out again the old way and say so if
-        // the two disagree. The planned one is still what runs, so this reports
-        // a divergence rather than hiding it behind a fallback.
-        if (planHaxeMat >= 3 || planFusedQkv >= 3) {
-            var liveHaxeMat = Linear.useHaxeMatmul();
-            var liveFusedMat = !liveHaxeMat || nue.Q4Matmul.useFusedMatmul()
-                || nue.Q4Matmul.canFuseRowwise(qWq, kWq, vWq);
-            if (useHaxeMat != liveHaxeMat) {
-                Sys.println("[nue-graph] MISMATCH attn.haxeMat planned="
-                    + useHaxeMat + " live=" + liveHaxeMat);
-            }
-            if (useFusedMat != liveFusedMat) {
-                Sys.println("[nue-graph] MISMATCH attn.fusedQkv planned="
-                    + useFusedMat + " live=" + liveFusedMat);
-            }
-        }
         nue.Q4Matmul.noteFusionSite(true, qWq != null && kWq != null && vWq != null, useHaxeMat);
         if (qWq != null && kWq != null && vWq != null && useFusedMat) {
             var triple:Array<Tensor>;

@@ -327,22 +327,11 @@ class LlamaArch implements ArchBuilder {
         return block;
     }
 
-    /** A route as the modules encode it. Verification is a separate state
-        rather than a separate field, so the hot path reads one Int. */
+    /** A route as the modules encode it: 1 on, 2 off. Zero is not produced
+        here — it is what a module built outside this builder still holds, and
+        means the route is decided at the call site as it always was. */
     static function planState(on:Bool):Int {
-        if (verifyPlan()) return on ? 3 : 4;
         return on ? 1 : 2;
-    }
-
-    /** Compare the planned route against the live one on every forward. Read
-        once; off unless asked for. */
-    static var _verifyPlan:Int = 0;
-    static function verifyPlan():Bool {
-        if (_verifyPlan == 0) {
-            var v = Sys.getEnvOr("NUE_PLAN_VERIFY", "RAYZOR_PLAN_VERIFY");
-            _verifyPlan = (v != null && v != "0" && v != "" && v != "false") ? 1 : 2;
-        }
-        return _verifyPlan == 1;
     }
 
     /** Build a Linear from a weight name, picking the QTensor path when
