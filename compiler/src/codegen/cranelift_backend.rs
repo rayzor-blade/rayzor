@@ -5754,13 +5754,14 @@ impl CraneliftBackend {
     /// semantics for values that originally went through memory
     /// (store/load), since SROA + CopyProp can expose fmul results
     /// across block boundaries that were previously hidden by memory ops.
-    /// `RAYZOR_NO_FMA=1` disables fusion globally (escape hatch shared
+    /// `RAYZOR_NO_FMA=1` disables fusion globally — truthy values only, so
+    /// `=0` leaves it ON (escape hatch shared
     /// with the scalar path).
     fn try_extract_vector_fmul(
         builder: &cranelift_frontend::FunctionBuilder,
         value: cranelift_codegen::ir::Value,
     ) -> Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
-        if std::env::var("RAYZOR_NO_FMA").is_ok() {
+        if crate::codegen::instruction_lowering::fma_disabled() {
             return None;
         }
         use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
