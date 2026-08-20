@@ -173,6 +173,7 @@ impl HirToMirContext<'_> {
         self.move_events.clear();
         self.move_event_order = 0;
         self.move_events_func = None;
+        self.borrow_roots.clear();
     }
 
     /// Whether `ty` is a `@:move` class.
@@ -321,6 +322,80 @@ impl HirToMirContext<'_> {
             kind,
             location,
         });
+    }
+
+    /// Enrol a function's `@:borrow` parameters. A borrow is permission to read
+    /// for the duration of the call, so the value must not remain reachable
+    /// once the call returns.
+    pub(crate) fn enroll_borrowed_params(&mut self, hir_func: &crate::ir::hir::HirFunction) {
+        for p in &hir_func.params {
+            if p.ownership == crate::tast::ParamOwnership::Borrowed {
+                self.borrow_roots.insert(p.symbol_id, p.symbol_id);
+            }
+        }
+    }
+
+    /// Note that `dst` now holds whatever `src` held. Copying a borrow into a
+    /// local does not launder it: the copy escapes exactly as the original would.
+    pub(crate) fn propagate_borrow(&mut self, dst: SymbolId, src: SymbolId) {
+        if let Some(&root) = self.borrow_roots.get(&src) {
+            self.borrow_roots.insert(dst, root);
+        }
+    }
+
+    /// Report a borrowed value reaching somewhere that outlives the call.
+    /// `site` names the escape in the message.
+    ///
+    /// Checked at the escape site rather than by dataflow: an escape on any
+    /// path is an escape, so there is nothing for a fixpoint to decide.
+    pub(crate) fn check_borrow_escape(
+        &mut self,
+        symbol: SymbolId,
+        site: &str,
+        location: SourceLocation,
+    ) {
+        let Some(&root) = self.borrow_roots.get(&symbol) else {
+            return;
+        };
+        if !self
+            .move_diag_seen
+            .insert((symbol, location.file_id, location.line, location.column))
+        {
+            return;
+        }
+        let name = self
+            .symbol_table
+            .get_symbol(root)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("<unknown>")
+            .to_string();
+        let via = if symbol == root {
+            String::new()
+        } else {
+            let alias = self
+                .symbol_table
+                .get_symbol(symbol)
+                .and_then(|s| self.string_interner.get(s.name))
+                .unwrap_or("<unknown>");
+            format!(" through `{}`", alias)
+        };
+        let span = Self::source_location_to_span(&location);
+        let diag = diagnostics::DiagnosticBuilder::error(
+            format!("borrowed value `{}` {}{}", name, site, via),
+            span.clone(),
+        )
+        .code("E0383")
+        .label(span, "the borrow escapes here")
+        .note(format!(
+            "`{}` is declared `@:borrow`, so the caller keeps its binding and the value must not outlive this call.",
+            name
+        ))
+        .help(format!(
+            "Take `{}` by value instead (drop the `@:borrow`), or hand back a copy.",
+            name
+        ))
+        .build();
+        self.diagnostics.push(diag);
     }
 
     /// Solve the recorded events against the current function's CFG and emit a

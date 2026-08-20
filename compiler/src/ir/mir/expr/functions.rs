@@ -148,6 +148,7 @@ impl<'a> HirToMirContext<'a> {
         // A by-value parameter of a `@:move` class owns its value, so it is a
         // binding the move-flow analysis tracks from function entry.
         self.enroll_move_params(hir_func);
+        self.enroll_borrowed_params(hir_func);
 
         if let Some(body) = &hir_func.body {
             let stmt_count = body.statements.len();
@@ -425,6 +426,12 @@ impl<'a> HirToMirContext<'a> {
                     );
                 }
             }
+            // Parameter ownership is per-body, and this is a body: Pass 1 only
+            // registered the signature, so without this a function lowered here
+            // has no enrolled parameters and every check on them is vacuous.
+            self.enroll_move_params(hir_func);
+            self.enroll_borrowed_params(hir_func);
+
             // Function-level scope so its variables are freed on function exit.
             self.enter_drop_scope();
             self.lower_block(body);
@@ -748,6 +755,7 @@ impl<'a> HirToMirContext<'a> {
         // A by-value parameter of a `@:move` class owns its value, so it is a
         // binding the move-flow analysis tracks from function entry.
         self.enroll_move_params(hir_func);
+        self.enroll_borrowed_params(hir_func);
 
         // Lower the function body
         if let Some(body) = &hir_func.body {

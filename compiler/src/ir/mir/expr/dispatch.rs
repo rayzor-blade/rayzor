@@ -137,6 +137,12 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Lambda { captures, .. } = &expr.kind else {
             return;
         };
+        // A closure outlives the call that built it, so capturing a borrow
+        // lets the reference escape.
+        let all: Vec<SymbolId> = captures.iter().map(|c| c.symbol).collect();
+        for symbol in all {
+            self.check_borrow_escape(symbol, "is captured by a closure", expr.source_location);
+        }
         let captured: Vec<SymbolId> = captures
             .iter()
             .filter(|c| self.is_move_symbol(c.symbol))

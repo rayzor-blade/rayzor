@@ -29,12 +29,17 @@ expect_for() {
     c18_cross_file_consume) echo ERROR ;;
     c19_void_call)    echo ERROR ;;
     c20_void_consume) echo ERROR ;;
+    c21_borrow_returned) echo ERROR ;;
+    c22_borrow_returned_alias) echo ERROR ;;
+    c23_borrow_field_read) echo SILENT ;;
+    c24_borrow_stored) echo ERROR ;;
+    c25_borrow_captured) echo ERROR ;;
     *)                echo UNKNOWN ;;
   esac
 }
 classify() {
-  if echo "$1" | grep -qaE "Error: \[E03(82|00)\]"; then echo ERROR
-  elif echo "$1" | grep -qaE "Warning: \[E03(82|00)\]"; then echo WARN
+  if echo "$1" | grep -qaE "Error: \[E03(82|83|00)\]"; then echo ERROR
+  elif echo "$1" | grep -qaE "Warning: \[E03(82|83|00)\]"; then echo WARN
   else echo SILENT; fi
 }
 score() {
