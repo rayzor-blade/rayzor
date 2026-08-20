@@ -4,7 +4,7 @@
 
 use log::debug;
 use std::cell::RefCell;
-use std::io::{self, Write};
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -115,9 +115,10 @@ fn print_with_prefix(msg: &str) {
     TRACE_PREFIX.with(|p| {
         let prefix = p.borrow();
         if prefix.is_empty() {
-            println!("{}", msg);
+            crate::haxe_string::rayzor_stdout_write(msg.as_bytes(), b"\n", true);
         } else {
-            println!("{}{}", *prefix, msg);
+            let line = format!("{}{}", *prefix, msg);
+            crate::haxe_string::rayzor_stdout_write(line.as_bytes(), b"\n", true);
         }
     });
 }
@@ -129,28 +130,28 @@ fn print_with_prefix(msg: &str) {
 /// Print integer to stdout
 #[no_mangle]
 pub extern "C" fn haxe_sys_print_int(value: i64) {
-    print!("{}", value);
-    let _ = io::stdout().flush();
+    let text = value.to_string();
+    crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print float to stdout
 #[no_mangle]
 pub extern "C" fn haxe_sys_print_float(value: f64) {
-    print!("{}", value);
-    let _ = io::stdout().flush();
+    let text = value.to_string();
+    crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print boolean to stdout
 #[no_mangle]
 pub extern "C" fn haxe_sys_print_bool(value: bool) {
-    print!("{}", value);
-    let _ = io::stdout().flush();
+    let text = value.to_string();
+    crate::haxe_string::rayzor_stdout_write(text.as_bytes(), b"", true);
 }
 
 /// Print newline
 #[no_mangle]
 pub extern "C" fn haxe_sys_println() {
-    println!();
+    crate::haxe_string::rayzor_stdout_write(b"\n", b"", true);
 }
 
 // ============================================================================

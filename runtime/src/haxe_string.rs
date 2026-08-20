@@ -35,6 +35,23 @@ fn stdout_flush_interval() -> Duration {
 }
 
 fn write_stdout_buffered(bytes: &[u8], force: bool) {
+    write_stdout_parts(bytes, b"", force)
+}
+
+/// The one stdout path. Everything that writes to stdout has to come through
+/// here, or it races the buffer: a `print!` goes straight to the fd while a
+/// buffered line is still queued, and the two arrive interleaved.
+pub fn rayzor_stdout_write(head: &[u8], tail: &[u8], force: bool) {
+    write_stdout_parts(head, tail, force)
+}
+
+/// Append both parts under ONE acquisition of the buffer lock.
+///
+/// A line and its newline have to arrive together. Written as two calls, the
+/// lock is released between them, and a second thread printing at that moment
+/// appends its own line in the gap — the two lines merge into one, so output
+/// that was never lost reads as output that went missing.
+fn write_stdout_parts(head: &[u8], tail: &[u8], force: bool) {
     static BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
     static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
     let interval = stdout_flush_interval();
@@ -45,7 +62,8 @@ fn write_stdout_buffered(bytes: &[u8], force: bool) {
     else {
         return;
     };
-    buffer.extend_from_slice(bytes);
+    buffer.extend_from_slice(head);
+    buffer.extend_from_slice(tail);
 
     let now = Instant::now();
     let mut should_flush = force || interval.is_zero() || buffer.len() >= 4096;
@@ -708,31 +726,45 @@ unsafe fn dynamic_box_to_string(s: *const HaxeString) -> Option<*mut HaxeString>
     Some(crate::type_system::haxe_std_string_ptr(s as *mut u8))
 }
 
-pub extern "C" fn haxe_string_print(s: *const HaxeString) {
+/// The printable bytes of a string, unwrapping a boxed Dynamic and rejecting
+/// invalid UTF-8, so print and println agree on what they are writing.
+///
+/// # Safety
+/// `s` must be null or a valid `HaxeString` whose `ptr`/`len` describe live
+/// memory for the duration of the borrow.
+unsafe fn printable_bytes<'a>(s: *const HaxeString) -> Option<&'a [u8]> {
     if s.is_null() {
-        return;
+        return None;
     }
+    if let Some(boxed) = dynamic_box_to_string(s) {
+        return printable_bytes(boxed);
+    }
+    let s_ref = &*s;
+    if s_ref.len == 0 {
+        return None;
+    }
+    let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
+    if str::from_utf8(slice).is_ok() {
+        Some(slice)
+    } else {
+        None
+    }
+}
 
-    unsafe {
-        if let Some(boxed) = dynamic_box_to_string(s) {
-            haxe_string_print(boxed);
-            return;
-        }
-        let s_ref = &*s;
-        if s_ref.len > 0 {
-            let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
-            if str::from_utf8(slice).is_ok() {
-                write_stdout_buffered(slice, slice.contains(&b'\n'));
-            }
-        }
+pub extern "C" fn haxe_string_print(s: *const HaxeString) {
+    if let Some(slice) = unsafe { printable_bytes(s) } {
+        write_stdout_buffered(slice, slice.contains(&b'\n'));
     }
 }
 
 /// Print string to stdout with newline
 #[no_mangle]
 pub extern "C" fn haxe_string_println(s: *const HaxeString) {
-    haxe_string_print(s);
-    write_stdout_buffered(b"\n", true);
+    // One write, so the newline cannot be separated from its line. An empty or
+    // unprintable argument still emits the newline, as it did when this was two
+    // calls and the first one returned early.
+    let slice = unsafe { printable_bytes(s) }.unwrap_or(b"");
+    write_stdout_parts(slice, b"\n", true);
 }
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`.
