@@ -150,6 +150,17 @@ pub struct LLVMJitBackend<'ctx> {
     /// Maps MIR value IDs to LLVM values
     value_map: BTreeMap<IrId, BasicValueEnum<'ctx>>,
 
+    /// For each register produced by an integer `Add`, its two operands.
+    ///
+    /// A raw address arrives here as an integer, and lowering it with one
+    /// `inttoptr` of the whole expression hands LLVM an opaque pointer:
+    /// ScalarEvolution cannot see through `inttoptr`, so LoopAccessAnalysis,
+    /// the vectorizer and LSR all decline, and nothing a kernel author did not
+    /// hand-vectorise ever gets vectorised. Splitting the address into
+    /// `getelementptr(inttoptr(base), offset)` restores the pointer SCEV.
+    /// Rebuilt per function.
+    addr_adds: BTreeMap<IrId, (IrId, IrId)>,
+
     /// Maps MIR function IDs to LLVM functions
     function_map: BTreeMap<IrFunctionId, FunctionValue<'ctx>>,
 
@@ -297,6 +308,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             builder,
             execution_engine: None,
             value_map: BTreeMap::new(),
+            addr_adds: BTreeMap::new(),
             function_map: BTreeMap::new(),
             block_map: BTreeMap::new(),
             phi_map: BTreeMap::new(),
@@ -2976,6 +2988,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
+        // Record every integer Add so a Load/Store can split its address into a
+        // GEP rather than casting the whole expression (see `addr_adds`).
+        self.addr_adds.clear();
+        for (_, mir_block) in &sorted_blocks {
+            for instruction in &mir_block.instructions {
+                if let IrInstruction::BinOp {
+                    dest,
+                    op: BinaryOp::Add,
+                    left,
+                    right,
+                } = instruction
+                {
+                    self.addr_adds.insert(*dest, (*left, *right));
+                }
+            }
+        }
+
         // Pass 2: Compile all blocks (instructions and terminators)
         for (block_id, mir_block) in &sorted_blocks {
             let llvm_block = self.block_map[block_id];
@@ -3202,6 +3231,51 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
     /// Compile a single MIR instruction to LLVM IR
     /// The register_types map is used to determine the proper types for operations
+    /// Turn an integer address into a pointer LLVM can reason about.
+    ///
+    /// When the address was computed as `base + offset`, emit
+    /// `getelementptr i8, inttoptr(base), offset` instead of casting the sum.
+    /// The two are numerically identical — byte-indexed GEP *is* pointer
+    /// arithmetic — so which operand is treated as the base does not affect
+    /// correctness, only whether the cast is loop-invariant enough for LICM to
+    /// hoist it and for ScalarEvolution to describe the access. Kernels here
+    /// spell it `base + Usize.fromInt(i * 4)`, so the left operand is the base.
+    fn address_as_pointer(
+        &mut self,
+        addr_id: IrId,
+        addr: inkwell::values::IntValue<'ctx>,
+        what: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        if let Some((base_id, offset_id)) = self.addr_adds.get(&addr_id).copied() {
+            if let (Ok(base_v), Ok(off_v)) = (self.get_value(base_id), self.get_value(offset_id)) {
+                if base_v.is_int_value() && off_v.is_int_value() {
+                    let base_ptr = self
+                        .builder
+                        .build_int_to_ptr(
+                            base_v.into_int_value(),
+                            ptr_ty,
+                            &format!("{}_base_{}", what, base_id.as_u32()),
+                        )
+                        .map_err(|e| format!("Failed to convert base to ptr: {}", e))?;
+                    let gep = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            self.context.i8_type(),
+                            base_ptr,
+                            &[off_v.into_int_value()],
+                            &format!("{}_gep_{}", what, addr_id.as_u32()),
+                        )
+                    }
+                    .map_err(|e| format!("Failed to build address GEP: {}", e))?;
+                    return Ok(gep);
+                }
+            }
+        }
+        self.builder
+            .build_int_to_ptr(addr, ptr_ty, &format!("{}_ptr_{}", what, addr_id.as_u32()))
+            .map_err(|e| format!("Failed to convert int to ptr for {}: {}", what, e))
+    }
+
     fn compile_instruction(
         &mut self,
         inst: &IrInstruction,
@@ -3245,13 +3319,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     let ptr = if ptr_value.is_pointer_value() {
                         ptr_value.into_pointer_value()
                     } else if ptr_value.is_int_value() {
-                        self.builder
-                            .build_int_to_ptr(
-                                ptr_value.into_int_value(),
-                                self.context.ptr_type(inkwell::AddressSpace::default()),
-                                &format!("load_ptr_{}", ptr.as_u32()),
-                            )
-                            .map_err(|e| format!("Failed to convert int to ptr for load: {}", e))?
+                        self.address_as_pointer(*ptr, ptr_value.into_int_value(), "load")?
                     } else {
                         return Err(format!("Load ptr {:?} has unexpected type", ptr));
                     };
@@ -3272,13 +3340,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let ptr_val = if ptr_raw.is_pointer_value() {
                     ptr_raw.into_pointer_value()
                 } else if ptr_raw.is_int_value() {
-                    self.builder
-                        .build_int_to_ptr(
-                            ptr_raw.into_int_value(),
-                            self.context.ptr_type(inkwell::AddressSpace::default()),
-                            &format!("store_ptr_{}", ptr.as_u32()),
-                        )
-                        .map_err(|e| format!("Failed to convert int to ptr for store: {}", e))?
+                    self.address_as_pointer(*ptr, ptr_raw.into_int_value(), "store")?
                 } else {
                     return Err(format!("Store ptr {:?} has unexpected type", ptr));
                 };
