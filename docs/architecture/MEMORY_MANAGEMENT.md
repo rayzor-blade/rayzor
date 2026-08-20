@@ -11,63 +11,85 @@ This document covers the full memory safety pipeline: ownership analysis, lifeti
 | Approach | When Used |
 | --- | --- |
 | Ownership + Automatic Drop | Default for all heap-allocated classes when drop conditions are met |
-| Reference Counting (`@:rc`, `@:arc`) | Shared ownership, thread-safe sharing |
+| Compile-time move checking (`@:move`) | Opt-in per class; enforced by MoveFlow, no runtime cost |
+| Reference Counting (`@:shared`) | Shared ownership; `.clone()` becomes an atomic increment |
 | Runtime Managed | Thread, Channel, Arc, Mutex (runtime handles cleanup) |
 | No Drop | Primitives (Int, Float, Bool), Dynamic |
 | GC | `Dynamic` types or objects with unknown compile-time size only |
+
+`@:rc` and `@:arc` appear in older notes as the reference-counting opt-in. They parse and
+do nothing; `@:shared` is the annotation with a consumer.
 
 The key insight: most Haxe programs use concrete types with known sizes. For these, the compiler can statically determine ownership, insertion of `Free` instructions at the correct points, and verify safety -- all without runtime overhead.
 
 ## Memory Annotations
 
-Rayzor extends Haxe with opt-in memory annotations that control ownership semantics:
+Rayzor extends Haxe with opt-in memory annotations. **Opt-in is structural, not a
+filter**: a class that carries no annotation records no ownership events at all, so
+existing Haxe from the wider ecosystem compiles unchanged and silently. There is no
+mode in which unannotated code is analysed.
 
-### Class-Level Annotations
+The table below separates what the compiler **enforces** from what it merely parses.
+An annotation in the second group is accepted by the parser and reaches the TAST, then
+forwards to nothing — writing one changes no behaviour.
+
+### Enforced
+
+| Annotation | Position | Meaning |
+| --- | --- | --- |
+| `@:move` | class | Bindings of this type are linear: a value is owned by one binding at a time, and using a binding after its value has been transferred is an error. |
+| `@:shared` | class | The type is reference-counted at runtime; `.clone()` lowers to an atomic increment and move-tracking is suppressed. Mutually exclusive with `@:move` (W0030). |
+| `@:borrow` | parameter | The callee only observes the argument. The caller keeps its binding, and the value may not outlive the call. |
+| `@:owned` | parameter | The callee takes the argument. This is the default; the annotation states it in the signature so a reader does not have to infer it. |
+| `@:consume` | method | Calling the method ends the caller's binding on the receiver. |
+| `@:manualDrop` | class | The compiler inserts no automatic `Free`; the program is responsible. |
+| `@:safety` | class | Historical opt-in marker. Enrolment now follows `@:move`, so this annotation does not itself enable or disable analysis. |
+
+### Parsed, with no consumer
+
+`@:unique`, `@:linear`, `@:affine`, `@:box`, `@:arc`, `@:atomic`, `@:rc`, `@:managed`.
+
+These reach `MemoryAnnotation` and stop at the exhaustive match in
+`compiler/src/ir/tast_to_hir.rs`, where each maps to `None`. The match has no `_` arm
+on purpose: a new annotation is a compile error until someone decides what it means.
+`rayzor.Box`, `rayzor.concurrent.Arc` and `rayzor.Atomic` exist as real extern types —
+it is the *annotations* of those names that do nothing.
+
+### Where an annotation can go
+
+Haxe allows metadata on a type, on a field or method, and on a **function parameter**.
+It does not allow metadata inside a function body, so a *local binding* can never carry
+one:
 
 ```haxe
-// Default: no annotation = Dynamic/runtime-managed (no safety analysis)
-class DefaultClass { }
-
-// Opt into memory safety analysis
-@:safety
-class SafeClass { }
-
-// Ownership models
-@:safety @:move    class MoveOnly { }     // Transfer ownership on assignment
-@:safety @:unique  class UniquePtr { }    // No aliasing allowed
-@:safety @:rc      class SharedLocal { }  // Reference counted (single-thread)
-@:safety @:arc     class SharedAtomic { } // Atomic reference counted (thread-safe)
-
-// Concurrency traits
-@:safety @:derive([Send, Sync])
-class ThreadSafe { }
+var r = session.cache();      // nothing can be written here
 ```
 
-### Parameter-Level Annotations
+This is why the parameter and method positions carry the ownership vocabulary, and why
+any future statement about a local has to be carried by its **type** rather than by an
+annotation.
+
+### Examples
 
 ```haxe
-@:safety
-class Resource {
-    // Borrow: caller retains ownership, function gets read access
-    public function inspect(@:borrow ref: OtherResource): Void { }
+@:move
+class Session {
+    public var id:Int;
+    public function new(id:Int) { this.id = id; }
 
-    // Owned: function takes ownership, caller can no longer use it
-    public function consume(@:owned ref: OtherResource): Void { }
+    // Calling this ends the caller's binding: `s` is unusable afterwards.
+    @:consume
+    public function close():Void { … }
 
-    // Move: explicit ownership transfer
-    public function transfer(@:move ref: OtherResource): Void { }
+    public function decode():Int { return id; }
+}
+
+class Pipeline {
+    // `keep` is observed; the caller still owns it after the call.
+    // `give` is taken; the caller's binding ends here.
+    static function run(@:borrow keep:Session, give:Session):Int { … }
 }
 ```
-
-### Safety Mode Configuration
-
-The `@:safety` annotation on the `Main` class controls program-wide behavior:
-
-| Annotation | Mode | Behavior |
-| --- | --- | --- |
-| None | Default | No safety analysis; runtime-managed memory |
-| `@:safety` or `@:safety(false)` | Non-Strict | Safety analysis on annotated classes; unannotated classes auto-wrapped in Rc |
-| `@:safety(true)` | Strict | All classes must have `@:safety`; compile error otherwise |
 
 ## Pipeline Overview
 
@@ -121,6 +143,143 @@ Source Code (with memory annotations)
 ```
 
 ---
+
+## Move Checking (MoveFlow)
+
+`compiler/src/ir/mir/moveflow.rs`. This is the pass that actually enforces `@:move`,
+`@:borrow`, `@:owned` and `@:consume`. It is a forward may-analysis over the MIR
+control-flow graph: a binding is *moved* at a point when **some** path reaching that
+point moved it.
+
+### Keyed on bindings, never on registers
+
+The property is about bindings, so the analysis is keyed on `SymbolId`. A register
+cannot stand in for a binding: `var d = b` needs no cast, so `d` and `b` are the same
+register, and a register-keyed check cannot tell a read of `d` from a read of the
+binding that was moved into it. An earlier register-keyed liveness check rejected
+correct code for exactly this reason.
+
+### Events, recorded while lowering
+
+Events are recorded where the symbol is still in hand, then replayed against the
+finished CFG:
+
+| Event | Recorded at |
+| --- | --- |
+| `Bind` — the binding starts (or restarts) owning a value | `var x = …`, an assignment, a by-value `@:move` parameter at function entry |
+| `Move` — the value is transferred away | a variable on the right of a binding, a call or constructor argument, the receiver of an `@:consume` call |
+| `Read` — the binding is observed | every variable read, and every closure capture |
+
+The instruction stream is deliberately **not** the input. `MarkMoved` and `CheckLive`
+both report their operand as a use, so a use/def scan over MIR would count a move as a
+use of itself at its own program point, and the two would cancel.
+
+### The rules
+
+- **A move is checked, then set.** A move first tests the incoming state — moving an
+  already-moved value is itself a violation — and only then records the move. This is
+  what makes `f(a); g(a)` fire; nothing anywhere compares two source locations.
+- **A bind kills.** Reassignment revives a binding. There is no other revival: a moved
+  binding does not come back at scope exit.
+- **Fixpoint first, report second.** A loop body is diagnosed once rather than once per
+  iteration.
+- **Unreachable blocks stay at bottom** and report nothing. This is what keeps
+  `if (flag) return take(r); return r.v;` silent — the read is only reachable on the
+  path where no move happened.
+- **The witness is the earliest move**, joined by minimum program order. The transfer
+  takes the minimum too; "keep whichever arrived" is not monotone and the fixpoint can
+  oscillate instead of settling.
+
+### Arguments and receivers
+
+A method call is desugared to `method(receiver, args…)`, so the receiver occupies
+`args[0]`. It is **borrowed by default** — a receiver has no parameter to annotate, and
+counting it as a move would end the binding at the first `a.f()`. `@:consume` is what
+changes that; when it applies, the receiver holds slot 0 and the declared parameters
+shift by one.
+
+Argument moves are recorded **after** the call lowers, never before: an argument's own
+read is recorded while it lowers, and a move ordered ahead of it would make the first
+call report against itself.
+
+A call returning `Void` lowers to no destination register. Recording therefore happens
+before that early return, or every `f(a);` in statement position — which is how a
+consuming call is usually written — would go unchecked while `var x = f(a);` was checked.
+
+### Borrows may not outlive the call (E0383)
+
+`@:borrow` on its own would silence the check that works and promise nothing back. A
+borrowed parameter is therefore rejected when it reaches somewhere that outlives the
+call: returned, stored through a field or index, or captured by a closure. Copying it
+into a local first does not launder it — the local inherits the borrow's root, and the
+diagnostic names the alias it travelled through.
+
+This is checked at the escape site rather than by dataflow: an escape on any path is an
+escape, so there is nothing for a fixpoint to decide.
+
+Reading a *field* of a borrow is not an escape. `return r.v` must stay legal, or the
+annotation would be safe by being useless.
+
+### Crossing module boundaries
+
+Every fact the analysis needs at a call site is published under the callee's **qualified
+name** as well as its `SymbolId`, because a callee lowered in another compilation context
+has a different `SymbolId` there. `@:move` classes, parameter ownership and `@:consume`
+methods each have a name-keyed registry in `compiler/src/ir/mir/mod.rs`.
+
+The two directions are not symmetric, and the asymmetry decides how much the registry
+matters. Missing a `@:move` or a `@:consume` across a boundary **under-reports** — the
+safe direction. Missing a `@:borrow` makes the compiler report correct code as a
+use-after-move: a false positive, which is worse than the error it claims to be.
+
+### Cost
+
+The analysis emits no instructions. A compiled artifact is byte-identical with and
+without it; the check is a compile-time reading of events, and the only runtime
+ownership machinery (`MarkMoved` / `CheckLive`) predates it and is now redundant.
+
+### What it does not see
+
+- **Places.** The analysis is keyed on `SymbolId` and matches only a literal variable,
+  so an owner held in a **field** (`h.cell`) is invisible.
+- **Constructor parameters.** Every constructor argument is a move; `@:borrow` on a
+  constructor parameter is ignored.
+- **Receiver escape.** E0383 covers parameters; a receiver escaping its method is silent.
+- **Lambda bodies.** A capture is checked at the point of capture, in the enclosing
+  function. The body lowers into its own graph with its own recorder.
+
+### Oracle
+
+`compiler/tests/move/` holds the cases, with `check.sh` and a README. Each declares
+`ERROR` or `SILENT`, and every case runs cold because a warm cache skips MIR lowering
+and the analysis with it.
+
+Two habits that the cases exist to enforce:
+
+- **A `SILENT` case must be silent for the right reason.** A checker that detects nothing
+  passes every silent case. Where an annotation is what makes a case silent, there is a
+  control that removes the annotation and must flip it to `ERROR`.
+- **A helper's return type is part of the case.** All eighteen cases once used an
+  `Int`-returning helper and reported 18/18 while void calls were entirely unchecked.
+
+## The `semantic_graph` analyses
+
+The sections below describe the analyses in `compiler/src/semantic_graph/`. They predate
+MoveFlow and are a separate body of code; read them as a description of that
+infrastructure rather than as a second account of the rules above.
+
+What is wired today:
+
+- **`OwnershipGraph::check_use_after_move`** runs, from
+  `CompilationUnit::check_ownership_violations`. It works on expression shape rather than
+  on control flow, and it knows nothing of `@:borrow`, `@:owned` or `@:consume`. It
+  therefore **defers on `@:move` types**, which MoveFlow owns, and emits only the
+  non-fatal E0382 *warning* for ordinary Haxe.
+- The lifetime analysis, constraint solver and escape analysis exist in that directory.
+  Before relying on any claim in the sections below, check whether the pass has a caller —
+  several describe intended behaviour rather than behaviour that runs.
+
+Nothing in `semantic_graph` enforces the annotations documented above.
 
 ## 1. Ownership Analysis
 
@@ -436,6 +595,7 @@ In all other cases (the vast majority of typed Haxe code), ownership-based memor
 
 | Analysis | Purpose | Key Algorithm | Complexity |
 | --- | --- | --- | --- |
+| **MoveFlow** | **Enforce `@:move` / `@:borrow` / `@:owned` / `@:consume`** | **Forward may-analysis over the MIR CFG, keyed on SymbolId** | **O(B*S) to fixpoint** |
 | Ownership Graph | Track ownership state, borrows, moves | Graph traversal | O(V+E) |
 | Lifetime Analysis | Determine variable validity periods | Constraint generation | O(V+E) per function |
 | Constraint Solver | Resolve lifetime ordering | Union-Find + Tarjan's SCC + Kahn's sort | O(V+E) |
@@ -444,4 +604,8 @@ In all other cases (the vast majority of typed Haxe code), ownership-based memor
 | Send/Sync | Thread safety validation | Recursive type checking | O(T*F) |
 | Drop Analysis | Determine deallocation points | Last-use analysis | O(V) per function |
 
-Where V = variables, E = edges/constraints, F = functions, C = call sites, T = types.
+Where V = variables, E = edges/constraints, F = functions, C = call sites, T = types,
+B = basic blocks, S = tracked bindings.
+
+MoveFlow is the row that enforces the annotations; the others are the `semantic_graph`
+infrastructure described above.
