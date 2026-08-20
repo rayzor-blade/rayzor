@@ -76,8 +76,16 @@ impl EnvironmentLayout {
                 IrType::TypeVar(_) => false,
                 IrType::Generic { .. } => false, // Generic types treated as pointers
                 // Bool and floating point
-                IrType::Bool => true,               // I64 → I8 for bool
-                IrType::F32 | IrType::F64 => false, // Float handled differently
+                IrType::Bool => true, // I64 → I8 for bool
+                // Bit-preserving, not a numeric conversion. The value went in
+                // by reinterpreting its bits into the i64 slot, so it has to
+                // come back out the same way — `build_cast` between I64 and a
+                // float is a bitcast for exactly this reason. Leaving it uncast
+                // handed the lambda body an integer holding the float's bit
+                // pattern, and every arithmetic on it was integer arithmetic:
+                // a captured 2.5 read as 4612811918334230528, and `* 2.0`
+                // saturated to i64::MAX. Silently, on both backends.
+                IrType::F32 | IrType::F64 => true,
                 IrType::Void => false,
                 IrType::Union { .. } => false,
                 // SIMD vector types are not captured directly
@@ -152,7 +160,20 @@ impl EnvironmentLayout {
 
         // Cast if needed
         let final_reg = if field.needs_cast {
-            let casted = builder.build_cast(loaded, field.storage_ty.clone(), field.ty.clone())?;
+            // A float goes in and comes out by REINTERPRETING its bits, never by
+            // converting: the i64 slot holds the bit pattern, so `build_cast`
+            // here would sitofp the pattern into a nonsense magnitude. F32 goes
+            // through i32 first — a 4-byte float and an 8-byte slot are not a
+            // legal bitcast pair.
+            let casted = match field.ty {
+                IrType::F64 => builder.build_bitcast(loaded, IrType::F64)?,
+                IrType::F32 => {
+                    let narrowed = builder.build_cast(loaded, IrType::I64, IrType::I32)?;
+                    builder.register_local(narrowed, IrType::I32)?;
+                    builder.build_bitcast(narrowed, IrType::F32)?
+                }
+                _ => builder.build_cast(loaded, field.storage_ty.clone(), field.ty.clone())?,
+            };
             // Register the casted value's type
             builder.register_local(casted, field.ty.clone())?;
             casted
@@ -176,9 +197,18 @@ impl EnvironmentLayout {
     ) -> Option<()> {
         let field = self.find_field(symbol)?;
 
-        // Cast if needed (I32 → I64 for storage)
+        // Cast if needed (I32 → I64 for storage). Floats are reinterpreted
+        // rather than converted, mirroring `load_field`.
         let store_value = if field.needs_cast {
-            builder.build_cast(value, field.ty.clone(), field.storage_ty.clone())?
+            match field.ty {
+                IrType::F64 => builder.build_bitcast(value, IrType::I64)?,
+                IrType::F32 => {
+                    let bits = builder.build_bitcast(value, IrType::I32)?;
+                    builder.register_local(bits, IrType::I32)?;
+                    builder.build_cast(bits, IrType::I32, IrType::I64)?
+                }
+                _ => builder.build_cast(value, field.ty.clone(), field.storage_ty.clone())?,
+            }
         } else {
             value
         };
