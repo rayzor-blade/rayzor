@@ -318,7 +318,13 @@ class LlamaArch implements ArchBuilder {
         ffn.planFusedPair = planState(Q4Matmul.useFusedMatmul()
             || Q4Matmul.canFuseRowwise(ffnGate.qweight, ffnUp.qweight, null));
 
-        return new LlamaBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+        var block = new LlamaBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+        // Both gates are process constants that the block would otherwise ask
+        // for on every token. No verify state: there is nothing for a per-token
+        // comparison to catch that resolving them once cannot.
+        block.planDbgShape = LlamaBlock.debugShapeMode();
+        block.planDecodeSplit = Q4Matmul.decodeSplitEnabled() ? 1 : 2;
+        return block;
     }
 
     /** A route as the modules encode it. Verification is a separate state

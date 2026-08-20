@@ -18,6 +18,16 @@ class LlamaBlock {
     public var ffnNorm:RMSNorm;
     public var ffn:SwiGLU;
     public var blockName:String;
+    /** The two per-token debug gates, resolved once when the block is built.
+        Both are process constants, so reading them here costs a field load in
+        place of a cross-module static call on every block of every token.
+
+        `planDbgShape` carries `debugShapeMode`'s own answer — 1 check, 2 off,
+        3 trace — which never takes the value 0, so 0 still means the block was
+        built outside the planner and the live call stands. `planDecodeSplit`
+        is 1 on, 2 off, for the same reason. */
+    public var planDbgShape:Int = 0;
+    public var planDecodeSplit:Int = 0;
     static var _debugShapes:Int = 0;
 
     public function new(
@@ -34,7 +44,7 @@ class LlamaBlock {
         this.blockName = name;
     }
 
-    static function debugShapeMode():Int {
+    public static function debugShapeMode():Int {
         if (_debugShapes == 0) {
             var v = Sys.getEnvOr("NUE_DUMP_BLOCK_SHAPES", "RAYZOR_DUMP_BLOCK_SHAPES");
             if (v == null || v == "0" || v == "" || v == "false") {
@@ -68,7 +78,7 @@ class LlamaBlock {
     }
 
     public function forwardWith(x:Tensor, kv:KVCache):Tensor {
-        var dbg = debugShapeMode();
+        var dbg = planDbgShape != 0 ? planDbgShape : debugShapeMode();
         var traceShapes = dbg == 3;
         var checkShapes = dbg == 1 || dbg == 3;
         var hiddenSize = attn.numQHeads * attn.headDim;
@@ -78,7 +88,9 @@ class LlamaBlock {
         // explicitly enabled. The old path called into Q4Matmul.splitNow()
         // several times per block even with profiling off, which made decode
         // pay for diagnostic plumbing in production runs.
-        var profileSplit = nue.Q4Matmul.decodeSplitEnabled();
+        var profileSplit = planDecodeSplit != 0
+            ? planDecodeSplit == 1
+            : nue.Q4Matmul.decodeSplitEnabled();
         var _t0 = profileSplit ? Sys.time() : 0.0;
         var _rows = profileSplit ? x.shape()[0] : 0;
         var xClone1 = x.clone();
