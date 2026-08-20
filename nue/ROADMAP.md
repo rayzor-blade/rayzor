@@ -78,19 +78,56 @@ kernel and fusion state, and the numbers reconcile with the pool profile. It
 must make a stale gate obvious at a glance — i.e. it would have surfaced
 `NUE_FUSED_MATMUL` immediately.
 
-### Stage 1 — Plan IR + planner owning fusion/dispatch
+### Stage 1 — Plan IR + planner owning fusion/dispatch — SHIPPED
 
-Lower the `Module` tree into a **static plan** once metadata, dtypes, quant
-schemes, head counts and cache policy are known. Node vocabulary tracks the
-transformer hot path: Embedding, RMSNorm/LayerNorm, QuantLinear, FusedQKV, RoPE,
-KVAppend, FlashAttention, ResidualAdd, SwiGLU/GeGLU, LMHead, Sampler.
+The planner, not the modules, now decides each layer's fusion route, and the
+acceptance bar was met: arm A output is byte-identical from before Stage 1 to
+after it — plan, census, cache, dispatch count and generated text — on both
+Qwen2.5-0.5B-Q4_K_M and q5_0.
 
-The planner — not the modules — decides fusion grouping, dispatch strategy, band
-kernel per scheme, and pool policy, subsuming the three env gates into **one
-policy object** with env override retained for A/B.
+What landed is narrower than the original sketch, and the constraints are worth
+keeping because each of them cost something to find.
 
-**Acceptance bar, non-negotiable:** reproduce today's behaviour **bit-identically
-and with identical dispatch counts** before any policy changes. Only then tune.
+**`NuePlan` is a build-time local.** Constructed in `LlamaArch.build()`, dumped,
+dropped. Never a field, never a static. `LlamaModel` gained nothing: a `Null<>`
+field holding a nue-defined class has an open corruption record, and there were
+zero such fields in nue before this. The cost is that `prefillHandle` is attached
+later by the loader, so the dump prints `graph_prefill=deferred`.
+
+**It lives in `nue.arch`, beside `LlamaArch`.** No new package, no new directory.
+`LlamaArch` does every field read and passes primitives in, so `NuePlan` reads no
+foreign field. It is never read by `Q4Matmul`, `Linear`, `GQAttention` or
+`SwiGLU`.
+
+**Policy travels as an `Int` on the receiver the kernel already holds** —
+`planHaxeMat`, `planFusedQkv`, `planFusedPair`, `planDbgShape`,
+`planDecodeSplit`. Nothing new crosses a module boundary on the hot path; the
+last step removed one cross-module static call per block per token.
+
+**Zero means unplanned, and it is load-bearing.** A module built outside the
+builder holds zero and decides its route at the call site exactly as before —
+which is why the two standalone examples needed no edit, and why the states are
+1 and 2 rather than a boolean.
+
+**New instance fields are appended, never inserted.** Importers resolve fields by
+declaration order.
+
+**`Q4Matmul` was not edited.** `matmul` / `matmulFused` / `noteFusionSite` /
+`dumpPlan` signatures are frozen, the seven private kernel gates stay
+kernel-owned, and `dumpPlan()`'s gates line remains the sole authority for them.
+
+**The route was proved, not assumed.** A verification mode compared the planned
+route against the live expression on every forward, across all 64 combinations of
+the six fusion gates on both models — 128 runs, zero mismatches — and was then
+deleted, so the shipped gate surface is exactly the pre-existing set.
+
+Cut from Stage 1 deliberately: the `forwardLayers` hot-loop rewrite, which buys
+nothing while one layer kind exists and touches an aliased in-place residual; and
+any node vocabulary that generation consumes. The plan observes and routes; it
+does not execute.
+
+The protocol that made this checkable is in PERFORMANCE.md under *Comparing two
+trees for identical behaviour*, and the harness is `nue/bench/plan/`.
 
 ### Stage 2 — Coverage via declarative arch descriptors
 

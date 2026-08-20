@@ -218,20 +218,54 @@ and keeping all eight P-cores computing (caller assist). **Prefill gets the
 parallel structure** — multi-token GEMM has rows to amortise; morsels landed
 (`RZT_PREFILL_MORSELS`), cache-blocked micro-kernels are the open follow-on.
 
-### Future: NueGraph execution plans
+### NueGraph execution plans
 
-`nue` does not currently have a model graph IR. The runtime shape is deliberately
-call-based: arch builders instantiate `Module` trees, and generation walks those
-modules directly. The compiler's semantic graphs and MIR passes are useful for
-Rayzor language optimization, and `gpu/` has a lazy elementwise DAG, but neither
-is a high-level transformer execution graph.
+Stage 1 shipped, and it is smaller than the section that used to sit here
+predicted. There is no graph IR that generation walks. What exists is a
+**build-time plan**: `nue.arch.NuePlan` records the structure and policy a model
+was actually built with, and each layer's routing decision is lowered onto the
+module the kernel already has in hand.
 
-The planned direction is a `NueGraph` execution-plan IR, not a generic ONNX
-executor. Arch builders should be able to lower a loaded model into a static
-plan once metadata, tensor dtypes, quant schemes, head counts, and cache policy
-are known. Initial node vocabulary should track the transformer hot path:
-Embedding, RMSNorm, QuantLinear, FusedQKV, RoPE, KVAppend, FlashAttention,
-ResidualAdd, SwiGLU, LMHead, and Sampler.
+The shape, and the constraints behind each choice:
+
+- **`NuePlan` is a local, not a field.** It is constructed inside
+  `LlamaArch.build()`, dumped, and dropped. `LlamaModel` gained no field for it,
+  because a `Null<>` field holding a nue-defined class has an open corruption
+  record. The cost is that `prefillHandle` is attached later by the loader, so
+  the dump says `graph_prefill=deferred`.
+- **It lives in `nue.arch`, beside its builder.** No new package, no new
+  directory. `LlamaArch` performs every field read and passes primitives in, so
+  `NuePlan` reads no foreign field.
+- **Policy travels as an `Int` on the receiver.** `GQAttention.planHaxeMat`,
+  `planFusedQkv`, `SwiGLU.planHaxeMat`, `planFusedPair`, `LlamaBlock.planDbgShape`
+  and `planDecodeSplit`. No kernel reads the plan; nothing new crosses a module
+  boundary on the hot path.
+- **Zero means unplanned, and it is load-bearing.** A module built outside the
+  builder — the two standalone examples do exactly that — holds zero and decides
+  its route at the call site exactly as before. That is why the states are
+  1 and 2 rather than a boolean, and it is why the examples needed no edit.
+- **New instance fields are appended, never inserted.** Importers resolve fields
+  by declaration order.
+- **`Q4Matmul` was not edited at all.** Its `matmul` / `matmulFused` /
+  `noteFusionSite` / `dumpPlan` signatures are frozen, the seven private kernel
+  gates stay kernel-owned, and `dumpPlan()`'s gates line remains the sole
+  authority for them.
+
+The acceptance bar was bit-identical behaviour with identical dispatch counts,
+and it was met at every step: arm A output — plan, census, cache, dispatch count
+and generated text — is byte-identical from before Stage 1 to after it. The only
+permitted deltas are the added `[nue-graph]` block and the position of the single
+`[q4-gate]` line, which moves because its print is a first-read side effect and
+the first read relocated to build time.
+
+Before the verification scaffold was removed, the planned route was compared
+against the live expression on every forward across all 64 combinations of the
+six fusion gates, on two models: 128 runs, zero mismatches.
+
+What is deliberately **not** here: no `forwardLayers` hot-loop rewrite (it buys
+nothing while one layer kind exists, and touches an aliased in-place residual),
+and no node vocabulary that generation consumes. The passes below remain future
+work.
 
 The first useful passes are:
 

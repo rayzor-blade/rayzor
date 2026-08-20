@@ -25,7 +25,7 @@ import rayzor.ds.DType;
  *   tokens [seq_len]
  *     ↓ embedTokens
  *   x [seq_len, hidden_size]
- *     ↓ blocks[0..N-1].forward     (each is a TransformerBlock)
+ *     ↓ blocks[0..N-1].forward     (each is a LlamaBlock)
  *   h [seq_len, hidden_size]
  *     ↓ outputNorm                  (RMSNorm)
  *   h' [seq_len, hidden_size]
