@@ -408,6 +408,72 @@ wasted 18 min at ~5 s of CPU and blew swap from 11.5 to 21.5 GB.
 
 ---
 
+### Comparing two trees for identical behaviour
+
+Throughput benchmarking answers "is it faster". This answers a different and
+stricter question — "did anything move at all" — and it needs its own protocol,
+because the interesting changes are the ones that must change nothing.
+
+**Pin every gate first.** `nue/bench/plan/pins.sh` exports the full list and,
+before it does, **scrubs every stray `RAYZOR_*` / `RZT_*` / `NUE_*` name in the
+environment**. `Sys.getEnvOr(name, alias)` falls back to the alias when the
+primary is unset, so a leftover `RAYZOR_HAXE_*` from an earlier session silently
+supplies a gate the pin list means to control. Two of them left unset on purpose:
+`NUE_POOL_SPINS` and `NUE_POOL_RELAX` have platform-derived defaults, and a
+literal would pin something the platform is meant to choose.
+
+**Two arms, and they answer different questions.** Arm A is `llama-chat` on the
+source path — it fixes the generated text and the dispatch counts. Arm B is the
+perplexity eval — it fixes the numerics. A change can pass one and fail the
+other. Use the source path for both: `bench.sh` with `BUNDLE=auto` runs a
+checked-in `.rzb` that is older than `target/release/rayzor`.
+
+**Compare the masked block, not the file.** `nue/bench/plan/extract.sh` pulls
+`[nue-plan]`, `[nue-graph]`, `[q4-census]`, `[kv-cache]`, `[lm_head]`, the
+dispatch count and the generated text, and strips what two identical runs
+legitimately move:
+
+- `band_ms` / `quant_ms` / per-worker `wN=` are chunk-stealing artefacts. Only
+  their sum is deterministic.
+- `[q4-gate]` is **counted, not compared**. Its print is a first-read side
+  effect, so relocating the first read moves the line without changing routing.
+  A count of 2 is a real finding — the static duplicated for a new reader — and
+  must be investigated rather than waved through.
+- Take the output with `sed -n '/^\[output\] /,$p'`, never `grep`: the generated
+  text can contain anything, including the pattern you are matching on.
+
+**Prove the instrument before trusting it.** Run arm A twice on the same tree
+and require byte-identical extracted output. If it is not identical, nothing
+downstream can be judged, and the fix is the instrument.
+
+**`2>&1` is not a capture.** Folding stderr into stdout interleaves two
+independent file descriptors, and no amount of runtime buffering makes that
+deterministic. A trace captured that way varied run to run; captured with
+`2>/dev/null` the same trace was byte-stable apart from its timing lines. Capture
+the streams separately before calling any output non-deterministic.
+
+**A debug trace is not an oracle.** `NUE_DUMP_BLOCK_SHAPES=trace` emits ~21,000
+lines and still moves by one or two under heavy machine load. `extract.sh` arm A
+is the oracle; a trace is for reading, not for gating.
+
+**Two counters that must be equal are worth more than a diff.** Chasing three
+lines out of 21,598 was settled not by the diff but by noticing that `enter` and
+`before_attn_residual` are emitted unconditionally in the same straight-line
+body, so their counts *must* match — and did not. An impossible inequality is
+lost or merged output, and you can conclude that without knowing the mechanism.
+(That one turned out to be `Sys.println` writing a line and its newline as two
+separate locked writes; fixed in the runtime.)
+
+**Other traps that have each cost a session:**
+
+- `NUE_LLAMA_SILENT_STREAM=1` suppresses the streamed text, so it needs
+  `NUE_LLAMA_DUMP_OUTPUT=1` or there is nothing to compare.
+- `NUE_FLASH_BATCH` is a **cap**, not a switch. `=1` disables batched prefill;
+  the uncapped value is `1073741824`.
+- `NUE_DUMP_TOPK` is not an oracle — it reports a sampling view, not the route.
+- Grep every arm for `LLVM upgrade failed`. A run that silently fell back to
+  Cranelift is not comparable to one that did not, and it will not say so.
+
 ## Gates and defaults
 
 Code defaults. **A plain `rayzor run` now takes the full pure-Haxe path — no
