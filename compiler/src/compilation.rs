@@ -8141,6 +8141,15 @@ impl CompilationUnit {
                         {
                             continue;
                         }
+                        // `@:move` types belong to the MIR move analysis now.
+                        // It works on bindings over the control-flow graph and
+                        // reads `@:borrow` / `@:owned` / `@:consume`, none of
+                        // which this pass knows about — so leaving it enabled
+                        // here means it contradicts the analysis that is right,
+                        // reporting a borrowed argument as consumed.
+                        if strict_q {
+                            continue;
+                        }
                         strict = strict_q;
                     }
                 }

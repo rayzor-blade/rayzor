@@ -1,0 +1,6 @@
+[project]
+name = "c18_cross_file_consume"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

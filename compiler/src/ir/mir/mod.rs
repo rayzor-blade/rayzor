@@ -532,6 +532,10 @@ pub struct HirToMirContext<'a> {
     /// Program-order counter for `move_events`, reset per function.
     move_event_order: u32,
 
+    /// Methods carrying `@:consume`: calling one ends the caller's binding on
+    /// the receiver.
+    consume_methods: BTreeSet<SymbolId>,
+
     /// Per-function parameter ownership, for the call sites that decide
     /// whether an argument ends the caller's binding.
     function_param_ownership: BTreeMap<SymbolId, Vec<crate::tast::ParamOwnership>>,
@@ -797,6 +801,30 @@ fn param_ownership_registry(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>>
 {
     PARAM_OWNERSHIP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Qualified names of `@:consume` methods, for callers that lower in another
+/// context. Missing one under-reports rather than accusing correct code, which
+/// is the safe direction — the opposite of `@:borrow`.
+static CONSUME_METHOD_NAMES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+fn consume_method_names() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    CONSUME_METHOD_NAMES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn record_consume_method_by_name(qualified: &str) {
+    if let Ok(mut m) = consume_method_names().lock() {
+        m.insert(qualified.to_string());
+    }
+}
+
+fn lookup_consume_method_by_name(qualified: &str) -> bool {
+    consume_method_names()
+        .lock()
+        .map(|m| m.contains(qualified))
+        .unwrap_or(false)
 }
 
 fn record_param_ownership_by_name(qualified: &str, owns: &[crate::tast::ParamOwnership]) {
@@ -1336,6 +1364,7 @@ impl<'a> HirToMirContext<'a> {
             move_events: Vec::new(),
             move_event_order: 0,
             move_events_func: None,
+            consume_methods: BTreeSet::new(),
             function_param_ownership: BTreeMap::new(),
             move_diag_seen: BTreeSet::new(),
             derive_shared_classes: BTreeSet::new(),
