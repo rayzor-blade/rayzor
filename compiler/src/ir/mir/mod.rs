@@ -532,6 +532,11 @@ pub struct HirToMirContext<'a> {
     /// Program-order counter for `move_events`, reset per function.
     move_event_order: u32,
 
+    /// Parameters declared `@:borrow` in the function being lowered, mapped to
+    /// themselves, plus every local that came to hold one of their values.
+    /// A borrow may be read and passed on, but must not outlive the call.
+    borrow_roots: BTreeMap<SymbolId, SymbolId>,
+
     /// Methods carrying `@:consume`: calling one ends the caller's binding on
     /// the receiver.
     consume_methods: BTreeSet<SymbolId>,
@@ -717,6 +722,7 @@ pub(crate) struct SavedLoweringState {
     move_events: Vec<moveflow::MoveEvent>,
     move_event_order: u32,
     move_events_func: Option<crate::ir::IrFunctionId>,
+    borrow_roots: BTreeMap<SymbolId, SymbolId>,
 }
 
 /// Process-global class field layouts, keyed by NAME.
@@ -1364,6 +1370,7 @@ impl<'a> HirToMirContext<'a> {
             move_events: Vec::new(),
             move_event_order: 0,
             move_events_func: None,
+            borrow_roots: BTreeMap::new(),
             consume_methods: BTreeSet::new(),
             function_param_ownership: BTreeMap::new(),
             move_diag_seen: BTreeSet::new(),

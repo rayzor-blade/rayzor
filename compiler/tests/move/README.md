@@ -3,8 +3,9 @@
 What the ownership checker must do, written as cases rather than prose. Each
 file declares its expectation in `check.sh`:
 
-- `ERROR`  — compilation must fail with a move diagnostic
-- `SILENT` — must compile with no move diagnostic at all
+- `ERROR`  — compilation must fail with an ownership diagnostic (E0382 use
+  after move, E0383 escaping borrow)
+- `SILENT` — must compile with no ownership diagnostic at all
 
 Run with `./check.sh` (needs `target/release/rayzor` built).
 
@@ -34,6 +35,11 @@ fires, not about what the program prints.
 | `c18_cross_file_consume` | ERROR | the `@:consume` is declared in another module |
 | `c19_void_call` | ERROR | a call in statement position, whose helper returns `Void` |
 | `c20_void_consume` | ERROR | `s.close();` — how a consuming call is actually written |
+| `c21_borrow_returned` | ERROR | a borrow handed back outlives the call it was lent for |
+| `c22_borrow_returned_alias` | ERROR | the same, laundered through a local |
+| `c23_borrow_field_read` | SILENT | `return r.v` reads a field; it does not return the borrow |
+| `c24_borrow_stored` | ERROR | a borrow written into a field |
+| `c25_borrow_captured` | ERROR | a borrow captured by a closure |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.

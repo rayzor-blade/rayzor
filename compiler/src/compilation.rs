@@ -6706,7 +6706,10 @@ impl CompilationUnit {
             .iter()
             .filter(|d| {
                 d.severity == diagnostics::DiagnosticSeverity::Error
-                    && matches!(d.code.as_deref(), Some("E0382") | Some("E0300"))
+                    && matches!(
+                        d.code.as_deref(),
+                        Some("E0382") | Some("E0383") | Some("E0300")
+                    )
             })
             .collect();
         if !fatal.is_empty() {
@@ -6715,10 +6718,7 @@ impl CompilationUnit {
             // as a bare error line only doubles it.
             let first = fatal[0];
             return Err(vec![CompilationError {
-                message: format!(
-                    "ownership check failed: {} use-after-move error(s)",
-                    fatal.len()
-                ),
+                message: format!("ownership check failed: {} error(s)", fatal.len()),
                 location: SourceLocation {
                     file_id: first.span.file_id.as_usize() as u32,
                     byte_offset: first.span.start.byte_offset as u32,

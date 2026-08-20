@@ -404,6 +404,13 @@ impl<'a> HirToMirContext<'a> {
                                     init_expr.source_location,
                                 );
                             }
+                            if let (
+                                HirPattern::Variable { symbol: dst, .. },
+                                HirExprKind::Variable { symbol: src, .. },
+                            ) = (pattern, &init_expr.kind)
+                            {
+                                self.propagate_borrow(*dst, *src);
+                            }
                             if is_move_class {
                                 if let HirPattern::Variable { symbol, .. } = pattern {
                                     self.enroll_move_symbol(*symbol);
@@ -596,6 +603,20 @@ impl<'a> HirToMirContext<'a> {
                 }
                 let rhs_value = self.lower_expression(rhs);
                 self.object_literal_target_ty = prev_anon_target;
+
+                // Storing a borrow in a field keeps it alive past the call that
+                // lent it. An assignment to a LOCAL is not an escape - it is
+                // just another name - so only field and index targets count.
+                if !matches!(lhs, HirLValue::Variable(_)) {
+                    if let HirExprKind::Variable { symbol, .. } = &rhs.kind {
+                        self.check_borrow_escape(*symbol, "is stored", rhs.source_location);
+                    }
+                }
+                if let (HirLValue::Variable(dst), HirExprKind::Variable { symbol: src, .. }) =
+                    (lhs, &rhs.kind)
+                {
+                    self.propagate_borrow(*dst, *src);
+                }
 
                 // Move-flow: the RHS consumes a binding, the LHS starts a new
                 // one. A plain reassignment is therefore what revives a moved
@@ -984,6 +1005,15 @@ impl<'a> HirToMirContext<'a> {
                     HirExprKind::Variable { symbol, .. } => Some(*symbol),
                     _ => None,
                 });
+                // A borrow may be read and passed on, but returning it hands the
+                // caller a reference that outlives the call it was lent for.
+                if let Some(sym) = returned_symbol {
+                    let loc = value
+                        .as_ref()
+                        .map(|e| e.source_location)
+                        .unwrap_or_else(SourceLocation::unknown);
+                    self.check_borrow_escape(sym, "is returned", loc);
+                }
                 let ret_value = value.as_ref().and_then(|e| {
                     debug!(
                         "[Return]: Lowering return expression, expr kind: {:?}",
