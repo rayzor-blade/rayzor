@@ -1066,7 +1066,7 @@ fn build_simd4f_insert(builder: &mut MirBuilder) {
         .begin_function("SIMD4f_insert")
         .param("self_val", vec_ty.clone())
         .param("lane", i32_ty)
-        .param("value", f32_ty)
+        .param("value", f32_ty.clone())
         .returns(vec_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -1076,9 +1076,40 @@ fn build_simd4f_insert(builder: &mut MirBuilder) {
     builder.set_insert_point(entry);
 
     let self_val = builder.get_param(0);
+    let lane = builder.get_param(1);
     let value = builder.get_param(2);
-    // Static lane 0 for now (same limitation as extract)
-    let result = builder.vector_insert(self_val, value, 0, vec_ty);
+
+    // VectorInsert needs a compile-time-constant lane, and `lane` is a runtime
+    // value. Mirror the select chain `extract` uses: decide each lane's scalar
+    // branchlessly — the incoming value where the index matches, the original
+    // otherwise — then reassemble with four constant inserts. Choosing between
+    // f32 scalars keeps it to the select that already works everywhere,
+    // including wasm, rather than needing a vector select.
+    // Hard-coded lane 0 before this, so `v.set(i, x)` wrote lane 0 whatever `i`
+    // was, silently.
+    let e0 = builder.vector_extract(self_val, 0, f32_ty.clone());
+    let e1 = builder.vector_extract(self_val, 1, f32_ty.clone());
+    let e2 = builder.vector_extract(self_val, 2, f32_ty.clone());
+    let e3 = builder.vector_extract(self_val, 3, f32_ty.clone());
+
+    let c0 = builder.const_i32(0);
+    let c1 = builder.const_i32(1);
+    let c2 = builder.const_i32(2);
+    let c3 = builder.const_i32(3);
+
+    let is0 = builder.icmp(CompareOp::Eq, lane, c0, IrType::Bool);
+    let n0 = builder.select(is0, value, e0, f32_ty.clone());
+    let is1 = builder.icmp(CompareOp::Eq, lane, c1, IrType::Bool);
+    let n1 = builder.select(is1, value, e1, f32_ty.clone());
+    let is2 = builder.icmp(CompareOp::Eq, lane, c2, IrType::Bool);
+    let n2 = builder.select(is2, value, e2, f32_ty.clone());
+    let is3 = builder.icmp(CompareOp::Eq, lane, c3, IrType::Bool);
+    let n3 = builder.select(is3, value, e3, f32_ty.clone());
+
+    let v0 = builder.vector_insert(self_val, n0, 0, vec_ty.clone());
+    let v1 = builder.vector_insert(v0, n1, 1, vec_ty.clone());
+    let v2 = builder.vector_insert(v1, n2, 2, vec_ty.clone());
+    let result = builder.vector_insert(v2, n3, 3, vec_ty);
     builder.ret(Some(result));
 }
 
@@ -1220,7 +1251,7 @@ fn build_simd_i32_insert(builder: &mut MirBuilder, name: &str, lanes: usize) {
         .begin_function(name)
         .param("self_val", vec_ty.clone())
         .param("lane", i32_ty.clone())
-        .param("value", i32_ty)
+        .param("value", i32_ty.clone())
         .returns(vec_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -1230,8 +1261,23 @@ fn build_simd_i32_insert(builder: &mut MirBuilder, name: &str, lanes: usize) {
     builder.set_insert_point(entry);
 
     let self_val = builder.get_param(0);
+    let lane = builder.get_param(1);
     let value = builder.get_param(2);
-    let result = builder.vector_insert(self_val, value, 0, vec_ty);
+
+    // Same shape as the f32 insert: VectorInsert wants a constant lane, so pick
+    // each lane's scalar branchlessly and reassemble. Was hard-coded to lane 0,
+    // which made `v.set(i, x)` write lane 0 for every `i`, silently.
+    let originals: Vec<_> = (0..lanes)
+        .map(|i| builder.vector_extract(self_val, i as u8, i32_ty.clone()))
+        .collect();
+
+    let mut result = self_val;
+    for (i, original) in originals.into_iter().enumerate() {
+        let idx = builder.const_i32(i as i32);
+        let matches = builder.icmp(CompareOp::Eq, lane, idx, IrType::Bool);
+        let chosen = builder.select(matches, value, original, i32_ty.clone());
+        result = builder.vector_insert(result, chosen, i as u8, vec_ty.clone());
+    }
     builder.ret(Some(result));
 }
 
