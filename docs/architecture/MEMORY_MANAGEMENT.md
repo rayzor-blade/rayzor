@@ -246,7 +246,12 @@ ownership machinery (`MarkMoved` / `CheckLive`) predates it and is now redundant
   constructor parameter is ignored.
 - **Receiver escape.** E0383 covers parameters; a receiver escaping its method is silent.
 - **Lambda bodies.** A capture is checked at the point of capture, in the enclosing
-  function. The body lowers into its own graph with its own recorder.
+  function. The body lowers into its own graph with its own recorder, so an acquire or
+  a move *inside* a closure is not seen by the frame that owns the value.
+- **Values reached through a deref.** `@:autoDeref` rewrites `h.close()` to
+  `h.get().close()`, and a receiver that is a call result names no binding — so a
+  `@:consume` reached through a wrapper consumes nothing the analysis can record. This
+  is the place-domain limitation above, seen from the other side.
 
 ### Oracle
 
@@ -261,6 +266,125 @@ Two habits that the cases exist to enforce:
   control that removes the annotation and must flip it to `ERROR`.
 - **A helper's return type is part of the case.** All eighteen cases once used an
   `Int`-returning helper and reported 18/18 while void calls were entirely unchecked.
+
+## Planned: `RefMut<T>`, a scoped exclusive borrow
+
+**Status: designed, not built. The design below has been measured against the
+compiler as it stands, and the prerequisites are larger than the feature.** Nothing
+in this section is implemented; it is written down so the cost is visible before
+anyone starts.
+
+### What it is for
+
+Everything above answers *who owns a value after a call*. None of it answers
+*may anyone else touch it while I hold it* — exclusivity. `@:move` gives a unique
+**binding**, which is adjacent but not the same: once a value is inside a structure
+there is no way to take a temporary exclusive view and give it back.
+
+`RefMut<T>` is that view. While one is live, the owner may not be read, written or
+borrowed again; when it goes out of scope, the owner comes back.
+
+### Why it must be a class
+
+`RefMut<T>` cannot join `Ptr` / `Ref` / `Box` in the pointer-abstract family.
+`resolve_receiver_class_symbol` (`compiler/src/ir/mir/resolve/classes.rs`) matches
+`Class`, `TypeAlias` and `GenericInstance`, and breaks on everything else — there is
+no `Abstract` arm, so `@:move` on an abstract is **inert** and a handle written as an
+extern abstract would carry no ownership checking whatsoever.
+
+It also cannot be metadata. Haxe permits no annotation inside a function body, so a
+statement about a **local** binding — which is exactly what a borrow handle is — can
+only be carried by its type.
+
+### The mechanism, and what already works
+
+Acquiring is a move: `new RefMut(c)` transfers `c` into the handle, because every
+constructor argument is a move. That much needs no compiler change, and it already
+gives real exclusivity for a local owner:
+
+| shape | today |
+| --- | --- |
+| two acquires of one owner | error |
+| reading the owner while borrowed | error |
+| mutating the owner while borrowed, including through a method | error |
+| duplicating the handle (`var h2 = h1`) | error, when the *handle* is also `@:move` |
+
+The annotation contract is precise and not obvious: **`@:move` on the owner class is
+what arms the acquire check**, and `@:move` on the handle is separately needed or
+handles duplicate by plain assignment. `@:safety` is not the gate — it is inert.
+
+What is missing is the **release**. MoveFlow revives a binding only on reassignment,
+so today an acquired owner never comes back: block exit, loop iteration and an
+explicit `release()` all leave it dead. Every realistic usage shape is currently a
+hard error, which makes release the critical path rather than a refinement.
+
+### Six prerequisites, each verified
+
+**1. Release has no hook.** `exit_drop_scope` is the wrong place: `if`/`else` arms,
+bare nested blocks, switch arms and function bodies push no drop scope at all, and
+where one does fire (a loop-body tail) it lands in the merge block after the handle's
+real scope has ended. Release needs a new scope notion in lowering, and it must emit
+one `Bind` per live handle, ordered outer-before-inner, and survive `break`,
+`continue`, early `return` and `throw`.
+
+**2. The accessor is the exclusivity hole.** `@:autoDeref` — the thing that would make
+a class handle ergonomic — requires a `get():T` returning the owner *by value*. That
+accessor hands back a second unrestricted owner, and the new binding is a fresh
+tracked symbol that the analysis reads as legitimately owned. Making `get()` private
+does not close it, because privacy is not enforced. Either `@:autoDeref` lowers
+`h.field` to a direct projection on the handle's stored pointer so the owner is never
+materialised as a bindable value, or the design gives up ergonomics.
+
+**3. Acquiring from a field is silent, not an error.** MoveFlow matches only a literal
+variable, so `new RefMut(o.cell)` records nothing and two such handles coexist happily.
+The design calls for a hard error there; it does not exist, and the alternative —
+copying the field to a local first — silently drops the guarantee.
+
+**4. `@:shared` owners make it a no-op.** Move tracking is suppressed for `@:shared`
+classes, so a handle over one checks nothing. That family includes the reference-counted
+tensor types — the aliasing-prone values a scoped exclusive borrow is most wanted for.
+Silence there is worse than absence, so an acquire over a `@:shared` owner must be
+refused at the acquire site.
+
+**5. The handle costs an allocation, and leaks the owner.** The handle is a real
+16-byte heap allocation per acquire. Scalar replacement erases it — but declines the
+moment the handle pointer is an argument to a call the inliner refused, which is
+exactly the lending idiom. Worse, the handle's constructor stores the owner pointer
+into a field, and `insert_free` reads that store as an escape, so it stops freeing the
+**owner**. Measured over 4,000,000 acquires handed to a non-inlinable callee: 66 MB of
+owners never freed, growth linear in acquire count, no diagnostic.
+
+The mitigation is measured and must become the documented rule: **lend the deref'd
+value, never the handle.** `kernel(h.get(), i)` allocates and frees exactly as the
+handle-free control does; `kernel(h, i)` leaks.
+
+**6. Disjoint borrows are impossible.** Borrowing two fields of one object
+independently is the headline reason to want a borrow checker, and MoveFlow has no
+place domain — `o.k` and `o.v` are indistinguishable from `o`. The design's two
+outcomes for that case are a hard error or an unchecked local copy. Neither is the
+feature a user came for.
+
+### Lowering
+
+Compile-time only, if the prerequisites are met. The handle holds the owner's pointer
+and nothing else; acquire and release emit no instructions, exactly as the rest of the
+ownership analysis does. Under prerequisite 5 that is true only where scalar
+replacement fires, so "zero cost" is a property of the *usage rule*, not of the design.
+
+The runtime ownership opcodes (`MarkMoved` / `CheckLive`) are not part of this. They
+are emitted at one site, discarded by the LLVM backend and enforced only by Cranelift,
+and a release that binds in MoveFlow would not clear the runtime slot. If a dynamic
+check is ever wanted — the `RefCell` shape, for the cases a static rule cannot reach —
+it should be built deliberately on that slot rather than inherited by accident.
+
+### Recommendation
+
+Prerequisites 1, 2 and 5 are each comparable in size to the rest of the ownership
+model, and 6 is the one users would actually ask for. A worthwhile first step is
+narrower than the feature: **an oracle that pins the acquire behaviour that already
+works**, plus refusals at the acquire site for the cases that are silently wrong today
+(a field owner, a `@:shared` owner). That converts three silent holes into diagnostics
+without committing to release, ergonomics or a place domain.
 
 ## The `semantic_graph` analyses
 
