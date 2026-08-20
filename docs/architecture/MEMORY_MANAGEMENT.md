@@ -240,8 +240,10 @@ ownership machinery (`MarkMoved` / `CheckLive`) predates it and is now redundant
 
 ### What it does not see
 
-- **Places.** The analysis is keyed on `SymbolId` and matches only a literal variable,
-  so an owner held in a **field** (`h.cell`) is invisible.
+- **Places.** The analysis is keyed on `SymbolId`, and a field is not a binding. Rather
+  than track one silently and wrongly, taking a `@:move` value **out of** a field is
+  refused (E0384). Borrowing a field, reading through one, and calling a method on one
+  are all unaffected — what is refused is carrying the value away.
 - **Constructor parameters.** Every constructor argument is a move; `@:borrow` on a
   constructor parameter is ignored.
 - **Receiver escape.** E0383 covers parameters; a receiver escaping its method is silent.
@@ -335,10 +337,10 @@ does not close it, because privacy is not enforced. Either `@:autoDeref` lowers
 `h.field` to a direct projection on the handle's stored pointer so the owner is never
 materialised as a bindable value, or the design gives up ergonomics.
 
-**3. Acquiring from a field is silent, not an error.** MoveFlow matches only a literal
-variable, so `new RefMut(o.cell)` records nothing and two such handles coexist happily.
-The design calls for a hard error there; it does not exist, and the alternative —
-copying the field to a local first — silently drops the guarantee.
+**3. Acquiring from a field — CLOSED.** `new RefMut(o.cell)` used to record nothing, so
+two such handles coexisted happily. Taking a `@:move` value out of a field is now
+refused outright (E0384), which makes the field acquire a diagnostic rather than a
+silent hole. Copying the field to a local first is refused by the same rule.
 
 **4. `@:shared` owners make it a no-op.** Move tracking is suppressed for `@:shared`
 classes, so a handle over one checks nothing. That family includes the reference-counted
@@ -380,11 +382,14 @@ it should be built deliberately on that slot rather than inherited by accident.
 ### Recommendation
 
 Prerequisites 1, 2 and 5 are each comparable in size to the rest of the ownership
-model, and 6 is the one users would actually ask for. A worthwhile first step is
-narrower than the feature: **an oracle that pins the acquire behaviour that already
-works**, plus refusals at the acquire site for the cases that are silently wrong today
-(a field owner, a `@:shared` owner). That converts three silent holes into diagnostics
-without committing to release, ergonomics or a place domain.
+model, and 6 is the one users would actually ask for.
+
+The first step has been taken, and it was narrower than the feature: the acquire
+behaviour that already works is pinned by `c32` and `c33`, and the field case that was
+silently wrong is now a refusal (prerequisite 3). What remains before any of this is a
+feature is release (1), the accessor (2), the allocation and owner leak (5), and a
+decision about `@:shared` owners (4) — for which the refusal has to happen at an acquire
+site that does not exist yet, since there is no `RefMut` type to hang it on.
 
 ## The `semantic_graph` analyses
 

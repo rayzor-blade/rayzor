@@ -4,7 +4,7 @@ What the ownership checker must do, written as cases rather than prose. Each
 file declares its expectation in `check.sh`:
 
 - `ERROR`  — compilation must fail with an ownership diagnostic (E0382 use
-  after move, E0383 escaping borrow)
+  after move, E0383 escaping borrow, E0384 move out of a field)
 - `SILENT` — must compile with no ownership diagnostic at all
 
 Run with `./check.sh` (needs `target/release/rayzor` built).
@@ -43,6 +43,11 @@ fires, not about what the program prints.
 | `c26_borrow_laundered_ctor` | ERROR | a borrow wrapped in a constructor and handed back |
 | `c27_borrow_laundered_local` | ERROR | the same, bound to a local first |
 | `c28_borrow_arg_passthrough` | SILENT | returning a call's *result* is not returning the borrow |
+| `c29_move_out_of_field` | ERROR | a field has no binding, so taking the value out is refused rather than tracked |
+| `c30_borrow_out_of_field` | SILENT | the control for `c29` — borrowing a field takes nothing away |
+| `c31_field_method_receiver` | SILENT | calling through a field is the supported way to use one |
+| `c32_handle_double_acquire` | ERROR | a second handle over a value one handle already holds |
+| `c33_owner_read_while_held` | ERROR | reading the owner while a handle holds it |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.

@@ -6708,7 +6708,7 @@ impl CompilationUnit {
                 d.severity == diagnostics::DiagnosticSeverity::Error
                     && matches!(
                         d.code.as_deref(),
-                        Some("E0382") | Some("E0383") | Some("E0300")
+                        Some("E0382") | Some("E0383") | Some("E0384") | Some("E0300")
                     )
             })
             .collect();
