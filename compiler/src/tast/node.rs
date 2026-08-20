@@ -206,8 +206,41 @@ pub struct TypedParameter {
     /// Parameter mutability
     pub mutability: Mutability,
 
+    /// Whether the callee takes the argument's ownership.
+    pub ownership: ParamOwnership,
+
     /// Source location
     pub source_location: SourceLocation,
+}
+
+/// What a call does to the caller's binding when a value is passed here.
+///
+/// Only meaningful for types under move semantics; for everything else the
+/// question does not arise. Written at the parameter with `@:borrow` /
+/// `@:owned`, so a signature says what happens rather than leaving the caller
+/// to infer it from argument position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamOwnership {
+    /// Unannotated. A by-value argument transfers ownership, which is what
+    /// makes passing a `@:move` value end the caller's binding.
+    #[default]
+    Owned,
+    /// The callee only observes the value; the caller keeps its binding.
+    Borrowed,
+}
+
+impl ParamOwnership {
+    /// Read `@:borrow` / `@:owned` off a parameter's metadata.
+    pub fn from_metadata(meta: &[parser::Metadata]) -> Self {
+        for m in meta {
+            match m.name.trim_start_matches(':') {
+                "borrow" => return ParamOwnership::Borrowed,
+                "owned" => return ParamOwnership::Owned,
+                _ => {}
+            }
+        }
+        ParamOwnership::Owned
+    }
 }
 
 /// Function effects information

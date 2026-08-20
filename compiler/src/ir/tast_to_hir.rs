@@ -3487,6 +3487,7 @@ impl<'a> TastToHirContext<'a> {
                 .map(|e| self.lower_expression(e)),
             is_optional: param.is_optional,
             is_rest: false, // TODO: Extract from parameter metadata
+            ownership: param.ownership,
         }
     }
 

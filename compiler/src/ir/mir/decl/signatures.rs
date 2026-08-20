@@ -30,6 +30,7 @@ impl<'a> HirToMirContext<'a> {
         hir_func: &HirFunction,
         this_type: Option<TypeId>,
     ) {
+        self.record_param_ownership(symbol_id, hir_func);
         let mut signature = self.build_function_signature(hir_func);
 
         // 'this' is always a pointer to the instance, generic parameters or not.
@@ -119,6 +120,7 @@ impl<'a> HirToMirContext<'a> {
         this_type: Option<TypeId>,
         class_type_params: &[HirTypeParam],
     ) {
+        self.record_param_ownership(symbol_id, hir_func);
         let mut signature =
             self.build_function_signature_with_class_type_params(hir_func, class_type_params);
 

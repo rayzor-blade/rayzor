@@ -217,6 +217,7 @@ fn test_phi_node_state_merging(
             is_optional: false,
             default_value: None,
             mutability: Mutability::Immutable,
+            ownership: Default::default(),
             source_location: SourceLocation::new(0, 1, 17, 21),
         }],
         return_type: TypeId::from_raw(1),

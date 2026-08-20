@@ -18,6 +18,11 @@ expect_for() {
     c7_field_read)    echo ERROR ;;
     c8_method_receiver) echo SILENT ;;
     c9_branch_join)   echo ERROR ;;
+    c10_borrow_param) echo SILENT ;;
+    c11_borrow_after_move) echo ERROR ;;
+    c12_capture_after_move) echo ERROR ;;
+    c13_capture_before_move) echo SILENT ;;
+    c14_cross_file_borrow) echo SILENT ;;
     *)                echo UNKNOWN ;;
   esac
 }

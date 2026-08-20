@@ -45,9 +45,9 @@ pub use namespace::{
     ImportEntry, ImportResolver, NamespaceResolver, PackageId, PackageInfo, QualifiedPath,
 };
 pub use node::{
-    AsyncKind, DerivedTrait, FunctionEffects, MemoryAnnotation, MemoryEffects, PropertyAccessInfo,
-    PropertyAccessor, ResourceEffects, SafetyMode, TypedClass, TypedEnum, TypedExpression,
-    TypedExpressionKind, TypedFile, TypedInterface, TypedStatement,
+    AsyncKind, DerivedTrait, FunctionEffects, MemoryAnnotation, MemoryEffects, ParamOwnership,
+    PropertyAccessInfo, PropertyAccessor, ResourceEffects, SafetyMode, TypedClass, TypedEnum,
+    TypedExpression, TypedExpressionKind, TypedFile, TypedInterface, TypedStatement,
 };
 pub use package_access::{AccessPermission, PackageAccessContext, PackageAccessValidator};
 pub use scopes::*;

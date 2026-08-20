@@ -654,6 +654,10 @@ pub struct HirParam {
     pub default: Option<HirExpr>,
     pub is_optional: bool,
     pub is_rest: bool, // For varargs
+    /// Whether a call transfers the argument's ownership here. Carried from
+    /// the parameter's `@:borrow` / `@:owned`; the move analysis reads it at
+    /// the call site so a signature, not argument position, decides.
+    pub ownership: crate::tast::ParamOwnership,
 }
 
 #[derive(Debug, Clone)]

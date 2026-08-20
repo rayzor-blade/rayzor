@@ -330,6 +330,7 @@ mod lambda_tests {
             is_optional: false,
             default_value: None,
             mutability: Mutability::Immutable,
+            ownership: Default::default(),
             source_location: SourceLocation::unknown(),
         };
 
@@ -420,6 +421,7 @@ mod lambda_tests {
             is_optional: false,
             default_value: None,
             mutability: Mutability::Immutable,
+            ownership: Default::default(),
             source_location: SourceLocation::unknown(),
         };
 

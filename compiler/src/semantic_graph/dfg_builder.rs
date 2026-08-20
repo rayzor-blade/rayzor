@@ -3837,6 +3837,7 @@ mod tests {
                 default_value: None,
                 is_optional: false,
                 // is_variadic: false,
+                ownership: Default::default(),
                 source_location: SourceLocation::unknown(),
                 mutability: Mutability::Mutable,
             }],

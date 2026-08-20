@@ -23,15 +23,23 @@ fires, not about what the program prints.
 | `c7_field_read` | ERROR | reading a field of a moved binding is still a use |
 | `c8_method_receiver` | SILENT | `a.f()` observes the receiver, it does not consume it |
 | `c9_branch_join` | ERROR | moved on one branch, read after the two rejoin |
+| `c10_borrow_param` | SILENT | the parameter says `@:borrow`, so the call does not consume |
+| `c11_borrow_after_move` | ERROR | a borrow of an already-moved value is still a use |
+| `c12_capture_after_move` | ERROR | a closure captures a binding that was moved |
+| `c13_capture_before_move` | SILENT | captured while still live |
+| `c14_cross_file_borrow` | SILENT | the `@:borrow` is declared in another module |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.
 The silent cases are what stop the checker being made to fire by making it
 fire on everything.
 
-`c6` is a directory rather than a file: an imported class only reaches MIR
-lowering in the importing compilation when the project declares a class-path,
-so the case carries its own `rayzor.toml`.
+`c6` and `c14` are directories rather than files: an imported declaration only
+reaches MIR lowering in the importing compilation when the project declares a
+class-path, so those cases carry their own `rayzor.toml`. Both have a control —
+removing the annotation must flip the result — because a case that is silent
+for the wrong reason passes just as well as one that is silent for the right
+one.
 
 Every case runs cold. A warm cache skips MIR lowering, and with it the
 analysis, so a second run of a failing case would score the cache.

@@ -219,6 +219,52 @@ impl HirToMirContext<'_> {
         }
     }
 
+    /// Publish a function's parameter ownership, by SymbolId for this context
+    /// and by qualified name for consumers that lower in another one.
+    ///
+    /// Recorded when the signature is registered, which happens for every
+    /// function before any body lowers, so a call site always finds a
+    /// complete entry for a callee in the same module.
+    pub(crate) fn record_param_ownership(
+        &mut self,
+        symbol_id: SymbolId,
+        hir_func: &crate::ir::hir::HirFunction,
+    ) {
+        if hir_func.params.is_empty() {
+            return;
+        }
+        let owns: Vec<crate::tast::ParamOwnership> =
+            hir_func.params.iter().map(|p| p.ownership).collect();
+        if let Some(qualified) = self
+            .symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))
+        {
+            super::record_param_ownership_by_name(qualified, &owns);
+        }
+        self.function_param_ownership.insert(symbol_id, owns);
+    }
+
+    /// Ownership of the callee's parameters, or None when the callee is not
+    /// known — an indirect call through a function value, say. Unknown means
+    /// the positional default applies, which is what the analysis did before
+    /// signatures could say anything.
+    pub(crate) fn callee_param_ownership(
+        &self,
+        callee: SymbolId,
+    ) -> Option<Vec<crate::tast::ParamOwnership>> {
+        if let Some(owns) = self.function_param_ownership.get(&callee) {
+            return Some(owns.clone());
+        }
+        let qualified = self
+            .symbol_table
+            .get_symbol(callee)
+            .and_then(|s| s.qualified_name)
+            .and_then(|q| self.string_interner.get(q))?;
+        super::lookup_param_ownership_by_name(qualified)
+    }
+
     pub(crate) fn record_move_event(
         &mut self,
         kind: MoveEventKind,

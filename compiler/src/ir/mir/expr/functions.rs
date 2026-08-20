@@ -62,6 +62,7 @@ impl<'a> HirToMirContext<'a> {
             .map(|b| b.statements.len())
             .unwrap_or(0);
 
+        self.record_param_ownership(symbol_id, hir_func);
         let signature = self.build_function_signature(hir_func);
 
         let func_name = self
