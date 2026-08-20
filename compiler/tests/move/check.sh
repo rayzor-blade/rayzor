@@ -27,6 +27,8 @@ expect_for() {
     c16_consume_last) echo SILENT ;;
     c17_consume_borrowed_param) echo SILENT ;;
     c18_cross_file_consume) echo ERROR ;;
+    c19_void_call)    echo ERROR ;;
+    c20_void_consume) echo ERROR ;;
     *)                echo UNKNOWN ;;
   esac
 }

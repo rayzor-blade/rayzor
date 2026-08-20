@@ -28,9 +28,15 @@ impl<'a> HirToMirContext<'a> {
     /// this, stdlib calls like `array_push` store a raw class pointer and
     /// subsequent interface dispatch on reads breaks.
     pub(crate) fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
-        let result = self.lower_expression_inner(expr)?;
+        // Recorded before the early return, not after. A call returning Void
+        // lowers to `None` (builder.rs: a void call has no destination
+        // register), so a `?` here would drop every event for `f(a);` in
+        // statement position — which is how a consuming call is usually
+        // written — while `var x = f(a);` was checked.
+        let lowered = self.lower_expression_inner(expr);
         self.record_argument_moves(expr);
         self.record_capture_reads(expr);
+        let result = lowered?;
         // Fires only when expr.ty IS an interface AND `kind` reveals an
         // underlying class. Interface-typed variables and Let/Cast results
         // yield no class here, so an already-wrapped value is never wrapped

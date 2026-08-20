@@ -32,6 +32,8 @@ fires, not about what the program prints.
 | `c16_consume_last` | SILENT | nothing follows the consuming call |
 | `c17_consume_borrowed_param` | SILENT | a consumed receiver shifts the declared parameters by one |
 | `c18_cross_file_consume` | ERROR | the `@:consume` is declared in another module |
+| `c19_void_call` | ERROR | a call in statement position, whose helper returns `Void` |
+| `c20_void_consume` | ERROR | `s.close();` — how a consuming call is actually written |
 
 `c2`, `c4` and `c8` need branch, reassignment and receiver awareness to stay
 silent for the right reason; a checker that detects nothing also passes them.
@@ -44,6 +46,12 @@ class-path, so those cases carry their own `rayzor.toml`. Both have a control �
 removing the annotation must flip the result — because a case that is silent
 for the wrong reason passes just as well as one that is silent for the right
 one.
+
+A helper's RETURN TYPE is part of the case. A void call lowers to no
+register, so a checker can be blind to `f(a);` while catching `var x = f(a);`.
+Cases 1-18 all returned `Int` and 18/18 passed while exactly that hole was
+open; `c19`/`c20` exist because a green oracle is only as good as the shapes
+it contains.
 
 Every case runs cold. A warm cache skips MIR lowering, and with it the
 analysis, so a second run of a failing case would score the cache.
