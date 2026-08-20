@@ -622,7 +622,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         inkwell::values::FloatValue<'ctx>,
         inkwell::values::FloatValue<'ctx>,
     )> {
-        if std::env::var("RAYZOR_NO_FMA").is_ok() {
+        if crate::codegen::instruction_lowering::fma_disabled() {
             return None;
         }
         let inst = value.as_instruction_value()?;

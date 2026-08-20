@@ -1065,7 +1065,7 @@ impl CraneliftBackend {
     /// through memory (store/load), since SRA + CopyProp can expose fmul results
     /// across block boundaries that were previously hidden by memory operations.
     fn try_extract_fmul(builder: &FunctionBuilder, value: Value) -> Option<(Value, Value)> {
-        if std::env::var("RAYZOR_NO_FMA").is_ok() {
+        if crate::codegen::instruction_lowering::fma_disabled() {
             return None;
         }
         use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
@@ -1114,5 +1114,19 @@ impl TypeProperties for IrType {
 
     fn is_signed(&self) -> bool {
         matches!(self, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64)
+    }
+}
+
+/// Whether FMA contraction is switched off.
+///
+/// Truthiness, not mere presence: `RAYZOR_NO_FMA=0` used to DISABLE fusion,
+/// because the check was `env::var(..).is_ok()` and any value satisfied it —
+/// including `0`, `false` and the empty string. Every other gate in the tree
+/// reads `0`/``/`false` as off, so this one silently did the opposite of what
+/// it was asked.
+pub(crate) fn fma_disabled() -> bool {
+    match std::env::var("RAYZOR_NO_FMA") {
+        Ok(v) => !matches!(v.as_str(), "" | "0" | "false"),
+        Err(_) => false,
     }
 }
