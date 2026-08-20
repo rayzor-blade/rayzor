@@ -532,6 +532,10 @@ pub struct HirToMirContext<'a> {
     /// Program-order counter for `move_events`, reset per function.
     move_event_order: u32,
 
+    /// Per-function parameter ownership, for the call sites that decide
+    /// whether an argument ends the caller's binding.
+    function_param_ownership: BTreeMap<SymbolId, Vec<crate::tast::ParamOwnership>>,
+
     /// The function `move_events` were recorded for. Lowering is interrupted
     /// mid-function to emit forward-declaration stubs, which finish a function
     /// that is not the one being recorded; the analysis must not fire there and
@@ -779,6 +783,33 @@ fn record_move_class(qualified: Option<&str>, bare: &str, is_move: bool) {
             _ => {}
         }
     }
+}
+
+/// Parameter ownership by the callee's qualified name. A callee lowered in
+/// another context has a different SymbolId here, and missing its `@:borrow`
+/// would turn correct code into a use-after-move report — a false positive,
+/// which is worse than the error it would be reporting.
+static PARAM_OWNERSHIP: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>>,
+> = std::sync::OnceLock::new();
+
+fn param_ownership_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>>
+{
+    PARAM_OWNERSHIP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_param_ownership_by_name(qualified: &str, owns: &[crate::tast::ParamOwnership]) {
+    if let Ok(mut m) = param_ownership_registry().lock() {
+        m.insert(qualified.to_string(), owns.to_vec());
+    }
+}
+
+fn lookup_param_ownership_by_name(qualified: &str) -> Option<Vec<crate::tast::ParamOwnership>> {
+    param_ownership_registry()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(qualified).cloned())
 }
 
 /// Whether a class name denotes a `@:move` class. An ambiguous bare name
@@ -1305,6 +1336,7 @@ impl<'a> HirToMirContext<'a> {
             move_events: Vec::new(),
             move_event_order: 0,
             move_events_func: None,
+            function_param_ownership: BTreeMap::new(),
             move_diag_seen: BTreeSet::new(),
             derive_shared_classes: BTreeSet::new(),
             strict_move_locals: BTreeSet::new(),

@@ -5925,6 +5925,7 @@ impl<'a> AstLowering<'a> {
             is_optional: parameter.optional,
             default_value,
             mutability: crate::tast::Mutability::Immutable,
+            ownership: crate::tast::ParamOwnership::from_metadata(&parameter.meta),
             source_location: self.context.create_location_from_span(parameter.span),
         })
     }
@@ -9345,6 +9346,7 @@ impl<'a> AstLowering<'a> {
                         is_optional: false,
                         default_value: None,
                         mutability: crate::tast::symbols::Mutability::Immutable,
+                        ownership: Default::default(),
                         source_location: self.context.span_to_location(&expression.span),
                     });
                 }
@@ -11226,6 +11228,7 @@ impl<'a> AstLowering<'a> {
                     is_optional: false,
                     default_value: None,
                     mutability: crate::tast::symbols::Mutability::Immutable,
+                    ownership: Default::default(),
                     source_location: location,
                 });
 
@@ -11265,6 +11268,7 @@ impl<'a> AstLowering<'a> {
                 is_optional: false,
                 default_value: None,
                 mutability: crate::tast::symbols::Mutability::Immutable,
+                ownership: Default::default(),
                 source_location: location,
             });
 
@@ -16386,6 +16390,7 @@ impl<'a> AstLowering<'a> {
             is_optional: param.optional,
             default_value,
             mutability: crate::tast::symbols::Mutability::Immutable,
+            ownership: crate::tast::ParamOwnership::from_metadata(&param.meta),
             source_location: self.context.span_to_location(&param.span),
         })
     }
@@ -16427,6 +16432,7 @@ impl<'a> AstLowering<'a> {
             is_optional: param.optional,
             default_value,
             mutability: crate::tast::symbols::Mutability::Immutable, // Function parameters are immutable by default in Haxe
+            ownership: crate::tast::ParamOwnership::from_metadata(&param.meta),
             source_location: self.context.span_to_location(&param.span),
         })
     }

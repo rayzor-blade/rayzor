@@ -30,6 +30,7 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
         let result = self.lower_expression_inner(expr)?;
         self.record_argument_moves(expr);
+        self.record_capture_reads(expr);
         // Fires only when expr.ty IS an interface AND `kind` reveals an
         // underlying class. Interface-typed variables and Let/Cast results
         // yield no class here, so an already-wrapped value is never wrapped
@@ -52,16 +53,17 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// A by-value argument transfers ownership, so passing a `@:move` binding
-    /// to a call or a constructor ends it.
+    /// to a call or a constructor ends it — unless the parameter says
+    /// `@:borrow`, in which case the callee only observes it.
     ///
     /// Recorded AFTER the call is lowered, not before: the argument's own read
     /// is recorded while it lowers, and a move ordered ahead of it would make
     /// the first call report against itself.
     fn record_argument_moves(&mut self, expr: &HirExpr) {
         // A method call is desugared to `method(receiver, args…)`, so for one
-        // the receiver occupies args[0]. Skip it: methods take `this` by
-        // reference, and counting it as a move would end the binding at the
-        // first `a.f()`.
+        // the receiver occupies args[0]. Skip it: a receiver has no parameter
+        // to annotate, so it is borrowed, and counting it as a move would end
+        // the binding at the first `a.f()`.
         let (args, skip) = match &expr.kind {
             HirExprKind::Call {
                 args, is_method, ..
@@ -69,10 +71,24 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::New { args, .. } => (args, 0),
             _ => return,
         };
+        // After the receiver is skipped, argument i is the callee's parameter
+        // i. A callee that cannot be named — an indirect call through a
+        // function value — leaves every argument at the default.
+        let ownership = self
+            .callee_of(expr)
+            .and_then(|c| self.callee_param_ownership(c));
         let moved: Vec<(SymbolId, SourceLocation)> = args
             .iter()
             .skip(skip)
-            .filter_map(|arg| match &arg.kind {
+            .enumerate()
+            .filter(|(i, _)| {
+                ownership
+                    .as_ref()
+                    .and_then(|o| o.get(*i))
+                    .map(|o| *o != crate::tast::ParamOwnership::Borrowed)
+                    .unwrap_or(true)
+            })
+            .filter_map(|(_, arg)| match &arg.kind {
                 HirExprKind::Variable { symbol, .. } if self.is_move_symbol(*symbol) => {
                     Some((*symbol, arg.source_location))
                 }
@@ -85,6 +101,51 @@ impl<'a> HirToMirContext<'a> {
                 symbol,
                 location,
             );
+        }
+    }
+
+    /// Capturing a binding in a closure observes it, so capturing one that has
+    /// already been moved is a use-after-move.
+    ///
+    /// Recorded in the ENCLOSING function, at the point the closure is built —
+    /// which is where the capture happens, so it needs no reasoning across the
+    /// two control-flow graphs. The lambda body lowers into its own function
+    /// and its own recorder, and a read inside the body says nothing about the
+    /// outer binding's state at the point of capture.
+    ///
+    /// A read and not a move: every capture is marked `ByValue` by a hardcoded
+    /// default rather than computed, so the mode cannot be read as evidence
+    /// that the closure takes ownership.
+    fn record_capture_reads(&mut self, expr: &HirExpr) {
+        let HirExprKind::Lambda { captures, .. } = &expr.kind else {
+            return;
+        };
+        let captured: Vec<SymbolId> = captures
+            .iter()
+            .filter(|c| self.is_move_symbol(c.symbol))
+            .map(|c| c.symbol)
+            .collect();
+        for symbol in captured {
+            self.record_move_event(
+                crate::ir::mir::moveflow::MoveEventKind::Read,
+                symbol,
+                expr.source_location,
+            );
+        }
+    }
+
+    /// The symbol of the function a call resolves to, when it resolves to one.
+    fn callee_of(&self, expr: &HirExpr) -> Option<SymbolId> {
+        let HirExprKind::Call { callee, target, .. } = &expr.kind else {
+            return None;
+        };
+        match target {
+            CallTarget::Method { method } => Some(*method),
+            CallTarget::Static { method, .. } => Some(*method),
+            CallTarget::Function => match &callee.kind {
+                HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                _ => None,
+            },
         }
     }
 
