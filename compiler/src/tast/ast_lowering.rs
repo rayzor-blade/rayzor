@@ -9652,6 +9652,14 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Meta { meta, expr } => {
                 // Metadata annotation: @:meta expr
+                if std::env::var("RAYZOR_META_LOG").is_ok_and(|v| v != "0") {
+                    eprintln!(
+                        "[meta] @:{} on {:?} at {:?}",
+                        meta.name,
+                        std::mem::discriminant(&expr.kind),
+                        self.context.span_to_location(&meta.span)
+                    );
+                }
                 let inner_expr = self.lower_expression(expr)?;
 
                 // Convert parser metadata to typed metadata
