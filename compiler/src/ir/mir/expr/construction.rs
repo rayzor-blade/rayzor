@@ -409,6 +409,22 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A class that declares no constructor inherits its parent's, which is
+        // ordinary Haxe: `class Sub extends Base {}` then `new Sub()`. The
+        // object is still allocated at the SUBCLASS size --
+        // `alloc_size_with_inheritance` below walks the same chain -- so
+        // running the parent's constructor over it is correct.
+        if !has_constructor {
+            if let Some((func_id, owner_type)) =
+                self.inherited_constructor(*class_type, actual_symbol_id)
+            {
+                constructor_type_id = owner_type;
+                has_constructor = true;
+                ctor_path = "inherited";
+                self.constructor_map.insert(*class_type, func_id);
+            }
+        }
+
         // No constructor plus exactly one argument is a value wrap; this catches
         // abstract types not detected above.
         if !has_constructor && args.len() == 1 {

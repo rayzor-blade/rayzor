@@ -160,6 +160,85 @@ impl<'a> HirToMirContext<'a> {
     /// fields yet. At the `new` site every class is registered, so take the max
     /// over the chain; a larger allocation is always safe because field indices
     /// are unchanged.
+    /// The constructor a class inherits, when it declares none of its own.
+    ///
+    /// `class Sub extends Base {}` is constructible in Haxe: `new Sub()` runs
+    /// Base's constructor over a Sub-sized object. Allocation already accounts
+    /// for the subclass (see `alloc_size_with_inheritance`, which walks the same
+    /// chain); only the lookup was missing, so `new Sub()` reached codegen with
+    /// no constructor and trapped.
+    ///
+    /// Returns the constructor's function id and the type that declared it.
+    pub(crate) fn inherited_constructor(
+        &self,
+        class_type: TypeId,
+        class_symbol: Option<SymbolId>,
+    ) -> Option<(crate::ir::IrFunctionId, TypeId)> {
+        let mut cur_type = class_type;
+        let mut cur_sym = class_symbol;
+        let mut visited: BTreeSet<TypeId> = BTreeSet::new();
+        visited.insert(cur_type);
+        loop {
+            let extends: Option<(Option<TypeId>, Option<SymbolId>)> = self
+                .current_hir_types
+                .get(&cur_type)
+                .and_then(|d| match d {
+                    HirTypeDecl::Class(c) => Some((c.extends, c.extends_symbol)),
+                    _ => None,
+                })
+                .or_else(|| {
+                    cur_sym.and_then(|s| {
+                        self.current_hir_types.values().find_map(|d| match d {
+                            HirTypeDecl::Class(c) if c.symbol_id == s => {
+                                Some((c.extends, c.extends_symbol))
+                            }
+                            _ => None,
+                        })
+                    })
+                });
+            let Some((parent_type_opt, extends_symbol)) = extends else {
+                return None;
+            };
+            let Some(parent_type) = parent_type_opt else {
+                return None;
+            };
+            if !visited.insert(parent_type) {
+                return None;
+            }
+            if let Some(&func_id) = self.constructor_map.get(&parent_type) {
+                return Some((func_id, parent_type));
+            }
+            let parent_sym = extends_symbol.or_else(|| {
+                self.type_table
+                    .get(parent_type)
+                    .and_then(|t| match &t.kind {
+                        crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+            });
+            // Names are the only key that crosses compilation contexts; a
+            // context-local TypeId must never be trusted for this lookup.
+            let by_name = parent_sym
+                .and_then(|ps| self.symbol_table.get_symbol(ps))
+                .and_then(|s| {
+                    s.qualified_name
+                        .and_then(|n| self.string_interner.get(n))
+                        .or_else(|| self.string_interner.get(s.name))
+                })
+                .and_then(|name| {
+                    self.constructor_name_map.get(name).copied().or_else(|| {
+                        let bare = name.rsplit('.').next().unwrap_or(name);
+                        self.constructor_name_map.get(bare).copied()
+                    })
+                });
+            if let Some(func_id) = by_name {
+                return Some((func_id, parent_type));
+            }
+            cur_type = parent_type;
+            cur_sym = parent_sym;
+        }
+    }
+
     pub(crate) fn alloc_size_with_inheritance(
         &self,
         class_type: TypeId,
