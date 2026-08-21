@@ -139,13 +139,31 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
 
-        // Expression-level metadata: `@:privateAccess obj.field`. Haxe
-        // allows metadata prefixed onto any expression; we don't preserve
-        // it in the AST (no slot for it on Expr) but consuming the tokens
-        // lets the surrounding expression parse normally instead of
-        // erroring at the `@` and dropping back to the legacy parser.
+        // Expression-level metadata: `@:privateAccess obj.field`. Haxe allows
+        // metadata on any expression, and the rest of the pipeline already
+        // carries it -- ExprKind::Meta lowers to TypedExpressionKind::Meta,
+        // which survives type checking and effect analysis and is unwrapped at
+        // HIR. Dropping it here was the only reason `@:move x` or `@:await f`
+        // could not mean anything.
+        //
+        // `@:a @:b e` nests outermost-first, so the innermost metadata sits
+        // closest to the expression it annotates.
         if matches!(self.stream.peek().kind, TokenKind::At | TokenKind::AtColon) {
-            let _ = self.parse_metadata_list();
+            let metas = self.parse_metadata_list();
+            if !metas.is_empty() {
+                let inner = self.parse_unary()?;
+                let mut expr = inner;
+                for meta in metas.into_iter().rev() {
+                    expr = Expr {
+                        span: Span::new(start, expr.span.end),
+                        kind: ExprKind::Meta {
+                            meta,
+                            expr: Box::new(expr),
+                        },
+                    };
+                }
+                return Ok(expr);
+            }
         }
 
         match self.stream.peek().kind {
