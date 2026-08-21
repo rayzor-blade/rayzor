@@ -80,6 +80,17 @@ pub struct PassManager {
     passes: Vec<Box<dyn OptimizationPass>>,
 }
 
+/// Whether to run the MIR loop vectorizer, off unless `RAYZOR_VECTORIZE=1`.
+///
+/// The pass was unreachable until now -- it was registered only at O3, which no
+/// preset selects -- so its transform has never run on real code. It stays
+/// opt-in until it has been shown to preserve values on the kernels it fires
+/// on. LLVM already autovectorizes; the pass exists for Cranelift and wasm,
+/// which do not.
+fn loop_vectorization_enabled() -> bool {
+    std::env::var("RAYZOR_VECTORIZE").is_ok_and(|v| v != "0")
+}
+
 /// Strip `rayzor_update_call_frame_location` calls from MIR.
 ///
 /// This is useful in non-stack-trace builds (benchmarks/release) where
@@ -2079,6 +2090,10 @@ impl PassManager {
                 manager.add_pass(LICMPass::new());
                 // Loop unrolling after LICM (invariants hoisted, trip counts visible)
                 manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
+                // Before ControlFlowSimplification -- see the O3 note.
+                if loop_vectorization_enabled() {
+                    manager.add_pass(super::vectorization::LoopVectorizationPass::new());
+                }
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new()); // Cleanup after other passes
@@ -2102,8 +2117,12 @@ impl PassManager {
                 manager.add_pass(LICMPass::new());
                 // Loop unrolling after LICM
                 manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
-                // Loop vectorization after LICM (LICM prepares loops for vectorization)
-                manager.add_pass(super::vectorization::LoopVectorizationPass::new());
+                // Vectorize before control flow simplification: running it
+                // after leaves a CFG that LoopNestInfo::analyze finds no loops
+                // in at all, so the pass silently sees nothing to do.
+                if loop_vectorization_enabled() {
+                    manager.add_pass(super::vectorization::LoopVectorizationPass::new());
+                }
                 manager.add_pass(TailCallOptimizationPass::new());
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());

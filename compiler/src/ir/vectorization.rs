@@ -82,111 +82,6 @@ impl VectorType {
     }
 }
 
-/// SIMD vector instructions for MIR
-#[derive(Debug, Clone)]
-pub enum VectorInstruction {
-    /// Load contiguous elements into a vector
-    VectorLoad {
-        dest: IrId,
-        ptr: IrId,
-        vec_type: VectorType,
-        alignment: usize,
-    },
-
-    /// Store vector to contiguous memory
-    VectorStore {
-        ptr: IrId,
-        value: IrId,
-        vec_type: VectorType,
-        alignment: usize,
-    },
-
-    /// Vector binary operation (element-wise)
-    VectorBinOp {
-        dest: IrId,
-        op: BinaryOp,
-        left: IrId,
-        right: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Broadcast scalar to all vector lanes
-    VectorSplat {
-        dest: IrId,
-        scalar: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Extract scalar element from vector
-    VectorExtract {
-        dest: IrId,
-        vector: IrId,
-        index: usize,
-        vec_type: VectorType,
-    },
-
-    /// Insert scalar into vector lane
-    VectorInsert {
-        dest: IrId,
-        vector: IrId,
-        scalar: IrId,
-        index: usize,
-        vec_type: VectorType,
-    },
-
-    /// Horizontal reduction (e.g., sum all elements)
-    VectorReduce {
-        dest: IrId,
-        op: BinaryOp,
-        vector: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Vector comparison (produces mask)
-    VectorCmp {
-        dest: IrId,
-        op: CompareOp,
-        left: IrId,
-        right: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Masked load (load where mask is true)
-    VectorMaskedLoad {
-        dest: IrId,
-        ptr: IrId,
-        mask: IrId,
-        passthru: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Masked store (store where mask is true)
-    VectorMaskedStore {
-        ptr: IrId,
-        value: IrId,
-        mask: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Gather (indexed load)
-    VectorGather {
-        dest: IrId,
-        base: IrId,
-        indices: IrId,
-        mask: IrId,
-        vec_type: VectorType,
-    },
-
-    /// Scatter (indexed store)
-    VectorScatter {
-        base: IrId,
-        indices: IrId,
-        value: IrId,
-        mask: IrId,
-        vec_type: VectorType,
-    },
-}
-
 /// Analysis result for a loop's vectorizability
 #[derive(Debug)]
 pub struct VectorizationAnalysis {
@@ -270,6 +165,11 @@ pub struct LoopVectorizationPass {
 
     /// Target vector width in bits
     pub target_width: usize,
+
+    /// Function names by id, for `RAYZOR_VECTORIZE_LOG` only: a loop rejected
+    /// for "contains function calls" is not actionable until the report names
+    /// which call it was.
+    callee_names: std::collections::BTreeMap<IrFunctionId, String>,
 }
 
 impl Default for LoopVectorizationPass {
@@ -278,6 +178,7 @@ impl Default for LoopVectorizationPass {
             min_trip_count: 8,
             use_cost_model: true,
             target_width: SIMD_WIDTH_BITS,
+            callee_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -875,7 +776,15 @@ impl LoopVectorizationPass {
             if let Some(block) = function.cfg.blocks.get(block_id) {
                 for inst in &block.instructions {
                     match inst {
-                        // Function calls might have side effects
+                        // Function calls might have side effects. The stack-trace
+                        // call-frame update is the exception: it is bookkeeping
+                        // that a later pass strips outright when traces are off,
+                        // and every loop in the program contains two of them.
+                        IrInstruction::CallDirect { func_id, .. }
+                            if self
+                                .callee_names
+                                .get(func_id)
+                                .is_some_and(|n| n == "rayzor_update_call_frame_location") => {}
                         IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. } => {
                             return Some("Loop contains function calls".to_string());
                         }
@@ -1669,10 +1578,12 @@ impl LoopVectorizationPass {
     fn is_vectorizable_binop(op: BinaryOp) -> bool {
         matches!(
             op,
+            // No integer vector divide exists on aarch64 or x86, so Div and Rem
+            // are absent by target capability, not by preference. FDiv stays:
+            // vector float divide is a real instruction everywhere.
             BinaryOp::Add
                 | BinaryOp::Sub
                 | BinaryOp::Mul
-                | BinaryOp::Div
                 | BinaryOp::FAdd
                 | BinaryOp::FSub
                 | BinaryOp::FMul
@@ -1692,6 +1603,12 @@ impl OptimizationPass for LoopVectorizationPass {
     fn run_on_module(&mut self, module: &mut IrModule) -> OptimizationResult {
         let mut result = OptimizationResult::unchanged();
 
+        self.callee_names = module
+            .functions
+            .iter()
+            .map(|(id, f)| (*id, f.name.clone()))
+            .collect();
+
         for function in module.functions.values_mut() {
             let func_result = self.run_on_function(function);
             result = result.combine(func_result);
@@ -1710,13 +1627,88 @@ impl OptimizationPass for LoopVectorizationPass {
 
         let mut modified = false;
 
+        // `RAYZOR_VECTORIZE_LOG=1` reports every loop considered and why it was
+        // declined. The analysis has always recorded a failure_reason; without a
+        // way to read it, a pass that never fires looks the same as one with
+        // nothing to do.
+        let log = std::env::var("RAYZOR_VECTORIZE_LOG").is_ok_and(|v| v != "0");
+
         // Process innermost loops first (they're most likely to benefit)
         for loop_info in loop_nest.loops_innermost_first() {
             let analysis = self.analyze_loop(function, loop_info, &domtree);
 
             if analysis.can_vectorize {
-                if self.vectorize_loop(function, loop_info, &analysis) {
+                let done = self.vectorize_loop(function, loop_info, &analysis);
+                if log {
+                    eprintln!(
+                        "[vectorize] {} block{:?}: {} vf={}",
+                        function.name,
+                        loop_info.header,
+                        if done {
+                            "VECTORIZED"
+                        } else {
+                            "declined in vectorize_loop"
+                        },
+                        analysis.vector_factor
+                    );
+                }
+                if done {
                     modified = true;
+                }
+            } else if log {
+                eprintln!(
+                    "[vectorize] {} block{:?}: {}",
+                    function.name,
+                    loop_info.header,
+                    analysis
+                        .failure_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                );
+                if let Some(hb) = function.cfg.blocks.get(&loop_info.header) {
+                    eprintln!(
+                        "[vectorize]   header: {} phi_nodes, {} inst, kinds: {}",
+                        hb.phi_nodes.len(),
+                        hb.instructions.len(),
+                        hb.instructions
+                            .iter()
+                            .map(|i| format!("{:?}", i)
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("?")
+                                .trim_start_matches("IrInstruction::")
+                                .to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    for b in &loop_info.blocks {
+                        if let Some(blk) = function.cfg.blocks.get(b) {
+                            let calls: Vec<String> = blk
+                                .instructions
+                                .iter()
+                                .filter_map(|i| match i {
+                                    IrInstruction::CallDirect { func_id, .. } => Some(format!(
+                                        "direct:{}",
+                                        self.callee_names
+                                            .get(func_id)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("{:?}", func_id))
+                                    )),
+                                    IrInstruction::CallIndirect { .. } => {
+                                        Some("indirect".to_string())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if !calls.is_empty() {
+                                eprintln!(
+                                    "[vectorize]   calls in block{:?}: {}",
+                                    b,
+                                    calls.join(",")
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
