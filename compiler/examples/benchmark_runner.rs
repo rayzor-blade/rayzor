@@ -256,9 +256,43 @@ fn load_benchmark(name: &str) -> Option<Benchmark> {
     }
 }
 
-/// Check if a precompiled .rzb bundle exists for this benchmark
+/// Check if a usable precompiled .rzb bundle exists for this benchmark.
+///
+/// A bundle older than its source or than the compiler that has to load it is
+/// refused rather than measured. These are checked-in artifacts that nothing
+/// regenerates, and a stale one does not fail -- it silently reports the old
+/// build's numbers. An 8-day-old mandelbrot bundle measured 4247ms against
+/// 327ms for the same code rebuilt, which reads as a 13x regression that does
+/// not exist.
 fn has_precompiled_bundle(name: &str) -> bool {
-    get_precompiled_path(name).exists()
+    let bundle = get_precompiled_path(name);
+    let Ok(bundle_time) = bundle.metadata().and_then(|m| m.modified()) else {
+        return false;
+    };
+
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benchmarks/src")
+        .join(format!("{}.hx", name));
+    let mut newer_than_bundle: Vec<String> = Vec::new();
+    for dep in [source, std::env::current_exe().unwrap_or_default()] {
+        if let Ok(t) = dep.metadata().and_then(|m| m.modified()) {
+            if t > bundle_time {
+                newer_than_bundle.push(dep.display().to_string());
+            }
+        }
+    }
+
+    if !newer_than_bundle.is_empty() {
+        eprintln!(
+            "  ! {}.rzb is older than {} — skipping the precompiled targets.\n                 Regenerate: rayzor bundle compiler/benchmarks/src/{}.hx -o              compiler/benchmarks/precompiled/{}.rzb --no-cache",
+            name,
+            newer_than_bundle.join(" and "),
+            name,
+            name
+        );
+        return false;
+    }
+    true
 }
 
 /// Get the path to the precompiled .rzb bundle
@@ -1685,14 +1719,31 @@ fn save_results(suite: &BenchmarkSuite) -> Result<BenchmarkSuite, String> {
         let mut existing_suite: BenchmarkSuite = serde_json::from_str(&existing)
             .map_err(|e| format!("parse existing results: {}", e))?;
 
+        // Merge per TARGET, not per benchmark. Replacing a whole benchmark
+        // means a run of one target deletes every other target measured today,
+        // and a run whose targets all failed replaces good rows with none --
+        // which is how deltablue came to be published as an empty chart.
         for new_bench in &suite.benchmarks {
             if let Some(pos) = existing_suite
                 .benchmarks
                 .iter()
                 .position(|b| b.name == new_bench.name)
             {
-                // Replace existing benchmark with updated results
-                existing_suite.benchmarks[pos] = new_bench.clone();
+                let existing_bench = &mut existing_suite.benchmarks[pos];
+                for new_result in &new_bench.results {
+                    if let Some(rpos) = existing_bench
+                        .results
+                        .iter()
+                        .position(|r| r.target == new_result.target)
+                    {
+                        existing_bench.results[rpos] = new_result.clone();
+                    } else {
+                        existing_bench.results.push(new_result.clone());
+                    }
+                }
+                existing_bench
+                    .results
+                    .sort_by(|a, b| a.target.cmp(&b.target));
             } else {
                 // Append new benchmark
                 existing_suite.benchmarks.push(new_bench.clone());
