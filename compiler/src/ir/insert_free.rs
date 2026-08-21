@@ -224,6 +224,10 @@ impl OptimizationPass for InsertFreePass {
         // ...and likewise for fresh caller-owned strings (chains through
         // StringBuf.toString → encodeUtf8-style wrappers).
         let fresh_string_fns = compute_returns_fresh_strings(module, &ids, &param_retention);
+        // Retention KINDS feed only the ownership-transfer analysis, so unlike
+        // the opt-in bool masks above they are computed unconditionally: the
+        // worst they can do is transfer nothing.
+        let retention_kinds = compute_retention_kinds(module, &ids);
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
@@ -233,6 +237,7 @@ impl OptimizationPass for InsertFreePass {
                     &fresh_fns,
                     &fresh_string_fns,
                     &param_retention,
+                    &retention_kinds,
                 );
             }
         }
@@ -425,6 +430,7 @@ fn insert_free_for_function(
     fresh_fns: &BTreeSet<IrFunctionId>,
     fresh_string_fns: &BTreeSet<IrFunctionId>,
     param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+    retention_kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
 ) -> usize {
     if function.cfg.blocks.is_empty() {
         return 0;
@@ -491,6 +497,7 @@ fn insert_free_for_function(
 
     // Step 2: For each alloc, check escape and collect non-escaping ones
     let mut allocs_needing_free: Vec<IrId> = Vec::new();
+    let mut escaped_candidates: Vec<(IrId, BTreeSet<IrId>)> = Vec::new();
     let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
     dealloc_ids.extend(ids.string_free_ids.iter().cloned());
@@ -547,10 +554,61 @@ fn insert_free_for_function(
             param_retention,
         ) {
             allocs_needing_free.push(alloc_id);
+        } else {
+            escaped_candidates.push((alloc_id, derived));
         }
     }
 
-    if allocs_needing_free.is_empty() {
+    // Ownership transfer: an allocation whose ONLY escape is into another
+    // local allocation dies with that owner. The classic shape is a value
+    // stored into a wrapper's field by the wrapper's constructor -- the
+    // wrapper is freed, what it held was not (check_composition_leak.sh).
+    let mut adopted: BTreeMap<IrId, Vec<IrId>> = BTreeMap::new();
+    if !escaped_candidates.is_empty() {
+        let all_derived: BTreeMap<IrId, BTreeSet<IrId>> = alloc_ids
+            .iter()
+            .map(|&a| (a, build_derived_set(a, function)))
+            .collect();
+        let dbg_adopt = std::env::var_os("RZT_DBG_ADOPT").is_some();
+        for (x, x_derived) in &escaped_candidates {
+            let Some(owner) =
+                classify_escape_owner(*x, x_derived, function, ids, retention_kinds, &all_derived)
+            else {
+                continue;
+            };
+            if !child_confined_ok(*x, x_derived, function) {
+                if dbg_adopt {
+                    eprintln!(
+                        "[adopt] {} {x:?} -> {owner:?} REFUSED (not confined)",
+                        function.name
+                    );
+                }
+                continue;
+            }
+            // A value read OUT of the owner may alias the child; if any such
+            // read escapes the reads-only discipline, freeing the child with
+            // the owner would dangle it. Refuse and keep the status-quo leak.
+            let owner_derived = all_derived
+                .get(&owner)
+                .cloned()
+                .unwrap_or_else(|| build_derived_set(owner, function));
+            if !owner_loads_confined(&owner_derived, function, ids) {
+                if dbg_adopt {
+                    eprintln!(
+                        "[adopt] {} {x:?} -> {owner:?} REFUSED (owner reads escape)",
+                        function.name
+                    );
+                }
+                continue;
+            }
+            if dbg_adopt {
+                eprintln!("[adopt] {} {x:?} dies with {owner:?}", function.name);
+            }
+            adopted.entry(owner).or_default().push(*x);
+        }
+    }
+
+    if allocs_needing_free.is_empty() && adopted.is_empty() {
         return 0;
     }
 
@@ -886,6 +944,156 @@ fn insert_free_for_function(
                 .instructions
                 .push(IrInstruction::Free { ptr: *carried });
             inserted += 1;
+        }
+    }
+
+    // Emit transferred children beside their owner's release, wherever that
+    // release actually landed (return path, latch, inner-confined). Keying on
+    // the emitted instructions means a child is freed exactly when its owner
+    // is -- an owner whose placement failed frees nothing and leaks both,
+    // which is the status quo, never a double free.
+    if !adopted.is_empty() {
+        // Transitive closure: freeing a releases b releases c.
+        fn expand(
+            owner: IrId,
+            adopted: &BTreeMap<IrId, Vec<IrId>>,
+            out: &mut Vec<IrId>,
+            seen: &mut BTreeSet<IrId>,
+        ) {
+            if let Some(children) = adopted.get(&owner) {
+                for &c in children {
+                    if seen.insert(c) {
+                        out.push(c);
+                        expand(c, adopted, out, seen);
+                    }
+                }
+            }
+        }
+        let owners: Vec<IrId> = adopted.keys().copied().collect();
+        let mut closure: BTreeMap<IrId, Vec<IrId>> = BTreeMap::new();
+        for &o in &owners {
+            let mut out = Vec::new();
+            let mut seen = BTreeSet::new();
+            seen.insert(o);
+            expand(o, &adopted, &mut out, &mut seen);
+            closure.insert(o, out);
+        }
+        let release_of = |child: IrId| -> Vec<IrInstruction> {
+            if string_alloc_ids.contains(&child) {
+                string_free_id
+                    .map(|fid| {
+                        vec![IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: fid,
+                            args: vec![child],
+                            arg_ownership: vec![OwnershipMode::Move],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else if array_alloc_ids.contains(&child) {
+                array_free_id
+                    .map(|fid| {
+                        vec![
+                            IrInstruction::CallDirect {
+                                dest: None,
+                                func_id: fid,
+                                args: vec![child],
+                                arg_ownership: vec![OwnershipMode::Move],
+                                type_args: vec![],
+                                is_tail_call: false,
+                            },
+                            IrInstruction::Free { ptr: child },
+                        ]
+                    })
+                    .unwrap_or_default()
+            } else if anon_alloc_ids.contains(&child) {
+                anon_drop_id
+                    .map(|fid| {
+                        vec![IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: fid,
+                            args: vec![child],
+                            arg_ownership: vec![OwnershipMode::Move],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                vec![IrInstruction::Free { ptr: child }]
+            }
+        };
+        let free_call_ids: BTreeSet<IrFunctionId> = string_free_id
+            .into_iter()
+            .chain(array_free_id)
+            .chain(anon_drop_id)
+            .collect();
+        // Plan first over an immutable view (site discovery + dominance),
+        // then apply. A child's Free must be dominated by its definition or
+        // the emitted instruction reads an undefined register.
+        let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+        let def_positions: BTreeMap<IrId, (IrBlockId, usize)> = {
+            let mut m = BTreeMap::new();
+            for (&bid, block) in &function.cfg.blocks {
+                for (i, inst) in block.instructions.iter().enumerate() {
+                    if let Some(d) = inst.dest() {
+                        m.entry(d).or_insert((bid, i));
+                    }
+                }
+            }
+            m
+        };
+        let mut plan: Vec<(IrBlockId, usize, IrId)> = Vec::new();
+        for (&bid, block) in &function.cfg.blocks {
+            let mut sites: BTreeMap<IrId, usize> = BTreeMap::new();
+            for (i, inst) in block.instructions.iter().enumerate() {
+                let released = match inst {
+                    IrInstruction::Free { ptr } => Some(*ptr),
+                    IrInstruction::CallDirect { func_id, args, .. }
+                        if free_call_ids.contains(func_id) =>
+                    {
+                        args.first().copied()
+                    }
+                    _ => None,
+                };
+                if let Some(r) = released {
+                    if closure.contains_key(&r) {
+                        sites.insert(r, i);
+                    }
+                }
+            }
+            for (o, i) in sites {
+                let all_dominated = closure[&o].iter().all(|c| match def_positions.get(c) {
+                    Some(&(db, di)) => {
+                        if db == bid {
+                            di < i
+                        } else {
+                            domtree.dominates(db, bid)
+                        }
+                    }
+                    None => false,
+                });
+                if all_dominated {
+                    plan.push((bid, i, o));
+                }
+            }
+        }
+        // Apply, highest index first within each block.
+        plan.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        for (bid, i, o) in plan {
+            let mut insts = Vec::new();
+            for &c in &closure[&o] {
+                insts.extend(release_of(c));
+            }
+            inserted += insts.len();
+            if let Some(block) = function.cfg.blocks.get_mut(&bid) {
+                let at = i + 1;
+                for inst in insts.into_iter().rev() {
+                    block.instructions.insert(at, inst);
+                }
+            }
         }
     }
 
@@ -1915,6 +2123,157 @@ fn compute_returns_fresh_arrays(
 /// other module functions consult the current map, so wrapper chains
 /// (`lookup(key)` → `haxe_stringmap_get(map, key)`) resolve, and cycles
 /// without sinks correctly stay non-retaining. `true` = retains.
+/// Where a retained parameter ends up. `param_retained` collapses this to a
+/// bool for escape analysis; ownership TRANSFER needs the distinction, because
+/// "stored into the receiver" is the one retention a caller can reason about:
+/// if the receiver is a caller-owned allocation that the caller frees, the
+/// stored value dies with it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Retention {
+    /// Never retained: the callee only reads it.
+    No,
+    /// Every retention is a store whose pointer derives from param 0 (the
+    /// receiver), directly or through a callee with the same property.
+    IntoSelf,
+    /// Retained somewhere the caller cannot see: a global, a return, a
+    /// different object, an unknown callee.
+    Elsewhere,
+}
+
+/// Per-function, per-parameter retention kinds. Computed unconditionally --
+/// unlike the bool masks this feeds ONLY the ownership-transfer analysis, so
+/// it cannot change which allocations count as escaping.
+fn compute_retention_kinds(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+) -> BTreeMap<IrFunctionId, Vec<Retention>> {
+    let mut kinds: BTreeMap<IrFunctionId, Vec<Retention>> = BTreeMap::new();
+    let mut param_derived: BTreeMap<IrFunctionId, Vec<BTreeSet<IrId>>> = BTreeMap::new();
+    for (&fid, f) in &module.functions {
+        kinds.insert(fid, vec![Retention::No; f.signature.parameters.len()]);
+        let sets = f
+            .signature
+            .parameters
+            .iter()
+            .map(|p| build_derived_set(p.reg, f))
+            .collect();
+        param_derived.insert(fid, sets);
+    }
+    loop {
+        let mut changed = false;
+        for (&fid, function) in &module.functions {
+            let self_derived = param_derived[&fid].first().cloned();
+            for pi in 0..function.signature.parameters.len() {
+                let cur = kinds[&fid][pi];
+                if cur == Retention::Elsewhere {
+                    continue;
+                }
+                let derived = param_derived[&fid][pi].clone();
+                let k = retention_kind_of(&derived, self_derived.as_ref(), function, ids, &kinds);
+                if k > cur {
+                    kinds.get_mut(&fid).unwrap()[pi] = k;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    kinds
+}
+
+fn retention_kind_of(
+    derived: &BTreeSet<IrId>,
+    self_derived: Option<&BTreeSet<IrId>>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
+) -> Retention {
+    let in_set = |v: &IrId| derived.contains(v);
+    let into_self = |ptr: &IrId| self_derived.map(|sd| sd.contains(ptr)).unwrap_or(false);
+    let mut acc = Retention::No;
+    let mut raise = |k: Retention, acc: &mut Retention| {
+        if k > *acc {
+            *acc = k;
+        }
+    };
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            match inst {
+                IrInstruction::Store { ptr, value, .. } if in_set(value) => {
+                    let k = if into_self(ptr) {
+                        Retention::IntoSelf
+                    } else {
+                        Retention::Elsewhere
+                    };
+                    raise(k, &mut acc);
+                }
+                IrInstruction::StoreGlobal { value, .. } if in_set(value) => {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::CreateStruct { fields, .. } if fields.iter().any(in_set) => {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::MemCopy { dest, src, .. } if in_set(dest) || in_set(src) => {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::Throw { exception } if in_set(exception) => {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::Return { value: Some(v) } if in_set(v) => {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::CallIndirect { func_ptr, args, .. }
+                    if in_set(func_ptr) || args.iter().any(in_set) =>
+                {
+                    return Retention::Elsewhere;
+                }
+                IrInstruction::CallDirect { func_id, args, .. } => {
+                    if ids.copy_only_ids.contains(func_id) {
+                        // reads only
+                    } else if let Some(callee_kinds) = kinds.get(func_id) {
+                        for (i, arg) in args.iter().enumerate() {
+                            if !in_set(arg) {
+                                continue;
+                            }
+                            match callee_kinds.get(i).copied() {
+                                Some(Retention::No) => {}
+                                Some(Retention::IntoSelf) => {
+                                    // Retained into the callee's receiver: that
+                                    // is our receiver only if we passed it.
+                                    let k = if args.first().map(|a| into_self(a)).unwrap_or(false) {
+                                        Retention::IntoSelf
+                                    } else {
+                                        Retention::Elsewhere
+                                    };
+                                    raise(k, &mut acc);
+                                }
+                                _ => return Retention::Elsewhere,
+                            }
+                        }
+                    } else if ids.array_safe_ids.contains(func_id)
+                        || ids.anon_safe_ids.contains(func_id)
+                    {
+                        if args.iter().skip(1).any(in_set) {
+                            return Retention::Elsewhere;
+                        }
+                    } else if args.iter().any(in_set) {
+                        return Retention::Elsewhere;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if in_set(v) {
+                return Retention::Elsewhere;
+            }
+        }
+    }
+    acc
+}
+
 fn compute_param_retention(
     module: &IrModule,
     ids: &AllocFuncIds,
@@ -2223,6 +2582,290 @@ fn returns_fresh_array(
             continue 'ret;
         }
         return false;
+    }
+    true
+}
+
+/// The single tracked allocation `x` escaped into, if its every escape is one
+/// the caller can prove dies with that owner. Default-deny: any use of `x`
+/// this walk does not positively recognise disqualifies the transfer.
+fn classify_escape_owner(
+    x: IrId,
+    x_derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
+    all_derived: &BTreeMap<IrId, BTreeSet<IrId>>,
+) -> Option<IrId> {
+    let in_x = |v: &IrId| *v == x || x_derived.contains(v);
+    // The unique tracked allocation a value belongs to, excluding x itself.
+    let resolve = |v: &IrId| -> Option<IrId> {
+        let mut found: Option<IrId> = None;
+        for (&a, derived) in all_derived {
+            if a == x {
+                continue;
+            }
+            if *v == a || derived.contains(v) {
+                if found.is_some() {
+                    return None; // ambiguous
+                }
+                found = Some(a);
+            }
+        }
+        found
+    };
+
+    let mut owner: Option<IrId> = None;
+    let mut adopt = |cand: Option<IrId>| -> bool {
+        match (cand, owner) {
+            (Some(c), None) => {
+                owner = Some(c);
+                true
+            }
+            (Some(c), Some(o)) => c == o,
+            (None, _) => false,
+        }
+    };
+
+    for block in function.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            // A phi mixing x with foreign values re-materialises x under a
+            // name whose uses this walk cannot attribute; refuse.
+            if phi.incoming.iter().any(|(_, v)| in_x(v)) {
+                let all_ours = phi.incoming.iter().all(|(_, v)| in_x(v));
+                if !all_ours || !x_derived.contains(&phi.dest) {
+                    return None;
+                }
+            }
+        }
+        for inst in &block.instructions {
+            match inst {
+                // Alias-forming instructions already folded into x_derived.
+                IrInstruction::GetElementPtr { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. }
+                | IrInstruction::Select { .. } => {}
+
+                // Reads of / through x are not escapes.
+                IrInstruction::Load { .. } => {}
+                IrInstruction::Cmp { .. } | IrInstruction::BinOp { .. } => {}
+
+                IrInstruction::Store { ptr, value, .. } => {
+                    if in_x(value) {
+                        if !adopt(resolve(ptr)) {
+                            return None;
+                        }
+                    }
+                    // A store INTO x mutates it; fine.
+                }
+
+                IrInstruction::CallDirect { func_id, args, .. } => {
+                    if !args.iter().any(|a| in_x(a)) {
+                        continue;
+                    }
+                    if ids.copy_only_ids.contains(func_id) {
+                        continue;
+                    }
+                    if let Some(callee_kinds) = kinds.get(func_id) {
+                        let mut cand: Option<IrId> = None;
+                        let mut ok = true;
+                        for (i, arg) in args.iter().enumerate() {
+                            if !in_x(arg) {
+                                continue;
+                            }
+                            match callee_kinds.get(i).copied() {
+                                Some(Retention::No) => {}
+                                Some(Retention::IntoSelf) if i != 0 => {
+                                    cand = args.first().and_then(|a| resolve(a));
+                                    if cand.is_none() {
+                                        ok = false;
+                                    }
+                                }
+                                _ => ok = false,
+                            }
+                            if !ok {
+                                break;
+                            }
+                        }
+                        if !ok {
+                            return None;
+                        }
+                        if let Some(c) = cand {
+                            if !adopt(Some(c)) {
+                                return None;
+                            }
+                        }
+                    } else if ids.array_safe_ids.contains(func_id)
+                        || ids.anon_safe_ids.contains(func_id)
+                    {
+                        // Receiver-safe accessors: x as arg0 is a borrow; x in
+                        // a value position is stored into the receiver, whose
+                        // liveness we do not model here.
+                        if args.iter().skip(1).any(|a| in_x(a)) {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+
+                other => {
+                    if other.uses().iter().any(|u| in_x(u)) {
+                        return None;
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            IrTerminator::Return { value: Some(v) } if in_x(v) => return None,
+            _ => {}
+        }
+    }
+    owner
+}
+
+/// A transferred child must not outlive the loop iteration its owner is
+/// released in: every use must sit inside any loop containing its definition,
+/// with no phi carrying it across iterations.
+fn child_confined_ok(x: IrId, x_derived: &BTreeSet<IrId>, function: &IrFunction) -> bool {
+    let Some(def_block) = def_block_of(function, x) else {
+        return false;
+    };
+    let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
+    let loop_info = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+    for natural in loop_info.loops_by_depth() {
+        if !natural.blocks.contains(&def_block) {
+            continue;
+        }
+        for (&bid, block) in &function.cfg.blocks {
+            if !natural.blocks.contains(&bid)
+                && block
+                    .instructions
+                    .iter()
+                    .any(|i| i.uses().iter().any(|u| x_derived.contains(u)))
+            {
+                return false;
+            }
+            if block
+                .phi_nodes
+                .iter()
+                .any(|p| p.incoming.iter().any(|(_, v)| x_derived.contains(v)))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Every value READ OUT of the owner must stay a read. A pointer loaded from
+/// the owner's memory may alias a transferred child, so if any such value is
+/// stored, returned, phi-carried or passed to a callee, freeing the child at
+/// the owner's death could dangle it. Default-deny: only load/GEP chains,
+/// comparisons and arithmetic are recognised as reads.
+fn owner_loads_confined(
+    owner_derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+) -> bool {
+    // Closure of values reachable by reading out of the owner, grown through
+    // further loads: a grandchild extracted from a child is as dangerous as
+    // the child. Scalar widths are included -- a pointer punned through an
+    // integer register must not slip past as "just arithmetic".
+    let mut read_out: BTreeSet<IrId> = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::Load { dest, ptr, .. }
+                        if owner_derived.contains(ptr) || read_out.contains(ptr) =>
+                    {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::GetElementPtr { dest, ptr, .. } if read_out.contains(ptr) => {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Cast { dest, src, .. }
+                    | IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::SsaBarrier { dest, src, .. }
+                    | IrInstruction::Copy { dest, src }
+                        if read_out.contains(src) =>
+                    {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Select {
+                        dest,
+                        true_val,
+                        false_val,
+                        ..
+                    } if read_out.contains(true_val) || read_out.contains(false_val) => {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if read_out.is_empty() {
+        return true;
+    }
+    let in_read = |v: &IrId| read_out.contains(v);
+    for block in function.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            if phi.incoming.iter().any(|(_, v)| in_read(v)) {
+                return false;
+            }
+        }
+        for inst in &block.instructions {
+            match inst {
+                IrInstruction::Load { .. }
+                | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. }
+                | IrInstruction::Select { .. }
+                | IrInstruction::Cmp { .. }
+                | IrInstruction::BinOp { .. }
+                | IrInstruction::UnOp { .. } => {}
+                IrInstruction::Store { ptr, value, .. } => {
+                    // Storing a read-out value anywhere re-homes a potential
+                    // child alias; storing INTO a read-out pointer mutates the
+                    // child, which is fine.
+                    if in_read(value) {
+                        return false;
+                    }
+                    let _ = ptr;
+                }
+                IrInstruction::CallDirect { func_id, args, .. } => {
+                    if args.iter().any(|a| in_read(a)) && !ids.copy_only_ids.contains(func_id) {
+                        return false;
+                    }
+                }
+                other => {
+                    if other.uses().iter().any(|u| in_read(u)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if in_read(v) {
+                return false;
+            }
+        }
     }
     true
 }
