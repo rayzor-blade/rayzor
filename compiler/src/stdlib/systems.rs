@@ -106,6 +106,8 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
         IrType::vector(IrType::I32, 4),
     );
     build_simd_i32_load(builder, "SIMD4i32_load", 4);
+    build_simd_i32_store(builder, "SIMD4i32_store", 4);
+    build_simd_i32_store(builder, "SIMD8i32_store", 8);
     // Math operations
     build_simd4f_sqrt(builder);
     build_simd4f_abs(builder);
@@ -1407,6 +1409,8 @@ fn build_simd_i8_splat(builder: &mut MirBuilder, name: &str, lanes: usize) {
 fn build_simd16i8_load(builder: &mut MirBuilder) {
     build_simd_i8_load(builder, "SIMD16i8_load", 16);
     build_simd_i8_load(builder, "SIMD32i8_load", 32);
+    build_simd_i8_store(builder, "SIMD16i8_store", 16);
+    build_simd_i8_store(builder, "SIMD32i8_store", 32);
 }
 
 /// SIMD{16,32}i8_load(ptr: i64) -> vec<i8; N>  (load N contiguous bytes)
@@ -1448,6 +1452,54 @@ fn build_simd_i32_load(builder: &mut MirBuilder, name: &str, lanes: usize) {
     let ptr = builder.get_param(0);
     let result = builder.vector_load(ptr, vec_ty);
     builder.ret(Some(result));
+}
+
+/// SIMD{4,8}i32_store(self: vec<i32; N>, ptr: i64) -> void
+///
+/// The integer vector types could load but not store, so a kernel could read
+/// quantised bytes and never write them: the produce side of every quantise
+/// fell back to a scalar loop, which measured 87% of the whole operation.
+fn build_simd_i32_store(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I32, lanes);
+
+    let func_id = builder
+        .begin_function(name)
+        .param("self_val", vec_ty.clone())
+        .param("ptr", IrType::I64)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let ptr = builder.get_param(1);
+    builder.vector_store(ptr, self_val, vec_ty);
+    builder.ret(None);
+}
+
+/// SIMD{16,32}i8_store(self: vec<i8; N>, ptr: i64) -> void
+fn build_simd_i8_store(builder: &mut MirBuilder, name: &str, lanes: usize) {
+    let vec_ty = IrType::vector(IrType::I8, lanes);
+
+    let func_id = builder
+        .begin_function(name)
+        .param("self_val", vec_ty.clone())
+        .param("ptr", IrType::I64)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let ptr = builder.get_param(1);
+    builder.vector_store(ptr, self_val, vec_ty);
+    builder.ret(None);
 }
 
 /// Byte-lane shuffle. Both operands are byte vectors; `result_ty` is what the

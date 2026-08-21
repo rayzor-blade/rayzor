@@ -3717,6 +3717,10 @@ impl StdlibMapping {
                 types: &[VecI8x16, VecI8x16] => VecI32x4),
             map_method!(static "rayzor.SIMD4i32", "load" => "SIMD4i32_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI32x4),
+            // simd.store(ptr): Void — the write-back half, previously absent
+            // for every integer vector type.
+            map_method!(instance "rayzor.SIMD4i32", "store" => "SIMD4i32_store", params: 1, mir_wrapper,
+                types: &[VecI32x4, I64]),
         ];
 
         self.register_from_tuples(mappings);
@@ -3794,6 +3798,8 @@ impl StdlibMapping {
             // SIMD16i8.load(ptr): SIMD16i8  (static, load 16 contiguous bytes)
             map_method!(static "rayzor.SIMD16i8", "load" => "SIMD16i8_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI8x16),
+            map_method!(instance "rayzor.SIMD16i8", "store" => "SIMD16i8_store", params: 1, mir_wrapper,
+                types: &[VecI8x16, I64]),
             // Lane-wise bitwise (vector & vector). AND masks the Q4 low nibble.
             map_method!(static "rayzor.SIMD16i8", "and" => "SIMD16i8_and", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),

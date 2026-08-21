@@ -29,6 +29,12 @@ extern abstract SIMD16i8 {
     @:native("load")
     public static function load(ptr:Ptr<Int>):SIMD16i8;
 
+    /** Write the SIMD16i8 back to `ptr`. The integer vector types could be
+        loaded but not stored, which left every quantise with a scalar write
+        loop after a vectorised body. */
+    @:native("store")
+    public function store(ptr:Ptr<Int>):Void;
+
     /**
      * Bitwise AND of two i8x16 vectors, lane-wise. The mask for Q4 nibble
      * unpack: `SIMD16i8.and(v, SIMD16i8.splat(0x0F))` keeps the low nibble.
