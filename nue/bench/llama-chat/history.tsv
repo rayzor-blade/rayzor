@@ -2,3 +2,10 @@ date	commit	ttft_s	decode_tok_s	e2e_tok_s	prefill_tok_s	gen_tokens	prompt_tokens
 2026-08-09	20f6b1f2	5.367	91.970	5.601	93.2	64	500	3	1.2	NA	yes	off	qwen2.5-0.5b-instruct-q5_k_m.gguf	bench(nue): a bench/ tree with gated harnesses and a quality
 2026-08-09	20f6b1f2+dirty	1.448	97.330	26.192	345.3	64	500	3	10.2	NA	yes	off	qwen2.5-0.5b-instruct-q5_k_m.gguf	bench(nue): a bench/ tree with gated harnesses and a quality
 2026-08-09	2a2c8fb5	1.463	92.110	25.292	341.8	64	500	3	1.8	NA	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	perf(nue): default the batched prefill attention on, and sto
+2026-08-20	f0e373b7+dirty	1.432	100.000	26.338	349.2	64	500	3	7.5	120.4	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	fix: stop the move check trapping on correct code
+2026-08-20	f0e373b7+dirty	1.512	103.030	25.389	330.7	64	500	5	17.2	78.5	NO(786%)	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	fix: stop the move check trapping on correct code
+2026-08-20	f0e373b7+dirty	1.354	121.720	28.851	369.3	64	500	5	4.6	2.2	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	fix: stop the move check trapping on correct code
+2026-08-20	f0e373b7+dirty	1.446	99.610	26.139	345.8	64	500	5	12.6	12.7	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	fix: stop the move check trapping on correct code
+2026-08-20	b53c19c0+dirty	1.390	91.690	18.405	359.7	64	500	3	14.9	23.4	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	docs(nue): record what NueGraph Stage 1 shipped, and why it 
+2026-08-21	4d364c98+dirty	1.322	114.290	20.080	378.2	64	500	3	1.8	6.2	NO(mem-pressure-2)	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	feat(simd): the integer vector types can be stored, not only
+2026-08-21	eb7ec8e8+dirty	1.312	122.140	20.272	381.1	64	500	3	0.8	3.1	yes	default(on)	qwen2.5-0.5b-instruct-q5_k_m.gguf	feat(simd): a quantise can stay in the vector domain, on eve
