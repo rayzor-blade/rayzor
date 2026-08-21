@@ -3276,6 +3276,46 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .map_err(|e| format!("Failed to convert int to ptr for {}: {}", what, e))
     }
 
+    /// Arithmetic on two SIMD values that arrived at the scalar binop path.
+    ///
+    /// Mirrors what `VectorBinOp` emits, so `a.add(b)` and `a + b` produce the
+    /// same instruction. Element type decides float vs integer; anything not
+    /// expressible is an error rather than a panic.
+    fn compile_vector_binop_fallback(
+        &self,
+        op: BinaryOp,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let lv = left.into_vector_value();
+        let rv = right.into_vector_value();
+        let is_float = lv.get_type().get_element_type().is_float_type();
+        let b = &self.builder;
+        let out = match (op, is_float) {
+            (BinaryOp::Add, true) => b.build_float_add(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Sub, true) => b.build_float_sub(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Mul, true) => b.build_float_mul(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Div, true) => b.build_float_div(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Add, false) => b.build_int_add(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Sub, false) => b.build_int_sub(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Mul, false) => b.build_int_mul(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Div, false) => b.build_int_signed_div(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::And, false) => b.build_and(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Or, false) => b.build_or(lv, rv, name).map(|v| v.into()),
+            (BinaryOp::Xor, false) => b.build_xor(lv, rv, name).map(|v| v.into()),
+            (other, _) => {
+                return Err(format!(
+                    "{:?} is not defined on SIMD values ({} lanes of {})",
+                    other,
+                    lv.get_type().get_size(),
+                    if is_float { "float" } else { "int" }
+                ))
+            }
+        };
+        out.map_err(|e| format!("Failed to build vector {:?}: {}", op, e))
+    }
+
     fn compile_instruction(
         &mut self,
         inst: &IrInstruction,
@@ -6302,6 +6342,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         } else {
             (left, right)
         };
+
+        // A vector reaching the scalar path is arithmetic on a SIMD value that
+        // did not take the VectorBinOp route — `a.add(b)` on an integer SIMD
+        // type, where `a + b` on the same values is fine. Everything below
+        // calls `into_int_value()` / `into_float_value()`, which ABORTS THE
+        // COMPILER on a VectorValue rather than degrading. Build the vector op
+        // instead: it is the same instruction the operator form produces.
+        if left.is_vector_value() && right.is_vector_value() {
+            return self.compile_vector_binop_fallback(op, left, right, &name);
+        }
 
         // Determine if this is a float operation
         // Primary: use MIR type if available
