@@ -430,7 +430,7 @@ fn insert_free_for_function(
     fresh_fns: &BTreeSet<IrFunctionId>,
     fresh_string_fns: &BTreeSet<IrFunctionId>,
     param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
-    retention_kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
+    retention_kinds: &RetentionInfo,
 ) -> usize {
     if function.cfg.blocks.is_empty() {
         return 0;
@@ -559,10 +559,12 @@ fn insert_free_for_function(
         }
     }
 
-    // Ownership transfer: an allocation whose ONLY escape is into another
-    // local allocation dies with that owner. The classic shape is a value
-    // stored into a wrapper's field by the wrapper's constructor -- the
-    // wrapper is freed, what it held was not (check_composition_leak.sh).
+    // Ownership transfer and benign borrows. An allocation whose ONLY escape
+    // is into another local allocation dies with that owner (the wrapper's
+    // field, via its constructor). One whose every exposure is a borrowing
+    // callee that publishes none of its children never really escaped at all
+    // -- the conservative walk counts any call argument as an escape -- and
+    // rejoins the ordinary freeing machinery under its own liveness.
     let mut adopted: BTreeMap<IrId, Vec<IrId>> = BTreeMap::new();
     if !escaped_candidates.is_empty() {
         let all_derived: BTreeMap<IrId, BTreeSet<IrId>> = alloc_ids
@@ -571,40 +573,56 @@ fn insert_free_for_function(
             .collect();
         let dbg_adopt = std::env::var_os("RZT_DBG_ADOPT").is_some();
         for (x, x_derived) in &escaped_candidates {
-            let Some(owner) =
-                classify_escape_owner(*x, x_derived, function, ids, retention_kinds, &all_derived)
-            else {
-                continue;
-            };
-            if !child_confined_ok(*x, x_derived, function) {
-                if dbg_adopt {
-                    eprintln!(
-                        "[adopt] {} {x:?} -> {owner:?} REFUSED (not confined)",
-                        function.name
-                    );
+            match classify_escape_owner(*x, x_derived, function, ids, retention_kinds, &all_derived)
+            {
+                EscapeClass::Escapes => {}
+                EscapeClass::Benign => {
+                    if std::env::var("RZT_BENIGN_FREE").as_deref() != Ok("1") {
+                        // Gated off: see the A/B in the commit message.
+                    } else if child_confined_ok(*x, x_derived, function) {
+                        if dbg_adopt {
+                            eprintln!("[adopt] {} {x:?} benign borrow, freeing", function.name);
+                        }
+                        allocs_needing_free.push(*x);
+                    } else if dbg_adopt {
+                        eprintln!(
+                            "[adopt] {} {x:?} benign but NOT confined, leaving",
+                            function.name
+                        );
+                    }
                 }
-                continue;
-            }
-            // A value read OUT of the owner may alias the child; if any such
-            // read escapes the reads-only discipline, freeing the child with
-            // the owner would dangle it. Refuse and keep the status-quo leak.
-            let owner_derived = all_derived
-                .get(&owner)
-                .cloned()
-                .unwrap_or_else(|| build_derived_set(owner, function));
-            if !owner_loads_confined(&owner_derived, function, ids) {
-                if dbg_adopt {
-                    eprintln!(
-                        "[adopt] {} {x:?} -> {owner:?} REFUSED (owner reads escape)",
-                        function.name
-                    );
+                EscapeClass::Owner(owner) => {
+                    if !child_confined_ok(*x, x_derived, function) {
+                        if dbg_adopt {
+                            eprintln!(
+                                "[adopt] {} {x:?} -> {owner:?} REFUSED (not confined)",
+                                function.name
+                            );
+                        }
+                        continue;
+                    }
+                    // A value read OUT of the owner may alias the child; if
+                    // any such read escapes the reads-only discipline,
+                    // freeing the child with the owner would dangle it.
+                    let owner_derived = all_derived
+                        .get(&owner)
+                        .cloned()
+                        .unwrap_or_else(|| build_derived_set(owner, function));
+                    if !owner_loads_confined(&owner_derived, function, ids) {
+                        if dbg_adopt {
+                            eprintln!(
+                                "[adopt] {} {x:?} -> {owner:?} REFUSED (owner reads escape)",
+                                function.name
+                            );
+                        }
+                        continue;
+                    }
+                    if dbg_adopt {
+                        eprintln!("[adopt] {} {x:?} dies with {owner:?}", function.name);
+                    }
+                    adopted.entry(owner).or_default().push(*x);
                 }
-                continue;
             }
-            if dbg_adopt {
-                eprintln!("[adopt] {} {x:?} dies with {owner:?}", function.name);
-            }
-            adopted.entry(owner).or_default().push(*x);
         }
     }
 
@@ -2140,17 +2158,27 @@ enum Retention {
     Elsewhere,
 }
 
-/// Per-function, per-parameter retention kinds. Computed unconditionally --
-/// unlike the bool masks this feeds ONLY the ownership-transfer analysis, so
-/// it cannot change which allocations count as escaping.
-fn compute_retention_kinds(
-    module: &IrModule,
-    ids: &AllocFuncIds,
-) -> BTreeMap<IrFunctionId, Vec<Retention>> {
+/// Per-function, per-parameter retention analysis. Computed unconditionally --
+/// unlike the bool masks this feeds ONLY the ownership-transfer and
+/// benign-escape analyses, so it cannot change what the conservative escape
+/// walk counts as escaping.
+struct RetentionInfo {
+    kinds: BTreeMap<IrFunctionId, Vec<Retention>>,
+    /// Per parameter: does the callee let a value READ OUT of it escape
+    /// (return it, store it, hand it to a leaking callee)? A callee with kind
+    /// `No` but `leaks = true` borrows the object yet publishes one of its
+    /// children -- freeing the object after the call is fine, but freeing
+    /// anything the object OWNS would dangle the published child.
+    leaks: BTreeMap<IrFunctionId, Vec<bool>>,
+}
+
+fn compute_retention_kinds(module: &IrModule, ids: &AllocFuncIds) -> RetentionInfo {
     let mut kinds: BTreeMap<IrFunctionId, Vec<Retention>> = BTreeMap::new();
+    let mut leaks: BTreeMap<IrFunctionId, Vec<bool>> = BTreeMap::new();
     let mut param_derived: BTreeMap<IrFunctionId, Vec<BTreeSet<IrId>>> = BTreeMap::new();
     for (&fid, f) in &module.functions {
         kinds.insert(fid, vec![Retention::No; f.signature.parameters.len()]);
+        leaks.insert(fid, vec![false; f.signature.parameters.len()]);
         let sets = f
             .signature
             .parameters
@@ -2164,14 +2192,19 @@ fn compute_retention_kinds(
         for (&fid, function) in &module.functions {
             let self_derived = param_derived[&fid].first().cloned();
             for pi in 0..function.signature.parameters.len() {
+                let derived = &param_derived[&fid][pi];
                 let cur = kinds[&fid][pi];
-                if cur == Retention::Elsewhere {
-                    continue;
+                if cur != Retention::Elsewhere {
+                    let k =
+                        retention_kind_of(derived, self_derived.as_ref(), function, ids, &kinds);
+                    if k > cur {
+                        kinds.get_mut(&fid).unwrap()[pi] = k;
+                        changed = true;
+                    }
                 }
-                let derived = param_derived[&fid][pi].clone();
-                let k = retention_kind_of(&derived, self_derived.as_ref(), function, ids, &kinds);
-                if k > cur {
-                    kinds.get_mut(&fid).unwrap()[pi] = k;
+                if !leaks[&fid][pi] && param_leaks_children(derived, function, ids, &kinds, &leaks)
+                {
+                    leaks.get_mut(&fid).unwrap()[pi] = true;
                     changed = true;
                 }
             }
@@ -2180,7 +2213,145 @@ fn compute_retention_kinds(
             break;
         }
     }
-    kinds
+    RetentionInfo { kinds, leaks }
+}
+
+/// Does anything READ OUT of this parameter escape the callee? The read-out
+/// closure mirrors `owner_loads_confined`: loads through the parameter at any
+/// width, grown through further loads and alias-forming ops, so a pointer
+/// punned through an integer register cannot slip past as arithmetic.
+fn param_leaks_children(
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
+    leaks: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let mut read_out: BTreeSet<IrId> = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::Load { dest, ptr, .. }
+                        if derived.contains(ptr) || read_out.contains(ptr) =>
+                    {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::GetElementPtr { dest, ptr, .. } if read_out.contains(ptr) => {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Cast { dest, src, .. }
+                    | IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::SsaBarrier { dest, src, .. }
+                    | IrInstruction::Copy { dest, src }
+                        if read_out.contains(src) =>
+                    {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    IrInstruction::Select {
+                        dest,
+                        true_val,
+                        false_val,
+                        ..
+                    } if read_out.contains(true_val) || read_out.contains(false_val) => {
+                        if read_out.insert(*dest) {
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for phi in &block.phi_nodes {
+                if !read_out.contains(&phi.dest)
+                    && phi.incoming.iter().any(|(_, v)| read_out.contains(v))
+                    && read_out.insert(phi.dest)
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    if read_out.is_empty() {
+        return false;
+    }
+    let in_read = |v: &IrId| read_out.contains(v);
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            match inst {
+                IrInstruction::Load { .. }
+                | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. }
+                | IrInstruction::Select { .. }
+                | IrInstruction::Cmp { .. }
+                | IrInstruction::BinOp { .. }
+                | IrInstruction::UnOp { .. } => {}
+                IrInstruction::Store { value, .. } if in_read(value) => return true,
+                IrInstruction::Store { .. } => {}
+                IrInstruction::StoreGlobal { value, .. } if in_read(value) => return true,
+                IrInstruction::StoreGlobal { .. } => {}
+                IrInstruction::CreateStruct { fields, .. } if fields.iter().any(in_read) => {
+                    return true;
+                }
+                IrInstruction::CreateStruct { .. } => {}
+                IrInstruction::MemCopy { dest, src, .. } if in_read(dest) || in_read(src) => {
+                    return true;
+                }
+                IrInstruction::MemCopy { .. } => {}
+                IrInstruction::Throw { exception } if in_read(exception) => return true,
+                IrInstruction::Return { value: Some(v) } if in_read(v) => return true,
+                IrInstruction::CallIndirect { func_ptr, args, .. }
+                    if in_read(func_ptr) || args.iter().any(in_read) =>
+                {
+                    return true;
+                }
+                IrInstruction::CallDirect { func_id, args, .. } => {
+                    if ids.copy_only_ids.contains(func_id) {
+                        continue;
+                    }
+                    for (i, arg) in args.iter().enumerate() {
+                        if !in_read(arg) {
+                            continue;
+                        }
+                        let kind_no = kinds
+                            .get(func_id)
+                            .and_then(|k| k.get(i))
+                            .map(|k| *k == Retention::No)
+                            .unwrap_or(false);
+                        let no_leak = leaks
+                            .get(func_id)
+                            .and_then(|l| l.get(i))
+                            .map(|l| !*l)
+                            .unwrap_or(false);
+                        if !(kind_no && no_leak) {
+                            return true;
+                        }
+                    }
+                }
+                other => {
+                    if other.uses().iter().any(|u| in_read(u)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if in_read(v) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn retention_kind_of(
@@ -2586,6 +2757,18 @@ fn returns_fresh_array(
     true
 }
 
+/// How a "conservatively escaping" allocation actually behaves.
+enum EscapeClass {
+    /// Its every escape is into this single tracked allocation.
+    Owner(IrId),
+    /// Every exposure is a borrow: callees read it (and leak none of its
+    /// children), nothing stores, returns or captures it. The conservative
+    /// walk called it an escape only because any call argument counts.
+    Benign,
+    /// A real escape, or one this walk cannot prove otherwise.
+    Escapes,
+}
+
 /// The single tracked allocation `x` escaped into, if its every escape is one
 /// the caller can prove dies with that owner. Default-deny: any use of `x`
 /// this walk does not positively recognise disqualifies the transfer.
@@ -2594,9 +2777,9 @@ fn classify_escape_owner(
     x_derived: &BTreeSet<IrId>,
     function: &IrFunction,
     ids: &AllocFuncIds,
-    kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
+    info: &RetentionInfo,
     all_derived: &BTreeMap<IrId, BTreeSet<IrId>>,
-) -> Option<IrId> {
+) -> EscapeClass {
     let in_x = |v: &IrId| *v == x || x_derived.contains(v);
     // The unique tracked allocation a value belongs to, excluding x itself.
     let resolve = |v: &IrId| -> Option<IrId> {
@@ -2634,7 +2817,7 @@ fn classify_escape_owner(
             if phi.incoming.iter().any(|(_, v)| in_x(v)) {
                 let all_ours = phi.incoming.iter().all(|(_, v)| in_x(v));
                 if !all_ours || !x_derived.contains(&phi.dest) {
-                    return None;
+                    return EscapeClass::Escapes;
                 }
             }
         }
@@ -2655,20 +2838,28 @@ fn classify_escape_owner(
                 IrInstruction::Store { ptr, value, .. } => {
                     if in_x(value) {
                         if !adopt(resolve(ptr)) {
-                            return None;
+                            return EscapeClass::Escapes;
                         }
                     }
                     // A store INTO x mutates it; fine.
                 }
 
-                IrInstruction::CallDirect { func_id, args, .. } => {
+                IrInstruction::CallDirect {
+                    dest,
+                    func_id,
+                    args,
+                    ..
+                } => {
                     if !args.iter().any(|a| in_x(a)) {
                         continue;
                     }
                     if ids.copy_only_ids.contains(func_id) {
                         continue;
                     }
-                    if let Some(callee_kinds) = kinds.get(func_id) {
+                    if let Some(callee_kinds) = info.kinds.get(func_id) {
+                        let callee_leaks = info.leaks.get(func_id);
+                        let leak_at =
+                            |i: usize| callee_leaks.and_then(|l| l.get(i)).copied().unwrap_or(true);
                         let mut cand: Option<IrId> = None;
                         let mut ok = true;
                         for (i, arg) in args.iter().enumerate() {
@@ -2676,11 +2867,26 @@ fn classify_escape_owner(
                                 continue;
                             }
                             match callee_kinds.get(i).copied() {
-                                Some(Retention::No) => {}
-                                Some(Retention::IntoSelf) if i != 0 => {
-                                    cand = args.first().and_then(|a| resolve(a));
-                                    if cand.is_none() {
+                                // A borrowing callee that publishes one of
+                                // x's children makes freeing x's OWNED graph
+                                // unsound; x itself may still die, so this
+                                // only blocks kinds of reasoning that follow
+                                // x's fields -- but adoption frees x at its
+                                // owner's death, and the child freed there is
+                                // exactly what the callee published. Refuse.
+                                Some(Retention::No) => {
+                                    if leak_at(i) {
                                         ok = false;
+                                    }
+                                }
+                                Some(Retention::IntoSelf) if i != 0 => {
+                                    if leak_at(i) {
+                                        ok = false;
+                                    } else {
+                                        cand = args.first().and_then(|a| resolve(a));
+                                        if cand.is_none() {
+                                            ok = false;
+                                        }
                                     }
                                 }
                                 _ => ok = false,
@@ -2690,11 +2896,11 @@ fn classify_escape_owner(
                             }
                         }
                         if !ok {
-                            return None;
+                            return EscapeClass::Escapes;
                         }
                         if let Some(c) = cand {
                             if !adopt(Some(c)) {
-                                return None;
+                                return EscapeClass::Escapes;
                             }
                         }
                     } else if ids.array_safe_ids.contains(func_id)
@@ -2704,26 +2910,54 @@ fn classify_escape_owner(
                         // a value position is stored into the receiver, whose
                         // liveness we do not model here.
                         if args.iter().skip(1).any(|a| in_x(a)) {
-                            return None;
+                            return EscapeClass::Escapes;
+                        }
+                        // An accessor's RESULT may alias x or one of its
+                        // children (a view, a field read), and derived-set
+                        // tracking does not follow call dests -- the alias
+                        // then escapes under a name this walk cannot see.
+                        // ArrayKeyValueIterator.next returned exactly such a
+                        // view of the anon it built, and freeing the anon
+                        // dangled the caller's iteration result.
+                        if dest.is_some() {
+                            return EscapeClass::Escapes;
                         }
                     } else {
-                        return None;
+                        return EscapeClass::Escapes;
                     }
                 }
 
                 other => {
                     if other.uses().iter().any(|u| in_x(u)) {
-                        return None;
+                        return EscapeClass::Escapes;
                     }
                 }
             }
         }
         match &block.terminator {
-            IrTerminator::Return { value: Some(v) } if in_x(v) => return None,
+            IrTerminator::Return { value: Some(v) } if in_x(v) => return EscapeClass::Escapes,
             _ => {}
         }
     }
-    owner
+    if owner.is_none() && std::env::var_os("RZT_DBG_BENIGN").is_some() {
+        eprintln!("[benign] {} x={x:?} exposures:", function.name);
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                let touches = inst.uses().iter().any(|u| in_x(u))
+                    || matches!(inst, IrInstruction::CallDirect { args, .. } if args.iter().any(|a| in_x(a)));
+                if touches {
+                    eprintln!("[benign]   {:?}", inst);
+                }
+            }
+            if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+                eprintln!("[benign]   terminator Return({v:?}) in_x={}", in_x(v));
+            }
+        }
+    }
+    match owner {
+        Some(o) => EscapeClass::Owner(o),
+        None => EscapeClass::Benign,
+    }
 }
 
 /// A transferred child must not outlive the loop iteration its owner is
