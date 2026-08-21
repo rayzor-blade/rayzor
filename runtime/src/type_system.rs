@@ -3144,10 +3144,15 @@ pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
     unsafe {
         let old_slots = VTABLE_FLAT_SLOTS as *mut Vec<Vec<i64>>;
         let old_flat = VTABLE_FLAT as *mut Vec<FlatVtable>;
+        let old_sparse = VTABLE_SPARSE as *mut HashMap<u32, FlatVtable>;
         VTABLE_FLAT = std::ptr::null();
         VTABLE_FLAT_SLOTS = std::ptr::null();
+        VTABLE_SPARSE = std::ptr::null();
         if !old_flat.is_null() {
             let _ = Box::from_raw(old_flat);
+        }
+        if !old_sparse.is_null() {
+            let _ = Box::from_raw(old_sparse);
         }
         if !old_slots.is_null() {
             let _ = Box::from_raw(old_slots);
@@ -3297,17 +3302,54 @@ pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32)
 /// Freeze the vtable registry into a flat array for O(1) lookup.
 /// Copies slot data so the flat table owns everything and survives
 /// registry mutations between benchmark runs.
+pub static mut VT_CALLS: u64 = 0;
+pub static mut VT_SLOW: u64 = 0;
+pub static mut VT_REBUILD: u64 = 0;
+pub static mut VT_NANOS: u64 = 0;
+pub static mut VT_MAX_NANOS: u64 = 0;
+/// Frozen alongside VTABLE_FLAT: entries whose type_id exceeds the dense cap.
+static mut VTABLE_SPARSE: *const HashMap<u32, FlatVtable> = std::ptr::null();
+
+/// Called at exit when `RAYZOR_VTABLE_STATS=1`.
+pub fn report_vtable_stats() {
+    unsafe {
+        if std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+            eprintln!(
+                "[vtable] calls={} slow_path={} flat_rebuilds={}",
+                VT_CALLS, VT_SLOW, VT_REBUILD
+            );
+        }
+    }
+}
+
 fn ensure_flat_vtable() {
     unsafe {
         if !VTABLE_FLAT.is_null() {
             return;
         }
+        let t_lock = std::time::Instant::now();
         let registry = VTABLE_REGISTRY.read().unwrap();
+        let lock_wait = t_lock.elapsed();
+        if std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+            eprintln!("[vtable] freeze: read-lock wait {:?}", lock_wait);
+        }
         if let Some(map) = registry.as_ref() {
-            let max_id = map.keys().copied().max().unwrap_or(0) as usize;
-            // Copy all slot data so we own it
-            let mut owned_slots: Vec<Vec<i64>> = Vec::with_capacity(max_id + 1);
-            let mut flat: Vec<FlatVtable> = (0..=max_id)
+            // Size the dense table by the largest SANE id, not the largest id.
+            // One registered type_id has been observed pointer-sized
+            // (347,876,344), and densifying over the maximum then allocates a
+            // multi-gigabyte table -- zero-faulting it took over a second, on
+            // the first virtual dispatch of the program, on every tier, and it
+            // dominated deltablue end to end. Outliers go in a frozen map that
+            // the lookup consults without taking a lock.
+            const DENSE_CAP: usize = 1 << 16;
+            let max_dense = map
+                .keys()
+                .copied()
+                .filter(|&id| (id as usize) < DENSE_CAP)
+                .max()
+                .unwrap_or(0) as usize;
+            let mut owned_slots: Vec<Vec<i64>> = Vec::with_capacity(map.len());
+            let mut flat: Vec<FlatVtable> = (0..=max_dense)
                 .map(|_| FlatVtable {
                     slots: std::ptr::null(),
                     len: 0,
@@ -3317,17 +3359,25 @@ fn ensure_flat_vtable() {
             for vtable in map.values() {
                 owned_slots.push(vtable.clone());
             }
-            // Store owned slots and build flat table pointing into them
+            // Store owned slots; point the dense table (or the sparse map, for
+            // outlier ids) into them.
             let owned_ptr = Box::into_raw(Box::new(owned_slots));
             let owned_ref = &*owned_ptr;
+            let mut sparse: HashMap<u32, FlatVtable> = HashMap::new();
             for (slot_idx, (&type_id, _vtable)) in map.iter().enumerate() {
                 let owned_vec = &owned_ref[slot_idx];
-                flat[type_id as usize] = FlatVtable {
+                let entry = FlatVtable {
                     slots: owned_vec.as_ptr(),
                     len: owned_vec.len(),
                 };
+                if (type_id as usize) < DENSE_CAP {
+                    flat[type_id as usize] = entry;
+                } else {
+                    sparse.insert(type_id, entry);
+                }
             }
             VTABLE_FLAT_SLOTS = owned_ptr as *const Vec<Vec<i64>>;
+            VTABLE_SPARSE = Box::into_raw(Box::new(sparse));
             VTABLE_FLAT = Box::into_raw(Box::new(flat));
         }
     }
@@ -3359,8 +3409,27 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
     let slot = slot_index as usize;
 
     unsafe {
+        // `RAYZOR_VTABLE_STATS=1` counts which path each dispatch takes. The
+        // flat table is an array index; the registry fallback takes a read lock
+        // and hashes, so a dispatch landing there costs orders of magnitude
+        // more and nothing distinguishes the two from outside.
+        VT_CALLS += 1;
+        let _t_in = std::time::Instant::now();
+        if VT_CALLS % 1_000_000 == 0 && std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+            eprintln!(
+                "[vtable] calls={} slow_path={} flat_rebuilds={} ns_total={} ns_avg={} ns_max_single={}",
+                VT_CALLS,
+                VT_SLOW,
+                VT_REBUILD,
+                VT_NANOS,
+                VT_NANOS / VT_CALLS.max(1),
+                VT_MAX_NANOS
+            );
+        }
+        let _guard = ();
         // Lazy freeze on first call
         if VTABLE_FLAT.is_null() {
+            VT_REBUILD += 1;
             ensure_flat_vtable();
         }
         if !VTABLE_FLAT.is_null() {
@@ -3368,13 +3437,41 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
             if type_id < flat.len() {
                 let entry = &flat[type_id];
                 if slot < entry.len {
-                    return *entry.slots.add(slot);
+                    let v = *entry.slots.add(slot);
+                    let ns = _t_in.elapsed().as_nanos() as u64;
+                    VT_NANOS += ns;
+                    if ns > VT_MAX_NANOS {
+                        VT_MAX_NANOS = ns;
+                        if ns > 1_000_000 && std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+                            eprintln!(
+                                "[vtable] SLOW call #{} took {}ms on {:?} (type_id={} slot={})",
+                                VT_CALLS,
+                                ns / 1_000_000,
+                                std::thread::current().id(),
+                                type_id,
+                                slot
+                            );
+                        }
+                    }
+                    return v;
+                }
+            } else if !VTABLE_SPARSE.is_null() {
+                // Outlier type_id (bigger than the dense cap): frozen at the
+                // same freeze as the flat table, read without a lock.
+                let sparse = &*VTABLE_SPARSE;
+                if let Some(entry) = sparse.get(&(type_id as u32)) {
+                    if slot < entry.len {
+                        let v = *entry.slots.add(slot);
+                        VT_NANOS += _t_in.elapsed().as_nanos() as u64;
+                        return v;
+                    }
                 }
             }
         }
     }
 
     // Slow path fallback
+    unsafe { VT_SLOW += 1 };
     let registry = VTABLE_REGISTRY.read().unwrap();
     if let Some(map) = registry.as_ref() {
         if let Some(vtable) = map.get(&(type_id as u32)) {
