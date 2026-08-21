@@ -1840,6 +1840,8 @@ impl TieredBackend {
                     | IrInstruction::VectorMinMax { .. }
                     | IrInstruction::VectorDot { .. }
                     | IrInstruction::VectorShuffle { .. }
+                    | IrInstruction::VectorConvert { .. }
+                    | IrInstruction::VectorNarrow { .. }
                     // Atomics need real shared memory → force straight to JIT.
                     | IrInstruction::AtomicLoad { .. }
                     | IrInstruction::AtomicStore { .. }

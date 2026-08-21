@@ -102,4 +102,15 @@ extern abstract SIMD16i8 {
     @:arrayAccess
     @:native("extract")
     public function get(lane:Int):Int;
+
+    /**
+     * Signed-saturating pack of four i32 vectors into 16 byte lanes: bytes
+     * 0..3 are `a`'s lanes, 4..7 `b`'s, 8..11 `c`'s, 12..15 `d`'s. A lane
+     * outside -128..127 saturates to that bound rather than wrapping.
+     *
+     * This is the produce side of an int8 quantise, which without it had to
+     * leave the vector domain and write its bytes one at a time.
+     */
+    @:native("packI32")
+    public static function packI32(a:SIMD4i32, b:SIMD4i32, c:SIMD4i32, d:SIMD4i32):SIMD16i8;
 }

@@ -599,6 +599,8 @@ impl CBackend {
             | IrInstruction::VectorSplat { vec_ty, .. }
             | IrInstruction::VectorUnaryOp { vec_ty, .. }
             | IrInstruction::VectorMinMax { vec_ty, .. } => vec_ty.clone(),
+            IrInstruction::VectorConvert { result_ty, .. }
+            | IrInstruction::VectorNarrow { result_ty, .. } => result_ty.clone(),
             IrInstruction::AtomicLoad { ty, .. }
             | IrInstruction::AtomicRmw { ty, .. }
             | IrInstruction::AtomicCas { ty, .. } => ty.clone(),
@@ -1460,6 +1462,59 @@ impl CBackend {
                 ));
             }
 
+            IrInstruction::VectorConvert {
+                dest,
+                kind,
+                operand,
+                src_ty,
+                result_ty,
+            } => {
+                let n = Self::vector_count(src_ty);
+                let src_elem = Self::vector_elem_c_type(src_ty);
+                let dst_elem = Self::vector_elem_c_type(result_ty);
+                match kind {
+                    crate::ir::instructions::VectorConvertKind::FpToSi => {
+                        // Saturating, NaN -> 0: out-of-range float-to-int is
+                        // undefined in C, and the contract is saturation.
+                        self.emit_line(&format!(
+                            "for (int _vi=0; _vi<{n}; _vi++) {{ {src_elem} _f=(({src_elem}*)&r{s})[_vi]; {dst_elem} _r; if (_f != _f) _r = 0; else if (_f >= 2147483648.0) _r = 2147483647; else if (_f <= -2147483648.0) _r = (-2147483647-1); else _r = ({dst_elem})_f; (({dst_elem}*)&r{d})[_vi] = _r; }}",
+                            s = operand.as_u32(),
+                            d = dest.as_u32()
+                        ));
+                    }
+                    crate::ir::instructions::VectorConvertKind::SiToFp => {
+                        self.emit_line(&format!(
+                            "for (int _vi=0; _vi<{n}; _vi++) (({dst_elem}*)&r{d})[_vi] = ({dst_elem})(({src_elem}*)&r{s})[_vi];",
+                            s = operand.as_u32(),
+                            d = dest.as_u32()
+                        ));
+                    }
+                }
+            }
+
+            IrInstruction::VectorNarrow {
+                dest,
+                lo,
+                hi,
+                src_ty,
+                result_ty,
+            } => {
+                let n = Self::vector_count(src_ty);
+                let src_elem = Self::vector_elem_c_type(src_ty);
+                let dst_elem = Self::vector_elem_c_type(result_ty);
+                let bits = Self::vector_elem_size(result_ty) * 8;
+                let max = (1i64 << (bits - 1)) - 1;
+                let min = -(1i64 << (bits - 1));
+                // Build into a temp first: dest may alias a source register.
+                self.emit_line(&format!(
+                    "{{ {dst_elem} _t[{n2}]; {src_elem} *_l=({src_elem}*)&r{l}, *_h=({src_elem}*)&r{h}; for (int _vi=0; _vi<{n}; _vi++) {{ {src_elem} _a=_l[_vi], _b=_h[_vi]; _t[_vi] = ({dst_elem})(_a > {max} ? {max} : (_a < {min} ? {min} : _a)); _t[_vi+{n}] = ({dst_elem})(_b > {max} ? {max} : (_b < {min} ? {min} : _b)); }} __builtin_memcpy(&r{d}, _t, {n2}*sizeof({dst_elem})); }}",
+                    n2 = n * 2,
+                    l = lo.as_u32(),
+                    h = hi.as_u32(),
+                    d = dest.as_u32()
+                ));
+            }
+
             IrInstruction::VectorUnaryOp {
                 dest,
                 op,
@@ -1475,7 +1530,7 @@ impl CBackend {
                     crate::ir::instructions::VectorUnaryOpKind::Ceil => "ceil",
                     crate::ir::instructions::VectorUnaryOpKind::Floor => "floor",
                     crate::ir::instructions::VectorUnaryOpKind::Trunc => "trunc",
-                    crate::ir::instructions::VectorUnaryOpKind::Round => "round",
+                    crate::ir::instructions::VectorUnaryOpKind::Round => "nearbyint",
                 };
                 if matches!(op, crate::ir::instructions::VectorUnaryOpKind::Neg) {
                     self.emit_line(&format!(
@@ -2049,16 +2104,25 @@ impl CBackend {
         }
     }
 
+    /// Lane C type for a vector. Every lane width is named explicitly: a
+    /// fallback here would emit 4-byte lane arithmetic over an i8 or i16
+    /// vector and corrupt the result with no diagnostic.
     fn vector_elem_c_type(ty: &IrType) -> &'static str {
         match ty {
             IrType::Vector { element, .. } => match element.as_ref() {
                 IrType::F32 => "float",
                 IrType::F64 => "double",
+                IrType::I8 => "i8",
+                IrType::I16 => "i16",
                 IrType::I32 => "i32",
                 IrType::I64 => "i64",
-                _ => "i32",
+                IrType::U8 => "u8",
+                IrType::U16 => "u16",
+                IrType::U32 => "u32",
+                IrType::U64 => "u64",
+                other => panic!("vector lane type has no C spelling: {:?}", other),
             },
-            _ => "float",
+            other => panic!("vector_elem_c_type on a non-vector type: {:?}", other),
         }
     }
 }

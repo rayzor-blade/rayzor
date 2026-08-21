@@ -79,4 +79,8 @@ extern abstract SIMD32i8 {
     @:arrayAccess
     @:native("extract")
     public function get(lane:Int):Int;
+
+    /** Write the 32 byte lanes back to `ptr`. */
+    @:native("store")
+    public function store(ptr:Ptr<Int>):Void;
 }

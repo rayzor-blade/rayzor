@@ -508,6 +508,37 @@ pub enum IrInstruction {
         replacement: IrId,
         ty: IrType,
     },
+
+    // New variants are appended here rather than filed next to their vector
+    // siblings: the enum is bincode-serialized into the module cache by variant
+    // index, so inserting in the middle silently misdecodes every existing
+    // artifact.
+    /// Lane-wise int/float conversion (see VectorConvertKind for the rounding
+    /// and saturation contract). Both types travel on the instruction because
+    /// register-type inference is lost across inlining and the wasm backend
+    /// tracks no SSA types -- the same reason VectorExtract carries `elem_ty`.
+    VectorConvert {
+        dest: IrId,
+        kind: VectorConvertKind,
+        operand: IrId,
+        src_ty: IrType,
+        result_ty: IrType,
+    },
+
+    /// Signed-saturating pack: two N-lane vectors of width W become one
+    /// 2N-lane vector of width W/2. `lo`'s narrowed lanes occupy the low half
+    /// of the result and `hi`'s the high half; a lane outside the destination
+    /// range saturates to that bound.
+    ///
+    /// Lowers to x86 `packssdw`/`packsswb`, AArch64 `sqxtn`/`sqxtn2`,
+    /// wasm `i16x8.narrow_i32x4_s`/`i8x16.narrow_i16x8_s`, cranelift `snarrow`.
+    VectorNarrow {
+        dest: IrId,
+        lo: IrId,
+        hi: IrId,
+        src_ty: IrType,
+        result_ty: IrType,
+    },
 }
 
 /// Binary operations
@@ -558,7 +589,11 @@ pub enum VectorUnaryOpKind {
     Ceil,
     Floor,
     Trunc,
-    Round, // nearest
+    /// Round to nearest, ties to even — the IEEE-754 default, and the one
+    /// rounding mode every target does in a single instruction. Ties-away
+    /// would have to be emulated on Cranelift and wasm, so the tiers could
+    /// not agree on it.
+    Round,
 }
 
 /// SIMD vector min/max operations
@@ -566,6 +601,20 @@ pub enum VectorUnaryOpKind {
 pub enum VectorMinMaxKind {
     Min,
     Max,
+}
+
+/// Lane-wise int/float conversion kind. Lane COUNT and lane WIDTH are both
+/// preserved: f32x4 <-> i32x4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VectorConvertKind {
+    /// f32 -> i32, rounding toward zero, SATURATING to the i32 range, NaN -> 0.
+    /// Saturating is the contract because it is the only float-to-int
+    /// conversion every backend expresses directly: wasm has nothing but
+    /// `trunc_sat`, and plain LLVM `fptosi` is poison out of range, so an
+    /// unsaturated form would mean different values on different tiers.
+    FpToSi,
+    /// i32 -> f32, round to nearest even.
+    SiToFp,
 }
 
 /// Atomic read-modify-write operation kind (SC ordering implied)
@@ -666,6 +715,8 @@ impl IrInstruction {
             IrInstruction::VectorMinMax { dest, .. } |
             IrInstruction::VectorDot { dest, .. } |
             IrInstruction::VectorShuffle { dest, .. } |
+            IrInstruction::VectorConvert { dest, .. } |
+            IrInstruction::VectorNarrow { dest, .. } |
             // Atomic instructions (AtomicStore omitted → falls to _ => None)
             IrInstruction::AtomicLoad { dest, .. } |
             IrInstruction::AtomicRmw { dest, .. } |
@@ -725,6 +776,8 @@ impl IrInstruction {
             | IrInstruction::VectorMinMax { dest, .. }
             | IrInstruction::VectorDot { dest, .. }
             | IrInstruction::VectorShuffle { dest, .. }
+            | IrInstruction::VectorConvert { dest, .. }
+            | IrInstruction::VectorNarrow { dest, .. }
             | IrInstruction::AtomicLoad { dest, .. }
             | IrInstruction::AtomicRmw { dest, .. }
             | IrInstruction::AtomicCas { dest, .. } => *dest = new_dest,
@@ -797,6 +850,8 @@ impl IrInstruction {
             IrInstruction::VectorMinMax { left, right, .. } => vec![*left, *right],
             IrInstruction::VectorDot { acc, a, b, .. } => vec![*acc, *a, *b],
             IrInstruction::VectorShuffle { a, idx, .. } => vec![*a, *idx],
+            IrInstruction::VectorConvert { operand, .. } => vec![*operand],
+            IrInstruction::VectorNarrow { lo, hi, .. } => vec![*lo, *hi],
             // Atomic instructions
             IrInstruction::AtomicLoad { ptr, .. } => vec![*ptr],
             IrInstruction::AtomicStore { ptr, value, .. } => vec![*ptr, *value],

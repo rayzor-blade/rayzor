@@ -43,7 +43,7 @@ use super::{
     FunctionKind, InlineHint, IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction,
     IrFunctionId, IrFunctionSignature, IrId, IrInstruction, IrLocal, IrModule, IrParameter,
     IrSourceLocation, IrTerminator, IrType, IrTypeParam, IrValue, Linkage, StructField, UnaryOp,
-    UnionVariant, VectorMinMaxKind, VectorUnaryOpKind,
+    UnionVariant, VectorConvertKind, VectorMinMaxKind, VectorUnaryOpKind,
 };
 use std::collections::BTreeMap;
 
@@ -799,6 +799,41 @@ impl MirBuilder {
             left,
             right,
             vec_ty,
+        });
+        dest
+    }
+
+    /// Lane-wise int/float conversion. The dest register takes the RESULT
+    /// type: downstream SIMD dispatch reads the register type back to decide
+    /// which class a value belongs to.
+    pub fn vector_convert(
+        &mut self,
+        kind: VectorConvertKind,
+        operand: IrId,
+        src_ty: IrType,
+        result_ty: IrType,
+    ) -> IrId {
+        let dest = self.alloc_reg_typed(result_ty.clone());
+        self.insert_inst(IrInstruction::VectorConvert {
+            dest,
+            kind,
+            operand,
+            src_ty,
+            result_ty,
+        });
+        dest
+    }
+
+    /// Signed-saturating pack of two vectors into one of twice the lane count
+    /// and half the lane width. `lo`'s lanes land in the low half.
+    pub fn vector_narrow(&mut self, lo: IrId, hi: IrId, src_ty: IrType, result_ty: IrType) -> IrId {
+        let dest = self.alloc_reg_typed(result_ty.clone());
+        self.insert_inst(IrInstruction::VectorNarrow {
+            dest,
+            lo,
+            hi,
+            src_ty,
+            result_ty,
         });
         dest
     }

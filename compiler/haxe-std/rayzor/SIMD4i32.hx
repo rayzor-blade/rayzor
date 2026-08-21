@@ -43,6 +43,17 @@ extern abstract SIMD4i32 {
     @:native("shuffleBytes")
     public static function shuffleBytes(a:SIMD16i8, idx:SIMD16i8):SIMD4i32;
 
+    /**
+     * Lane-wise f32 -> i32: rounds toward zero, saturates to the i32 range,
+     * and maps NaN to 0. Saturating is the contract because it is the only
+     * float-to-int conversion every backend expresses directly, so the value
+     * does not depend on which tier ran the code.
+     *
+     * Pair with `SIMD4f.round()` for round-to-nearest-even.
+     */
+    @:native("fromFloat")
+    public static function fromFloat(v:SIMD4f):SIMD4i32;
+
     /** Load 4 contiguous i32 from a pointer. */
     @:native("load")
     public static function load(ptr:Ptr<Int>):SIMD4i32;

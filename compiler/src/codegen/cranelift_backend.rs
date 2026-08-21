@@ -5091,6 +5091,64 @@ impl CraneliftBackend {
                 value_map.insert(*dest, r);
             }
 
+            IrInstruction::VectorConvert {
+                dest,
+                kind,
+                operand,
+                src_ty: _,
+                result_ty,
+            } => {
+                let v = *value_map
+                    .get(operand)
+                    .ok_or_else(|| format!("VectorConvert operand {:?} not found", operand))?;
+                let want = match result_ty {
+                    IrType::Vector { element, count } => {
+                        Self::mir_vector_to_cranelift(element, *count)?
+                    }
+                    other => {
+                        return Err(format!("VectorConvert: non-vector result type {:?}", other))
+                    }
+                };
+                let r = match kind {
+                    crate::ir::VectorConvertKind::FpToSi => builder.ins().fcvt_to_sint_sat(want, v),
+                    crate::ir::VectorConvertKind::SiToFp => builder.ins().fcvt_from_sint(want, v),
+                };
+                value_map.insert(*dest, r);
+            }
+
+            IrInstruction::VectorNarrow {
+                dest,
+                lo,
+                hi,
+                src_ty: _,
+                result_ty,
+            } => {
+                let l = *value_map
+                    .get(lo)
+                    .ok_or_else(|| format!("VectorNarrow lo {:?} not found", lo))?;
+                let h = *value_map
+                    .get(hi)
+                    .ok_or_else(|| format!("VectorNarrow hi {:?} not found", hi))?;
+                // snarrow puts the first operand's narrowed lanes in the low half.
+                let r = builder.ins().snarrow(l, h);
+                let want = match result_ty {
+                    IrType::Vector { element, count } => {
+                        Self::mir_vector_to_cranelift(element, *count)?
+                    }
+                    other => {
+                        return Err(format!("VectorNarrow: non-vector result type {:?}", other))
+                    }
+                };
+                let r = if want != builder.func.dfg.value_type(r) {
+                    builder
+                        .ins()
+                        .bitcast(want, cranelift_codegen::ir::MemFlagsData::new(), r)
+                } else {
+                    r
+                };
+                value_map.insert(*dest, r);
+            }
+
             // TODO: Implement remaining instructions
             _ => {
                 return Err(format!("Unsupported instruction: {:?}", instruction));

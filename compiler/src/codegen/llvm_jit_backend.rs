@@ -39,8 +39,8 @@ use inkwell::{
 
 use crate::ir::{
     BinaryOp, CompareOp, IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrGlobalId, IrId,
-    IrInstruction, IrModule, IrPhiNode, IrTerminator, IrType, IrValue, UnaryOp, VectorMinMaxKind,
-    VectorUnaryOpKind,
+    IrInstruction, IrModule, IrPhiNode, IrTerminator, IrType, IrValue, UnaryOp, VectorConvertKind,
+    VectorMinMaxKind, VectorUnaryOpKind,
 };
 use std::collections::BTreeMap;
 use std::sync::{Mutex, Once};
@@ -5417,6 +5417,147 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, res);
             }
 
+            IrInstruction::VectorConvert {
+                dest,
+                kind,
+                operand,
+                src_ty: _,
+                result_ty,
+            } => {
+                let v = self.get_value(*operand)?.into_vector_value();
+                let want = self.translate_type(result_ty)?;
+                let res: inkwell::values::BasicValueEnum = match kind {
+                    VectorConvertKind::FpToSi => {
+                        // The saturating intrinsic, not a bare fptosi: bare
+                        // fptosi is poison out of range, and the other tiers
+                        // can only saturate.
+                        let intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.fptosi.sat")
+                            .ok_or("llvm.fptosi.sat intrinsic not found")?;
+                        let func = intrinsic
+                            .get_declaration(&self.module, &[want, v.get_type().into()])
+                            .ok_or("llvm.fptosi.sat declaration failed")?;
+                        self.builder
+                            .build_call(func, &[v.into()], "vcvt_fptosi_sat")
+                            .map_err(|e| format!("fptosi.sat call failed: {}", e))?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or("fptosi.sat returned void")?
+                    }
+                    VectorConvertKind::SiToFp => self
+                        .builder
+                        .build_signed_int_to_float(v, want.into_vector_type(), "vcvt_sitofp")
+                        .map_err(|e| format!("sitofp failed: {}", e))?
+                        .into(),
+                };
+                self.value_map.insert(*dest, res);
+            }
+
+            IrInstruction::VectorNarrow {
+                dest,
+                lo,
+                hi,
+                src_ty,
+                result_ty,
+            } => {
+                use inkwell::types::VectorType;
+                use inkwell::IntPredicate;
+
+                let lo_v = self.get_value(*lo)?.into_vector_value();
+                let hi_v = self.get_value(*hi)?.into_vector_value();
+                let src_lanes = match src_ty {
+                    IrType::Vector { count, .. } => *count,
+                    other => return Err(format!("VectorNarrow: non-vector source {:?}", other)),
+                };
+                let dst_elem_bits = match result_ty {
+                    IrType::Vector { element, .. } => match element.as_ref() {
+                        IrType::I8 | IrType::U8 => 8u64,
+                        IrType::I16 | IrType::U16 => 16u64,
+                        other => {
+                            return Err(format!("VectorNarrow: bad destination lane {:?}", other))
+                        }
+                    },
+                    other => return Err(format!("VectorNarrow: non-vector result {:?}", other)),
+                };
+
+                // Saturate in the source lane width, then concatenate and
+                // truncate. This is the shape LLVM folds into packssdw/sqxtn;
+                // there is no portable saturating-pack intrinsic.
+                let src_elem = lo_v.get_type().get_element_type().into_int_type();
+                let max = (1i64 << (dst_elem_bits - 1)) - 1;
+                let min = -(1i64 << (dst_elem_bits - 1));
+                let max_v = VectorType::const_vector(&vec![
+                    src_elem.const_int(max as u64, true);
+                    src_lanes
+                ]);
+                let min_v = VectorType::const_vector(&vec![
+                    src_elem.const_int(min as u64, true);
+                    src_lanes
+                ]);
+
+                let mut clamp =
+                    |x: inkwell::values::VectorValue<'ctx>,
+                     tag: &str|
+                     -> Result<inkwell::values::VectorValue<'ctx>, String> {
+                        let too_big = self
+                            .builder
+                            .build_int_compare(IntPredicate::SGT, x, max_v, &format!("{tag}_gt"))
+                            .map_err(|e| format!("narrow cmp failed: {}", e))?;
+                        let capped = self
+                            .builder
+                            .build_select(too_big, max_v, x, &format!("{tag}_hi"))
+                            .map_err(|e| format!("narrow select failed: {}", e))?
+                            .into_vector_value();
+                        let too_small = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::SLT,
+                                capped,
+                                min_v,
+                                &format!("{tag}_lt"),
+                            )
+                            .map_err(|e| format!("narrow cmp failed: {}", e))?;
+                        Ok(self
+                            .builder
+                            .build_select(too_small, min_v, capped, &format!("{tag}_lo"))
+                            .map_err(|e| format!("narrow select failed: {}", e))?
+                            .into_vector_value())
+                    };
+                let lo_c = clamp(lo_v, "vnarrow_l")?;
+                let hi_c = clamp(hi_v, "vnarrow_h")?;
+
+                let i32_ty = self.context.i32_type();
+                let mask: Vec<_> = (0..src_lanes * 2)
+                    .map(|j| i32_ty.const_int(j as u64, false))
+                    .collect();
+                let wide = self
+                    .builder
+                    .build_shuffle_vector(
+                        lo_c,
+                        hi_c,
+                        VectorType::const_vector(&mask),
+                        "vnarrow_cat",
+                    )
+                    .map_err(|e| format!("VectorNarrow concat failed: {}", e))?;
+                let narrow_ty = self
+                    .context
+                    .custom_width_int_type(dst_elem_bits as u32)
+                    .vec_type((src_lanes * 2) as u32);
+                let packed = self
+                    .builder
+                    .build_int_truncate(wide, narrow_ty, "vnarrow")
+                    .map_err(|e| format!("VectorNarrow truncate failed: {}", e))?;
+
+                let want = self.translate_type(result_ty)?;
+                let res: inkwell::values::BasicValueEnum = if want != packed.get_type().into() {
+                    self.builder
+                        .build_bit_cast(packed, want, "vnarrow_bc")
+                        .map_err(|e| format!("VectorNarrow bitcast failed: {}", e))?
+                } else {
+                    packed.into()
+                };
+                self.value_map.insert(*dest, res);
+            }
+
             IrInstruction::VectorUnaryOp {
                 dest,
                 op,
@@ -5550,17 +5691,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         }
                         VectorUnaryOpKind::Round => {
                             let intrinsic = inkwell::intrinsics::Intrinsic::find(&format!(
-                                "llvm.round.f{}",
+                                "llvm.roundeven.f{}",
                                 if elem_ty == self.context.f32_type() {
                                     32
                                 } else {
                                     64
                                 }
                             ))
-                            .ok_or("round intrinsic not found")?;
+                            .ok_or("roundeven intrinsic not found")?;
                             let func = intrinsic
                                 .get_declaration(&self.module, &[elem_ty.into()])
-                                .ok_or("round declaration failed")?;
+                                .ok_or("roundeven declaration failed")?;
                             self.builder
                                 .build_call(func, &[elem.into()], "round")
                                 .map_err(|e| format!("round call failed: {}", e))?
