@@ -690,6 +690,12 @@ pub struct AstLowering<'a> {
     /// Temporary storage for classes being built (symbol_id -> class methods)
     class_methods: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
     class_fields: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
+    /// Child class symbol -> parent class symbol, for resolving inherited
+    /// members. `class_methods`/`class_fields` only ever hold what THIS
+    /// compilation context lowered, so a parent from another module contributes
+    /// nothing to them; its members are reachable only through its own scope in
+    /// the shared symbol table, which is what this map makes walkable.
+    class_parents: BTreeMap<SymbolId, SymbolId>,
     /// Skip internal stdlib loading (used when CompilationUnit handles it)
     skip_stdlib_loading: bool,
     /// Program-wide declared static signatures (shared from CompilationUnit).
@@ -1323,6 +1329,62 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // Inherited members. `class_fields`/`class_methods` above hold only what
+        // this context lowered, so a parent from another module is absent from
+        // both -- which is why a bare `eq(...)` inside `class T extends
+        // unit.Test` failed to resolve while the same code with a same-module
+        // parent worked. Each ancestor's members live in its own scope in the
+        // shared symbol table, so walk the chain and look there.
+        if let Some(class_symbol) = self.context.class_context_stack.last().copied() {
+            if std::env::var("RAYZOR_INHERIT_DEBUG").is_ok() {
+                eprintln!(
+                    "[lookup] name={:?} class={:?} parent={:?} parent_scope_has={:?}",
+                    self.context.string_interner.get(name),
+                    class_symbol,
+                    self.class_parents.get(&class_symbol),
+                    self.class_parents.get(&class_symbol).and_then(|p| {
+                        self.context.symbol_table.get_symbol(*p).map(|s| {
+                            self.context
+                                .symbol_table
+                                .lookup_symbol(s.scope_id, name)
+                                .is_some()
+                        })
+                    })
+                );
+            }
+            let mut current = class_symbol;
+            let mut seen: std::collections::BTreeSet<SymbolId> = std::collections::BTreeSet::new();
+            seen.insert(current);
+            while let Some(&parent) = self.class_parents.get(&current) {
+                if !seen.insert(parent) {
+                    break; // cyclic `extends`; the type checker reports it
+                }
+                if let Some(members) = self.class_methods.get(&parent) {
+                    if let Some((_, sym, _)) = members.iter().find(|(n, _, _)| *n == name) {
+                        return Some(*sym);
+                    }
+                }
+                if let Some(members) = self.class_fields.get(&parent) {
+                    if let Some((_, sym, _)) = members.iter().find(|(n, _, _)| *n == name) {
+                        return Some(*sym);
+                    }
+                }
+                // The declaration-level source of truth: the parent's own scope,
+                // populated when ITS module registered its methods.
+                if let Some(parent_scope) = self
+                    .context
+                    .symbol_table
+                    .get_symbol(parent)
+                    .map(|s| s.scope_id)
+                {
+                    if let Some(sym) = self.context.symbol_table.lookup_symbol(parent_scope, name) {
+                        return Some(sym.id);
+                    }
+                }
+                current = parent;
+            }
+        }
+
         // Fallback: explicitly check the global root scope (ScopeId::first())
         // This is needed for symbols like enum variants that are registered globally
         // but may not be reachable through the current scope's parent chain
@@ -1474,6 +1536,7 @@ impl<'a> AstLowering<'a> {
             resolution_state: TypeResolutionState::default(),
             class_methods: BTreeMap::new(),
             class_fields: BTreeMap::new(),
+            class_parents: BTreeMap::new(),
             skip_stdlib_loading: false,
             static_sig_index: None,
             skip_pre_registration: false,
@@ -3399,6 +3462,9 @@ impl<'a> AstLowering<'a> {
         // 2. Method inheritance works (child methods can call parent methods)
         // 3. Method overriding works (child methods will replace parent methods during processing)
         if let Some(parent_type_id) = extends {
+            if let Some(parent_symbol) = self.resolve_type_to_class_symbol(parent_type_id) {
+                self.class_parents.insert(class_symbol, parent_symbol);
+            }
             self.copy_parent_fields(parent_type_id, class_symbol);
             self.copy_parent_methods(parent_type_id, class_symbol);
         }
