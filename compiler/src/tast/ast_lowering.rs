@@ -7321,6 +7321,34 @@ impl<'a> AstLowering<'a> {
     /// This enables method inheritance and overriding
     /// Call this AFTER processing child's members so child methods come first for overriding
     fn copy_parent_methods(&mut self, parent_type_id: TypeId, child_symbol: SymbolId) {
+        // `RAYZOR_INHERIT_DEBUG=1` reports what a child actually inherits.
+        // A cross-module parent resolves to a Class symbol but carries no
+        // methods in this context, so the copy below is a no-op and every
+        // inherited name is unresolvable -- which reads identically to the
+        // parent having no methods at all.
+        let dbg = std::env::var("RAYZOR_INHERIT_DEBUG").is_ok();
+        if dbg {
+            let ps = self.resolve_type_to_class_symbol(parent_type_id);
+            let kind = {
+                let tt = self.context.type_table.borrow();
+                tt.get(parent_type_id).map(|t| format!("{:?}", t.kind))
+            };
+            let child_name = self
+                .context
+                .symbol_table
+                .get_symbol(child_symbol)
+                .and_then(|s| self.context.string_interner.get(s.name))
+                .unwrap_or("?")
+                .to_string();
+            eprintln!(
+                "[inherit] child={} parent_type={:?} kind={:?} parent_symbol={:?} methods={:?}",
+                child_name,
+                parent_type_id,
+                kind.map(|k| k.chars().take(70).collect::<String>()),
+                ps,
+                ps.and_then(|p| self.class_methods.get(&p)).map(|m| m.len()),
+            );
+        }
         // Get the parent class symbol from the type
         if let Some(parent_symbol) = self.resolve_type_to_class_symbol(parent_type_id) {
             // Copy this parent's methods
