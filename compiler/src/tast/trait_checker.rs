@@ -20,6 +20,12 @@ pub struct TraitChecker<'a> {
     class_map: std::collections::BTreeMap<SymbolId, &'a TypedClass>,
     /// Core type checker for identifying stdlib concurrent types
     core_checker: CoreTypeChecker<'a>,
+    /// Auto-derive questions currently being answered, to break cycles in the
+    /// type graph. Auto-derivation recurses through every field's type, and
+    /// mutually referential classes (a constraint solver's `Variable` holding
+    /// `Constraint`s that hold a `Variable`) otherwise recurse until the stack
+    /// runs out.
+    in_progress: RefCell<std::collections::HashSet<(SymbolId, DerivedTrait)>>,
 }
 
 impl<'a> TraitChecker<'a> {
@@ -41,6 +47,7 @@ impl<'a> TraitChecker<'a> {
             symbol_table,
             class_map,
             core_checker: CoreTypeChecker::new(type_table, symbol_table, string_interner),
+            in_progress: RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -276,14 +283,28 @@ impl<'a> TraitChecker<'a> {
             return true;
         }
 
-        // 2. Auto-derive rules (like Rust)
-        match trait_ {
+        // 2. Auto-derive rules (like Rust).
+        //
+        // Auto-derivation asks the same question of every field's type, so a
+        // cycle in the type graph asks it of this very class again. Answer
+        // `true` for the question already on the stack and let the other fields
+        // decide: a genuinely non-Send leaf anywhere still returns false, and
+        // without this a mutually referential pair of classes recurses until
+        // the stack overflows. This is the greatest fixed point, and it is what
+        // Rust does for auto traits.
+        let question = (symbol_id, trait_);
+        if !self.in_progress.borrow_mut().insert(question) {
+            return true;
+        }
+        let derived = match trait_ {
             DerivedTrait::Send => self.auto_derive_send(&class),
             DerivedTrait::Sync => self.auto_derive_sync(&class),
             DerivedTrait::Clone => self.auto_derive_clone(&class),
             DerivedTrait::Copy => self.auto_derive_copy(&class),
             _ => false,
-        }
+        };
+        self.in_progress.borrow_mut().remove(&question);
+        derived
     }
 
     /// Check if all fields are Send (auto-derive)
