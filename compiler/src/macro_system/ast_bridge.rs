@@ -572,6 +572,40 @@ pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
                 ]),
             )
         }
+        // `@:name(params) expr` -> EMeta(s:MetadataEntry, e:Expr).
+        //
+        // MetadataEntry is a typedef'd anonymous structure in haxe.macro.Expr:
+        // { name:String, ?params:Array<Expr>, pos:Position }. Reifying it is
+        // what lets a macro author read a custom annotation off an expression
+        // rather than receive the bare inner expression with the name lost.
+        ExprKind::Meta { meta, expr } => {
+            let mut entry = BTreeMap::new();
+            entry.insert(
+                "name".to_string(),
+                MacroValue::String(Arc::from(meta.name.as_str())),
+            );
+            entry.insert(
+                "params".to_string(),
+                MacroValue::Array(Arc::new(
+                    meta.params
+                        .iter()
+                        .map(|p| MacroValue::Expr(Arc::new(p.clone())))
+                        .collect(),
+                )),
+            );
+            entry.insert(
+                "pos".to_string(),
+                MacroValue::Position(span_to_location(meta.span)),
+            );
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EMeta"),
+                Arc::new(vec![
+                    MacroValue::Object(Arc::new(entry)),
+                    MacroValue::Expr(Arc::new(expr.as_ref().clone())),
+                ]),
+            )
+        }
         ExprKind::Binary { left, op, right } => {
             let left_val = MacroValue::Expr(Arc::new(left.as_ref().clone()));
             let right_val = MacroValue::Expr(Arc::new(right.as_ref().clone()));

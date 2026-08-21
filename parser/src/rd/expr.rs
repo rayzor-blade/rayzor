@@ -149,7 +149,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // `@:a @:b e` nests outermost-first, so the innermost metadata sits
         // closest to the expression it annotates.
         if matches!(self.stream.peek().kind, TokenKind::At | TokenKind::AtColon) {
-            let metas = self.parse_metadata_list();
+            let metas = self.parse_metadata_list_expr();
             if !metas.is_empty() {
                 let inner = self.parse_unary()?;
                 let mut expr = inner;

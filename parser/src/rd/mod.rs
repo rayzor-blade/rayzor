@@ -345,9 +345,25 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
     /// Parse metadata list: `@meta @:native("name")` etc.
     pub(crate) fn parse_metadata_list(&mut self) -> Vec<Metadata> {
+        self.parse_metadata_list_inner(false)
+    }
+
+    /// Metadata in EXPRESSION position, where `@:m (e)` is ambiguous: the
+    /// parenthesised group is the metadata's parameter list only when it
+    /// follows the name immediately. With whitespace between, it is the
+    /// annotated expression -- otherwise `@:m (20 + 3)` eats its own operand
+    /// and the parse dies on the token after it.
+    ///
+    /// Declarations do not have the ambiguity (no expression follows), so they
+    /// keep accepting `@:native ("x")`.
+    pub(crate) fn parse_metadata_list_expr(&mut self) -> Vec<Metadata> {
+        self.parse_metadata_list_inner(true)
+    }
+
+    fn parse_metadata_list_inner(&mut self, params_must_be_adjacent: bool) -> Vec<Metadata> {
         let mut metas = Vec::new();
         while self.stream.at(TokenKind::At) || self.stream.at(TokenKind::AtColon) {
-            if let Ok(meta) = self.parse_metadata() {
+            if let Ok(meta) = self.parse_metadata(params_must_be_adjacent) {
                 metas.push(meta);
             } else {
                 break;
@@ -356,39 +372,42 @@ impl<'a, 'b> RdParser<'a, 'b> {
         metas
     }
 
-    fn parse_metadata(&mut self) -> Result<Metadata, ParseError> {
+    fn parse_metadata(&mut self, params_must_be_adjacent: bool) -> Result<Metadata, ParseError> {
         let start = self.stream.current_offset();
 
         self.stream.advance(); // skip @ or @:
 
         // Name (can be keyword like "native", "forward", etc.)
         let name = self.stream.current_text().to_string();
+        let name_end = self.stream.peek().span.end;
         self.stream.advance();
 
         // Optional parameters
-        let params = if self.stream.at(TokenKind::LParen) {
-            self.stream.advance(); // skip (
-            let mut args = Vec::new();
-            while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
-                match self.parse_expression() {
-                    Ok(expr) => args.push(expr),
-                    Err(_) => {
-                        // Skip to closing paren
-                        while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
-                            self.stream.advance();
+        let params_adjacent = self.stream.peek().span.start == name_end;
+        let params =
+            if self.stream.at(TokenKind::LParen) && (!params_must_be_adjacent || params_adjacent) {
+                self.stream.advance(); // skip (
+                let mut args = Vec::new();
+                while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
+                    match self.parse_expression() {
+                        Ok(expr) => args.push(expr),
+                        Err(_) => {
+                            // Skip to closing paren
+                            while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
+                                self.stream.advance();
+                            }
+                            break;
                         }
-                        break;
+                    }
+                    if !self.stream.at(TokenKind::RParen) {
+                        self.stream.eat(TokenKind::Comma);
                     }
                 }
-                if !self.stream.at(TokenKind::RParen) {
-                    self.stream.eat(TokenKind::Comma);
-                }
-            }
-            self.stream.eat(TokenKind::RParen);
-            args
-        } else {
-            Vec::new()
-        };
+                self.stream.eat(TokenKind::RParen);
+                args
+            } else {
+                Vec::new()
+            };
 
         let span = self.stream.span_from(start);
 
