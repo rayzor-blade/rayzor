@@ -1,3 +1,5 @@
+package unit;
+
 /** Assertion counters for the conformance harness, in the root package so the
     generated main() reaches them without a dotted static path. */
 class ConfCheck {
