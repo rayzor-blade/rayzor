@@ -3600,6 +3600,9 @@ impl StdlibMapping {
             // SIMD4f.splat(v: Float): SIMD4f  (static, broadcast scalar to all lanes)
             map_method!(static "rayzor.SIMD4f", "splat" => "SIMD4f_splat", params: 1, mir_wrapper,
                 types: &[F32] => VecF32x4),
+            // Lane-wise i32 -> f32. Static on the destination class, as fromFloat is.
+            map_method!(static "rayzor.SIMD4f", "fromInt" => "SIMD4f_from_int", params: 1, mir_wrapper,
+                types: &[VecI32x4] => VecF32x4),
             // SIMD4f.make(x, y, z, w): SIMD4f  (static, construct from 4 scalars)
             map_method!(static "rayzor.SIMD4f", "make" => "SIMD4f_make", params: 4, mir_wrapper,
                 types: &[F32, F32, F32, F32] => VecF32x4),
@@ -3715,6 +3718,11 @@ impl StdlibMapping {
             // Byte-shuffle, result reinterpreted as i32x4 — the scale broadcast.
             map_method!(static "rayzor.SIMD4i32", "shuffleBytes" => "SIMD4i32_shuffle_bytes", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI32x4),
+            // Lane-wise f32 -> i32, saturating. A static on the destination
+            // class: the return-class hint falls back to the dispatching
+            // class, so a cross-type result must be reached that way.
+            map_method!(static "rayzor.SIMD4i32", "fromFloat" => "SIMD4i32_from_float", params: 1, mir_wrapper,
+                types: &[VecF32x4] => VecI32x4),
             map_method!(static "rayzor.SIMD4i32", "load" => "SIMD4i32_load", params: 1, mir_wrapper,
                 types: &[I64] => VecI32x4),
             // simd.store(ptr): Void — the write-back half, previously absent
@@ -3750,6 +3758,10 @@ impl StdlibMapping {
                 types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
             map_method!(static "rayzor.SIMD8i32", "dotI8U8" => "SIMD8i32_dot32_i8_u8", params: 3, mir_wrapper,
                 types: &[VecI32x8, VecI8x32, VecI8x32] => VecI32x8),
+            map_method!(static "rayzor.SIMD8i32", "load" => "SIMD8i32_load", params: 1, mir_wrapper,
+                types: &[I64] => VecI32x8),
+            map_method!(instance "rayzor.SIMD8i32", "store" => "SIMD8i32_store", params: 1, mir_wrapper,
+                types: &[VecI32x8, I64]),
         ];
 
         self.register_from_tuples(mappings);
@@ -3780,6 +3792,8 @@ impl StdlibMapping {
                 types: &[VecI8x32, I32] => VecI8x32),
             map_method!(instance "rayzor.SIMD32i8", "get" => "SIMD32i8_extract", params: 1, mir_wrapper,
                 types: &[VecI8x32, I32] => I32),
+            map_method!(instance "rayzor.SIMD32i8", "store" => "SIMD32i8_store", params: 1, mir_wrapper,
+                types: &[VecI8x32, I64]),
         ];
 
         self.register_from_tuples(mappings);
@@ -3818,6 +3832,11 @@ impl StdlibMapping {
             // is on IrInstruction::VectorShuffle: 0..15 selects, bit 7 yields 0.
             map_method!(static "rayzor.SIMD16i8", "shuffle" => "SIMD16i8_shuffle", params: 2, mir_wrapper,
                 types: &[VecI8x16, VecI8x16] => VecI8x16),
+            // Signed-saturating pack of four i32x4 into 16 byte lanes: the
+            // produce side of a quantise, which otherwise left the vector
+            // domain for a scalar write loop.
+            map_method!(static "rayzor.SIMD16i8", "packI32" => "SIMD16i8_pack_i32", params: 4, mir_wrapper,
+                types: &[VecI32x4, VecI32x4, VecI32x4, VecI32x4] => VecI8x16),
             // 16 literals -> a constant byte vector, for shuffle masks.
             map_method!(static "rayzor.SIMD16i8", "make16" => "SIMD16i8_make16", params: 16, mir_wrapper,
                 types: &[I32, I32, I32, I32, I32, I32, I32, I32,

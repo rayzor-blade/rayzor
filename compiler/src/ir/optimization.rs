@@ -872,6 +872,11 @@ impl InstructionExt for IrInstruction {
                 replace(a);
                 replace(idx);
             }
+            IrInstruction::VectorConvert { operand, .. } => replace(operand),
+            IrInstruction::VectorNarrow { lo, hi, .. } => {
+                replace(lo);
+                replace(hi);
+            }
             // Atomic instructions (silent _ => {} below would miscompile these)
             IrInstruction::AtomicLoad { ptr, .. } => replace(ptr),
             IrInstruction::AtomicStore { ptr, value, .. } => {

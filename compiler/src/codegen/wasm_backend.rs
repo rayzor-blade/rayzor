@@ -31,7 +31,8 @@ use wasm_encoder::{
 use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
 use crate::ir::functions::{IrFunction, IrFunctionId, IrFunctionSignature};
 use crate::ir::instructions::{
-    AtomicRmwOp, BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind,
+    AtomicRmwOp, BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorConvertKind, VectorMinMaxKind,
+    VectorUnaryOpKind,
 };
 use crate::ir::modules::{IrGlobalId, IrModule};
 use crate::ir::{DominatorTree, IrId, IrType, IrValue, LoopNestInfo};
@@ -5132,6 +5133,51 @@ impl<'a> FunctionLowerer<'a> {
                         }
                         f.instruction(&Instruction::I32x4ReplaceLane(lane));
                     }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            IrInstruction::VectorConvert {
+                dest,
+                kind,
+                operand,
+                ..
+            } => {
+                self.get_reg(f, *operand);
+                match kind {
+                    VectorConvertKind::FpToSi => {
+                        f.instruction(&Instruction::I32x4TruncSatF32x4S);
+                    }
+                    VectorConvertKind::SiToFp => {
+                        f.instruction(&Instruction::F32x4ConvertI32x4S);
+                    }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            IrInstruction::VectorNarrow {
+                dest,
+                lo,
+                hi,
+                src_ty,
+                ..
+            } => {
+                // Push order is load-bearing: the first operand's lanes land
+                // in the low half of the result.
+                self.get_reg(f, *lo);
+                self.get_reg(f, *hi);
+                match vec_element(src_ty) {
+                    IrType::I32 | IrType::U32 => {
+                        f.instruction(&Instruction::I16x8NarrowI32x4S);
+                    }
+                    IrType::I16 | IrType::U16 => {
+                        f.instruction(&Instruction::I8x16NarrowI16x8S);
+                    }
+                    other => panic!(
+                        "wasm has no saturating narrow for {:?} lanes: wasm SIMD narrows only \
+                         i32x4 -> i16x8 and i16x8 -> i8x16.",
+                        other
+                    ),
                 }
                 self.set_reg(f, *dest);
             }

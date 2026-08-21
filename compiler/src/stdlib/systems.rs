@@ -7,7 +7,7 @@
 use crate::ir::mir_builder::MirBuilder;
 use crate::ir::{
     AtomicRmwOp, BinaryOp, CallingConvention, CompareOp, InlineHint, IrType, IrValue,
-    VectorMinMaxKind, VectorUnaryOpKind,
+    VectorConvertKind, VectorMinMaxKind, VectorUnaryOpKind,
 };
 
 /// Build all systems-level type functions
@@ -105,7 +105,23 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
         16,
         IrType::vector(IrType::I32, 4),
     );
+    build_simd_convert(
+        builder,
+        "SIMD4i32_from_float",
+        VectorConvertKind::FpToSi,
+        IrType::vector(IrType::F32, 4),
+        IrType::vector(IrType::I32, 4),
+    );
+    build_simd_convert(
+        builder,
+        "SIMD4f_from_int",
+        VectorConvertKind::SiToFp,
+        IrType::vector(IrType::I32, 4),
+        IrType::vector(IrType::F32, 4),
+    );
+    build_simd16i8_pack_i32(builder);
     build_simd_i32_load(builder, "SIMD4i32_load", 4);
+    build_simd_i32_load(builder, "SIMD8i32_load", 8);
     build_simd_i32_store(builder, "SIMD4i32_store", 4);
     build_simd_i32_store(builder, "SIMD8i32_store", 8);
     // Math operations
@@ -1523,6 +1539,63 @@ fn build_simd_shuffle(builder: &mut MirBuilder, name: &str, lanes: usize, result
     let a = builder.get_param(0);
     let idx = builder.get_param(1);
     let result = builder.vector_shuffle(a, idx, lanes, result_ty);
+    builder.ret(Some(result));
+}
+
+/// Lane-wise int/float convert: `SIMD4i32.fromFloat` and `SIMD4f.fromInt`.
+fn build_simd_convert(
+    builder: &mut MirBuilder,
+    name: &str,
+    kind: VectorConvertKind,
+    src: IrType,
+    dst: IrType,
+) {
+    let func_id = builder
+        .begin_function(name)
+        .param("v", src.clone())
+        .returns(dst.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let v = builder.get_param(0);
+    let result = builder.vector_convert(kind, v, src, dst);
+    builder.ret(Some(result));
+}
+
+/// `SIMD16i8_pack_i32(a,b,c,d) -> vec<i8;16>`, signed-saturating.
+///
+/// The i16x8 intermediate stays inside this wrapper, so the pack needs no
+/// SIMD8i16 abstract and no i16 vector type descriptor.
+fn build_simd16i8_pack_i32(builder: &mut MirBuilder) {
+    let i32x4 = IrType::vector(IrType::I32, 4);
+    let i16x8 = IrType::vector(IrType::I16, 8);
+    let i8x16 = IrType::vector(IrType::I8, 16);
+
+    let func_id = builder
+        .begin_function("SIMD16i8_pack_i32")
+        .param("a", i32x4.clone())
+        .param("b", i32x4.clone())
+        .param("c", i32x4.clone())
+        .param("d", i32x4.clone())
+        .returns(i8x16.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let a = builder.get_param(0);
+    let b = builder.get_param(1);
+    let c = builder.get_param(2);
+    let d = builder.get_param(3);
+    let ab = builder.vector_narrow(a, b, i32x4.clone(), i16x8.clone());
+    let cd = builder.vector_narrow(c, d, i32x4, i16x8.clone());
+    let result = builder.vector_narrow(ab, cd, i16x8, i8x16);
     builder.ret(Some(result));
 }
 

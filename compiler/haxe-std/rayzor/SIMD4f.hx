@@ -30,6 +30,10 @@ extern abstract SIMD4f {
     public static function make(x:Float, y:Float, z:Float, w:Float):SIMD4f;
 
     /** Load 4 contiguous floats from a pointer */
+    /** Lane-wise i32 -> f32, round to nearest even. */
+    @:native("fromInt")
+    public static function fromInt(v:SIMD4i32):SIMD4f;
+
     @:native("load")
     public static function load(ptr:Ptr<Float>):SIMD4f;
 

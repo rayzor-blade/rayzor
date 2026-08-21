@@ -71,4 +71,12 @@ extern abstract SIMD8i32 {
      */
     @:native("dotI8U8")
     public static function dotI8U8(acc:SIMD8i32, a:SIMD32i8, b:SIMD32i8):SIMD8i32;
+
+    /** Load 8 contiguous i32 from a pointer. */
+    @:native("load")
+    public static function load(ptr:Ptr<Int>):SIMD8i32;
+
+    /** Write the 8 i32 lanes back to `ptr`. */
+    @:native("store")
+    public function store(ptr:Ptr<Int>):Void;
 }
