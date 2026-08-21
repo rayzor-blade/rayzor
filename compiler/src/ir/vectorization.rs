@@ -1666,6 +1666,29 @@ impl OptimizationPass for LoopVectorizationPass {
                         .unwrap_or("no reason recorded")
                 );
                 if let Some(hb) = function.cfg.blocks.get(&loop_info.header) {
+                    for phi in &hb.phi_nodes {
+                        let inside: Vec<_> = phi
+                            .incoming
+                            .iter()
+                            .map(|(b, v)| {
+                                format!(
+                                    "{:?}{}=>{:?}",
+                                    b,
+                                    if loop_info.blocks.contains(b) {
+                                        "[in]"
+                                    } else {
+                                        "[out]"
+                                    },
+                                    v
+                                )
+                            })
+                            .collect();
+                        eprintln!(
+                            "[vectorize]   phi {:?} incoming: {}",
+                            phi.dest,
+                            inside.join(" ")
+                        );
+                    }
                     eprintln!(
                         "[vectorize]   header: {} phi_nodes, {} inst, kinds: {}",
                         hb.phi_nodes.len(),
