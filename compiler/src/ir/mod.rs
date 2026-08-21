@@ -56,7 +56,7 @@ pub use loop_analysis::{DominatorTree, LoopNestInfo, NaturalLoop, TripCount};
 pub use modules::*;
 pub use monomorphize::{MonoKey, MonomorphizationStats, Monomorphizer};
 pub use types::*;
-pub use vectorization::{LoopVectorizationPass, VectorInstruction, VectorType};
+pub use vectorization::{LoopVectorizationPass, VectorType};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

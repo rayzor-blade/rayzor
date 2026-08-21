@@ -800,8 +800,12 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!(
-                        "[COMPILE_FAIL] Skipping function '{}' ({}): {}",
+                    // Unconditional: the fallback below is a trap stub, so a
+                    // function that fails to compile here does not fail the
+                    // build -- it SIGTRAPs at exit 133 with nothing said. A
+                    // silent miscompile is worse than a noisy one.
+                    eprintln!(
+                        "[COMPILE_FAIL] '{}' ({:?}) will trap if called: {}",
                         function.name, func_id, e
                     );
                     if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
