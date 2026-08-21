@@ -265,6 +265,13 @@ fn load_benchmark(name: &str) -> Option<Benchmark> {
 /// 327ms for the same code rebuilt, which reads as a 13x regression that does
 /// not exist.
 fn has_precompiled_bundle(name: &str) -> bool {
+    // CI regenerates every bundle from source in the same workflow, but the
+    // artifact round-trip does not preserve mtimes, so the freshness check
+    // below would compare arbitrary timestamps and skip the targets it is
+    // meant to protect.
+    if std::env::var_os("RAYZOR_BENCH_BUNDLES_ARE_FRESH").is_some() {
+        return get_precompiled_path(name).exists();
+    }
     let bundle = get_precompiled_path(name);
     let Ok(bundle_time) = bundle.metadata().and_then(|m| m.modified()) else {
         return false;

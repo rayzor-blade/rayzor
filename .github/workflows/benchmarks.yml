@@ -105,9 +105,7 @@ jobs:
         kernel:
           - nbody
           - fibonacci
-          # deltablue disabled: rayzor-gcc hangs (C backend CallIndirect
-          # doesn't dereference the closure struct for vtable dispatch).
-          # Re-enable after fix.
+          - deltablue
           - mandelbrot
     steps:
       - uses: actions/checkout@v4
@@ -193,6 +191,11 @@ jobs:
         run: chmod +x target/release/rayzor target/release/examples/benchmark_runner
 
       - name: Run ${{ matrix.kernel }} benchmark
+        # The bundles were regenerated from source two jobs up; the artifact
+        # round-trip loses their mtimes, so the runner's staleness check is
+        # told they are current rather than left to guess from timestamps.
+        env:
+          RAYZOR_BENCH_BUNDLES_ARE_FRESH: "1"
         run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
 
       # Each runner produces only its own kernel; `collect` merges them back
