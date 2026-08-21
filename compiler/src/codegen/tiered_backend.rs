@@ -1544,31 +1544,24 @@ impl TieredBackend {
                 }
             }
         }
-        if !self.promotion_barrier.request_promotion() {
-            // Another promotion is already in flight — retry next call.
-            emit_tier_event("install_barrier_busy", Some(func_id), Some(target_tier), "");
-            return;
-        }
-        if !self
-            .promotion_barrier
-            .wait_for_drain(Duration::from_secs(1))
-        {
-            self.promotion_barrier.cancel_promotion();
-            emit_tier_event(
-                "install_barrier_timeout",
-                Some(func_id),
-                Some(target_tier),
-                "",
-            );
-            return;
-        }
+        // No barrier dance for a single-pointer install. The drain can never
+        // succeed while a program is running -- `main` itself holds the
+        // execution counter until exit -- so every request burned its full 1s
+        // wait_for_drain timeout with state=PromotionRequested, and any
+        // execution entering through wait_and_enter_execution during that
+        // window blocked for the second. In-process repeated runs (the
+        // benchmark runner) paid it per promotion attempt.
+        //
+        // The dance also protected nothing here: this installs ONE pointer,
+        // the map write below is serialized against every reader by the
+        // RwLock, and replaced code is Box::leak'd -- a caller that already
+        // read the old pointer keeps executing valid code.
         {
             let mut fp = self.function_pointers.write().unwrap();
             let mut ft = self.function_tiers.write().unwrap();
             fp.insert(func_id, ptr);
             ft.insert(func_id, target_tier);
         }
-        self.promotion_barrier.complete_promotion();
         emit_tier_event("beadie_install", Some(func_id), Some(target_tier), "");
         self.beadie_installs.fetch_add(1, Ordering::Relaxed);
         match target_tier {
