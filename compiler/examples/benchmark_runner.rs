@@ -901,7 +901,21 @@ fn hashlink_c_available() -> bool {
     {
         return false;
     }
-    std::path::Path::new("/usr/local/include/hlc.h").exists()
+    std::path::Path::new(&hashlink_include_dir())
+        .join("hlc.h")
+        .exists()
+}
+
+/// Where to find HashLink's headers. `HASHLINK_INCLUDE` points the benchmark at
+/// a particular HashLink checkout instead of the system install, so a branch can
+/// be measured against the one in /usr/local.
+fn hashlink_include_dir() -> String {
+    std::env::var("HASHLINK_INCLUDE").unwrap_or_else(|_| "/usr/local/include".to_string())
+}
+
+/// Where to find libhl. See `hashlink_include_dir`.
+fn hashlink_lib_dir() -> String {
+    std::env::var("HASHLINK_LIB").unwrap_or_else(|_| "/usr/local/lib".to_string())
 }
 
 fn java_available() -> bool {
@@ -1039,9 +1053,13 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
                 .arg("-I")
                 .arg(&c_out_dir)
                 .arg("-I")
-                .arg("/usr/local/include")
+                .arg(hashlink_include_dir())
                 .arg("-L")
-                .arg("/usr/local/lib")
+                .arg(hashlink_lib_dir())
+                // libhl's install name is @rpath-relative, so without this the
+                // binary resolves against whatever libhl the system has -- and
+                // then the numbers describe a build nobody chose.
+                .arg(format!("-Wl,-rpath,{}", hashlink_lib_dir()))
                 .arg("-lhl")
                 .arg("-lm")
                 .arg("-lpthread")
@@ -1058,7 +1076,8 @@ fn run_haxe_benchmark(bench_name: &str, target: Target) -> Result<(Duration, Dur
             // Step 4: Run the native binary
             let exec_start = Instant::now();
             let output = Command::new(&binary)
-                .env("LD_LIBRARY_PATH", "/usr/local/lib")
+                .env("LD_LIBRARY_PATH", hashlink_lib_dir())
+                .env("DYLD_LIBRARY_PATH", hashlink_lib_dir())
                 .output()
                 .map_err(|e| format!("Failed to run hlc binary: {}", e))?;
             let exec_time = exec_start.elapsed();
@@ -1348,9 +1367,19 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         | Target::HaxeCpp
         | Target::HaxeJvm => {
             // No warmup for Haxe targets — matches Haxe benchmark methodology
-            for _ in 0..BENCH_RUNS {
+            let trace_iters = std::env::var("RAYZOR_BENCH_TRACE").is_ok();
+            for i in 0..BENCH_RUNS {
                 match run_haxe_benchmark(&bench.name, target) {
                     Ok((compile, exec)) => {
+                        if trace_iters {
+                            eprintln!(
+                                "  [iter {}] {} compile={:.0}ms exec={:.0}ms",
+                                i,
+                                target.name(),
+                                compile.as_secs_f64() * 1000.0,
+                                exec.as_secs_f64() * 1000.0
+                            );
+                        }
                         compile_times.push(compile);
                         exec_times.push(exec);
                     }
