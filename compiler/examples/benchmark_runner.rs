@@ -577,6 +577,23 @@ struct TieredBenchmarkState {
     compile_time: Duration,
 }
 
+/// Per-benchmark repetition counts: (warmup, timed).
+///
+/// An allocation kernel's whole working set currently leaks per iteration --
+/// objects held in other objects' fields are never freed (the composition
+/// leak; scripts/check_composition_leak.sh exits 1 at HEAD) -- so running it
+/// warmup+timed times IN ONE PROCESS multiplies the leak by the rep count.
+/// binarytrees at the default 15+10 is ~2.4 GB x 25 = far past a 16 GB CI
+/// runner: the job died at SIGTERM 31 seconds into its first lane and took
+/// every other lane's numbers with it. Three reps bound the peak at ~7 GB and
+/// still give a median. Restore the defaults when transitive drop lands.
+fn reps_for(name: &str) -> (usize, usize) {
+    match name {
+        "binarytrees" => (0, 3),
+        _ => (WARMUP_RUNS, BENCH_RUNS),
+    }
+}
+
 /// Heavy benchmarks that should skip standalone interpreter target.
 /// fibonacci and deltablue are too slow for interpreter; mandelbrot
 /// and nbody are compute-heavy. Tiered mode still uses the interpreter
@@ -1268,6 +1285,7 @@ fn run_benchmark_isolated(
 }
 
 fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, String> {
+    let (warmup_runs, bench_runs) = reps_for(&bench.name);
     let symbols = get_runtime_symbols();
     let mut compile_times = Vec::new();
     let mut exec_times = Vec::new();
@@ -1282,7 +1300,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = state.compile_time;
 
             // Warmup - runs accumulate, triggering tier promotion
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_tiered_iteration(&mut state);
             }
 
@@ -1291,7 +1309,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             // A fixed number of extra iterations is a guess about when another
             // thread finishes: on a loaded machine the promotion can land
             // after the measurement starts, and because the reported figure is
-            // the median of BENCH_RUNS, a handful of unpromoted iterations
+            // the median of bench_runs, a handful of unpromoted iterations
             // moves it to a different tier entirely. That is the shape of the
             // run-to-run inconsistency in CI — bimodal, not noisy. So wait for
             // the tier the run is supposed to measure, and say so when it
@@ -1317,7 +1335,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             }
 
             // Benchmark runs
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec = run_tiered_iteration(&mut state)?;
                 compile_times.push(compile_time);
                 exec_times.push(exec);
@@ -1336,12 +1354,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = state.compile_time;
 
             // Warmup runs
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_llvm_iteration(&mut state);
             }
 
             // Benchmark runs
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec = run_llvm_iteration(&mut state)?;
                 compile_times.push(compile_time);
                 exec_times.push(exec);
@@ -1354,12 +1372,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let load_time = state.load_time;
 
             // Warmup runs (same compiled code, warm caches)
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_precompiled_iteration(&mut state);
             }
 
             // Benchmark runs
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec = run_precompiled_iteration(&mut state)?;
                 compile_times.push(load_time);
                 exec_times.push(exec);
@@ -1372,7 +1390,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let load_time = state.load_time;
 
             // Warmup - runs accumulate, triggering tier promotion
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_precompiled_tiered_iteration(&mut state);
             }
 
@@ -1398,7 +1416,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             }
 
             // Benchmark runs at highest tier
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec = run_precompiled_tiered_iteration(&mut state)?;
                 compile_times.push(load_time); // Load time = "compile time"
                 exec_times.push(exec);
@@ -1413,7 +1431,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
         | Target::HaxeJvm => {
             // No warmup for Haxe targets — matches Haxe benchmark methodology
             let trace_iters = std::env::var("RAYZOR_BENCH_TRACE").is_ok();
-            for i in 0..BENCH_RUNS {
+            for i in 0..bench_runs {
                 match run_haxe_benchmark(&bench.name, target) {
                     Ok((compile, exec)) => {
                         if trace_iters {
@@ -1461,12 +1479,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = compile_start.elapsed();
 
             // Warmup runs
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = Command::new(&binary_path).output();
             }
 
             // Benchmark runs
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec_start = Instant::now();
                 let output = Command::new(&binary_path)
                     .output()
@@ -1510,12 +1528,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = compile_start.elapsed();
 
             // Warmup runs
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = Command::new(&binary_path).output();
             }
 
             // Benchmark runs
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let exec_start = Instant::now();
                 let output = Command::new(&binary_path)
                     .output()
@@ -1534,7 +1552,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
         // Cranelift and Interpreter: each iteration is independent
         Target::RayzorCranelift | Target::RayzorInterpreter => {
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = match target {
                     Target::RayzorCranelift => run_benchmark_cranelift(bench, &symbols),
                     Target::RayzorInterpreter => run_benchmark_interpreter(bench, &symbols),
@@ -1542,7 +1560,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 };
             }
 
-            for _ in 0..BENCH_RUNS {
+            for _ in 0..bench_runs {
                 let result = match target {
                     Target::RayzorCranelift => run_benchmark_cranelift(bench, &symbols),
                     Target::RayzorInterpreter => run_benchmark_interpreter(bench, &symbols),
