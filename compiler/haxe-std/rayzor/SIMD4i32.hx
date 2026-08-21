@@ -47,6 +47,12 @@ extern abstract SIMD4i32 {
     @:native("load")
     public static function load(ptr:Ptr<Int>):SIMD4i32;
 
+    /** Write the SIMD4i32 back to `ptr`. The integer vector types could be
+        loaded but not stored, which left every quantise with a scalar write
+        loop after a vectorised body. */
+    @:native("store")
+    public function store(ptr:Ptr<Int>):Void;
+
     /** Element-wise addition */
     @:native("add")
     @:op(A + B)
