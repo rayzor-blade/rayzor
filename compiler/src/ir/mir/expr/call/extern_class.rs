@@ -122,12 +122,26 @@ impl<'a> HirToMirContext<'a> {
             };
             let receiver_class_hint = receiver_class_hint_owned.as_deref();
 
-            // SIMD4f arithmetic methods (`a.add(b)`) must compile to the same
+            // SIMD arithmetic methods (`a.add(b)`) must compile to the same
             // single vector instruction as the operators (`a + b`); the default
             // method-call path routes them to a MIR wrapper that mishandles the
-            // vector ABI. Restricted to rayzor_SIMD4f (f32x4) — integer
-            // VectorBinOp miscompiles on the wasm backend.
-            if receiver_class_hint == Some("rayzor.SIMD4f") && args.len() == 2 {
+            // vector ABI — on the integer types that surfaced as a compiler
+            // panic on one backend and an "Unsupported cast from I64 to
+            // Vector" tier drop on the other, while `a + b` on the same values
+            // was correct.
+            //
+            // The integer types were previously excluded over a wasm concern.
+            // The exclusion did not send them anywhere safer: it sent them
+            // through the broken wrapper for every backend.
+            if matches!(
+                receiver_class_hint,
+                Some("rayzor.SIMD4f")
+                    | Some("rayzor.SIMD4i32")
+                    | Some("rayzor.SIMD8i32")
+                    | Some("rayzor.SIMD16i8")
+                    | Some("rayzor.SIMD32i8")
+            ) && args.len() == 2
+            {
                 let mname = self
                     .symbol_table
                     .get_symbol(*symbol)
@@ -140,13 +154,13 @@ impl<'a> HirToMirContext<'a> {
                     _ => None,
                 };
                 // The hint alone is not trusted: the operand's own declared type
-                // must classify as f32x4, so a VectorBinOp is never built over a
-                // non-vector operand.
-                let operands_are_simd4f = {
+                // must be a vector of the same class, so a VectorBinOp is never
+                // built over a non-vector operand.
+                let operands_match_hint = {
                     let t = self.convert_type(args[0].ty);
-                    t.is_vector() && simd_vector_class(&t) == "rayzor.SIMD4f"
+                    t.is_vector() && Some(simd_vector_class(&t)) == receiver_class_hint
                 };
-                if let Some(bin_op) = vbop.filter(|_| operands_are_simd4f) {
+                if let Some(bin_op) = vbop.filter(|_| operands_match_hint) {
                     let lhs_reg = self.lower_expression(&args[0])?;
                     let rhs_reg = self.lower_expression(&args[1])?;
                     // vec_ty must always be a vector: fall through both operand
