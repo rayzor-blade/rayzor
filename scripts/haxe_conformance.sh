@@ -36,7 +36,7 @@ for f in "$SRC"/*.hx; do
 
   d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit"
   cp "$REPO/compiler/tests/conformance/unit/Test.hx" "$d/unit/Test.hx"
-  cp "$REPO/compiler/tests/conformance/ConfCheck.hx" "$d/ConfCheck.hx"
+  cp "$REPO/compiler/tests/conformance/unit/ConfCheck.hx" "$d/unit/ConfCheck.hx"
 
   # Inject main() as the last member of the class; awk -v cannot carry newlines.
   python3 - "$f" "$d/unit/issues/$base.hx" "$base" $methods <<'PYGEN'
@@ -62,7 +62,7 @@ for i in range(start, len(lines)):
 main = ['    public static function main():Void {',
         '        var inst = new %s();' % cls]
 main += ['        inst.%s();' % m for m in methods]
-main += ['        ConfCheck.summary();', '    }']
+main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
 PYGEN
 
