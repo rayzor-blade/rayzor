@@ -6943,6 +6943,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     self.apply_fast_math(result);
                     Ok(result.into())
                 } else {
+                    if operand.is_pointer_value() {
+                        return Err(
+                            "negation applied to a reference; only numbers can be negated"
+                                .to_string(),
+                        );
+                    }
                     let result = self
                         .builder
                         .build_int_neg(operand.into_int_value(), &name)
@@ -6960,6 +6966,18 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             "not_cast",
                         )
                         .map_err(|e| format!("Failed to cast not operand: {}", e))?
+                } else if operand.is_pointer_value() {
+                    // `!x` where x is a reference: `s != null && ...` lowers the
+                    // short-circuit through Not on the pointer itself. Compare
+                    // the address, which for a Bool result is exactly the null
+                    // test the source asked for.
+                    self.builder
+                        .build_ptr_to_int(
+                            operand.into_pointer_value(),
+                            self.context.i64_type(),
+                            "not_ptr",
+                        )
+                        .map_err(|e| format!("Failed to cast not pointer operand: {}", e))?
                 } else {
                     operand.into_int_value()
                 };
