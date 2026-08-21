@@ -70,6 +70,7 @@ jobs:
           ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/binarytrees.hx -o compiler/benchmarks/precompiled/binarytrees.rzb --strip
           ./target/release/rayzor preblade --out .rayzor/blade/stdlib
 
       - name: Upload precompiled bundles and stdlib cache
@@ -107,6 +108,10 @@ jobs:
           - fibonacci
           - deltablue
           - mandelbrot
+          # Allocation. The rest of the set is FP or call latency, and since
+          # SRA started scalarizing mandelbrot's per-iteration objects nothing
+          # else exercises the allocator on a hot path.
+          - binarytrees
     steps:
       - uses: actions/checkout@v4
 

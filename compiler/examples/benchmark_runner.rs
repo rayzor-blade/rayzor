@@ -582,7 +582,10 @@ struct TieredBenchmarkState {
 /// and nbody are compute-heavy. Tiered mode still uses the interpreter
 /// for initial warmup before JIT promotion.
 fn is_heavy_benchmark(name: &str) -> bool {
-    matches!(name, "mandelbrot" | "nbody" | "fibonacci" | "deltablue")
+    matches!(
+        name,
+        "mandelbrot" | "nbody" | "fibonacci" | "deltablue" | "binarytrees"
+    )
 }
 
 fn setup_tiered_benchmark(
@@ -888,6 +891,7 @@ fn run_benchmark_llvm(
 /// Map benchmark name to the Haxe-native source file and main class
 fn get_haxe_source(bench_name: &str) -> Option<(&'static str, &'static str)> {
     match bench_name {
+        "binarytrees" => Some(("BMBinaryTreesCode.hx", "BMBinaryTreesCode")),
         "deltablue" => Some(("BMDeltaBlueCode.hx", "BMDeltaBlueCode")),
         "fibonacci" => Some(("BMFibonacciCode.hx", "BMFibonacciCode")),
         "nbody" => Some(("BMNBodyCode.hx", "BMNBodyCode")),
