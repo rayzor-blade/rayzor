@@ -58,6 +58,10 @@ pub enum OsrReject {
     /// not cover every instruction, so treating this as "already computed"
     /// would silently read whatever the register happened to hold.
     UnclassifiableValue,
+    /// The function returns through a caller-provided buffer. A helper is
+    /// reached as `(frame) -> ret` and has no buffer to write through, so it
+    /// would hand back its own frame.
+    ReturnsThroughBuffer,
     /// A block other than the header can also be entered from outside the
     /// resumed region, so on that edge it would redefine values the frame is
     /// supposed to supply. An enclosing loop's header is the usual case.
@@ -235,6 +239,15 @@ pub fn helper_for(func: &str, site_key: u64) -> *mut () {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// Whether resume points are built at all.
+///
+/// Off by default while the probe side is being brought up: building variants
+/// costs compile time for code nothing can yet reach.
+pub fn osr_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RAYZOR_OSR").is_some())
+}
+
 /// Whether tracing of OSR decisions is on.
 ///
 /// Resolved once. `getenv` takes a process-wide lock on macOS, and a probe that
@@ -381,6 +394,9 @@ pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, Osr
     if header == func.cfg.entry_block {
         return Err(OsrReject::IsEntryBlock);
     }
+    if func.signature.uses_sret {
+        return Err(OsrReject::ReturnsThroughBuffer);
+    }
 
     let region = blocks_reachable_from(func, header);
     // Only blocks the header dominates are guaranteed to have run by the time
@@ -514,6 +530,13 @@ pub fn build_osr_variant(
         reg: frame_ptr,
         by_ref: false,
     }];
+    // A probe calls the helper as `(frame) -> ret`. Left on the Haxe
+    // convention the backends prepend a hidden environment pointer, which
+    // would put the frame in the wrong register. Nothing is lost by dropping
+    // it: an environment a resumed block reads arrives in the frame like any
+    // other value, because it is a parameter and parameters are defined by the
+    // entry block, which no header dominates.
+    variant.signature.calling_convention = crate::ir::CallingConvention::C;
 
     // The prologue reads each live value back out of the frame. A phi's value
     // becomes that phi's incoming on the entry edge; everything else is bound
@@ -831,6 +854,31 @@ mod tests {
         assert_eq!(
             build_osr_variant(&func, inner_h, IrFunctionId(9997)).err(),
             Some(OsrReject::RegionHasExternalEntry)
+        );
+    }
+
+    /// A probe calls a helper as `(frame) -> ret`, so the helper must not also
+    /// be expected to write through a caller-provided buffer.
+    #[test]
+    fn a_function_returning_through_a_buffer_is_refused() {
+        let mut func = counted_loop();
+        func.signature.uses_sret = true;
+        let header = innermost_header(&func);
+        assert_eq!(
+            build_osr_variant(&func, header, IrFunctionId(9993)).err(),
+            Some(OsrReject::ReturnsThroughBuffer)
+        );
+    }
+
+    /// Left on the Haxe convention the backends prepend a hidden environment
+    /// pointer, which would put the frame in the wrong register.
+    #[test]
+    fn the_variant_uses_the_c_convention() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        assert_eq!(
+            v.function.signature.calling_convention,
+            crate::ir::CallingConvention::C
         );
     }
 

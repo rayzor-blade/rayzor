@@ -2963,6 +2963,88 @@ impl TieredBackend {
     /// MCJIT is stable on these platforms and provides the best JIT experience.
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
+    /// Add a resumable second entry point for every loop that has one, and
+    /// report what to publish once the engine hands back addresses.
+    ///
+    /// Variants go into the tree-shaken clones rather than the live modules:
+    /// nothing calls them, so shaking would drop them, and the interpreter and
+    /// baseline tiers should never see a function that only a back edge reaches.
+    ///
+    /// Returns `(variant id, parent function name, site key)`. The parent's
+    /// NAME identifies the site because an IrFunctionId is a slot number local
+    /// to one module, not an identity.
+    #[cfg(feature = "llvm-backend")]
+    fn add_osr_variants(modules: &mut [crate::ir::IrModule]) -> Vec<(IrFunctionId, String, u64)> {
+        use crate::ir::osr;
+
+        if !osr::osr_enabled() {
+            return Vec::new();
+        }
+
+        // One id space covers the whole compile: the backend keys functions by
+        // id, so a variant must not land on an id another module already uses.
+        let mut next_id = modules
+            .iter()
+            .flat_map(|m| m.functions.keys().map(|id| id.0))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
+            .max(
+                modules
+                    .iter()
+                    .map(|m| m.next_function_id)
+                    .max()
+                    .unwrap_or(0),
+            );
+
+        let mut published = Vec::new();
+        for module in modules.iter_mut() {
+            let candidates: Vec<(IrFunctionId, crate::ir::IrBlockId)> = module
+                .functions
+                .iter()
+                .filter(|(_, f)| !f.cfg.blocks.is_empty())
+                .flat_map(|(id, f)| osr::find_loop_headers(f).into_iter().map(move |h| (*id, h)))
+                .collect();
+
+            let mut built = Vec::new();
+            for (func_id, header) in candidates {
+                let Some(parent) = module.functions.get(&func_id) else {
+                    continue;
+                };
+                let variant_id = IrFunctionId(next_id);
+                match osr::build_osr_variant(parent, header, variant_id) {
+                    Ok(variant) => {
+                        if osr::osr_trace_enabled() {
+                            eprintln!(
+                                "[osr] resume point {} site=0x{:x} slots={}",
+                                variant.function.name,
+                                variant.layout.site_key(),
+                                variant.layout.params.len()
+                            );
+                        }
+                        published.push((
+                            variant_id,
+                            parent.name.clone(),
+                            variant.layout.site_key(),
+                        ));
+                        next_id += 1;
+                        built.push(variant.function);
+                    }
+                    Err(reason) => {
+                        if osr::osr_trace_enabled() {
+                            eprintln!("[osr] {} {header:?} not resumable: {reason:?}", parent.name);
+                        }
+                    }
+                }
+            }
+            for function in built {
+                module.add_function(function);
+            }
+        }
+        published
+    }
+
+    #[cfg(feature = "llvm-backend")]
     fn compile_all_with_llvm_mcjit(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // Check if THIS instance has already compiled with LLVM
         {
@@ -3005,7 +3087,12 @@ impl TieredBackend {
         // Tree-shake to remove unreachable stdlib wrappers (Tensor, GPU, etc.)
         // before LLVM compilation. Without this, LLVM compiles all functions
         // including unused wrappers, which can cause heap corruption on Linux.
-        let modules = self.tree_shake_modules_for_llvm();
+        let mut modules = self.tree_shake_modules_for_llvm();
+        // Give every resumable loop a second entry point, compiled alongside
+        // the function it came from. A frame already running baseline code can
+        // then finish here rather than waiting to return, which is the only way
+        // optimised code reaches a loop that is entered once.
+        let osr_variants = Self::add_osr_variants(&mut modules);
         for module in &modules {
             backend.declare_module(module)?;
         }
@@ -3049,6 +3136,20 @@ impl TieredBackend {
         for func_id in &needed_func_ids {
             if let Some(ptr) = backend.get_function_pointer_by_id(*func_id) {
                 resolved_pointers.insert(*func_id, ptr);
+            }
+        }
+
+        // Publish each resume point now the engine has addresses. A back edge
+        // reads its slot every iteration and starts transferring the moment it
+        // is non-null, so this is what arms them.
+        for (variant_id, parent_name, site_key) in &osr_variants {
+            match backend.get_function_pointer_by_id(*variant_id) {
+                Some(ptr) => crate::ir::osr::publish_helper(parent_name, *site_key, ptr as *mut ()),
+                None => {
+                    if crate::ir::osr::osr_trace_enabled() {
+                        eprintln!("[osr] no address for {parent_name} site=0x{site_key:x}");
+                    }
+                }
             }
         }
 
