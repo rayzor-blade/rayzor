@@ -23,7 +23,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export CARGO_INCREMENTAL=0
 
-log="$(mktemp -t rayzor-build)"
+# BSD mktemp treats -t as a bare prefix; GNU requires the template to end in
+# XXXXXX and errors out otherwise, so the bare form fails on every Linux box.
+log="$(mktemp -t rayzor-build.XXXXXX)"
 trap 'rm -f "$log"' EXIT
 
 echo ">> lowering the standard library with the current compiler"
