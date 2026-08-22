@@ -333,6 +333,85 @@ pub fn build_batched_adapter(
     )
 }
 
+/// Whole-module LLVM, as a backend beadie can promote into.
+///
+/// The tier above Cranelift used to be reachable only by a blocking call that
+/// compiled everything before execution continued. Expressed as a backend, the
+/// same compile runs on beadie's worker while the program keeps going, and a
+/// loop already running transfers into the result through its resume point.
+///
+/// Only the module handle and the symbol table live here, which is what lets
+/// this cross a thread at all: the LLVM context and engine are built and left
+/// behind inside `compile`, and never travel.
+#[cfg(feature = "llvm-backend")]
+pub struct BeadieLlvm {
+    runtime_symbols: Arc<Vec<(String, usize)>>,
+}
+
+#[cfg(feature = "llvm-backend")]
+impl BeadieLlvm {
+    pub fn new(runtime_symbols: Arc<Vec<(String, usize)>>) -> Self {
+        Self { runtime_symbols }
+    }
+}
+
+#[cfg(feature = "llvm-backend")]
+impl JitBackend for BeadieLlvm {
+    type FunctionDef = BeadieFunctionDef;
+    type Error = CompileError;
+
+    fn compile(&self, _bead: &Arc<Bead>, def: BeadieFunctionDef) -> Result<*mut (), Self::Error> {
+        let modules: Vec<IrModule> = def.modules.read().unwrap().clone();
+
+        // The whole module is compiled, but only the function that asked for
+        // promotion needs its address resolved here. Resolving every one at
+        // once is what the MCJIT path warns segfaults; the rest reach their
+        // code through the global pointer map.
+        let mut needed = vec![def.func_id];
+        for module in &modules {
+            for (func_id, function) in &module.functions {
+                if !function.cfg.blocks.is_empty()
+                    && function.uses_wide_vectors()
+                    && !needed.contains(func_id)
+                {
+                    needed.push(*func_id);
+                }
+            }
+        }
+
+        let (resolved, global_ptrs) = super::tiered_backend::TieredBackend::llvm_compile_owned(
+            modules,
+            Arc::clone(&self.runtime_symbols),
+            needed,
+        )
+        .map_err(CompileError::new)?;
+
+        super::llvm_jit_backend::mark_llvm_compiled_globally_with_pointers(global_ptrs);
+
+        resolved
+            .get(&def.func_id)
+            .map(|ptr| *ptr as *mut ())
+            .ok_or_else(|| CompileError::new(format!("no LLVM address for {:?}", def.func_id)))
+    }
+}
+
+/// Build the adapter that promotes a function from Cranelift to LLVM.
+///
+/// `queue_ahead` is why the threshold is not simply small: the compile is
+/// submitted that many invocations early, so the code is ready around the time
+/// the function is actually hot rather than long after.
+#[cfg(feature = "llvm-backend")]
+pub fn build_llvm_adapter(
+    runtime_symbols: Arc<Vec<(String, usize)>>,
+    threshold: u32,
+    queue_ahead: u32,
+) -> Arc<BackendAdapter<BeadieLlvm>> {
+    Arc::new(BackendAdapter::from_arc_with_policy(
+        Arc::new(BeadieLlvm::new(runtime_symbols)),
+        ThresholdPolicy::new(threshold).queue_ahead(queue_ahead),
+    ))
+}
+
 /// Build a batched [`BackendAdapter<BeadieJit>`] with explicit
 /// cranelift opt-level. Used by `TieredBackend` to construct one
 /// adapter per tier (Standard at `"speed"`, Optimized at
