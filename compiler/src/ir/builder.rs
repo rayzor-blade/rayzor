@@ -351,6 +351,31 @@ impl IrBuilder {
         args: Vec<IrId>,
         ty: IrType,
     ) -> Option<IrId> {
+        // An extern's signature IS its ABI, so a call cannot carry arguments it
+        // does not declare. Haxe optional parameters produce exactly that:
+        // `Bytes.ofString(s:String, ?encoding:Encoding)` lowers a two-argument
+        // call, while the runtime it maps to is
+        // `haxe_bytes_of_string(s: *const HaxeString)` and the mapping itself
+        // records `params: 1`. Two of the three sources already agreed on one;
+        // only the lowering disagreed. LLVM reports "Incorrect number of
+        // arguments passed to called function"; Cranelift does not check arity
+        // and lets the callee read a register that means nothing.
+        //
+        // Trailing only, and externs only. A module function's signature is the
+        // Haxe one, so a short call there is an omitted optional rather than a
+        // mismatch, and truncating it would be wrong.
+        let mut args = args;
+        if let Some(declared) = self
+            .module
+            .extern_functions
+            .get(&func_id)
+            .map(|f| f.signature.parameters.len())
+        {
+            if args.len() > declared {
+                args.truncate(declared);
+            }
+        }
+
         // IMPORTANT: Always use the function's actual signature if available.
         // The caller might pass an incorrect type (e.g., Any instead of Void) due to
         // type inference issues in earlier stages. Using the actual signature ensures
