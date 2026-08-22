@@ -430,6 +430,14 @@ register_symbol!(
     "haxe_register_interface_impl",
     crate::type_system::haxe_register_interface_impl
 );
+register_symbol!(
+    "haxe_register_owned_mask",
+    crate::type_system::haxe_register_owned_mask
+);
+register_symbol!(
+    "haxe_object_free_deep",
+    crate::type_system::haxe_object_free_deep
+);
 
 // Std.string() - Type-specific conversions
 register_symbol!(
