@@ -1436,6 +1436,85 @@ pub extern "C" fn haxe_register_interface_impl(class_type_id: i64, interface_typ
     set.insert(iface_id);
 }
 
+/// Per class, which instance fields hold a value this object OWNS: bit `i` set
+/// means field `i` -- byte offset `(i + 1) * 8`, since slot 0 is `__type_id` --
+/// holds the only pointer to a heap object that dies with its holder.
+///
+/// Kept apart from `ClassInfo` on purpose. `ClassInfo` is registered by a Rust
+/// call from the compiler process, so an AOT-built binary has none of it; this
+/// table is filled by `__vtable_init__`, which is emitted code and runs under
+/// every backend. Hanging the mask off `ClassInfo` would make deep-free a
+/// silent no-op in exactly the builds that ship.
+static OWNED_FIELD_MASKS: RwLock<Option<HashMap<u32, u64>>> = RwLock::new(None);
+
+/// Declare which of a class's fields own their referent.
+///
+/// The compiler proves this per field and defaults to NOT owned. That default
+/// is the whole safety argument: freeing a field that is merely a REFERENCE
+/// corrupts the heap, while declining to free one that is owned only leaks.
+#[no_mangle]
+pub extern "C" fn haxe_register_owned_mask(class_type_id: i64, mask: i64) {
+    if class_type_id <= 0 || mask == 0 {
+        return;
+    }
+    let mut guard = OWNED_FIELD_MASKS.write().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(class_type_id as u32, mask as u64);
+}
+
+/// Release a class instance and everything it owns.
+///
+/// Walks the owned-field mask, releasing each owned child before the object
+/// itself, so a tree is reclaimed from the leaves up.
+///
+/// There is deliberately NO visited set and no mark bit. Neither would make
+/// this safe, because the danger is not revisiting a node: a field pointing at
+/// a shared singleton is freed on FIRST visit, and no amount of cycle
+/// detection catches that. Safety comes from the compiler only setting a bit
+/// when it has proved the referent is unaliased, which also makes cycles
+/// impossible -- a cycle needs two paths to some node, and the second one is
+/// an alias. A visited set would also cost more than the free it guards: the
+/// tree kernel allocates tens of millions of nodes.
+///
+/// Recursion depth follows the owned graph, which is the object's own depth --
+/// a 2^16-node tree is 17 frames, not 65535.
+///
+/// # Safety
+/// `ptr` must be a live class instance allocated by the compiler's object
+/// allocator, with its `__type_id` header intact, and must not be reachable
+/// from anywhere else.
+#[no_mangle]
+pub unsafe extern "C" fn haxe_object_free_deep(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    let type_id = unsafe { *(ptr as *const i64) };
+    let mask = if type_id > 0 {
+        OWNED_FIELD_MASKS
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|m| m.get(&(type_id as u32)).copied()))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut bits = mask;
+    while bits != 0 {
+        let index = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        // Field i sits at (i + 1) * 8; slot 0 is the type-id header.
+        let slot = unsafe { ptr.add((index + 1) * 8) as *const i64 };
+        let child = unsafe { *slot };
+        if child != 0 {
+            unsafe { haxe_object_free_deep(child as *mut u8) };
+        }
+    }
+
+    unsafe { libc::free(ptr as *mut libc::c_void) };
+}
+
 /// Runtime type check for Dynamic/boxed values.
 /// Checks if a boxed DynamicValue has the given type_id, walking the class hierarchy.
 /// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.

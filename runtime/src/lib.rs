@@ -64,6 +64,7 @@ pub mod haxe_string; // Comprehensive String API
 pub mod haxe_sys; // System/IO functions
 pub mod json; // Native JSON parse/stringify
 pub mod native_stack_trace; // NativeStackTrace (Rust backtrace capture + source-mapped traces)
+pub mod object_pool;
 pub mod panic_guard; // Panic guard for safe FFI (catch_unwind → Haxe exception)
 pub mod reflect; // Reflect + Type API for anonymous objects
 pub mod safety; // Safety validation and error reporting

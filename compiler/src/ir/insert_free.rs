@@ -26,7 +26,7 @@ use super::blocks::{IrBlockId, IrTerminator};
 use super::functions::IrFunctionId;
 use super::instructions::{IrInstruction, OwnershipMode};
 use super::optimization::{OptimizationPass, OptimizationResult};
-use super::{IrFunction, IrId, IrModule, IrType};
+use super::{IrFunction, IrId, IrModule, IrType, IrValue};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Collected function IDs for allocation/deallocation patterns
@@ -243,6 +243,22 @@ impl OptimizationPass for InsertFreePass {
         // the opt-in bool masks above they are computed unconditionally: the
         // worst they can do is transfer nothing.
         let retention_kinds = compute_retention_kinds(module, &ids);
+
+        // Objects. A builder that hands back a freshly made instance makes its
+        // call dest an owned allocation in the caller, and the owned-field
+        // census says what dies with that instance. Together they reclaim a
+        // structure whose interior nothing else names; apart, neither does
+        // anything -- the census has nothing to hang off if the root is never
+        // freed, and freeing the root alone reclaims one node of a tree.
+        let fresh_object_fns = compute_returns_fresh_objects(module, &ids, &param_retention);
+        let owned = compute_owned_fields(
+            module,
+            &ids,
+            &fresh_object_fns,
+            &retention_kinds.returns_alias,
+        );
+        register_owned_masks(module, &owned);
+
         let func_ids: Vec<_> = module.functions.keys().cloned().collect();
         for func_id in func_ids {
             if let Some(function) = module.functions.get_mut(&func_id) {
@@ -2072,6 +2088,624 @@ fn read_out_closure(
         return seed;
     }
     alias_closure(&seed, function, ids, returns_alias, true)
+}
+
+/// Per class, which instance fields hold a value the object owns.
+///
+/// A field is owned only when EVERY store to it, anywhere in the program,
+/// hands over a freshly allocated object that nothing else keeps. Anything
+/// unproven stays borrowed, because the two mistakes are not symmetric:
+/// declining to free an owned field leaks, while freeing a borrowed one
+/// corrupts the heap.
+///
+/// That asymmetry is the whole safety argument, and it is not a cycle
+/// question. `TreeNode.left` points at another `TreeNode`, so a rule that
+/// refused self-referential types would refuse the one shape that leaks;
+/// meanwhile deltablue's `Strength` is perfectly acyclic yet its instances are
+/// static singletons that many constraints share, and freeing one through a
+/// constraint corrupts the heap on the FIRST visit, where no cycle detection
+/// would ever look. Aliasing is the property that separates them.
+#[derive(Default)]
+struct OwnedFields {
+    /// class type id -> bitmask over INSTANCE field indices (bit 0 is the
+    /// first instance field, which lives at GEP index 1: slot 0 is the header)
+    masks: BTreeMap<u64, u64>,
+}
+
+/// Which class a local allocation belongs to, read from the type-id header the
+/// constructor writes into slot 0.
+fn alloc_type_ids(function: &IrFunction, ids: &AllocFuncIds) -> BTreeMap<IrId, u64> {
+    let mut allocs: BTreeSet<IrId> = BTreeSet::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect {
+                dest: Some(d),
+                func_id,
+                ..
+            } = inst
+            {
+                if ids.malloc_ids.contains(func_id) {
+                    allocs.insert(*d);
+                }
+            }
+        }
+    }
+    if allocs.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let consts = const_ints(function);
+    let mut out = BTreeMap::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            let IrInstruction::Store { ptr, value, .. } = inst else {
+                continue;
+            };
+            // The header write is `store gep(alloc, 0), <type id>`.
+            let Some((base, 0)) = gep_base_and_index(function, *ptr, &consts) else {
+                continue;
+            };
+            if !allocs.contains(&base) {
+                continue;
+            }
+            if let Some(tid) = consts.get(value) {
+                if *tid > 0 {
+                    out.insert(base, *tid as u64);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Integer constants defined in this function, by register.
+fn const_ints(function: &IrFunction) -> BTreeMap<IrId, i64> {
+    let mut out = BTreeMap::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::Const { dest, value } = inst {
+                let n = match value {
+                    IrValue::I8(v) => Some(*v as i64),
+                    IrValue::I16(v) => Some(*v as i64),
+                    IrValue::I32(v) => Some(*v as i64),
+                    IrValue::I64(v) => Some(*v),
+                    IrValue::U8(v) => Some(*v as i64),
+                    IrValue::U16(v) => Some(*v as i64),
+                    IrValue::U32(v) => Some(*v as i64),
+                    IrValue::U64(v) => Some(*v as i64),
+                    _ => None,
+                };
+                if let Some(n) = n {
+                    out.insert(*dest, n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `(base, constant index)` a GEP names, or `None` when the index is not a
+/// known constant -- a computed index could reach any field, so it is not a
+/// fact about one of them.
+fn gep_base_and_index(
+    function: &IrFunction,
+    ptr: IrId,
+    consts: &BTreeMap<IrId, i64>,
+) -> Option<(IrId, i64)> {
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::GetElementPtr {
+                dest,
+                ptr: base,
+                indices,
+                ..
+            } = inst
+            {
+                if *dest != ptr {
+                    continue;
+                }
+                if indices.len() != 1 {
+                    return None;
+                }
+                return consts.get(&indices[0]).map(|i| (*base, *i));
+            }
+        }
+    }
+    None
+}
+
+/// Which parameters a function stores into its receiver, and at which field.
+///
+/// `TreeNode.new(this, left, right, item)` stores `left` at GEP index 1 and
+/// `right` at index 2, so the caller's argument is what the field will hold and
+/// the question "does this field own its value" is really a question about
+/// every call site.
+///
+/// A parameter that reaches more than one field, or that is used for anything
+/// beyond that single store, is left out: the point is to identify a handover,
+/// and a parameter doing something else as well has not handed anything over.
+fn param_to_field_map(
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> BTreeMap<usize, i64> {
+    let params = &function.signature.parameters;
+    if params.len() < 2 {
+        return BTreeMap::new();
+    }
+    let consts = const_ints(function);
+    let self_derived = alias_closure(
+        &BTreeSet::from([params[0].reg]),
+        function,
+        ids,
+        returns_alias,
+        false,
+    );
+
+    let mut out = BTreeMap::new();
+    for (pi, param) in params.iter().enumerate().skip(1) {
+        let derived = alias_closure(
+            &BTreeSet::from([param.reg]),
+            function,
+            ids,
+            returns_alias,
+            false,
+        );
+        let mut field: Option<i64> = None;
+        let mut disqualified = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::Store { ptr, value, .. } if derived.contains(value) => {
+                        match gep_base_and_index(function, *ptr, &consts) {
+                            Some((base, idx)) if self_derived.contains(&base) && idx > 0 => {
+                                if field.replace(idx).is_some_and(|prev| prev != idx) {
+                                    disqualified = true;
+                                }
+                            }
+                            _ => disqualified = true,
+                        }
+                    }
+                    // Reads and the alias-forming ops are how the value gets
+                    // from the parameter to the store; anything else is a use
+                    // this walk has not accounted for.
+                    IrInstruction::Load { .. }
+                    | IrInstruction::GetElementPtr { .. }
+                    | IrInstruction::PtrAdd { .. }
+                    | IrInstruction::Cast { .. }
+                    | IrInstruction::BitCast { .. }
+                    | IrInstruction::SsaBarrier { .. }
+                    | IrInstruction::Copy { .. }
+                    | IrInstruction::Select { .. }
+                    | IrInstruction::Cmp { .. }
+                    | IrInstruction::Store { .. } => {}
+                    IrInstruction::CallDirect { func_id, args, .. }
+                        if args.iter().any(|a| derived.contains(a)) =>
+                    {
+                        // A callee that merely reads it is fine; one that could
+                        // keep it means the field is not the only holder.
+                        let borrows = ids.copy_only_ids.contains(func_id)
+                            || ids.nonaliasing_result_ids.contains(func_id);
+                        if !borrows {
+                            disqualified = true;
+                        }
+                    }
+                    other => {
+                        if other.uses().iter().any(|u| derived.contains(u)) {
+                            disqualified = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !disqualified {
+            if let Some(idx) = field {
+                out.insert(pi, idx);
+            }
+        }
+    }
+    out
+}
+
+/// Is this value a freshly made object that nothing else in the function keeps?
+///
+/// "Fresh" is the allocation itself; "single-holder" is that its only use is
+/// the handover site given. Both are needed: a fresh object stored into two
+/// places has two holders, and freeing it through either dangles the other.
+fn fresh_single_holder(
+    value: IrId,
+    handover: &IrInstruction,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    fresh_object_fns: &BTreeSet<IrFunctionId>,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let is_fresh = function.cfg.blocks.values().any(|b| {
+        b.instructions.iter().any(|i| match i {
+            IrInstruction::CallDirect {
+                dest: Some(d),
+                func_id,
+                ..
+            } => {
+                *d == value
+                    && (ids.malloc_ids.contains(func_id) || fresh_object_fns.contains(func_id))
+            }
+            _ => false,
+        })
+    });
+    if !is_fresh {
+        return false;
+    }
+
+    let derived = alias_closure(
+        &BTreeSet::from([value]),
+        function,
+        ids,
+        returns_alias,
+        false,
+    );
+    let mut uses = 0usize;
+    for block in function.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            if phi.incoming.iter().any(|(_, v)| derived.contains(v)) {
+                return false;
+            }
+        }
+        for inst in &block.instructions {
+            if std::ptr::eq(inst, handover) {
+                continue;
+            }
+            match inst {
+                // The chain that produces and carries it.
+                IrInstruction::CallDirect { dest: Some(d), .. } if *d == value => {}
+                IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. } => {}
+                other => {
+                    if other.uses().iter().any(|u| derived.contains(u)) {
+                        uses += 1;
+                    }
+                }
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if derived.contains(v) {
+                return false;
+            }
+        }
+    }
+    uses == 0
+}
+
+/// Functions whose returned value is a freshly built class instance the caller
+/// owns. The object analogue of `compute_returns_fresh_arrays`: without it a
+/// tree returned from a builder is not an allocation the pass can even see, so
+/// nothing frees the root and the owned-field mask never gets a chance to
+/// reclaim what hangs off it.
+fn compute_returns_fresh_objects(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> BTreeSet<IrFunctionId> {
+    let mut fresh: BTreeSet<IrFunctionId> = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for (fid, function) in bodied(module) {
+            if fresh.contains(&fid) || returns_a_pointer(function).is_none() {
+                continue;
+            }
+            if returns_fresh_object(function, ids, &fresh, param_retention) {
+                fresh.insert(fid);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    fresh
+}
+
+/// The single value this function returns, when every return agrees.
+fn returns_a_pointer(function: &IrFunction) -> Option<Vec<IrId>> {
+    let mut rets = Vec::new();
+    for block in function.cfg.blocks.values() {
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            rets.push(*v);
+        }
+        for inst in &block.instructions {
+            if let IrInstruction::Return { value: Some(v) } = inst {
+                rets.push(*v);
+            }
+        }
+    }
+    (!rets.is_empty()).then_some(rets)
+}
+
+/// Every return of this function hands back an object it allocated and did not
+/// publish anywhere else. Mirrors `returns_fresh_array`, minus the
+/// array-header identification: a class instance is a single allocation.
+fn returns_fresh_object(
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    fresh: &BTreeSet<IrFunctionId>,
+    param_retention: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let Some(ret_vals) = returns_a_pointer(function) else {
+        return false;
+    };
+    let type_ids = alloc_type_ids(function, ids);
+
+    let mut sources: Vec<IrId> = type_ids.keys().copied().collect();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect {
+                dest: Some(d),
+                func_id,
+                ..
+            } = inst
+            {
+                if fresh.contains(func_id) {
+                    sources.push(*d);
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return false;
+    }
+
+    let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    dealloc_ids.extend(ids.array_free_ids.iter().cloned());
+
+    'ret: for v in &ret_vals {
+        for &src in &sources {
+            let derived = build_derived_set(src, function);
+            if !derived.contains(v) {
+                continue;
+            }
+            if pointer_escapes_ex(
+                src,
+                &derived,
+                function,
+                &BTreeSet::new(),
+                &ids.anon_setter_ids,
+                &ids.copy_only_ids,
+                param_retention,
+                true,
+                None,
+            ) {
+                continue;
+            }
+            // Freed here and then returned would hand back a dangling pointer.
+            let freed = function.cfg.blocks.values().any(|block| {
+                block.instructions.iter().any(|inst| match inst {
+                    IrInstruction::Free { ptr } => derived.contains(ptr),
+                    IrInstruction::CallDirect { func_id, args, .. }
+                        if dealloc_ids.contains(func_id) =>
+                    {
+                        args.iter().any(|a| derived.contains(a))
+                    }
+                    _ => false,
+                })
+            });
+            if freed {
+                continue;
+            }
+            continue 'ret;
+        }
+        return false;
+    }
+    true
+}
+
+/// Whole-program owned-field census.
+///
+/// Evidence is gathered per (class, field) from two shapes -- a direct store
+/// through a local allocation whose type is known, and an argument handed to a
+/// callee that stores it into its receiver. A field is owned only if evidence
+/// exists and EVERY piece of it shows a fresh, single-holder value. One
+/// unproven store anywhere in the program is enough to leave the field
+/// borrowed, which is why a shared singleton like deltablue's `Strength`
+/// cannot be mistaken for owned: it is stored from a static, not freshly made.
+fn compute_owned_fields(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+    fresh_object_fns: &BTreeSet<IrFunctionId>,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> OwnedFields {
+    let mut param_fields: BTreeMap<IrFunctionId, BTreeMap<usize, i64>> = BTreeMap::new();
+    for (fid, f) in bodied(module) {
+        let m = param_to_field_map(f, ids, returns_alias);
+        if !m.is_empty() {
+            param_fields.insert(fid, m);
+        }
+    }
+
+    // (type id, GEP index) -> every store seen was a proven handover
+    let mut evidence: BTreeMap<(u64, i64), bool> = BTreeMap::new();
+    let mut note = |key: (u64, i64), ok: bool| {
+        let e = evidence.entry(key).or_insert(true);
+        *e &= ok;
+    };
+
+    for (_, function) in bodied(module) {
+        let type_ids = alloc_type_ids(function, ids);
+        if type_ids.is_empty() {
+            continue;
+        }
+        let consts = const_ints(function);
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::Store { ptr, value, .. } => {
+                        let Some((base, idx)) = gep_base_and_index(function, *ptr, &consts) else {
+                            continue;
+                        };
+                        if idx == 0 {
+                            continue; // the type-id header
+                        }
+                        let Some(&tid) = type_ids.get(&base) else {
+                            continue;
+                        };
+                        note(
+                            (tid, idx),
+                            fresh_single_holder(
+                                *value,
+                                inst,
+                                function,
+                                ids,
+                                fresh_object_fns,
+                                returns_alias,
+                            ),
+                        );
+                    }
+                    IrInstruction::CallDirect { func_id, args, .. } => {
+                        let Some(map) = param_fields.get(func_id) else {
+                            continue;
+                        };
+                        let Some(recv) = args.first() else { continue };
+                        let Some(&tid) = type_ids.get(recv) else {
+                            continue;
+                        };
+                        for (&pi, &idx) in map {
+                            let Some(&arg) = args.get(pi) else { continue };
+                            note(
+                                (tid, idx),
+                                fresh_single_holder(
+                                    arg,
+                                    inst,
+                                    function,
+                                    ids,
+                                    fresh_object_fns,
+                                    returns_alias,
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut owned = OwnedFields::default();
+    for ((tid, idx), ok) in evidence {
+        if !ok {
+            continue;
+        }
+        // GEP index 1 is instance field 0; slot 0 is the type-id header.
+        let bit = idx - 1;
+        if (0..64).contains(&bit) {
+            *owned.masks.entry(tid).or_insert(0) |= 1u64 << bit;
+        }
+    }
+    if std::env::var_os("RZT_DBG_OWNED").is_some() {
+        for (tid, mask) in &owned.masks {
+            eprintln!("[owned] type_id={tid} mask={mask:#x}");
+        }
+    }
+    owned
+}
+
+/// Declare each class's owned-field mask at startup.
+///
+/// The masks ride `__vtable_init__` rather than the RTTI that `ClassInfo`
+/// carries, because that registry is filled by a call from the compiler
+/// process and an AOT-built binary therefore has none of it. `__vtable_init__`
+/// is emitted code that every backend runs before main, so a mask declared
+/// here is present wherever the program is.
+fn register_owned_masks(module: &mut IrModule, owned: &OwnedFields) {
+    if owned.masks.is_empty() {
+        return;
+    }
+    let Some(init_id) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "__vtable_init__" && !f.cfg.blocks.is_empty())
+        .map(|(id, _)| *id)
+    else {
+        // No startup hook in this module: the masks have nowhere to live, so
+        // deep-free will fall back to releasing objects one at a time.
+        return;
+    };
+
+    let register_fn = match module
+        .extern_functions
+        .iter()
+        .find(|(_, f)| f.name == "haxe_register_owned_mask")
+        .map(|(id, _)| *id)
+    {
+        Some(id) => id,
+        None => {
+            let id = module.alloc_function_id();
+            module.extern_functions.insert(
+                id,
+                super::modules::IrExternFunction {
+                    id,
+                    name: "haxe_register_owned_mask".to_string(),
+                    symbol_id: crate::tast::SymbolId::from_raw(0),
+                    signature: super::IrFunctionSignature {
+                        parameters: vec![
+                            super::functions::IrParameter {
+                                name: "type_id".to_string(),
+                                ty: IrType::I64,
+                                reg: IrId(0),
+                                by_ref: false,
+                            },
+                            super::functions::IrParameter {
+                                name: "mask".to_string(),
+                                ty: IrType::I64,
+                                reg: IrId(1),
+                                by_ref: false,
+                            },
+                        ],
+                        return_type: IrType::Void,
+                        calling_convention: super::CallingConvention::C,
+                        can_throw: false,
+                        type_params: vec![],
+                        uses_sret: false,
+                    },
+                    source: "runtime".to_string(),
+                },
+            );
+            id
+        }
+    };
+
+    let Some(function) = module.functions.get_mut(&init_id) else {
+        return;
+    };
+    let entry = function.entry_block();
+    let regs: Vec<(IrId, IrId)> = owned
+        .masks
+        .keys()
+        .map(|_| (function.alloc_reg(), function.alloc_reg()))
+        .collect();
+    let Some(block) = function.cfg.blocks.get_mut(&entry) else {
+        return;
+    };
+    for ((&tid, &mask), (tid_reg, mask_reg)) in owned.masks.iter().zip(regs) {
+        block.instructions.push(IrInstruction::Const {
+            dest: tid_reg,
+            value: IrValue::I64(tid as i64),
+        });
+        block.instructions.push(IrInstruction::Const {
+            dest: mask_reg,
+            value: IrValue::I64(mask as i64),
+        });
+        block.instructions.push(IrInstruction::CallDirect {
+            dest: None,
+            func_id: register_fn,
+            args: vec![tid_reg, mask_reg],
+            arg_ownership: vec![OwnershipMode::Copy, OwnershipMode::Copy],
+            type_args: vec![],
+            is_tail_call: false,
+        });
+    }
 }
 
 /// A malloc allocation is an owned `HaxeArray` header if the alloc — or any
