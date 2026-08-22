@@ -1344,14 +1344,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 );
             }
 
-            // Upgrade to LLVM tier for maximum performance
-            #[cfg(feature = "llvm-backend")]
-            {
-                match state.backend.upgrade_to_llvm() {
-                    Ok(()) => eprintln!("  [LLVM] Upgrade succeeded"),
-                    Err(e) => eprintln!("  [LLVM] Upgrade FAILED: {}", e),
-                }
-            }
+            // No forced upgrade here. This target exists to measure what
+            // tiered execution actually delivers, and hoisting every function
+            // to the top tier first measures the top tier instead.
 
             // Benchmark runs
             for _ in 0..bench_runs {
