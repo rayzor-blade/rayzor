@@ -149,6 +149,16 @@ impl<'a> HirToMirContext<'a> {
                 if matches!(name_str, "Usize" | "Ptr" | "Ref" | "Box") {
                     return IrType::I64;
                 }
+                // Int64 is a real 64-bit integer here. Haxe declares it as an
+                // abstract over a two-word object because some of its targets
+                // have no 64-bit integer to lower to; rayzor does, so carrying
+                // a high/low pair -- and an allocation per value -- buys
+                // nothing. It was reaching the underlying-type fallback below
+                // and coming out as I32, which does not merely cost
+                // performance: every Int64 was being truncated to 32 bits.
+                if matches!(name_str, "Int64" | "__Int64" | "___Int64") {
+                    return IrType::I64;
+                }
                 // `Single`'s `to`/`from Float` are cast compatibility, not identity:
                 // the representation is 32-bit. Decided here with the other
                 // representation-bearing coreTypes, before the underlying/opaque

@@ -51,6 +51,30 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_cstring_from_raw(builder);
 
     // Build Usize MIR wrappers (no externs needed — native i64 ops)
+    build_fphelper_i32_to_float(builder);
+    build_fphelper_float_to_i32(builder);
+    build_fphelper_i64_to_double(builder);
+    build_fphelper_double_to_i64(builder);
+
+    build_int64_of_int(builder);
+    build_int64_to_int(builder);
+    build_int64_make(builder);
+    build_int64_get_high(builder);
+    build_int64_get_low(builder);
+    build_int64_neg(builder);
+    build_int64_compare(builder);
+    build_int64_binop(builder, "Int64_add", BinaryOp::Add);
+    build_int64_binop(builder, "Int64_sub", BinaryOp::Sub);
+    build_int64_binop(builder, "Int64_mul", BinaryOp::Mul);
+    build_int64_binop(builder, "Int64_div", BinaryOp::Div);
+    build_int64_binop(builder, "Int64_mod", BinaryOp::Rem);
+    build_int64_binop(builder, "Int64_and", BinaryOp::And);
+    build_int64_binop(builder, "Int64_or", BinaryOp::Or);
+    build_int64_binop(builder, "Int64_xor", BinaryOp::Xor);
+    build_int64_binop(builder, "Int64_shl", BinaryOp::Shl);
+    build_int64_binop(builder, "Int64_shr", BinaryOp::Shr);
+    build_int64_binop(builder, "Int64_ushr", BinaryOp::Ushr);
+
     build_usize_from_int(builder);
     build_usize_to_int(builder);
     build_usize_add(builder);
@@ -565,6 +589,263 @@ fn build_ref_deref(builder: &mut MirBuilder) {
 // ============================================================================
 // Usize — MIR wrappers (native i64 arithmetic, all identity/inline)
 // ============================================================================
+
+// ============================================================================
+// haxe.Int64 — a real 64-bit integer
+//
+// Haxe declares Int64 as an abstract over a `{high, low}` pair because some of
+// its targets have no 64-bit integer to lower to. rayzor does, so the pair
+// costs an allocation per value and buys nothing; worse, the abstract was
+// falling through to its underlying type and coming out as I32, silently
+// truncating every Int64 to 32 bits.
+//
+// These are the operations the abstract's methods map to. Each is a single
+// native instruction, so the whole two-word implementation in the stdlib is
+// bypassed rather than compiled.
+// ============================================================================
+
+/// Int64_ofInt(value: i32) -> i64 — sign-extend, the way Haxe's ofInt does.
+fn build_int64_of_int(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_ofInt")
+        .param("value", IrType::I32)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let value = builder.get_param(0);
+    let widened = builder.cast(value, IrType::I32, IrType::I64);
+    builder.ret(Some(widened));
+}
+
+/// Int64_toInt(self: i64) -> i32 — truncates, as Haxe specifies.
+fn build_int64_to_int(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_toInt")
+        .param("self_val", IrType::I64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let narrowed = builder.cast(self_val, IrType::I64, IrType::I32);
+    builder.ret(Some(narrowed));
+}
+
+/// Int64_make(high: i32, low: i32) -> i64 — (high << 32) | (low & 0xffffffff).
+///
+/// The mask matters: `low` is signed, and widening it without masking would
+/// smear its sign bit across the high word.
+fn build_int64_make(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_make")
+        .param("high", IrType::I32)
+        .param("low", IrType::I32)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let high = builder.get_param(0);
+    let low = builder.get_param(1);
+    let high64 = builder.cast(high, IrType::I32, IrType::I64);
+    let low64 = builder.cast(low, IrType::I32, IrType::I64);
+    let mask = builder.const_i64(0xffff_ffff);
+    let low_masked = builder.bin_op(BinaryOp::And, low64, mask);
+    let shift = builder.const_i64(32);
+    let high_shifted = builder.bin_op(BinaryOp::Shl, high64, shift);
+    let result = builder.bin_op(BinaryOp::Or, high_shifted, low_masked);
+    builder.ret(Some(result));
+}
+
+/// Int64_getHigh(self: i64) -> i32 — the top word.
+fn build_int64_get_high(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_getHigh")
+        .param("self_val", IrType::I64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let shift = builder.const_i64(32);
+    let shifted = builder.bin_op(BinaryOp::Shr, self_val, shift);
+    let narrowed = builder.cast(shifted, IrType::I64, IrType::I32);
+    builder.ret(Some(narrowed));
+}
+
+/// Int64_getLow(self: i64) -> i32 — the bottom word.
+fn build_int64_get_low(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_getLow")
+        .param("self_val", IrType::I64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let narrowed = builder.cast(self_val, IrType::I64, IrType::I32);
+    builder.ret(Some(narrowed));
+}
+
+/// One binary Int64 operation, `self op other`, both and result i64.
+fn build_int64_binop(builder: &mut MirBuilder, name: &str, op: BinaryOp) {
+    let func_id = builder
+        .begin_function(name)
+        .param("self_val", IrType::I64)
+        .param("other", IrType::I64)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let other = builder.get_param(1);
+    let result = builder.bin_op(op, self_val, other);
+    builder.ret(Some(result));
+}
+
+/// Int64_neg(self: i64) -> i64 — 0 - self.
+fn build_int64_neg(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_neg")
+        .param("self_val", IrType::I64)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let zero = builder.const_i64(0);
+    let result = builder.bin_op(BinaryOp::Sub, zero, self_val);
+    builder.ret(Some(result));
+}
+
+/// Int64_compare(a: i64, b: i64) -> i32 — negative, zero or positive.
+///
+/// Subtraction would overflow on distant operands, so this is two comparisons.
+fn build_int64_compare(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("Int64_compare")
+        .param("a", IrType::I64)
+        .param("b", IrType::I64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let a = builder.get_param(0);
+    let b = builder.get_param(1);
+    let gt = builder.cmp(CompareOp::Gt, a, b);
+    let lt = builder.cmp(CompareOp::Lt, a, b);
+    let gt_i = builder.cast(gt, IrType::Bool, IrType::I32);
+    let lt_i = builder.cast(lt, IrType::Bool, IrType::I32);
+    let result = builder.bin_op(BinaryOp::Sub, gt_i, lt_i);
+    builder.ret(Some(result));
+}
+
+// ============================================================================
+// haxe.io.FPHelper — reinterpreting float bits
+//
+// FPHelper exists because several Haxe targets cannot look at a float's bits:
+// its bodies allocate scratch buffers, write bytes one at a time, or call
+// per-target intrinsics, and the eval branch rayzor selects does the whole
+// IEEE decode in Haxe arithmetic -- exponent extraction, mantissa
+// reconstruction, a pow() per call. On a machine with real f32/f64 registers
+// each of these is one instruction that moves no bits at all.
+// ============================================================================
+
+/// FPHelper_i32ToFloat(bits: i32) -> f64 — the bits ARE an f32; widen after.
+fn build_fphelper_i32_to_float(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("FPHelper_i32ToFloat")
+        .param("bits", IrType::I32)
+        .returns(IrType::F64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let bits = builder.get_param(0);
+    let as_f32 = builder.bitcast(bits, IrType::F32);
+    // Haxe's Float is f64, so the single widens -- a value conversion, not a
+    // reinterpretation, and the two must not be confused.
+    let widened = builder.cast(as_f32, IrType::F32, IrType::F64);
+    builder.ret(Some(widened));
+}
+
+/// FPHelper_floatToI32(value: f64) -> i32 — narrow to f32, then take its bits.
+fn build_fphelper_float_to_i32(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("FPHelper_floatToI32")
+        .param("value", IrType::F64)
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let value = builder.get_param(0);
+    let narrowed = builder.cast(value, IrType::F64, IrType::F32);
+    let bits = builder.bitcast(narrowed, IrType::I32);
+    builder.ret(Some(bits));
+}
+
+/// FPHelper_i64ToDouble(low: i32, high: i32) -> f64.
+///
+/// Same low-word masking as Int64_make: `low` is signed and would otherwise
+/// smear its sign bit through the high half before the reinterpretation.
+fn build_fphelper_i64_to_double(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("FPHelper_i64ToDouble")
+        .param("low", IrType::I32)
+        .param("high", IrType::I32)
+        .returns(IrType::F64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let low = builder.get_param(0);
+    let high = builder.get_param(1);
+    let low64 = builder.cast(low, IrType::I32, IrType::I64);
+    let high64 = builder.cast(high, IrType::I32, IrType::I64);
+    let mask = builder.const_i64(0xffff_ffff);
+    let low_masked = builder.bin_op(BinaryOp::And, low64, mask);
+    let shift = builder.const_i64(32);
+    let high_shifted = builder.bin_op(BinaryOp::Shl, high64, shift);
+    let combined = builder.bin_op(BinaryOp::Or, high_shifted, low_masked);
+    let as_f64 = builder.bitcast(combined, IrType::F64);
+    builder.ret(Some(as_f64));
+}
+
+/// FPHelper_doubleToI64(value: f64) -> i64 — the bits, unchanged.
+fn build_fphelper_double_to_i64(builder: &mut MirBuilder) {
+    let func_id = builder
+        .begin_function("FPHelper_doubleToI64")
+        .param("value", IrType::F64)
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let value = builder.get_param(0);
+    let bits = builder.bitcast(value, IrType::I64);
+    builder.ret(Some(bits));
+}
 
 /// Usize_fromInt(value: i64) -> i64  — identity
 fn build_usize_from_int(builder: &mut MirBuilder) {

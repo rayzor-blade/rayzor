@@ -326,6 +326,8 @@ impl StdlibMapping {
         mapping.register_ptr_methods();
         mapping.register_ref_methods();
         mapping.register_usize_methods();
+        mapping.register_int64_methods();
+        mapping.register_fphelper_methods();
         mapping.register_cstring_methods();
         mapping.register_simd4f_methods();
         mapping.register_simd4i32_methods();
@@ -3552,6 +3554,88 @@ impl StdlibMapping {
             // usize.isZero(): Bool  (instance, compare to 0)
             map_method!(instance "rayzor.Usize", "isZero" => "Usize_isZero", params: 0, mir_wrapper,
                 types: &[I64] => Bool),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // haxe.Int64 — a real 64-bit integer
+    // ============================================================================
+    //
+    // Haxe declares Int64 as an abstract over a `{high, low}` pair because some
+    // of its targets have no 64-bit integer. rayzor does, so these map to
+    // single native instructions and the two-word implementation in the stdlib
+    // is never compiled. Before this the abstract fell through to its
+    // underlying type and lowered to I32, truncating every Int64 to 32 bits.
+
+    fn register_int64_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "haxe.Int64", "ofInt" => "Int64_ofInt", params: 1, mir_wrapper,
+                types: &[I32] => I64),
+            map_method!(static "haxe.Int64", "toInt" => "Int64_toInt", params: 1, mir_wrapper,
+                types: &[I64] => I32),
+            map_method!(static "haxe.Int64", "make" => "Int64_make", params: 2, mir_wrapper,
+                types: &[I32, I32] => I64),
+            map_method!(static "haxe.Int64", "neg" => "Int64_neg", params: 1, mir_wrapper,
+                types: &[I64] => I64),
+            map_method!(static "haxe.Int64", "compare" => "Int64_compare", params: 2, mir_wrapper,
+                types: &[I64, I64] => I32),
+            map_method!(static "haxe.Int64", "add" => "Int64_add", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "sub" => "Int64_sub", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "mul" => "Int64_mul", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "div" => "Int64_div", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "mod" => "Int64_mod", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "and" => "Int64_and", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "or" => "Int64_or", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "xor" => "Int64_xor", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "shl" => "Int64_shl", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "shr" => "Int64_shr", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            map_method!(static "haxe.Int64", "ushr" => "Int64_ushr", params: 2, mir_wrapper,
+                types: &[I64, I64] => I64),
+            // The property accessors are shift-and-mask now, not field loads.
+            map_method!(instance "haxe.Int64", "get_high" => "Int64_getHigh", params: 0, mir_wrapper,
+                types: &[I64] => I32),
+            map_method!(instance "haxe.Int64", "get_low" => "Int64_getLow", params: 0, mir_wrapper,
+                types: &[I64] => I32),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // haxe.io.FPHelper — reinterpreting float bits
+    // ============================================================================
+    //
+    // FPHelper decodes IEEE layout in Haxe arithmetic because several targets
+    // cannot look at a float's bits. rayzor can: each of these is a register
+    // move, and the stdlib's exponent/mantissa reconstruction -- which calls
+    // Math.pow once per conversion -- is never compiled.
+
+    fn register_fphelper_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "haxe.io.FPHelper", "i32ToFloat" => "FPHelper_i32ToFloat",
+                params: 1, mir_wrapper, types: &[I32] => F64),
+            map_method!(static "haxe.io.FPHelper", "floatToI32" => "FPHelper_floatToI32",
+                params: 1, mir_wrapper, types: &[F64] => I32),
+            map_method!(static "haxe.io.FPHelper", "i64ToDouble" => "FPHelper_i64ToDouble",
+                params: 2, mir_wrapper, types: &[I32, I32] => F64),
+            map_method!(static "haxe.io.FPHelper", "doubleToI64" => "FPHelper_doubleToI64",
+                params: 1, mir_wrapper, types: &[F64] => I64),
         ];
 
         self.register_from_tuples(mappings);
