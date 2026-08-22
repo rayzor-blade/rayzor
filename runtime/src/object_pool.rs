@@ -256,21 +256,37 @@ pub extern "C" fn rayzor_object_free(ptr: *mut u8) {
     });
 }
 
-/// Whether to serve from the pool at all. `RZT_POOL=0` sends everything to
-/// libc, which makes the pool an A/B on one binary rather than two builds --
-/// and the two arms can then be interleaved, which is the only way to compare
-/// anything on a contended machine. It also means a platform where the system
-/// allocator wins can turn this off without a revert: glibc's per-thread cache
-/// is fast enough that the pool is not obviously better there, and that is a
-/// measurement, not an assumption.
+/// Whether to serve from the pool at all. OFF unless `RZT_POOL=1`.
+///
+/// Default-off because the only measurement on the platform CI runs says the
+/// pool LOSES there: binarytrees execute went 949ms to 1443ms on x86_64 while
+/// the same change took 0.66s to 0.42s of user CPU on aarch64 macOS. glibc's
+/// malloc has a per-thread cache and macOS's does not, so beating one system
+/// allocator says nothing about the other. Some of that gap was overhead this
+/// allocator has since shed, but until it is re-measured on x86_64 the honest
+/// default is the allocator that is known not to regress.
+///
+/// Being a switch rather than a build flag is what makes that re-measurement
+/// cheap: both arms run on one binary and can be interleaved, which is the
+/// only comparison a contended machine supports.
 ///
 /// The free path deliberately does NOT consult this. Blocks handed out while
 /// the pool was on must still come back to it, or flipping the switch mid-
 /// process would hand pooled memory to libc.
 fn pool_enabled() -> bool {
+    #[cfg(test)]
+    if TEST_POOL.load(Ordering::Relaxed) {
+        return true;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RZT_POOL").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("RZT_POOL").as_deref() == Ok("1"))
 }
+
+/// Tests drive the pool through this, not the environment: the answer above is
+/// cached for the process, so an env var would make every test depend on which
+/// one ran first.
+#[cfg(test)]
+static TEST_POOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether to poison blocks. Resolved once; the check is a bool read on a path
 /// that runs per allocation and per free.
@@ -300,6 +316,7 @@ mod tests {
 
     #[test]
     fn reuses_a_freed_block() {
+        let _g = pooled();
         let a = rayzor_object_alloc(32);
         assert!(!a.is_null());
         rayzor_object_free(a);
@@ -310,6 +327,7 @@ mod tests {
 
     #[test]
     fn separates_size_classes() {
+        let _g = pooled();
         let small = rayzor_object_alloc(16);
         let large = rayzor_object_alloc(256);
         assert_ne!(small, large);
@@ -322,6 +340,7 @@ mod tests {
 
     #[test]
     fn oversized_goes_to_libc_and_back() {
+        let _g = pooled();
         let big = rayzor_object_alloc(4096);
         assert!(!big.is_null());
         unsafe { *big = 7 };
@@ -333,9 +352,17 @@ mod tests {
     /// anything.
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Take the serial lock and turn the pool on. Every test here is about the
+    /// pool, and the pool is off by default.
+    fn pooled() -> std::sync::MutexGuard<'static, ()> {
+        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_POOL.store(true, Ordering::Relaxed);
+        g
+    }
+
     #[test]
     fn poisons_a_released_block_when_asked() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = pooled();
         TEST_SCRIBBLE.store(true, Ordering::Relaxed);
         let a = rayzor_object_alloc(64);
         unsafe { std::ptr::write_bytes(a, 0x27, 64) };
@@ -352,7 +379,7 @@ mod tests {
 
     #[test]
     fn fills_a_fresh_block_when_asked() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = pooled();
         TEST_SCRIBBLE.store(true, Ordering::Relaxed);
         let a = rayzor_object_alloc(48);
         let bytes = unsafe { std::slice::from_raw_parts(a, 48) };
@@ -367,7 +394,7 @@ mod tests {
 
     #[test]
     fn counts_only_what_it_actually_serves() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = pooled();
         // The counter rides the same flag as the fill: an atomic increment per
         // allocation is not something the default path should pay for.
         TEST_SCRIBBLE.store(true, Ordering::Relaxed);
@@ -392,6 +419,7 @@ mod tests {
         // A block handed out by the pool must return to the pool even if the
         // switch is consulted again later; routing it to libc would be a free
         // of memory libc never allocated.
+        TEST_POOL.store(true, Ordering::Relaxed);
         let a = rayzor_object_alloc(32);
         assert!(in_region(a as usize), "expected a pooled block");
         rayzor_object_free(a);
@@ -402,6 +430,7 @@ mod tests {
 
     #[test]
     fn frees_a_foreign_pointer_without_touching_the_pool() {
+        let _g = pooled();
         let foreign = unsafe { libc::malloc(64) as *mut u8 };
         rayzor_object_free(foreign);
         let fresh = rayzor_object_alloc(64);
