@@ -1724,8 +1724,13 @@ register_symbol!(
 // ============================================================================
 // Memory Allocation (libc malloc/free for heap allocations)
 // ============================================================================
-register_symbol!("malloc", libc::malloc);
-register_symbol!("free", libc::free);
+// Compiled code's object allocation and release. Both must move together:
+// handing a pooled block to libc free corrupts the heap, and the pool's free
+// passes non-pool pointers straight through, so this pairing stays correct for
+// memory from either allocator.
+register_symbol!("malloc", crate::object_pool::rayzor_object_alloc);
+register_symbol!("free", crate::object_pool::rayzor_object_free);
+register_symbol!("rayzor_pool_served", crate::object_pool::rayzor_pool_served);
 
 // ============================================================================
 // Global Variable Storage (for static class fields)

@@ -1512,7 +1512,7 @@ pub unsafe extern "C" fn haxe_object_free_deep(ptr: *mut u8) {
         }
     }
 
-    unsafe { libc::free(ptr as *mut libc::c_void) };
+    crate::object_pool::rayzor_object_free(ptr);
 }
 
 /// Runtime type check for Dynamic/boxed values.
@@ -2241,9 +2241,9 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
 #[no_mangle]
 pub extern "C" fn haxe_free_dynamic(dynamic: DynamicValue) {
     if !dynamic.value_ptr.is_null() {
-        unsafe {
-            libc::free(dynamic.value_ptr as *mut libc::c_void);
-        }
+        // The boxed value may be a compiler-allocated object, which now comes
+        // from the pool; `rayzor_object_free` routes anything else to libc.
+        crate::object_pool::rayzor_object_free(dynamic.value_ptr);
     }
 }
 
