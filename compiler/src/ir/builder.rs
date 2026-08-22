@@ -1007,6 +1007,17 @@ impl IrBuilder {
 
         // First, set the terminator
         let block = func.cfg.get_block_mut(block_id)?;
+        // A block that has already been terminated as unreachable cannot be
+        // re-terminated: control does not continue past a throw, so whatever
+        // wants to terminate it now is dead code. `return throw e;` is exactly
+        // this -- the throw terminates, then the enclosing return overwrites
+        // that with `ret void`, and the function's declared type says it
+        // returns an Int. LLVM rejects the result; Cranelift does not verify
+        // and returns whatever is in the register, so `Input.readByte` has been
+        // returning garbage instead of throwing.
+        if block.terminator_explicit && matches!(block.terminator, IrTerminator::Unreachable) {
+            return Some(());
+        }
         block.set_terminator(term.clone());
         // Mark this terminator as deliberately set — distinguishes explicit
         // `Unreachable` (e.g. after throw) from the default uninitialized state.
