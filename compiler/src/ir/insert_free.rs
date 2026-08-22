@@ -63,6 +63,13 @@ struct AllocFuncIds {
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
     /// getters (hand out interior pointers) — which must count as escapes.
     array_safe_ids: BTreeSet<IrFunctionId>,
+    /// Callees whose RESULT cannot alias any argument: it is a scalar, or a
+    /// verified-fresh box. Retention says where an argument ENDS UP; this says
+    /// whether the caller gets a second name for it back. `haxe_stringmap_get`
+    /// retains nothing yet hands back a value read out of the map, so the two
+    /// properties must be tracked apart. Default-deny: a callee absent from
+    /// this set and from the module is assumed to return an alias.
+    nonaliasing_result_ids: BTreeSet<IrFunctionId>,
 }
 
 pub struct InsertFreePass;
@@ -95,11 +102,19 @@ impl OptimizationPass for InsertFreePass {
             ext_fresh_string_ids: BTreeSet::new(),
             string_free_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
+            nonaliasing_result_ids: BTreeSet::new(),
         };
 
-        // Scan both local and extern functions for known names
+        // Only a DECLARATION is the runtime intrinsic. Haxe method names are
+        // lowered bare, so a class with a `malloc`, `free` or `realloc` method
+        // shares the name -- and classifying that bodied method as the
+        // allocator registers its ordinary return value as a heap allocation,
+        // which the pass then releases. `Pool.malloc(21)` returns 21 * 2, so
+        // the release is `free((void*)42)`.
         for (&fid, func) in &module.functions {
-            classify_func(fid, &func.name, &mut ids);
+            if func.cfg.blocks.is_empty() {
+                classify_func(fid, &func.name, &mut ids);
+            }
         }
         for (&fid, func) in &module.extern_functions {
             classify_func(fid, &func.name, &mut ids);
@@ -296,6 +311,7 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         | "haxe_bytes_to_string" => {
             ids.ext_fresh_string_ids.insert(fid);
             ids.copy_only_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
         }
         // Read-only string/map consumers: read every pointer arg, retain none.
         // NOT stringmap_set (stores its key) and NOT haxe_box_haxestring_ptr
@@ -311,6 +327,11 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         | "haxe_stringmap_get"
         | "haxe_stringmap_exists" => {
             ids.copy_only_ids.insert(fid);
+            // `haxe_stringmap_get` is the one exception: it retains nothing,
+            // yet hands back the stored value itself.
+            if name != "haxe_stringmap_get" {
+                ids.nonaliasing_result_ids.insert(fid);
+            }
         }
         // Non-retaining array ops (receiver = arg0). Conservative: only the
         // scalar get/set/push/pop/length/query ops that neither hand out an
@@ -319,6 +340,13 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         // it still counts as an escape.
         _ if is_safe_array_op(name) => {
             ids.array_safe_ids.insert(fid);
+            // Most of these return a scalar, but the 64-bit element getters
+            // hand back a stored element -- on an array of objects that is a
+            // pointer punned into the integer.
+            let base = name.strip_prefix("haxe_").unwrap_or(name);
+            if !matches!(base, "array_pop" | "array_pop_i64" | "array_get_i64") {
+                ids.nonaliasing_result_ids.insert(fid);
+            }
         }
         "rayzor_anon_new" => {
             ids.anon_new_ids.insert(fid);
@@ -497,7 +525,7 @@ fn insert_free_for_function(
 
     // Step 2: For each alloc, check escape and collect non-escaping ones
     let mut allocs_needing_free: Vec<IrId> = Vec::new();
-    let mut escaped_candidates: Vec<(IrId, BTreeSet<IrId>)> = Vec::new();
+    let mut escaped_candidates: Vec<IrId> = Vec::new();
     let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
     dealloc_ids.extend(ids.string_free_ids.iter().cloned());
@@ -555,7 +583,7 @@ fn insert_free_for_function(
         ) {
             allocs_needing_free.push(alloc_id);
         } else {
-            escaped_candidates.push((alloc_id, derived));
+            escaped_candidates.push(alloc_id);
         }
     }
 
@@ -567,14 +595,40 @@ fn insert_free_for_function(
     // rejoins the ordinary freeing machinery under its own liveness.
     let mut adopted: BTreeMap<IrId, Vec<IrId>> = BTreeMap::new();
     if !escaped_candidates.is_empty() {
-        let all_derived: BTreeMap<IrId, BTreeSet<IrId>> = alloc_ids
+        // Two sets, and the difference between them is the whole safety
+        // argument. `all_may` follows call results, because the question "does
+        // anything else name this memory" must be complete before this stage
+        // overrules the conservative walk. `all_must` does not, because
+        // attributing a pointer to ONE owning allocation is a claim about
+        // provenance, and a call result's provenance is unknown -- reading a
+        // may-alias as proof of ownership adopts a value onto an owner it does
+        // not belong to, and frees it there.
+        let ra = &retention_kinds.returns_alias;
+        let all_may: BTreeMap<IrId, BTreeSet<IrId>> = alloc_ids
+            .iter()
+            .map(|&a| {
+                (
+                    a,
+                    alias_closure(&BTreeSet::from([a]), function, ids, ra, false),
+                )
+            })
+            .collect();
+        let all_must: BTreeMap<IrId, BTreeSet<IrId>> = alloc_ids
             .iter()
             .map(|&a| (a, build_derived_set(a, function)))
             .collect();
         let dbg_adopt = std::env::var_os("RZT_DBG_ADOPT").is_some();
-        for (x, x_derived) in &escaped_candidates {
-            match classify_escape_owner(*x, x_derived, function, ids, retention_kinds, &all_derived)
-            {
+        for x in &escaped_candidates {
+            let x_derived = &all_may[x];
+            match classify_escape_owner(
+                *x,
+                x_derived,
+                function,
+                ids,
+                retention_kinds,
+                &all_may,
+                &all_must,
+            ) {
                 EscapeClass::Escapes => {}
                 EscapeClass::Benign => {
                     if std::env::var("RZT_BENIGN_FREE").as_deref() != Ok("1") {
@@ -604,11 +658,7 @@ fn insert_free_for_function(
                     // A value read OUT of the owner may alias the child; if
                     // any such read escapes the reads-only discipline,
                     // freeing the child with the owner would dangle it.
-                    let owner_derived = all_derived
-                        .get(&owner)
-                        .cloned()
-                        .unwrap_or_else(|| build_derived_set(owner, function));
-                    if !owner_loads_confined(&owner_derived, function, ids) {
+                    if !owner_loads_confined(&all_may[&owner], function, ids, ra) {
                         if dbg_adopt {
                             eprintln!(
                                 "[adopt] {} {x:?} -> {owner:?} REFUSED (owner reads escape)",
@@ -1768,7 +1818,8 @@ fn build_alias_set_no_phi(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrI
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    IrInstruction::GetElementPtr { dest, ptr, .. } => {
+                    IrInstruction::GetElementPtr { dest, ptr, .. }
+                    | IrInstruction::PtrAdd { dest, ptr, .. } => {
                         if derived.contains(ptr) && derived.insert(*dest) {
                             changed = true;
                         }
@@ -1812,7 +1863,8 @@ fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    IrInstruction::GetElementPtr { dest, ptr, .. } => {
+                    IrInstruction::GetElementPtr { dest, ptr, .. }
+                    | IrInstruction::PtrAdd { dest, ptr, .. } => {
                         if derived.contains(ptr) && derived.insert(*dest) {
                             changed = true;
                         }
@@ -1864,6 +1916,162 @@ fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
     }
 
     derived
+}
+
+/// Can this call hand the caller back a value aliasing one of the tracked
+/// pointers it was given? Retention answers where an argument ENDS UP; this
+/// answers whether a second name for it comes back out, which is a separate
+/// question with a separate answer — `haxe_stringmap_get` retains nothing and
+/// returns the stored value. Default-deny: a callee with no body and no
+/// verified non-aliasing result may return an alias.
+fn call_result_may_alias(
+    func_id: &IrFunctionId,
+    args: &[IrId],
+    set: &BTreeSet<IrId>,
+    ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    let tracked: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| set.contains(a))
+        .map(|(i, _)| i)
+        .collect();
+    if tracked.is_empty() {
+        return false;
+    }
+    if ids.nonaliasing_result_ids.contains(func_id) {
+        return false;
+    }
+    match returns_alias.get(func_id) {
+        Some(mask) => tracked
+            .iter()
+            .any(|&i| mask.get(i).copied().unwrap_or(true)),
+        None => true,
+    }
+}
+
+/// Every value in `function` that may name the same memory as one of `seed`.
+/// Beyond what `build_derived_set` follows, this follows CALL RESULTS: a
+/// callee able to return an alias of a tracked argument gives the caller a
+/// second name for that memory, and a caller blind to that name will free
+/// underneath it.
+///
+/// `through_loads` additionally grows the set through reads made THROUGH it,
+/// which tracks the children of the memory rather than the memory itself. The
+/// two questions have different answers and different callers, so the flag
+/// picks one rather than merging them.
+fn alias_closure(
+    seed: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+    through_loads: bool,
+) -> BTreeSet<IrId> {
+    let mut set = seed.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                let pulled = match inst {
+                    IrInstruction::GetElementPtr { dest, ptr, .. }
+                    | IrInstruction::PtrAdd { dest, ptr, .. } => set.contains(ptr).then_some(*dest),
+                    IrInstruction::Cast { dest, src, .. }
+                    | IrInstruction::BitCast { dest, src, .. }
+                    | IrInstruction::SsaBarrier { dest, src, .. }
+                    | IrInstruction::Copy { dest, src } => set.contains(src).then_some(*dest),
+                    IrInstruction::Select {
+                        dest,
+                        true_val,
+                        false_val,
+                        ..
+                    } => (set.contains(true_val) || set.contains(false_val)).then_some(*dest),
+                    IrInstruction::Load { dest, ptr, .. } if through_loads => {
+                        set.contains(ptr).then_some(*dest)
+                    }
+                    IrInstruction::CallDirect {
+                        dest: Some(d),
+                        func_id,
+                        args,
+                        ..
+                    } => {
+                        call_result_may_alias(func_id, args, &set, ids, returns_alias).then_some(*d)
+                    }
+                    // An indirect callee is unknown by construction, and a
+                    // closure invoked through a tracked pointer can return a
+                    // value out of its own environment.
+                    IrInstruction::CallIndirect {
+                        dest: Some(d),
+                        func_ptr,
+                        args,
+                        ..
+                    } => (set.contains(func_ptr) || args.iter().any(|a| set.contains(a)))
+                        .then_some(*d),
+                    _ => None,
+                };
+                if let Some(d) = pulled {
+                    if set.insert(d) {
+                        changed = true;
+                    }
+                }
+            }
+            for phi in &block.phi_nodes {
+                if !set.contains(&phi.dest)
+                    && phi.incoming.iter().any(|(_, v)| set.contains(v))
+                    && set.insert(phi.dest)
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    set
+}
+
+/// The closure of values read OUT of `derived` — its children, grandchildren,
+/// and every alias of them. Empty when nothing is read through it.
+fn read_out_closure(
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> BTreeSet<IrId> {
+    let mut seed = BTreeSet::new();
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            match inst {
+                IrInstruction::Load { dest, ptr, .. } if derived.contains(ptr) => {
+                    seed.insert(*dest);
+                }
+                // An accessor hands back a child without ever emitting a Load
+                // in this function. Seeding only from loads makes a getter's
+                // result invisible and the read-out question answer itself
+                // vacuously.
+                IrInstruction::CallDirect {
+                    dest: Some(d),
+                    func_id,
+                    args,
+                    ..
+                } if call_result_may_alias(func_id, args, derived, ids, returns_alias) => {
+                    seed.insert(*d);
+                }
+                IrInstruction::CallIndirect {
+                    dest: Some(d),
+                    func_ptr,
+                    args,
+                    ..
+                } if derived.contains(func_ptr) || args.iter().any(|a| derived.contains(a)) => {
+                    seed.insert(*d);
+                }
+                _ => {}
+            }
+        }
+    }
+    if seed.is_empty() {
+        return seed;
+    }
+    alias_closure(&seed, function, ids, returns_alias, true)
 }
 
 /// A malloc allocation is an owned `HaxeArray` header if the alloc — or any
@@ -2062,7 +2270,36 @@ fn pointer_escapes_ex(
                     }
                 }
 
-                _ => {}
+                // Reads of and through the pointer, and the alias-forming ops
+                // already folded into `derived`. Releasing it is what a Free
+                // does, not an escape.
+                IrInstruction::Load { .. }
+                | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. }
+                | IrInstruction::Select { .. }
+                | IrInstruction::Cmp { .. }
+                | IrInstruction::BinOp { .. }
+                | IrInstruction::UnOp { .. }
+                | IrInstruction::Free { .. } => {}
+
+                // Default-deny. Every aggregate-forming and publishing
+                // instruction that is not named above -- CreateUnion,
+                // InsertValue, Throw, the atomics, InlineAsm -- hands the
+                // pointer somewhere this walk cannot follow, and a silent
+                // fallthrough here reads as "does not escape".
+                other => {
+                    if other
+                        .uses()
+                        .iter()
+                        .any(|u| *u == alloc_id || derived.contains(u))
+                    {
+                        return true;
+                    }
+                }
             }
         }
 
@@ -2170,27 +2407,49 @@ struct RetentionInfo {
     /// children -- freeing the object after the call is fine, but freeing
     /// anything the object OWNS would dangle the published child.
     leaks: BTreeMap<IrFunctionId, Vec<bool>>,
+    /// Per parameter: can the RETURNED value alias it -- be it, point into it,
+    /// or have been read out of it? Without this a caller sees a call it has
+    /// proved harmless and never learns that its result is a second name for
+    /// the argument, so every later use of that name is invisible.
+    returns_alias: BTreeMap<IrFunctionId, Vec<bool>>,
 }
 
 fn compute_retention_kinds(module: &IrModule, ids: &AllocFuncIds) -> RetentionInfo {
+    // Phase 1: which parameters can come back out of a return. This one must
+    // rebuild its alias sets every round -- they follow call results, so they
+    // GROW as the map does, and a set pinned at round zero would hand the
+    // later phases an under-approximation.
+    let returns_alias = compute_returns_alias(module, ids);
+
+    // Phase 2: retention and child-leakage, over alias sets built once with
+    // the settled map. They are body-static again at this point.
     let mut kinds: BTreeMap<IrFunctionId, Vec<Retention>> = BTreeMap::new();
     let mut leaks: BTreeMap<IrFunctionId, Vec<bool>> = BTreeMap::new();
     let mut param_derived: BTreeMap<IrFunctionId, Vec<BTreeSet<IrId>>> = BTreeMap::new();
-    for (&fid, f) in &module.functions {
+    // `self_derived` decides whether a store lands in the RECEIVER, which is an
+    // attribution -- it names one specific object. Only the locally-provable
+    // set can answer that; a call result may name memory from anywhere, and
+    // reading it as "inside the receiver" is how a value gets adopted by an
+    // owner it does not belong to.
+    let mut param_must: BTreeMap<IrFunctionId, BTreeSet<IrId>> = BTreeMap::new();
+    for (fid, f) in bodied(module) {
         kinds.insert(fid, vec![Retention::No; f.signature.parameters.len()]);
         leaks.insert(fid, vec![false; f.signature.parameters.len()]);
         let sets = f
             .signature
             .parameters
             .iter()
-            .map(|p| build_derived_set(p.reg, f))
+            .map(|p| alias_closure(&BTreeSet::from([p.reg]), f, ids, &returns_alias, false))
             .collect();
         param_derived.insert(fid, sets);
+        if let Some(p0) = f.signature.parameters.first() {
+            param_must.insert(fid, build_derived_set(p0.reg, f));
+        }
     }
     loop {
         let mut changed = false;
-        for (&fid, function) in &module.functions {
-            let self_derived = param_derived[&fid].first().cloned();
+        for (fid, function) in bodied(module) {
+            let self_derived = param_must.get(&fid).cloned();
             for pi in 0..function.signature.parameters.len() {
                 let derived = &param_derived[&fid][pi];
                 let cur = kinds[&fid][pi];
@@ -2202,7 +2461,8 @@ fn compute_retention_kinds(module: &IrModule, ids: &AllocFuncIds) -> RetentionIn
                         changed = true;
                     }
                 }
-                if !leaks[&fid][pi] && param_leaks_children(derived, function, ids, &kinds, &leaks)
+                if !leaks[&fid][pi]
+                    && param_leaks_children(derived, function, ids, &kinds, &leaks, &returns_alias)
                 {
                     leaks.get_mut(&fid).unwrap()[pi] = true;
                     changed = true;
@@ -2213,72 +2473,122 @@ fn compute_retention_kinds(module: &IrModule, ids: &AllocFuncIds) -> RetentionIn
             break;
         }
     }
-    RetentionInfo { kinds, leaks }
+    RetentionInfo {
+        kinds,
+        leaks,
+        returns_alias,
+    }
 }
 
-/// Does anything READ OUT of this parameter escape the callee? The read-out
-/// closure mirrors `owner_loads_confined`: loads through the parameter at any
-/// width, grown through further loads and alias-forming ops, so a pointer
-/// punned through an integer register cannot slip past as arithmetic.
+/// Per-function, per-parameter: can the returned value alias this parameter?
+///
+/// Optimistic fixpoint over `false < true`: every parameter of every bodied
+/// function starts at `false` and only escalates, so a recursive cycle settles
+/// at the answer its base cases justify. The pessimistic default belongs in
+/// the transfer function, not the initial value -- `call_result_may_alias`
+/// answers `true` for a callee with no body. Reversing those two is the
+/// difference between a leak and a use-after-free.
+fn compute_returns_alias(
+    module: &IrModule,
+    ids: &AllocFuncIds,
+) -> BTreeMap<IrFunctionId, Vec<bool>> {
+    let mut alias: BTreeMap<IrFunctionId, Vec<bool>> = bodied(module)
+        .map(|(fid, f)| (fid, vec![false; f.signature.parameters.len()]))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (fid, function) in bodied(module) {
+            for pi in 0..function.signature.parameters.len() {
+                if alias[&fid][pi] {
+                    continue;
+                }
+                let derived = alias_closure(
+                    &BTreeSet::from([function.signature.parameters[pi].reg]),
+                    function,
+                    ids,
+                    &alias,
+                    false,
+                );
+                if returns_alias_of(&derived, function, ids, &alias) {
+                    alias.get_mut(&fid).unwrap()[pi] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if std::env::var_os("RZT_DBG_ALIAS").is_some() {
+        for (fid, function) in bodied(module) {
+            let mask = &alias[&fid];
+            if mask.iter().any(|b| *b) {
+                eprintln!("[alias] {} {fid:?} returns_alias={mask:?}", function.name);
+            }
+        }
+    }
+    alias
+}
+
+/// The functions that actually have a body.
+///
+/// `mark_as_extern` clears a function's blocks but LEAVES it in
+/// `module.functions`, so the map is full of bodyless stubs. An interprocedural
+/// analysis that seeds one of those at its optimistic bottom pins it there --
+/// there is no body for the fixpoint to find evidence in -- and every lookup
+/// then reads as PROVEN SAFE for exactly the runtime callees the pessimistic
+/// default was written for. Keeping them out of the domain is what makes a
+/// missing entry mean "unknown" instead of "harmless".
+fn bodied(module: &IrModule) -> impl Iterator<Item = (IrFunctionId, &IrFunction)> {
+    module
+        .functions
+        .iter()
+        .filter(|(_, f)| !f.cfg.blocks.is_empty())
+        .map(|(&fid, f)| (fid, f))
+}
+
+/// Does any return of `function` hand back a value aliasing this parameter or
+/// something read out of it?
+fn returns_alias_of(
+    derived: &BTreeSet<IrId>,
+    function: &IrFunction,
+    ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+) -> bool {
+    // Returning a CHILD counts: the caller gets a name for memory the
+    // parameter's graph owns, which is what it must know before freeing it.
+    let mut exposed = derived.clone();
+    exposed.extend(read_out_closure(derived, function, ids, returns_alias));
+    for block in function.cfg.blocks.values() {
+        for inst in &block.instructions {
+            if let IrInstruction::Return { value: Some(v) } = inst {
+                if exposed.contains(v) {
+                    return true;
+                }
+            }
+        }
+        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
+            if exposed.contains(v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Does anything READ OUT of this parameter escape the callee? The closure
+/// covers loads through the parameter at any width, grown through further
+/// loads, alias-forming ops and call results, so neither a pointer punned
+/// through an integer register nor one handed back by a callee slips past.
 fn param_leaks_children(
     derived: &BTreeSet<IrId>,
     function: &IrFunction,
     ids: &AllocFuncIds,
     kinds: &BTreeMap<IrFunctionId, Vec<Retention>>,
     leaks: &BTreeMap<IrFunctionId, Vec<bool>>,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> bool {
-    let mut read_out: BTreeSet<IrId> = BTreeSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in function.cfg.blocks.values() {
-            for inst in &block.instructions {
-                match inst {
-                    IrInstruction::Load { dest, ptr, .. }
-                        if derived.contains(ptr) || read_out.contains(ptr) =>
-                    {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::GetElementPtr { dest, ptr, .. } if read_out.contains(ptr) => {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::Cast { dest, src, .. }
-                    | IrInstruction::BitCast { dest, src, .. }
-                    | IrInstruction::SsaBarrier { dest, src, .. }
-                    | IrInstruction::Copy { dest, src }
-                        if read_out.contains(src) =>
-                    {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::Select {
-                        dest,
-                        true_val,
-                        false_val,
-                        ..
-                    } if read_out.contains(true_val) || read_out.contains(false_val) => {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            for phi in &block.phi_nodes {
-                if !read_out.contains(&phi.dest)
-                    && phi.incoming.iter().any(|(_, v)| read_out.contains(v))
-                    && read_out.insert(phi.dest)
-                {
-                    changed = true;
-                }
-            }
-        }
-    }
+    let read_out = read_out_closure(derived, function, ids, returns_alias);
     if read_out.is_empty() {
         return false;
     }
@@ -2288,6 +2598,7 @@ fn param_leaks_children(
             match inst {
                 IrInstruction::Load { .. }
                 | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }
                 | IrInstruction::BitCast { .. }
                 | IrInstruction::SsaBarrier { .. }
@@ -2772,19 +3083,24 @@ enum EscapeClass {
 /// The single tracked allocation `x` escaped into, if its every escape is one
 /// the caller can prove dies with that owner. Default-deny: any use of `x`
 /// this walk does not positively recognise disqualifies the transfer.
+#[allow(clippy::too_many_arguments)]
 fn classify_escape_owner(
     x: IrId,
     x_derived: &BTreeSet<IrId>,
     function: &IrFunction,
     ids: &AllocFuncIds,
     info: &RetentionInfo,
-    all_derived: &BTreeMap<IrId, BTreeSet<IrId>>,
+    all_may: &BTreeMap<IrId, BTreeSet<IrId>>,
+    all_must: &BTreeMap<IrId, BTreeSet<IrId>>,
 ) -> EscapeClass {
     let in_x = |v: &IrId| *v == x || x_derived.contains(v);
     // The unique tracked allocation a value belongs to, excluding x itself.
+    // Attribution, so it reads the MUST set: a call result may name memory
+    // reached through the argument rather than memory the argument owns, and
+    // naming an owner on that basis frees x at the wrong object's death.
     let resolve = |v: &IrId| -> Option<IrId> {
         let mut found: Option<IrId> = None;
-        for (&a, derived) in all_derived {
+        for (&a, derived) in all_must {
             if a == x {
                 continue;
             }
@@ -2793,6 +3109,14 @@ fn classify_escape_owner(
                     return None; // ambiguous
                 }
                 found = Some(a);
+            }
+        }
+        // Ambiguous if any OTHER allocation may also name it.
+        if let Some(f) = found {
+            for (&a, may) in all_may {
+                if a != f && a != x && may.contains(v) {
+                    return None;
+                }
             }
         }
         found
@@ -2825,6 +3149,7 @@ fn classify_escape_owner(
             match inst {
                 // Alias-forming instructions already folded into x_derived.
                 IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }
                 | IrInstruction::BitCast { .. }
                 | IrInstruction::SsaBarrier { .. }
@@ -2912,16 +3237,6 @@ fn classify_escape_owner(
                         if args.iter().skip(1).any(|a| in_x(a)) {
                             return EscapeClass::Escapes;
                         }
-                        // An accessor's RESULT may alias x or one of its
-                        // children (a view, a field read), and derived-set
-                        // tracking does not follow call dests -- the alias
-                        // then escapes under a name this walk cannot see.
-                        // ArrayKeyValueIterator.next returned exactly such a
-                        // view of the anon it built, and freeing the anon
-                        // dangled the caller's iteration result.
-                        if dest.is_some() {
-                            return EscapeClass::Escapes;
-                        }
                     } else {
                         return EscapeClass::Escapes;
                     }
@@ -3003,55 +3318,9 @@ fn owner_loads_confined(
     owner_derived: &BTreeSet<IrId>,
     function: &IrFunction,
     ids: &AllocFuncIds,
+    returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> bool {
-    // Closure of values reachable by reading out of the owner, grown through
-    // further loads: a grandchild extracted from a child is as dangerous as
-    // the child. Scalar widths are included -- a pointer punned through an
-    // integer register must not slip past as "just arithmetic".
-    let mut read_out: BTreeSet<IrId> = BTreeSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in function.cfg.blocks.values() {
-            for inst in &block.instructions {
-                match inst {
-                    IrInstruction::Load { dest, ptr, .. }
-                        if owner_derived.contains(ptr) || read_out.contains(ptr) =>
-                    {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::GetElementPtr { dest, ptr, .. } if read_out.contains(ptr) => {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::Cast { dest, src, .. }
-                    | IrInstruction::BitCast { dest, src, .. }
-                    | IrInstruction::SsaBarrier { dest, src, .. }
-                    | IrInstruction::Copy { dest, src }
-                        if read_out.contains(src) =>
-                    {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    IrInstruction::Select {
-                        dest,
-                        true_val,
-                        false_val,
-                        ..
-                    } if read_out.contains(true_val) || read_out.contains(false_val) => {
-                        if read_out.insert(*dest) {
-                            changed = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    let read_out = read_out_closure(owner_derived, function, ids, returns_alias);
     if read_out.is_empty() {
         return true;
     }
@@ -3066,6 +3335,7 @@ fn owner_loads_confined(
             match inst {
                 IrInstruction::Load { .. }
                 | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
                 | IrInstruction::Cast { .. }
                 | IrInstruction::BitCast { .. }
                 | IrInstruction::SsaBarrier { .. }
