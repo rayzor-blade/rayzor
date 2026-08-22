@@ -13,6 +13,16 @@
 # a dangling pointer yields 0x5555... instead of the value that happened to
 # survive. A program that passes normally and fails here read freed memory.
 #
+# KNOWN BLIND SPOT: a program whose output varies run to run is reported as
+# non-reproducible rather than judged, and a use-after-free READ AT A BLOCK'S
+# BASE produces exactly that -- the allocator's free-list link lives there and
+# follows the address, so the corrupted value differs every run. Such a defect
+# is skipped, not caught. The guard is still worth having: without it ten of
+# twelve reports were the test's own nondeterminism, which buries the real
+# ones. What it buys in precision it costs in recall, and the fixture is
+# deliberately written to read PAST the header so the detector itself is
+# testable.
+#
 #   ./check_uaf.sh                     whole suite
 #   ./check_uaf.sh test_array_iterator single test
 #   RZT_BENIGN_FREE=1 ./check_uaf.sh   with an experimental gate on
@@ -30,7 +40,7 @@ if [ $# -gt 0 ]; then
     FILES=()
     for n in "$@"; do FILES+=("$TESTS_DIR/${n%.hx}.hx"); done
 else
-    FILES=("$TESTS_DIR"/*.hx)
+    FILES=("$TESTS_DIR"/*.hx)   # the fixture lives in scripts/, not here
 fi
 
 # A run under poisoning is compared against the same program run without it, so
@@ -45,6 +55,23 @@ run() {
     fi
     printf '%s\n--exit:%d' "$out" "$?"
 }
+
+# Prove the detector fires before trusting it to stay silent. uaf_fixture.hx
+# frees a block and reads the payload back, so a working oracle must flag it.
+# A green run means nothing if the check cannot come back red.
+FIXTURE="$(dirname "$0")/uaf_fixture.hx"
+if [ -f "$FIXTURE" ]; then
+    run no "$FIXTURE" > /dev/null
+    if [ "$(run no "$FIXTURE")" = "$(run yes "$FIXTURE")" ]; then
+        echo "SELF-TEST FAILED: the detector did not flag a deliberate" >&2
+        echo "use-after-free ($FIXTURE). Poisoning is not reaching the" >&2
+        echo "program, so a silent result here proves nothing." >&2
+        exit 2
+    fi
+    echo "self-test: detector fires on a known use-after-free"
+else
+    echo "SELF-TEST SKIPPED: $FIXTURE missing; results are unvalidated" >&2
+fi
 
 SUSPECT=0 FLAKY=0 CHECKED=0
 for f in "${FILES[@]}"; do
