@@ -2285,6 +2285,15 @@ fn run_file(
         .execute_function(main_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
 
+    // A published resume point proves only that one was compiled. Report the
+    // transfers that actually happened, so a run where none did is not mistaken
+    // for one where transferring was free.
+    if compiler::ir::osr::osr_trace_enabled() {
+        for (name, site, count) in compiler::ir::osr::transfers_taken() {
+            eprintln!("[osr] transferred {name} site=0x{site:x} x{count}");
+        }
+    }
+
     if stats {
         let backend_stats = backend.get_statistics();
         let beadie_stats = backend.beadie_stats();
