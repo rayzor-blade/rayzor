@@ -3044,6 +3044,66 @@ impl TieredBackend {
         published
     }
 
+    /// Compile whole modules to LLVM off the caller's thread.
+    ///
+    /// Everything LLVM owns is born and leaked here, so nothing that cannot
+    /// cross a thread ever has to: the context and the backend never leave,
+    /// and only the pointer maps come back.
+    #[cfg(feature = "llvm-backend")]
+    pub(crate) fn llvm_compile_owned(
+        mut modules: Vec<IrModule>,
+        runtime_symbols: Arc<Vec<(String, usize)>>,
+        needed_func_ids: Vec<IrFunctionId>,
+    ) -> Result<(BTreeMap<IrFunctionId, usize>, BTreeMap<String, usize>), String> {
+        let _llvm_guard = super::llvm_jit_backend::llvm_lock();
+
+        let context = Box::leak(Box::new(Context::create()));
+        let symbols: Vec<(&str, *const u8)> = runtime_symbols
+            .iter()
+            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
+            .collect();
+        let mut backend = LLVMJitBackend::with_symbols(context, &symbols)?;
+
+        let osr_variants = Self::add_osr_variants(&mut modules);
+        for module in &modules {
+            backend.declare_module(module)?;
+        }
+        for module in &modules {
+            backend.compile_module_bodies(module)?;
+        }
+
+        let function_symbols = backend.get_function_symbols();
+        backend.finalize()?;
+
+        let mut resolved: BTreeMap<IrFunctionId, usize> = BTreeMap::new();
+        for func_id in &needed_func_ids {
+            if let Some(ptr) = backend.get_function_pointer_by_id(*func_id) {
+                resolved.insert(*func_id, ptr);
+            }
+        }
+
+        // Arm the resume points. A loop already running reads its slot every
+        // iteration, so this is the moment it can start transferring.
+        for (variant_id, parent_name, site_key) in &osr_variants {
+            match backend.get_function_pointer_by_id(*variant_id) {
+                Some(ptr) => crate::ir::osr::publish_helper(parent_name, *site_key, ptr as *mut ()),
+                None => {
+                    if crate::ir::osr::osr_trace_enabled() {
+                        eprintln!("[osr] no address for {parent_name} site=0x{site_key:x}");
+                    }
+                }
+            }
+        }
+
+        let global_ptrs: BTreeMap<String, usize> = function_symbols
+            .iter()
+            .filter_map(|(id, name)| resolved.get(id).map(|ptr| (name.clone(), *ptr)))
+            .collect();
+
+        let _leaked_backend = Box::leak(Box::new(backend));
+        Ok((resolved, global_ptrs))
+    }
+
     #[cfg(feature = "llvm-backend")]
     fn compile_all_with_llvm_mcjit(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // Check if THIS instance has already compiled with LLVM
