@@ -1846,6 +1846,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
     /// Compile function bodies for a module (call declare_module for ALL modules first)
     pub fn compile_module_bodies(&mut self, module: &IrModule) -> Result<(), String> {
+        let mut verify_failures: Vec<String> = Vec::new();
         for (func_id, function) in &module.functions {
             let llvm_func = *self
                 .function_map
@@ -1872,12 +1873,34 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
             // Per-function verification to catch return type mismatches early
             if !llvm_func.verify(true) {
-                // verify(true) prints the error to stderr
+                // verify(true) prints the error to stderr.
+                //
+                // Aborting here reports one bad function per build, which for a
+                // backlog means recompiling to learn the next name. The verifier
+                // is the only part of the toolchain that objects to malformed
+                // MIR -- Cranelift accepts it and runs -- so seeing the whole
+                // list at once is the difference between a survey and a series
+                // of guesses. `RAYZOR_LLVM_VERIFY_SURVEY=1` collects instead.
+                if std::env::var_os("RAYZOR_LLVM_VERIFY_SURVEY").is_some() {
+                    eprintln!(
+                        "[verify] {} ({:?}) failed verification",
+                        function.name, func_id
+                    );
+                    verify_failures.push(function.name.clone());
+                    continue;
+                }
                 return Err(format!(
                     "LLVM verification failed for function '{}' ({:?}). Check stderr for details.",
                     function.name, func_id,
                 ));
             }
+        }
+        if !verify_failures.is_empty() {
+            eprintln!(
+                "[verify] {} function(s) failed: {}",
+                verify_failures.len(),
+                verify_failures.join(", ")
+            );
         }
         Ok(())
     }
