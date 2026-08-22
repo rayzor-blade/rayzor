@@ -27,15 +27,69 @@
 use crate::tast::node::HasSourceLocation;
 use crate::tast::{core::*, node::MemoryEffects, node::*, type_resolution, *};
 use parser::{
-    AbstractDecl, BinaryOp, ClassDecl, ClassField, ClassFieldKind, EnumConstructor, EnumDecl, Expr,
-    ExprKind, Function, FunctionParam, HaxeFile, Import, InterfaceDecl, Metadata, Modifier,
-    ModuleField, Package, Type, TypeDeclaration, TypeParam, TypedefDecl, UnaryOp, Using,
+    AbstractDecl, BinaryOp, BlockElement, ClassDecl, ClassField, ClassFieldKind, EnumConstructor,
+    EnumDecl, Expr, ExprKind, Function, FunctionParam, HaxeFile, Import, InterfaceDecl, Metadata,
+    Modifier, ModuleField, Package, Type, TypeDeclaration, TypeParam, TypedefDecl, UnaryOp, Using,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
+
+/// Record every `this.<field> = <param>` in an expression tree, marking a
+/// parameter ambiguous once it is seen feeding a second field.
+fn collect_this_field_stores<'a>(
+    expr: &'a Expr,
+    params: &std::collections::BTreeSet<&str>,
+    out: &mut BTreeMap<&'a str, Option<&'a str>>,
+) {
+    if let ExprKind::Assign { left, right, .. } = &expr.kind {
+        if let (
+            ExprKind::Field {
+                expr: recv, field, ..
+            },
+            ExprKind::Ident(name),
+        ) = (&left.kind, &right.kind)
+        {
+            if matches!(recv.kind, ExprKind::This) && params.contains(name.as_str()) {
+                out.entry(name.as_str())
+                    .and_modify(|slot| {
+                        if slot.is_some_and(|f| f != field.as_str()) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(field.as_str()));
+            }
+        }
+    }
+    // Recursion covers the block-shaped containers a constructor body uses.
+    // Anything else simply yields no inference, which leaves the parameter
+    // Dynamic -- the same answer as before, never a wrong one.
+    match &expr.kind {
+        ExprKind::Block(elements) => {
+            for element in elements {
+                if let BlockElement::Expr(e) = element {
+                    collect_this_field_stores(e, params, out);
+                }
+            }
+        }
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_this_field_stores(then_branch, params, out);
+            if let Some(e) = else_branch {
+                collect_this_field_stores(e, params, out);
+            }
+        }
+        ExprKind::While { body, .. } | ExprKind::For { body, .. } => {
+            collect_this_field_stores(body, params, out);
+        }
+        _ => {}
+    }
+}
 
 /// Top-level Haxe standard library classes that are always implicitly
 /// available, matching the `.hx` files in the haxe-std root. Registered as
@@ -5721,10 +5775,18 @@ impl<'a> AstLowering<'a> {
         }
         self.context.push_type_parameters(type_param_map);
 
-        // Process parameters
+        // Process parameters. An unannotated one takes the type of the field
+        // it is stored into, the way Haxe's own unification would.
+        let inferred = self.param_types_from_field_stores(func);
         let mut parameters = Vec::new();
         for param in &func.params {
-            parameters.push(self.lower_parameter(param)?);
+            let hint = if param.type_hint.is_none() {
+                let key = self.context.intern_string(&param.name);
+                inferred.get(&key).copied()
+            } else {
+                None
+            };
+            parameters.push(self.lower_parameter_with_hint(param, hint)?);
         }
 
         // Check if this is a static method BEFORE lowering the body, so that
@@ -5950,7 +6012,86 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower a parameter
+    /// Types for parameters the source left unannotated, recovered from the
+    /// field they are stored into.
+    ///
+    /// `function new(left, right, item) { this.left = left; ... }` is ordinary
+    /// Haxe: the compiler is expected to unify each parameter with the field it
+    /// feeds. Without that every one of them is Dynamic, and a Dynamic argument
+    /// is boxed at the call -- one heap allocation per field per object, none
+    /// of which the escape analysis can see. On a tree builder the boxes
+    /// outweigh the objects.
+    ///
+    /// Only a direct `this.f = p` counts, and only when `p` reaches exactly one
+    /// field. A parameter feeding two differently typed fields has no single
+    /// answer, and anything less direct is left to the Dynamic path rather than
+    /// guessed at.
+    fn param_types_from_field_stores(
+        &mut self,
+        func: &Function,
+    ) -> BTreeMap<InternedString, TypeId> {
+        let unannotated: std::collections::BTreeSet<&str> = func
+            .params
+            .iter()
+            .filter(|p| p.type_hint.is_none())
+            .map(|p| p.name.as_str())
+            .collect();
+        if unannotated.is_empty() {
+            return BTreeMap::new();
+        }
+        let Some(body) = func.body.as_deref() else {
+            return BTreeMap::new();
+        };
+
+        // param -> the one field it feeds; `None` once a second one is seen.
+        let mut targets: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+        collect_this_field_stores(body, &unannotated, &mut targets);
+        if targets.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let Some(&class_symbol) = self.context.class_context_stack.last() else {
+            return BTreeMap::new();
+        };
+        let pairs: Vec<(String, String)> = targets
+            .into_iter()
+            .filter_map(|(p, f)| f.map(|f| (p.to_string(), f.to_string())))
+            .collect();
+
+        let mut out = BTreeMap::new();
+        for (param, field) in pairs {
+            let param_key = self.context.intern_string(&param);
+            let field_key = self.context.intern_string(&field);
+            let field_symbol = self.class_fields.get(&class_symbol).and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|(name, _, is_static)| *name == field_key && !*is_static)
+                    .map(|(_, sym, _)| *sym)
+            });
+            let Some(field_symbol) = field_symbol else {
+                continue;
+            };
+            if let Some(sym) = self.context.symbol_table.get_symbol(field_symbol) {
+                out.insert(param_key, sym.type_id);
+            }
+        }
+        if std::env::var_os("RAYZOR_PARAM_INFER_LOG").is_some() && !out.is_empty() {
+            eprintln!("[param-infer] {}: {} parameter(s)", func.name, out.len());
+        }
+        out
+    }
+
     fn lower_parameter(&mut self, parameter: &FunctionParam) -> LoweringResult<TypedParameter> {
+        self.lower_parameter_with_hint(parameter, None)
+    }
+
+    /// As `lower_parameter`, with a type recovered from the body for a
+    /// parameter the source did not annotate.
+    fn lower_parameter_with_hint(
+        &mut self,
+        parameter: &FunctionParam,
+        inferred: Option<TypeId>,
+    ) -> LoweringResult<TypedParameter> {
         let param_name = self.context.intern_string(&parameter.name);
         // Create the parameter symbol with the current scope
         let param_symbol = self
@@ -5969,6 +6110,8 @@ impl<'a> AstLowering<'a> {
 
         let param_type = if let Some(type_annotation) = &parameter.type_hint {
             self.lower_type(type_annotation)?
+        } else if let Some(ty) = inferred {
+            ty
         } else {
             self.context.type_table.borrow().dynamic_type()
         };
