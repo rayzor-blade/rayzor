@@ -22,6 +22,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// The IEEE value behind `Math.NaN`, `Math.POSITIVE_INFINITY` and
+    /// `Math.NEGATIVE_INFINITY`.
+    ///
+    /// Matched on the name alone: these three are reserved in Haxe's `Math`,
+    /// and a user static sharing a name would still have its own initializer
+    /// and its own global, which is consulted first by every other read path.
+    fn math_float_constant(&self, symbol: SymbolId) -> Option<IrValue> {
+        if self.global_symbol_map.contains_key(&symbol) {
+            return None;
+        }
+        let name = self
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|sy| self.string_interner.get(sy.name))?;
+        match name {
+            "NaN" => Some(IrValue::F64(f64::NAN)),
+            "POSITIVE_INFINITY" => Some(IrValue::F64(f64::INFINITY)),
+            "NEGATIVE_INFINITY" => Some(IrValue::F64(f64::NEG_INFINITY)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lower_variable_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
             unreachable!("lower_variable_expr on a non-Variable expression")
@@ -37,6 +59,18 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        // Math's float constants are declared with no value and no initializer:
+        // under the `eval` define rayzor masquerades as, Math.hx's `__init__`
+        // that would assign them is excluded by `#if !eval`, because a native
+        // target is expected to supply them itself. Nothing did, so every read
+        // resolved to no global and produced no value -- a function returning
+        // one emitted `ret void`, which the LLVM verifier rejects and Cranelift
+        // silently accepts, handing back garbage. They are IEEE bit patterns,
+        // so the constant is the whole implementation.
+        if let Some(value) = self.math_float_constant(*symbol) {
+            return self.builder.build_const(value);
+        }
+
         // Check if this is a class/enum used as a value (e.g., Type.getClassName(Animal))
         // Must be before function reference check since class symbols may also map to constructors
         if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
