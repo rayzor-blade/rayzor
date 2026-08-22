@@ -1410,10 +1410,37 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR block expression to MIR, returning the trailing expression's value
     pub(crate) fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
-        for stmt in block.statements.iter() {
+        // A block's value is its last expression, and a trailing semicolon does
+        // not change that in Haxe -- `{ f(x); }` evaluates to `f(x)`. Only a
+        // block with no trailing semicolon reaches `block.expr`, so returning
+        // None for the semicolon form silently drops the value.
+        //
+        // `return if (c) { f(a); } else { g(b); }` is exactly that shape, and
+        // it produced a function that computed both branches and then returned
+        // nothing. LLVM rejects the result; Cranelift does not verify and
+        // returns whatever was in the register.
+        let trailing =
+            block.expr.is_none() && matches!(block.statements.last(), Some(HirStatement::Expr(_)));
+        let last = if trailing {
+            block.statements.len() - 1
+        } else {
+            block.statements.len()
+        };
+
+        for stmt in block.statements[..last].iter() {
             self.lower_statement(stmt);
             self.check_drop_points_after_statement();
             self.current_stmt_index += 1;
+        }
+
+        if trailing {
+            let Some(HirStatement::Expr(expr)) = block.statements.last() else {
+                unreachable!("checked above")
+            };
+            let value = self.lower_expression(expr);
+            self.check_drop_points_after_statement();
+            self.current_stmt_index += 1;
+            return value;
         }
 
         if let Some(expr) = &block.expr {
