@@ -11,6 +11,16 @@
 // nothing. Past the header the poison survives, and a poisoned read yields
 // 0x55555555 every time.
 //
+// WHAT THIS DOES NOT COVER: the object pool. `Bytes.alloc` is a runtime
+// allocation that never reaches the compiler's object path, and 4096 is above
+// the pool's size cap regardless -- two independent reasons no size would put
+// this fixture on the pooled path. It proves the detector fires on libc
+// memory, which is a true statement about the wrong subject if you are asking
+// about the allocator. The pool is covered separately: unit tests assert its
+// fill bytes directly, and a served-block counter proves compiled code reaches
+// it. Neither can be a fixture like this one, because a class instance is the
+// pooled allocation and Haxe offers no way to free one and then read it back.
+//
 // Unpoisoned, the same read usually returns what was written, because nothing
 // has reused the block yet. That is exactly why this class of defect survives
 // a passing test suite and needs an allocator to expose it.

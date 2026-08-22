@@ -52,6 +52,21 @@ struct ChunkHeader {
     class_index: usize,
 }
 
+/// Blocks served from the pool, for proving compiled code reaches it.
+///
+/// The unit tests below prove the pool works; they say nothing about whether
+/// anything USES it. A backend reverting to libc's malloc would leave every
+/// one of them passing, against an allocator no program touches. This counter
+/// makes that a fact a test can assert instead of something inferred from a
+/// bug happening to still be visible.
+static POOL_SERVED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many blocks the pool has served this process.
+#[no_mangle]
+pub extern "C" fn rayzor_pool_served() -> u64 {
+    POOL_SERVED.load(Ordering::Relaxed) as u64
+}
+
 static REGION_BASE: AtomicUsize = AtomicUsize::new(0);
 static REGION_NEXT: AtomicUsize = AtomicUsize::new(0);
 static REGION_END: AtomicUsize = AtomicUsize::new(0);
@@ -146,6 +161,14 @@ pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
     };
     let block_size = (class_index + 1) * GRANULE;
 
+    // Fresh blocks get the same treatment libc's MallocPreScribble gives, for
+    // the same reason the release path is poisoned: a read of a field nothing
+    // wrote is invisible against zeroed mmap pages. This is not hypothetical --
+    // a known 32-bit-store/64-bit-read bug in enum reflection was detectable
+    // before objects moved to the pool and silently stopped being detectable
+    // after, because the upper half read as zero instead of as fill.
+    let scribble = scribble_enabled();
+
     let popped = FREE_LISTS.with(|lists| {
         let mut lists = lists.borrow_mut();
         let head = lists[class_index];
@@ -156,6 +179,10 @@ pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
         head
     });
     if !popped.is_null() {
+        if scribble {
+            unsafe { std::ptr::write_bytes(popped, 0xAA, block_size) };
+        }
+        POOL_SERVED.fetch_add(1, Ordering::Relaxed);
         return popped;
     }
 
@@ -164,11 +191,19 @@ pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
         let (next, end) = bump[class_index];
         if next + block_size <= end {
             bump[class_index] = (next + block_size, end);
+            if scribble {
+                unsafe { std::ptr::write_bytes(next as *mut u8, 0xAA, block_size) };
+            }
+            POOL_SERVED.fetch_add(1, Ordering::Relaxed);
             return next as *mut u8;
         }
         match new_chunk(class_index) {
             Some((start, chunk_end)) => {
                 bump[class_index] = (start + block_size, chunk_end);
+                if scribble {
+                    unsafe { std::ptr::write_bytes(start as *mut u8, 0xAA, block_size) };
+                }
+                POOL_SERVED.fetch_add(1, Ordering::Relaxed);
                 start as *mut u8
             }
             None => unsafe { libc::malloc(block_size) as *mut u8 },
@@ -195,12 +230,43 @@ pub extern "C" fn rayzor_object_free(ptr: *mut u8) {
         // guess. Handing it to libc would be worse.
         return;
     }
+    if scribble_enabled() {
+        // The freed-memory oracle poisons through libc's MallocScribble, which
+        // cannot see pool blocks -- they come from mmap and libc never touches
+        // them. Without this the oracle keeps passing on a fixture that still
+        // uses libc while being blind to every object the pool now owns, which
+        // is worse than having no oracle: it reports itself working.
+        let block_size = (class_index + 1) * GRANULE;
+        unsafe { std::ptr::write_bytes(ptr, 0x55, block_size) };
+    }
     FREE_LISTS.with(|lists| {
         let mut lists = lists.borrow_mut();
         unsafe { *(ptr as *mut *mut u8) = lists[class_index] };
         lists[class_index] = ptr;
     });
 }
+
+/// Whether to poison blocks. Resolved once; the check is a bool read on a path
+/// that runs per allocation and per free.
+///
+/// Tests cannot drive this through the environment: the answer is cached for
+/// the process, so whichever test ran first would decide it for all of them
+/// and the rest would pass or fail on ordering rather than on behaviour. They
+/// set the override instead.
+fn scribble_enabled() -> bool {
+    #[cfg(test)]
+    if TEST_SCRIBBLE.load(Ordering::Relaxed) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("MallocScribble").is_some()
+            || std::env::var_os("RZT_POOL_SCRIBBLE").is_some()
+    })
+}
+
+#[cfg(test)]
+static TEST_SCRIBBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {
@@ -233,6 +299,60 @@ mod tests {
         let big = rayzor_object_alloc(4096);
         assert!(!big.is_null());
         unsafe { *big = 7 };
+        rayzor_object_free(big);
+    }
+
+    /// The scribble flag and the served counter are process-global, so the
+    /// tests that touch them cannot run beside each other and be about
+    /// anything.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn poisons_a_released_block_when_asked() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_SCRIBBLE.store(true, Ordering::Relaxed);
+        let a = rayzor_object_alloc(64);
+        unsafe { std::ptr::write_bytes(a, 0x27, 64) };
+        rayzor_object_free(a);
+        // The link word occupies the first 8 bytes of a free block; the rest
+        // must read as poison, not as what the object used to hold.
+        let tail = unsafe { std::slice::from_raw_parts(a.add(8), 56) };
+        assert!(
+            tail.iter().all(|b| *b == 0x55),
+            "released block kept its contents; the oracle would see nothing"
+        );
+        TEST_SCRIBBLE.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn fills_a_fresh_block_when_asked() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        TEST_SCRIBBLE.store(true, Ordering::Relaxed);
+        let a = rayzor_object_alloc(48);
+        let bytes = unsafe { std::slice::from_raw_parts(a, 48) };
+        assert!(
+            bytes.iter().all(|b| *b == 0xAA),
+            "a fresh block read as zero; a field nothing wrote would look \
+             deliberately initialised"
+        );
+        rayzor_object_free(a);
+        TEST_SCRIBBLE.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn counts_only_what_it_actually_serves() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let before = rayzor_pool_served();
+        let a = rayzor_object_alloc(32);
+        assert_eq!(rayzor_pool_served(), before + 1);
+        // Above the cap is libc's, and must not be counted as the pool's.
+        let big = rayzor_object_alloc((MAX_POOLED + 1) as u64);
+        assert_eq!(
+            rayzor_pool_served(),
+            before + 1,
+            "an oversized request went to libc but was counted as pooled"
+        );
+        rayzor_object_free(a);
         rayzor_object_free(big);
     }
 
