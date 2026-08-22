@@ -3398,6 +3398,18 @@ fn ensure_flat_vtable() {
 /// throws sit only on paths that previously produced a guaranteed crash.
 #[no_mangle]
 #[inline(never)]
+/// Is dispatch instrumentation on? Resolved once.
+///
+/// The counters below are cheap; the TIMESTAMPS are not. `Instant::now()` is a
+/// `mach_absolute_time` on macOS, and taking two per dispatch costs more than
+/// the lookup it measures -- deltablue makes a million virtual calls and paid
+/// ~37ms for the clock alone. Reading the env var per call is worse still, so
+/// it is resolved once and the hot path tests a bool.
+fn vtable_stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_VTABLE_STATS").is_some())
+}
+
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
         crate::exception::throw_with_message(format!(
@@ -3414,8 +3426,9 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
         // and hashes, so a dispatch landing there costs orders of magnitude
         // more and nothing distinguishes the two from outside.
         VT_CALLS += 1;
-        let _t_in = std::time::Instant::now();
-        if VT_CALLS % 1_000_000 == 0 && std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+        let stats = vtable_stats_enabled();
+        let _t_in = stats.then(std::time::Instant::now);
+        if stats && VT_CALLS % 1_000_000 == 0 {
             eprintln!(
                 "[vtable] calls={} slow_path={} flat_rebuilds={} ns_total={} ns_avg={} ns_max_single={}",
                 VT_CALLS,
@@ -3438,11 +3451,11 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 let entry = &flat[type_id];
                 if slot < entry.len {
                     let v = *entry.slots.add(slot);
-                    let ns = _t_in.elapsed().as_nanos() as u64;
+                    let ns = _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64);
                     VT_NANOS += ns;
                     if ns > VT_MAX_NANOS {
                         VT_MAX_NANOS = ns;
-                        if ns > 1_000_000 && std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+                        if ns > 1_000_000 && stats {
                             eprintln!(
                                 "[vtable] SLOW call #{} took {}ms on {:?} (type_id={} slot={})",
                                 VT_CALLS,
@@ -3462,7 +3475,7 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 if let Some(entry) = sparse.get(&(type_id as u32)) {
                     if slot < entry.len {
                         let v = *entry.slots.add(slot);
-                        VT_NANOS += _t_in.elapsed().as_nanos() as u64;
+                        VT_NANOS += _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64);
                         return v;
                     }
                 }
