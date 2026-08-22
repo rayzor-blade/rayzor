@@ -30,7 +30,9 @@ use super::functions::{IrFunction, IrFunctionId, IrParameter};
 use super::instructions::IrInstruction;
 use super::loop_analysis::DominatorTree;
 use super::{IrBlockId, IrId, IrType, IrValue};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 /// Live values a single variant accepts. They travel in a frame rather than
 /// registers, so a large count costs stack bytes and one copy at the moment of
@@ -168,6 +170,79 @@ pub fn loop_ordinal_of(func: &IrFunction, header: IrBlockId) -> Option<u64> {
         .iter()
         .position(|h| *h == header)
         .map(|i| i as u64)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helper slots
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One pointer per resume point, holding the compiled helper for that site or
+/// null. Generated code loads it directly at the back edge.
+///
+/// Storing the helper rather than a flag is what keeps the loop cheap. A flag
+/// would still need a runtime lookup to find the code, and a call that returns
+/// into the loop makes the register allocator treat caller-saved registers as
+/// clobbered across the whole body. An armed site instead branches straight to
+/// the helper and returns its result, so the loop holds no call at all.
+///
+/// The `Box` matters: it keeps each slot at a fixed address while the map
+/// rehashes, and that address is baked into generated code.
+///
+/// Sites are keyed by the function's NAME, not its id. `IrFunctionId` counts
+/// from zero in every module, so two functions from different modules share
+/// one, and a shared id here would send a loop into another loop's helper.
+/// Names are what already carry function identity between modules.
+type HelperSlots = RwLock<HashMap<(String, u64), Box<AtomicU64>>>;
+
+fn helper_slots() -> &'static HelperSlots {
+    static SLOTS: OnceLock<HelperSlots> = OnceLock::new();
+    SLOTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Address of the slot for `(func, site_key)`, allocating it on first call.
+///
+/// Stable for the life of the process, which is what lets codegen embed it as
+/// a constant instead of looking the site up every iteration.
+pub fn helper_slot_addr(func: &str, site_key: u64) -> *const u8 {
+    let mut slots = helper_slots().write().unwrap();
+    let slot = slots
+        .entry((func.to_string(), site_key))
+        .or_insert_with(|| Box::new(AtomicU64::new(0)));
+    (&**slot) as *const AtomicU64 as *const u8
+}
+
+/// Publish `helper` for `(func, site_key)`, after which back edges at that site
+/// start transferring into it.
+pub fn publish_helper(func: &str, site_key: u64, helper: *mut ()) {
+    if osr_trace_enabled() {
+        eprintln!("[osr] publish {func} site=0x{site_key:x} -> {helper:?}");
+    }
+    let mut slots = helper_slots().write().unwrap();
+    slots
+        .entry((func.to_string(), site_key))
+        .or_insert_with(|| Box::new(AtomicU64::new(0)))
+        .store(helper as u64, Ordering::Release);
+}
+
+/// The helper currently published for `(func, site_key)`, or null. Reads what
+/// generated code reads.
+pub fn helper_for(func: &str, site_key: u64) -> *mut () {
+    helper_slots()
+        .read()
+        .unwrap()
+        .get(&(func.to_string(), site_key))
+        .map(|s| s.load(Ordering::Acquire) as *mut ())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// Whether tracing of OSR decisions is on.
+///
+/// Resolved once. `getenv` takes a process-wide lock on macOS, and a probe that
+/// consulted the environment per iteration would spend most of a hot loop
+/// inside it.
+pub fn osr_trace_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RAYZOR_OSR_TRACE").is_some())
 }
 
 /// What a probe hands over for one frame slot.
@@ -898,6 +973,49 @@ mod tests {
         assert_eq!(frame.offsets, vec![0, 8, 16]);
         assert_eq!(frame.align, 8);
         assert_eq!(frame.size % 8, 0);
+    }
+
+    /// Generated code embeds a slot's address as a constant, so the address
+    /// has to survive the map growing under it. A slot held inline would move
+    /// on rehash and every armed probe would load from freed memory.
+    #[test]
+    fn a_slot_address_survives_the_map_growing() {
+        let f = "slot_stability_probe";
+        let first = helper_slot_addr(f, 0);
+        for site in 1..512u64 {
+            helper_slot_addr(f, site);
+        }
+        assert_eq!(first, helper_slot_addr(f, 0));
+    }
+
+    #[test]
+    fn a_published_helper_is_what_the_slot_reads_back() {
+        let f = "slot_publish_probe";
+        let site = encode_osr_site(3, 7);
+        assert!(helper_for(f, site).is_null(), "unarmed sites read null");
+
+        let code = 0xDEAD_BEEFusize as *mut ();
+        publish_helper(f, site, code);
+        assert_eq!(helper_for(f, site), code);
+
+        // The address codegen baked in must observe the publish.
+        let slot = helper_slot_addr(f, site) as *const std::sync::atomic::AtomicU64;
+        let seen = unsafe { (*slot).load(std::sync::atomic::Ordering::Acquire) };
+        assert_eq!(seen, code as u64);
+    }
+
+    /// Two sites in one function, and the same site in two functions, must not
+    /// share a slot -- either collision dispatches a loop into another loop.
+    #[test]
+    fn slots_do_not_collide_across_functions_or_sites() {
+        let (a, b) = ("slot_fn_a", "slot_fn_b");
+        let (s0, s1) = (encode_osr_site(0, 1), encode_osr_site(1, 1));
+        publish_helper(a, s0, 1usize as *mut ());
+        publish_helper(a, s1, 2usize as *mut ());
+        publish_helper(b, s0, 3usize as *mut ());
+        assert_eq!(helper_for(a, s0), 1usize as *mut ());
+        assert_eq!(helper_for(a, s1), 2usize as *mut ());
+        assert_eq!(helper_for(b, s0), 3usize as *mut ());
     }
 
     #[test]
