@@ -69,6 +69,11 @@ pub struct CraneliftBackend {
     /// Target pointer size (32-bit or 64-bit) from ISA
     pointer_type: types::Type,
 
+    /// Emit a back-edge probe at each resumable loop header, so a loop already
+    /// running here can transfer into optimised code instead of finishing at
+    /// this tier.
+    emit_osr_probes: bool,
+
     /// Module counter for unique function naming across multiple MIR modules
     /// Each MIR module starts function IDs from 0, so we need to disambiguate
     module_counter: usize,
@@ -321,6 +326,7 @@ impl CraneliftBackend {
             closure_environments: BTreeMap::new(),
             runtime_functions: BTreeMap::new(),
             pointer_type,
+            emit_osr_probes: crate::ir::osr::osr_enabled(),
             module_counter: 0,
             defined_functions: BTreeSet::new(),
             pending_stub_safety_net: Vec::new(),
@@ -2203,6 +2209,30 @@ impl CraneliftBackend {
         // Track which blocks have been translated
         let mut translated_blocks = std::collections::BTreeSet::new();
 
+        // Resumable loop headers, worked out once. Both `find_loop_headers` and
+        // `osr_layout` build a dominator tree, so asking per block would make
+        // this quadratic in the size of the function.
+        let osr_layouts: BTreeMap<IrBlockId, crate::ir::osr::OsrLayout> = if self.emit_osr_probes {
+            crate::ir::osr::find_loop_headers(function)
+                .into_iter()
+                .filter_map(|h| crate::ir::osr::osr_layout(function, h).ok().map(|l| (h, l)))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        // What a helper hands back, which is what the probe returns. A void
+        // return maps to INVALID rather than an error, and putting that in a
+        // signature makes Cranelift panic, so it has to be treated as "returns
+        // nothing" alongside the types that do not map at all.
+        let osr_return_clir = if function.signature.uses_sret {
+            None
+        } else {
+            match Self::mir_type_to_cranelift_static(&function.signature.return_type) {
+                Ok(t) if t != types::INVALID => Some(t),
+                _ => None,
+            }
+        };
+
         for (mir_block_id, mir_block) in blocks_to_process {
             let cl_block = *block_map
                 .get(&mir_block_id)
@@ -2227,6 +2257,19 @@ impl CraneliftBackend {
                     &function.cfg,
                 )?;
                 // eprintln!("    After translation, value_map has {:?}", self.value_map.keys().collect::<Vec<_>>());
+            }
+
+            // The probe goes after the phis are bound: a loop-carried value is
+            // read straight from its phi, which by this point has chosen the
+            // value this iteration runs with.
+            if let Some(layout) = osr_layouts.get(&mir_block_id) {
+                Self::emit_osr_back_edge_probe(
+                    &self.value_map,
+                    &mut builder,
+                    &function.name,
+                    layout,
+                    osr_return_clir,
+                )?;
             }
 
             // Translate instructions
@@ -5502,6 +5545,123 @@ impl CraneliftBackend {
     }
 
     /// Convert MIR type to Cranelift type (static version for use without self)
+    /// Emit the back-edge probe at the top of a loop header.
+    ///
+    /// ```text
+    ///   helper = load.i64 [<slot address, baked in as a constant>]
+    ///   brif helper, dispatch, body        ; null in the steady state
+    /// dispatch:
+    ///   <store each live value into a frame at its offset>
+    ///   ret = call_indirect helper(frame)
+    ///   return ret
+    /// body:
+    ///   <the header's own instructions carry on here>
+    /// ```
+    ///
+    /// An unarmed site costs one load and a branch that is not taken. The
+    /// dispatch path RETURNS rather than rejoining the loop: a call that falls
+    /// back into the body would make the register allocator treat every
+    /// caller-saved register as clobbered across the whole loop, a cost paid
+    /// by every iteration that never transfers.
+    ///
+    /// Emitted after the header's phis are bound, so a loop-carried value is
+    /// read straight from its phi -- at this point the phi has already chosen
+    /// the value this iteration is running with.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_osr_back_edge_probe(
+        value_map: &BTreeMap<IrId, Value>,
+        builder: &mut FunctionBuilder,
+        function_name: &str,
+        layout: &crate::ir::osr::OsrLayout,
+        return_clir: Option<Type>,
+    ) -> Result<(), String> {
+        use crate::ir::osr::OsrParam;
+        use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+
+        // Resolve every live value and coerce it to the width the variant's
+        // prologue will load back. A frame written at one width and read at
+        // another is a silent miscompile, so anything that cannot be matched
+        // means this header is not resumable from here: leave it unprobed
+        // rather than arm a site whose frame the helper would misread.
+        let mut stores: Vec<(Value, u32, Type)> = Vec::with_capacity(layout.params.len());
+        for (i, param) in layout.params.iter().enumerate() {
+            let id = match param {
+                OsrParam::HeaderPhi { phi_dest } => *phi_dest,
+                OsrParam::Live(v) => *v,
+            };
+            let Some(&value) = value_map.get(&id) else {
+                return Ok(());
+            };
+            let Ok(want) = Self::mir_type_to_cranelift_static(&layout.live_in_types[i]) else {
+                return Ok(());
+            };
+            if builder.func.dfg.value_type(value) != want {
+                return Ok(());
+            }
+            stores.push((value, layout.frame.offsets[i], want));
+        }
+
+        let slot_addr = crate::ir::osr::helper_slot_addr(function_name, layout.site_key());
+        let slot_v = builder.ins().iconst(types::I64, slot_addr as i64);
+        // Default flags on purpose. The slot is written by whichever thread
+        // finished the optimised compile, so the load must not be marked
+        // readonly and hoisted out of the loop -- a hoisted load would read
+        // null once and the site would never arm.
+        let helper = builder
+            .ins()
+            .load(types::I64, MemFlagsData::new(), slot_v, 0);
+
+        let dispatch = builder.create_block();
+        let body = builder.create_block();
+        builder.ins().brif(helper, dispatch, &[], body, &[]);
+
+        builder.switch_to_block(dispatch);
+        builder.seal_block(dispatch);
+        if stores.is_empty() {
+            // Nothing to hand over means nothing to resume with.
+            builder.ins().jump(body, &[]);
+        } else {
+            let frame = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                layout.frame.size.max(1),
+                layout.frame.align.trailing_zeros().min(3) as u8,
+            ));
+            for (value, offset, ty) in &stores {
+                builder
+                    .ins()
+                    .stack_store(*ty, *value, frame, *offset as i32);
+            }
+            let frame_addr = builder.ins().stack_addr(types::I64, frame, 0);
+
+            // Record that this site transferred. Three instructions on a path
+            // that runs once per transfer, and the only evidence available
+            // afterwards that a loop changed tier rather than simply finishing
+            // where it started.
+            let count_addr = crate::ir::osr::transfer_count_addr(function_name, layout.site_key());
+            let count_v = builder.ins().iconst(types::I64, count_addr as i64);
+            let seen = builder
+                .ins()
+                .load(types::I64, MemFlagsData::new(), count_v, 0);
+            let bumped = builder.ins().iadd_imm(seen, 1);
+            builder.ins().store(MemFlagsData::new(), bumped, count_v, 0);
+
+            let mut sig =
+                cranelift_codegen::ir::Signature::new(cranelift_codegen::isa::CallConv::SystemV);
+            sig.params.push(AbiParam::new(types::I64));
+            if let Some(ret) = return_clir {
+                sig.returns.push(AbiParam::new(ret));
+            }
+            let sig_ref = builder.import_signature(sig);
+            let call = builder.ins().call_indirect(sig_ref, helper, &[frame_addr]);
+            let results: Vec<Value> = builder.inst_results(call).to_vec();
+            builder.ins().return_(&results);
+        }
+
+        builder.switch_to_block(body);
+        builder.seal_block(body);
+        Ok(())
+    }
+
     pub(super) fn mir_type_to_cranelift_static(ty: &IrType) -> Result<Type, String> {
         match ty {
             IrType::Void => Ok(types::INVALID), // Void functions have no return value

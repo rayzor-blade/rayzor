@@ -239,6 +239,50 @@ pub fn helper_for(func: &str, site_key: u64) -> *mut () {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// One counter per resume point, bumped by the dispatch path each time a loop
+/// actually transfers.
+///
+/// Publishing a helper proves only that one was compiled. A transfer is the
+/// thing worth knowing about, and without a count an A/B where nothing ever
+/// transferred looks exactly like one where the transfer was free.
+fn transfer_counts() -> &'static HelperSlots {
+    static COUNTS: OnceLock<HelperSlots> = OnceLock::new();
+    COUNTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Address of the transfer counter for `(func, site_key)`, allocated on first
+/// call and stable thereafter so generated code can bump it directly.
+pub fn transfer_count_addr(func: &str, site_key: u64) -> *const u8 {
+    let mut counts = transfer_counts().write().unwrap();
+    let slot = counts
+        .entry((func.to_string(), site_key))
+        .or_insert_with(|| Box::new(AtomicU64::new(0)));
+    (&**slot) as *const AtomicU64 as *const u8
+}
+
+/// How many times `(func, site_key)` has transferred.
+pub fn transfer_count(func: &str, site_key: u64) -> u64 {
+    transfer_counts()
+        .read()
+        .unwrap()
+        .get(&(func.to_string(), site_key))
+        .map(|s| s.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// Every resume point that has transferred at least once.
+pub fn transfers_taken() -> Vec<(String, u64, u64)> {
+    transfer_counts()
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|((name, site), n)| {
+            let n = n.load(Ordering::Acquire);
+            (n > 0).then(|| (name.clone(), *site, n))
+        })
+        .collect()
+}
+
 /// Whether resume points are built at all.
 ///
 /// Off by default while the probe side is being brought up: building variants
