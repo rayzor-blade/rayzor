@@ -63,10 +63,18 @@ fn collect_this_field_stores<'a>(
             }
         }
     }
-    // Recursion covers the block-shaped containers a constructor body uses.
-    // Anything else simply yields no inference, which leaves the parameter
-    // Dynamic -- the same answer as before, never a wrong one.
+    // Recursion covers the block-shaped containers a body uses, and `return`,
+    // because a brace-less setter puts the store inside one:
+    // `function set_high(x) return this.high = x;`. Missing that left the
+    // parameter Dynamic, and storing a Dynamic into an Int32 field writes
+    // eight bytes into four.
+    //
+    // Anything else yields no inference, which leaves the parameter Dynamic --
+    // the same answer as before, never a wrong one.
     match &expr.kind {
+        ExprKind::Return(Some(inner)) => {
+            collect_this_field_stores(inner, params, out);
+        }
         ExprKind::Block(elements) => {
             for element in elements {
                 if let BlockElement::Expr(e) = element {
@@ -17450,6 +17458,35 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Infer return type from function body by looking at return statements
+    /// The type a return inside this expression yields, if any.
+    ///
+    /// Only the shapes a brace-less body can take: the return itself, and the
+    /// block or conditional a body may be wrapped in. Anything else has no
+    /// return to find.
+    fn find_return_type_in_expression(&self, expr: &TypedExpression) -> Option<TypeId> {
+        match &expr.kind {
+            TypedExpressionKind::Return { value } => Some(
+                value
+                    .as_ref()
+                    .map(|v| v.expr_type)
+                    .unwrap_or_else(|| self.context.type_table.borrow().void_type()),
+            ),
+            TypedExpressionKind::Block { statements, .. } => statements
+                .iter()
+                .find_map(|s| self.find_return_type_in_statement(s)),
+            TypedExpressionKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => self.find_return_type_in_expression(then_expr).or_else(|| {
+                else_expr
+                    .as_ref()
+                    .and_then(|e| self.find_return_type_in_expression(e))
+            }),
+            _ => None,
+        }
+    }
+
     fn infer_return_type_from_body(&self, body: &[TypedStatement]) -> TypeId {
         // Look for return statements in the body
         for stmt in body {
@@ -17464,6 +17501,15 @@ impl<'a> AstLowering<'a> {
     /// Find return type from a statement (recursively search nested blocks)
     fn find_return_type_in_statement(&self, stmt: &TypedStatement) -> Option<TypeId> {
         match stmt {
+            // A brace-less body -- `function get_high() return this.high;` --
+            // lowers to a single expression statement wrapping a return, and
+            // the whole body is wrapped this way regardless. Without this arm
+            // the search finds no return at all and the function is typed
+            // void, which is how Int64's accessors came to declare `-> void`
+            // and then return an i32 from the body.
+            TypedStatement::Expression { expression, .. } => {
+                self.find_return_type_in_expression(expression)
+            }
             TypedStatement::Return { value, .. } => {
                 if let Some(expr) = value {
                     Some(expr.expr_type)
