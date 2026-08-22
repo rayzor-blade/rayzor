@@ -71,14 +71,30 @@ static REGION_BASE: AtomicUsize = AtomicUsize::new(0);
 static REGION_NEXT: AtomicUsize = AtomicUsize::new(0);
 static REGION_END: AtomicUsize = AtomicUsize::new(0);
 
+/// Per class: the free-list head, and the un-handed-out remainder of the
+/// current chunk as `(next, end)`.
+struct ClassState {
+    free: *mut u8,
+    next: usize,
+    end: usize,
+}
+
 thread_local! {
-    /// Head of each class's free list. Blocks are linked through their own
-    /// first word, which is dead while the block is free.
-    static FREE_LISTS: RefCell<[*mut u8; NUM_CLASSES]> =
-        const { RefCell::new([std::ptr::null_mut(); NUM_CLASSES]) };
-    /// Un-handed-out remainder of the current chunk per class: (next, end).
-    static BUMP: RefCell<[(usize, usize); NUM_CLASSES]> =
-        const { RefCell::new([(0, 0); NUM_CLASSES]) };
+    /// One thread-local, not two. Allocation is a handful of instructions, so
+    /// a second TLS lookup is a measurable share of it -- and the two were
+    /// always consulted together anyway. Blocks on the free list are linked
+    /// through their own first word, which is dead while the block is free.
+    static CLASSES: RefCell<[ClassState; NUM_CLASSES]> = const {
+        RefCell::new(
+            [const {
+                ClassState {
+                    free: std::ptr::null_mut(),
+                    next: 0,
+                    end: 0,
+                }
+            }; NUM_CLASSES],
+        )
+    };
 }
 
 /// Reserve the region on first use. Failure is not fatal: every path falls
@@ -156,59 +172,52 @@ fn class_of(size: usize) -> Option<usize> {
 #[no_mangle]
 pub extern "C" fn rayzor_object_alloc(size: u64) -> *mut u8 {
     let size = size as usize;
+    if !pool_enabled() {
+        return unsafe { libc::malloc(size.max(1)) as *mut u8 };
+    }
     let Some(class_index) = class_of(size) else {
         return unsafe { libc::malloc(size.max(1)) as *mut u8 };
     };
     let block_size = (class_index + 1) * GRANULE;
 
-    // Fresh blocks get the same treatment libc's MallocPreScribble gives, for
-    // the same reason the release path is poisoned: a read of a field nothing
-    // wrote is invisible against zeroed mmap pages. This is not hypothetical --
-    // a known 32-bit-store/64-bit-read bug in enum reflection was detectable
-    // before objects moved to the pool and silently stopped being detectable
-    // after, because the upper half read as zero instead of as fill.
-    let scribble = scribble_enabled();
+    let ptr = CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        let state = &mut classes[class_index];
 
-    let popped = FREE_LISTS.with(|lists| {
-        let mut lists = lists.borrow_mut();
-        let head = lists[class_index];
-        if head.is_null() {
-            return std::ptr::null_mut();
+        let head = state.free;
+        if !head.is_null() {
+            state.free = unsafe { *(head as *const *mut u8) };
+            return head;
         }
-        lists[class_index] = unsafe { *(head as *const *mut u8) };
-        head
-    });
-    if !popped.is_null() {
-        if scribble {
-            unsafe { std::ptr::write_bytes(popped, 0xAA, block_size) };
-        }
-        POOL_SERVED.fetch_add(1, Ordering::Relaxed);
-        return popped;
-    }
-
-    BUMP.with(|bump| {
-        let mut bump = bump.borrow_mut();
-        let (next, end) = bump[class_index];
-        if next + block_size <= end {
-            bump[class_index] = (next + block_size, end);
-            if scribble {
-                unsafe { std::ptr::write_bytes(next as *mut u8, 0xAA, block_size) };
-            }
-            POOL_SERVED.fetch_add(1, Ordering::Relaxed);
-            return next as *mut u8;
+        if state.next + block_size <= state.end {
+            let p = state.next as *mut u8;
+            state.next += block_size;
+            return p;
         }
         match new_chunk(class_index) {
             Some((start, chunk_end)) => {
-                bump[class_index] = (start + block_size, chunk_end);
-                if scribble {
-                    unsafe { std::ptr::write_bytes(start as *mut u8, 0xAA, block_size) };
-                }
-                POOL_SERVED.fetch_add(1, Ordering::Relaxed);
+                state.next = start + block_size;
+                state.end = chunk_end;
                 start as *mut u8
             }
-            None => unsafe { libc::malloc(block_size) as *mut u8 },
+            None => std::ptr::null_mut(),
         }
-    })
+    });
+    if ptr.is_null() {
+        return unsafe { libc::malloc(block_size) as *mut u8 };
+    }
+
+    // Counting and filling are for the tests that prove compiled code reaches
+    // this allocator and that a fresh block is distinguishable from a written
+    // one. Both sit behind the same flag: an atomic increment per allocation
+    // costs more than the allocation, and the default path must not pay for a
+    // check nobody asked for -- which is the mistake that put two clock reads
+    // on every virtual dispatch.
+    if scribble_enabled() {
+        unsafe { std::ptr::write_bytes(ptr, 0xAA, block_size) };
+        POOL_SERVED.fetch_add(1, Ordering::Relaxed);
+    }
+    ptr
 }
 
 /// Return a block to the pool, or to libc if it never came from one.
@@ -239,11 +248,28 @@ pub extern "C" fn rayzor_object_free(ptr: *mut u8) {
         let block_size = (class_index + 1) * GRANULE;
         unsafe { std::ptr::write_bytes(ptr, 0x55, block_size) };
     }
-    FREE_LISTS.with(|lists| {
-        let mut lists = lists.borrow_mut();
-        unsafe { *(ptr as *mut *mut u8) = lists[class_index] };
-        lists[class_index] = ptr;
+    CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        let state = &mut classes[class_index];
+        unsafe { *(ptr as *mut *mut u8) = state.free };
+        state.free = ptr;
     });
+}
+
+/// Whether to serve from the pool at all. `RZT_POOL=0` sends everything to
+/// libc, which makes the pool an A/B on one binary rather than two builds --
+/// and the two arms can then be interleaved, which is the only way to compare
+/// anything on a contended machine. It also means a platform where the system
+/// allocator wins can turn this off without a revert: glibc's per-thread cache
+/// is fast enough that the pool is not obviously better there, and that is a
+/// measurement, not an assumption.
+///
+/// The free path deliberately does NOT consult this. Blocks handed out while
+/// the pool was on must still come back to it, or flipping the switch mid-
+/// process would hand pooled memory to libc.
+fn pool_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RZT_POOL").as_deref() != Ok("0"))
 }
 
 /// Whether to poison blocks. Resolved once; the check is a bool read on a path
@@ -342,6 +368,9 @@ mod tests {
     #[test]
     fn counts_only_what_it_actually_serves() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // The counter rides the same flag as the fill: an atomic increment per
+        // allocation is not something the default path should pay for.
+        TEST_SCRIBBLE.store(true, Ordering::Relaxed);
         let before = rayzor_pool_served();
         let a = rayzor_object_alloc(32);
         assert_eq!(rayzor_pool_served(), before + 1);
@@ -354,6 +383,21 @@ mod tests {
         );
         rayzor_object_free(a);
         rayzor_object_free(big);
+        TEST_SCRIBBLE.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn free_still_reclaims_pool_blocks_when_the_switch_is_off() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // A block handed out by the pool must return to the pool even if the
+        // switch is consulted again later; routing it to libc would be a free
+        // of memory libc never allocated.
+        let a = rayzor_object_alloc(32);
+        assert!(in_region(a as usize), "expected a pooled block");
+        rayzor_object_free(a);
+        let b = rayzor_object_alloc(32);
+        assert_eq!(a, b, "the released block did not come back");
+        rayzor_object_free(b);
     }
 
     #[test]
