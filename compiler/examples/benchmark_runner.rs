@@ -1273,9 +1273,28 @@ fn run_benchmark_isolated(
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Echo the child's own output so a run reads the same as it always did.
+    // Echo the child's own output, but collapse the repeats.
+    //
+    // A benchmark prints its checksum once per iteration, so a target that
+    // runs six of them prints six identical lines and the table is mostly
+    // noise. The checksum is not noise, though -- it is the only evidence the
+    // run computed the right answer -- so an unchanging line is printed once
+    // with a count rather than dropped, and a line that CHANGES between
+    // iterations is printed every time, because that means the benchmark is
+    // not reproducing and the reader needs to see it.
+    let mut echoed: Vec<(String, usize)> = Vec::new();
     for line in stdout.lines().filter(|l| !l.starts_with("__RESULT_JSON__")) {
-        println!("{line}");
+        match echoed.last_mut() {
+            Some((prev, n)) if prev == line => *n += 1,
+            _ => echoed.push((line.to_string(), 1)),
+        }
+    }
+    for (line, count) in echoed {
+        if count > 1 {
+            println!("{line}   (x{count})");
+        } else {
+            println!("{line}");
+        }
     }
     let json = stdout
         .lines()
