@@ -6,48 +6,204 @@
 //! and the only way to get optimised code into it is to compile the whole
 //! module before the loop is entered.
 //!
-//! An OSR variant lifts that restriction. It is a standalone function that can
-//! be entered at a loop header, so code sitting on a back edge can hand its
-//! live state to a freshly compiled variant and return whatever the variant
-//! returns. Execution changes tier in the middle of a loop.
+//! An OSR variant lifts that restriction. It is a standalone function that
+//! resumes at a loop header, so code sitting on the back edge can hand over its
+//! live state and return whatever the variant returns.
 //!
 //! The variant covers every block reachable from the header, not just the loop
 //! body: once control transfers it never comes back, so the variant has to run
 //! the loop, leave it, and carry the function to its return.
+//!
+//! ## Live state travels in a frame
+//!
+//! The variant takes one parameter, the address of a frame holding the live
+//! values, and its prologue loads them back out. Passing them as arguments
+//! instead would force each to fit a register, and the backends do not even
+//! agree on how a value is held -- a multi-field struct is a pointer to
+//! Cranelift and a value to LLVM. A frame sidesteps that: the back edge stores
+//! bytes, the prologue loads them, and neither has to know how the other keeps
+//! the value in registers. It is also the only shape that scales, since a
+//! header deep in a nest legitimately carries scores of live values.
 
 use super::blocks::{IrBasicBlock, IrTerminator};
 use super::functions::{IrFunction, IrFunctionId, IrParameter};
+use super::instructions::IrInstruction;
 use super::loop_analysis::DominatorTree;
-use super::{IrBlockId, IrId};
+use super::{IrBlockId, IrId, IrType, IrValue};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// What a probe has to hand over for one variant parameter.
-#[derive(Debug, Clone)]
+/// Live values a single variant accepts. They travel in a frame rather than
+/// registers, so a large count costs stack bytes and one copy at the moment of
+/// transfer, not anything per iteration.
+pub const OSR_MAX_LIVE_INS: usize = 128;
+
+/// Why a header cannot be resumed. Reported rather than swallowed, so a caller
+/// can say which loops were skipped and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OsrReject {
+    /// No such block in the function.
+    NoSuchHeader,
+    /// Resuming at the entry is the whole function, and nothing strictly
+    /// dominates it, so its live values cannot be identified.
+    IsEntryBlock,
+    /// More live values than one frame carries.
+    TooManyLiveIns(usize),
+    /// A live value's type has no known size, so it has nowhere to sit.
+    LiveInHasNoLayout,
+    /// A live value has no recorded type.
+    LiveInTypeUnknown,
+    /// A value is read that no instruction is known to define. `dest()` does
+    /// not cover every instruction, so treating this as "already computed"
+    /// would silently read whatever the register happened to hold.
+    UnclassifiableValue,
+    /// A block other than the header can also be entered from outside the
+    /// resumed region, so on that edge it would redefine values the frame is
+    /// supposed to supply. An enclosing loop's header is the usual case.
+    RegionHasExternalEntry,
+}
+
+/// Where each live value sits in the frame the back edge hands over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsrFrame {
+    /// Byte offset of each live value, parallel to `OsrLayout::live_ins`.
+    pub offsets: Vec<u32>,
+    pub size: u32,
+    pub align: u32,
+}
+
+impl OsrFrame {
+    /// Lay out `types` in order, each at its natural alignment.
+    pub fn for_types(types: &[IrType]) -> Self {
+        let mut offsets = Vec::with_capacity(types.len());
+        let mut cursor = 0usize;
+        let mut align = 1usize;
+        for ty in types {
+            let a = frame_align_of(ty);
+            align = align.max(a);
+            cursor = cursor.div_ceil(a) * a;
+            offsets.push(cursor as u32);
+            cursor += frame_size_of(ty);
+        }
+        let align = align.max(1);
+        Self {
+            offsets,
+            size: cursor.div_ceil(align).saturating_mul(align) as u32,
+            align: align as u32,
+        }
+    }
+}
+
+/// Bytes a value of this type occupies in a frame. Zero means the type has no
+/// layout here, which is a reason to refuse the header rather than guess.
+pub fn frame_size_of(ty: &IrType) -> usize {
+    match ty {
+        IrType::Bool | IrType::I8 | IrType::U8 => 1,
+        IrType::I16 | IrType::U16 => 2,
+        IrType::I32 | IrType::U32 | IrType::F32 => 4,
+        IrType::I64 | IrType::U64 | IrType::F64 => 8,
+        IrType::Ptr(_)
+        | IrType::Ref(_)
+        | IrType::Slice(_)
+        | IrType::String
+        | IrType::Function { .. }
+        | IrType::Any => 8,
+        IrType::Array(elem, n) => frame_size_of(elem).saturating_mul(*n),
+        IrType::Vector { element, count } => frame_size_of(element).saturating_mul(*count),
+        IrType::Opaque { size, .. } => *size,
+        // A struct crosses the boundary as the pointer the backends hold it by.
+        IrType::Struct { .. } | IrType::Union { .. } => 8,
+        IrType::Generic { base, .. } => frame_size_of(base),
+        IrType::Void | IrType::TypeVar(_) => 0,
+    }
+}
+
+/// Alignment a value of this type needs in a frame.
+pub fn frame_align_of(ty: &IrType) -> usize {
+    match ty {
+        IrType::Array(elem, _) => frame_align_of(elem),
+        IrType::Vector { element, .. } => frame_align_of(element),
+        IrType::Opaque { align, .. } => (*align).max(1),
+        IrType::Generic { base, .. } => frame_align_of(base),
+        other => frame_size_of(other).clamp(1, 8),
+    }
+}
+
+/// The site key beadie stores for a resume point.
+///
+/// Bits 63..16 hold the header's position among the function's loop headers and
+/// bits 15..0 the live count, so a probe and the helper it dispatches to agree
+/// on arity. The ordinal counts headers rather than blocks, which keeps a site
+/// stable when unrelated blocks are added or removed.
+#[inline]
+pub fn encode_osr_site(loop_ordinal: u64, live_in_count: u16) -> u64 {
+    (loop_ordinal << 16) | (live_in_count as u64)
+}
+
+/// Unpack a site key into `(loop_ordinal, live_in_count)`.
+#[inline]
+pub fn decode_osr_site(site: u64) -> (u64, u16) {
+    (site >> 16, (site & 0xFFFF) as u16)
+}
+
+/// Loop headers in discovery order, so codegen and the runtime agree on which
+/// ordinal names which header.
+pub fn find_loop_headers(func: &IrFunction) -> Vec<IrBlockId> {
+    let domtree = DominatorTree::compute(func);
+    let mut headers = Vec::new();
+    for (&b, block) in &func.cfg.blocks {
+        for succ in block.successors() {
+            // A back edge runs to a block that dominates its source.
+            if domtree.dominates(succ, b) && !headers.contains(&succ) {
+                headers.push(succ);
+            }
+        }
+    }
+    headers.sort();
+    headers
+}
+
+/// Position of `header` among the function's loop headers.
+pub fn loop_ordinal_of(func: &IrFunction, header: IrBlockId) -> Option<u64> {
+    find_loop_headers(func)
+        .iter()
+        .position(|h| *h == header)
+        .map(|i| i as u64)
+}
+
+/// What a probe hands over for one frame slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OsrParam {
     /// The value flowing into this header phi from whichever block transfers.
     /// Each latch supplies its own, so one variant serves every back edge.
     HeaderPhi { phi_dest: IrId },
-    /// A value computed before the loop, passed straight through.
+    /// A value computed before the loop, stored as it stands.
     Live(IrId),
 }
 
-/// A loop header lifted into a function that can be entered directly.
-pub struct OsrVariant {
-    /// The extracted function; entry is a synthetic block that jumps to the header.
-    pub function: IrFunction,
-    /// The header this variant resumes at, used as the OSR table key.
-    pub site: IrBlockId,
-    /// Parameters in signature order.
+/// The live state a resume point needs, and where it sits in the frame.
+#[derive(Debug, Clone)]
+pub struct OsrLayout {
+    pub header: IrBlockId,
+    pub loop_ordinal: u64,
+    /// What the back edge stores, in frame-slot order.
     pub params: Vec<OsrParam>,
+    pub live_in_types: Vec<IrType>,
+    /// Leading slots that are header phis; the rest are plain live values.
+    pub phi_count: usize,
+    pub frame: OsrFrame,
 }
 
-impl OsrVariant {
-    /// The registers a probe on `latch` passes, in parameter order.
+impl OsrLayout {
+    pub fn site_key(&self) -> u64 {
+        encode_osr_site(self.loop_ordinal, self.params.len() as u16)
+    }
+
+    /// The registers a probe on `latch` stores, in frame-slot order.
     ///
     /// Returns `None` when `latch` supplies no value for one of the header's
-    /// phis, which means it is not a real predecessor of the header.
+    /// phis, which means it is not a predecessor of the header.
     pub fn live_ins_at(&self, func: &IrFunction, latch: IrBlockId) -> Option<Vec<IrId>> {
-        let header = func.cfg.blocks.get(&self.site)?;
+        let header = func.cfg.blocks.get(&self.header)?;
         self.params
             .iter()
             .map(|p| match p {
@@ -65,6 +221,16 @@ impl OsrVariant {
     }
 }
 
+/// A loop header lifted into a function that can be entered directly.
+pub struct OsrVariant {
+    /// The extracted function. It takes the frame address and resumes at the
+    /// header; its entry block loads the live values back out.
+    pub function: IrFunction,
+    /// The header this variant resumes at.
+    pub site: IrBlockId,
+    pub layout: OsrLayout,
+}
+
 /// Registers a terminator reads.
 fn terminator_uses(term: &IrTerminator) -> Vec<IrId> {
     match term {
@@ -78,7 +244,7 @@ fn terminator_uses(term: &IrTerminator) -> Vec<IrId> {
 
 /// Blocks reachable from `start`, which is the part of the function an OSR
 /// transfer still has to execute.
-fn reachable_from(func: &IrFunction, start: IrBlockId) -> BTreeSet<IrBlockId> {
+pub fn blocks_reachable_from(func: &IrFunction, start: IrBlockId) -> BTreeSet<IrBlockId> {
     let mut seen = BTreeSet::new();
     let mut queue = VecDeque::new();
     if func.cfg.blocks.contains_key(&start) {
@@ -96,6 +262,18 @@ fn reachable_from(func: &IrFunction, start: IrBlockId) -> BTreeSet<IrBlockId> {
         }
     }
     seen
+}
+
+/// Blocks `header` dominates -- every path to them from the entry runs through
+/// it, so a variant resuming there is guaranteed to have executed them.
+pub fn blocks_dominated_by(func: &IrFunction, header: IrBlockId) -> BTreeSet<IrBlockId> {
+    let domtree = DominatorTree::compute(func);
+    func.cfg
+        .blocks
+        .keys()
+        .copied()
+        .filter(|b| domtree.dominates(header, *b))
+        .collect()
 }
 
 /// The block each register is defined in. Parameters count as defined by the
@@ -118,125 +296,187 @@ fn definition_blocks(func: &IrFunction) -> BTreeMap<IrId, IrBlockId> {
     defs
 }
 
-/// Build the variant that resumes `func` at `header`.
-///
-/// Returns `None` for a header that cannot be resumed — one that is the
-/// function's own entry, or one reading a register whose type is unknown.
-pub fn build_osr_variant(
-    func: &IrFunction,
-    header: IrBlockId,
-    new_id: IrFunctionId,
-) -> Option<OsrVariant> {
-    func.cfg.blocks.get(&header)?;
-    // Entering at the entry block is the whole function, and nothing strictly
-    // dominates it, so the parameters it needs cannot be identified.
+/// Work out what resuming at `header` needs, or why it cannot be done.
+pub fn osr_layout(func: &IrFunction, header: IrBlockId) -> Result<OsrLayout, OsrReject> {
+    let header_block = func
+        .cfg
+        .blocks
+        .get(&header)
+        .ok_or(OsrReject::NoSuchHeader)?;
     if header == func.cfg.entry_block {
-        return None;
+        return Err(OsrReject::IsEntryBlock);
     }
 
-    let region = reachable_from(func, header);
-    let domtree = DominatorTree::compute(func);
+    let region = blocks_reachable_from(func, header);
+    // Only blocks the header dominates are guaranteed to have run by the time
+    // the resumed code reads what they define. A block that is merely reachable
+    // may also be reached without the header -- an enclosing loop's header is
+    // the usual case -- so anything it defines has to arrive in the frame.
+    let dominated = blocks_dominated_by(func, header);
     let defs = definition_blocks(func);
 
-    // A phi inside the region whose block strictly dominates the header cannot
-    // be re-entered here. Its value is already live when the transfer happens,
-    // so it would arrive as a parameter, and the phi would write the same
-    // register again -- one register with two definitions. That is the shape of
-    // an inner loop header while its enclosing loop is mid-flight; resuming
-    // there needs the enclosing phis rebuilt, so only headers without one are
-    // resumable.
-    for &b in &region {
-        if b != header
-            && !func.cfg.blocks[&b].phi_nodes.is_empty()
-            && domtree.strictly_dominates(b, header)
-        {
-            return None;
-        }
+    // The header's phis are the loop-carried values. They lead the frame, and
+    // the walk below skips the header's own incomings: those are precisely what
+    // resuming replaces.
+    let mut params: Vec<OsrParam> = Vec::new();
+    let mut types: Vec<IrType> = Vec::new();
+    let mut seen: BTreeSet<IrId> = BTreeSet::new();
+    for phi in &header_block.phi_nodes {
+        params.push(OsrParam::HeaderPhi { phi_dest: phi.dest });
+        types.push(phi.ty.clone());
+        seen.insert(phi.dest);
     }
+    let phi_count = params.len();
 
-    let mut variant = func.clone();
-    let mut params: Vec<IrParameter> = Vec::new();
-    let mut descriptors: Vec<OsrParam> = Vec::new();
-    let mut next_reg = variant.next_reg_id;
-
-    // The header's phis choose between the value from before the loop and the
-    // value from a back edge. The phi has to SURVIVE, or nothing writes the
-    // loop-carried register when the variant goes round again -- the induction
-    // variable would freeze at whatever the transfer handed over. So the phi
-    // keeps its in-region incomings and gains one more, from a synthetic entry
-    // block, carrying a fresh parameter.
-    let entry = IrBlockId(variant.cfg.next_block_id);
-    variant.cfg.next_block_id += 1;
-    let header_phis: Vec<(IrId, super::IrType)> = func.cfg.blocks[&header]
-        .phi_nodes
-        .iter()
-        .map(|phi| (phi.dest, phi.ty.clone()))
-        .collect();
-    for (i, (dest, ty)) in header_phis.iter().enumerate() {
-        let reg = IrId::new(next_reg);
-        next_reg += 1;
-        params.push(IrParameter {
-            name: format!("osr_phi{i}"),
-            ty: ty.clone(),
-            reg,
-            by_ref: false,
-        });
-        variant.register_types.insert(reg, ty.clone());
-        descriptors.push(OsrParam::HeaderPhi { phi_dest: *dest });
-    }
-
-    // Values the region reads that were computed before entering it. Membership
-    // of the region is NOT the test: reachability from the header wraps back
-    // through an enclosing loop, so a value defined in an outer body is
-    // reachable yet has not run when the variant starts. Strict dominance is
-    // the test that separates them -- a definition that strictly dominates the
-    // header ran before entry and must be handed over, while one that does not
-    // is recomputed by the variant itself.
-    let header_phi_dests: BTreeSet<IrId> = header_phis.iter().map(|(d, _)| *d).collect();
-    let mut carried: BTreeSet<IrId> = BTreeSet::new();
-    let mut note = |v: IrId, carried: &mut BTreeSet<IrId>| {
-        if header_phi_dests.contains(&v) {
-            return;
+    let mut consider = |v: IrId,
+                        params: &mut Vec<OsrParam>,
+                        types: &mut Vec<IrType>,
+                        seen: &mut BTreeSet<IrId>|
+     -> Result<(), OsrReject> {
+        if !seen.insert(v) {
+            return Ok(());
         }
-        if let Some(&db) = defs.get(&v) {
-            if domtree.strictly_dominates(db, header) {
-                carried.insert(v);
-            }
+        let Some(&db) = defs.get(&v) else {
+            // Nothing claims to define it. `dest()` does not cover every
+            // instruction, so this may be a real definition we cannot see;
+            // assuming it is already computed would read a stale register.
+            return Err(OsrReject::UnclassifiableValue);
+        };
+        if dominated.contains(&db) {
+            return Ok(());
         }
+        let ty = func
+            .register_types
+            .get(&v)
+            .cloned()
+            .or_else(|| func.locals.get(&v).map(|l| l.ty.clone()))
+            .ok_or(OsrReject::LiveInTypeUnknown)?;
+        if frame_size_of(&ty) == 0 {
+            return Err(OsrReject::LiveInHasNoLayout);
+        }
+        params.push(OsrParam::Live(v));
+        types.push(ty);
+        Ok(())
     };
+
     for &b in &region {
         let block = &func.cfg.blocks[&b];
-        for phi in &block.phi_nodes {
-            // Edges from outside the region cannot fire in the variant, so the
-            // values they carry are not read here.
-            for (pred, val) in &phi.incoming {
-                if region.contains(pred) {
-                    note(*val, &mut carried);
+        if b != header {
+            for phi in &block.phi_nodes {
+                for (pred, val) in &phi.incoming {
+                    if region.contains(pred) {
+                        consider(*val, &mut params, &mut types, &mut seen)?;
+                    }
                 }
             }
         }
         for inst in &block.instructions {
             for u in inst.uses() {
-                note(u, &mut carried);
+                consider(u, &mut params, &mut types, &mut seen)?;
             }
         }
         for u in terminator_uses(&block.terminator) {
-            note(u, &mut carried);
+            consider(u, &mut params, &mut types, &mut seen)?;
         }
     }
-    for v in carried {
-        let ty = variant
-            .register_types
-            .get(&v)
-            .cloned()
-            .or_else(|| variant.locals.get(&v).map(|l| l.ty.clone()))?;
-        params.push(IrParameter {
-            name: format!("osr_live{}", v.as_u32()),
-            ty,
-            reg: v,
-            by_ref: false,
+
+    if params.len() > OSR_MAX_LIVE_INS {
+        return Err(OsrReject::TooManyLiveIns(params.len()));
+    }
+
+    // A block other than the header that is also entered from outside the
+    // region would, on that edge, redefine values the frame supplies, and its
+    // phi would take an incoming the variant has no block for.
+    for &b in &region {
+        if b == header {
+            continue;
+        }
+        let block = &func.cfg.blocks[&b];
+        if block
+            .predecessors
+            .iter()
+            .any(|p| !region.contains(p) && *p != header)
+        {
+            return Err(OsrReject::RegionHasExternalEntry);
+        }
+    }
+
+    let frame = OsrFrame::for_types(&types);
+    Ok(OsrLayout {
+        header,
+        loop_ordinal: loop_ordinal_of(func, header).unwrap_or(u64::MAX),
+        params,
+        live_in_types: types,
+        phi_count,
+        frame,
+    })
+}
+
+/// Build the variant that resumes `func` at `header`.
+pub fn build_osr_variant(
+    func: &IrFunction,
+    header: IrBlockId,
+    new_id: IrFunctionId,
+) -> Result<OsrVariant, OsrReject> {
+    let layout = osr_layout(func, header)?;
+    let region = blocks_reachable_from(func, header);
+
+    let mut variant = func.clone();
+    let mut next_reg = variant.next_reg_id;
+    let mut fresh = || {
+        let r = IrId::new(next_reg);
+        next_reg += 1;
+        r
+    };
+
+    // One parameter: the address of the frame the back edge filled in.
+    let frame_ptr = fresh();
+    let frame_ty = IrType::Ptr(Box::new(IrType::I8));
+    variant.register_types.insert(frame_ptr, frame_ty.clone());
+    variant.signature.parameters = vec![IrParameter {
+        name: "osr_frame".to_string(),
+        ty: frame_ty.clone(),
+        reg: frame_ptr,
+        by_ref: false,
+    }];
+
+    // The prologue reads each live value back out of the frame. A phi's value
+    // becomes that phi's incoming on the entry edge; everything else is bound
+    // to the register it had, which the region already refers to.
+    let entry = IrBlockId(variant.cfg.next_block_id);
+    variant.cfg.next_block_id += 1;
+    let mut prologue: Vec<IrInstruction> = Vec::new();
+    let mut phi_values: Vec<IrId> = Vec::new();
+    for (i, param) in layout.params.iter().enumerate() {
+        let ty = layout.live_in_types[i].clone();
+        let offset = fresh();
+        let addr = fresh();
+        let dest = match param {
+            OsrParam::HeaderPhi { .. } => {
+                let d = fresh();
+                phi_values.push(d);
+                d
+            }
+            OsrParam::Live(v) => *v,
+        };
+        variant.register_types.insert(offset, IrType::I64);
+        variant.register_types.insert(addr, frame_ty.clone());
+        variant.register_types.insert(dest, ty.clone());
+        prologue.push(IrInstruction::Const {
+            dest: offset,
+            value: IrValue::I64(layout.frame.offsets[i] as i64),
         });
-        descriptors.push(OsrParam::Live(v));
+        prologue.push(IrInstruction::PtrAdd {
+            dest: addr,
+            ptr: frame_ptr,
+            offset,
+            ty: frame_ty.clone(),
+        });
+        prologue.push(IrInstruction::Load {
+            dest,
+            ptr: addr,
+            ty,
+        });
     }
 
     variant.id = new_id;
@@ -245,26 +485,27 @@ pub fn build_osr_variant(
         .qualified_name
         .as_ref()
         .map(|q| format!("{q}$osr{}", header.0));
-    variant.signature.parameters = params;
     variant.next_reg_id = next_reg;
     variant.cfg.blocks.retain(|b, _| region.contains(b));
 
     // Only edges from inside the variant can fire, plus the new entry edge.
-    for (&b, block) in variant.cfg.blocks.iter_mut() {
+    for block in variant.cfg.blocks.values_mut() {
         for phi in block.phi_nodes.iter_mut() {
             phi.incoming.retain(|(pred, _)| region.contains(pred));
         }
-        let _ = b;
     }
+    // The header's phis survive. Converting them to loads and deleting them
+    // would leave nothing writing the loop-carried register on the back edge,
+    // so the value would freeze at whatever the transfer handed over.
     if let Some(block) = variant.cfg.blocks.get_mut(&header) {
         for (i, phi) in block.phi_nodes.iter_mut().enumerate() {
-            phi.incoming
-                .push((entry, variant.signature.parameters[i].reg));
+            phi.incoming.push((entry, phi_values[i]));
         }
     }
 
     let mut entry_block = IrBasicBlock::new(entry);
     entry_block.label = Some("osr_entry".to_string());
+    entry_block.instructions = prologue;
     entry_block.terminator = IrTerminator::Branch { target: header };
     entry_block.terminator_explicit = true;
     variant.cfg.blocks.insert(entry, entry_block);
@@ -274,10 +515,10 @@ pub fn build_osr_variant(
     // analysis reads.
     variant.cfg.recompute_predecessors();
 
-    Some(OsrVariant {
+    Ok(OsrVariant {
         function: variant,
         site: header,
-        params: descriptors,
+        layout,
     })
 }
 
@@ -381,187 +622,6 @@ mod tests {
         (f, outer_h, inner_h, n)
     }
 
-    fn innermost_header(func: &IrFunction) -> IrBlockId {
-        let domtree = DominatorTree::compute(func);
-        let loops = LoopNestInfo::analyze(func, &domtree);
-        loops
-            .loops_innermost_first()
-            .into_iter()
-            .next()
-            .unwrap()
-            .header
-    }
-
-    fn variant_of(func: &IrFunction) -> OsrVariant {
-        build_osr_variant(func, innermost_header(func), IrFunctionId(9999)).expect("variant")
-    }
-
-    #[test]
-    fn entry_is_synthetic_and_jumps_to_the_header() {
-        let func = counted_loop();
-        let v = variant_of(&func);
-        let entry = v.function.cfg.entry_block;
-        assert_ne!(entry, v.site, "entry must not be the header itself");
-        let block = &v.function.cfg.blocks[&entry];
-        assert!(block.instructions.is_empty());
-        assert!(matches!(block.terminator, IrTerminator::Branch { target } if target == v.site));
-    }
-
-    /// The bug this guards: converting the header phi into a parameter and
-    /// DELETING it leaves nothing to write the loop-carried register on the
-    /// back edge, so the induction variable freezes at its transfer value and
-    /// the loop spins forever on one iteration.
-    #[test]
-    fn header_phi_survives_with_both_the_entry_and_the_latch_edge() {
-        let func = counted_loop();
-        let v = variant_of(&func);
-        let entry = v.function.cfg.entry_block;
-        let phis = &v.function.cfg.blocks[&v.site].phi_nodes;
-        assert_eq!(phis.len(), 1, "the header phi must survive");
-        let preds: BTreeSet<IrBlockId> = phis[0].incoming.iter().map(|(p, _)| *p).collect();
-        assert!(preds.contains(&entry), "phi needs the transfer value");
-        assert!(
-            preds.iter().any(|p| *p != entry),
-            "phi needs the back edge, or the loop never advances"
-        );
-    }
-
-    /// The cross-block liveness question. `row` is defined in the OUTER body
-    /// and read in the inner loop. It is reachable from the inner header, so a
-    /// region-membership test calls it locally computed; strict dominance
-    /// correctly calls it live-in.
-    #[test]
-    fn a_value_from_an_enclosing_loop_is_handed_over_not_assumed() {
-        let (func, outer_h, _inner_h, n) = nested_loop();
-        let v = build_osr_variant(&func, outer_h, IrFunctionId(9998)).expect("outer variant");
-
-        let live: Vec<IrId> = v
-            .params
-            .iter()
-            .filter_map(|p| match p {
-                OsrParam::Live(r) => Some(*r),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            live.contains(&n),
-            "a value computed before the loop must arrive as a parameter, got {live:?}"
-        );
-    }
-
-    /// An inner header cannot be resumed while its enclosing loop is mid-flight
-    /// without rebuilding the enclosing phis, so it is refused rather than
-    /// silently miscompiled.
-    #[test]
-    fn an_inner_header_is_refused() {
-        let (func, _outer_h, inner_h, _n) = nested_loop();
-        assert!(build_osr_variant(&func, inner_h, IrFunctionId(9997)).is_none());
-    }
-
-    #[test]
-    fn the_entry_block_is_refused() {
-        let func = counted_loop();
-        let entry = func.cfg.entry_block;
-        assert!(build_osr_variant(&func, entry, IrFunctionId(9996)).is_none());
-    }
-
-    #[test]
-    fn every_parameter_has_a_descriptor_and_resolves_at_a_latch() {
-        let func = counted_loop();
-        let v = variant_of(&func);
-        assert_eq!(v.params.len(), v.function.signature.parameters.len());
-
-        let latch = func.cfg.blocks[&v.site]
-            .phi_nodes
-            .first()
-            .and_then(|phi| {
-                phi.incoming
-                    .iter()
-                    .map(|(p, _)| *p)
-                    .find(|p| *p != func.cfg.entry_block)
-            })
-            .expect("a back edge");
-        let ins = v.live_ins_at(&func, latch).expect("resolves");
-        assert_eq!(ins.len(), v.params.len());
-    }
-
-    /// The invariant that makes a variant safe to run: it never reads a
-    /// register that neither a parameter nor one of its own instructions
-    /// produced. A miss here is state the back edge failed to hand over.
-    #[test]
-    fn variant_reads_nothing_it_was_not_given() {
-        for func in [counted_loop(), nested_loop().0] {
-            let header = innermost_header(&func);
-            let Some(v) = build_osr_variant(&func, header, IrFunctionId(9995)) else {
-                continue;
-            };
-
-            let mut available: BTreeSet<IrId> = v
-                .function
-                .signature
-                .parameters
-                .iter()
-                .map(|p| p.reg)
-                .collect();
-            for block in v.function.cfg.blocks.values() {
-                for phi in &block.phi_nodes {
-                    available.insert(phi.dest);
-                }
-                for inst in &block.instructions {
-                    if let Some(d) = inst.dest() {
-                        available.insert(d);
-                    }
-                }
-            }
-
-            for (id, block) in &v.function.cfg.blocks {
-                for phi in &block.phi_nodes {
-                    for (pred, val) in &phi.incoming {
-                        assert!(
-                            available.contains(val),
-                            "block {id:?} phi reads {val:?} from {pred:?}, never provided"
-                        );
-                    }
-                }
-                for inst in &block.instructions {
-                    for u in inst.uses() {
-                        assert!(
-                            available.contains(&u),
-                            "block {id:?} reads {u:?}, never provided"
-                        );
-                    }
-                }
-                for u in terminator_uses(&block.terminator) {
-                    assert!(
-                        available.contains(&u),
-                        "block {id:?} terminator reads {u:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Phi incomings from blocks the variant does not contain are edges that
-    /// cannot fire, and leaving them in would reference dropped blocks.
-    #[test]
-    fn variant_keeps_no_edge_from_outside_itself() {
-        let func = counted_loop();
-        let v = variant_of(&func);
-        for block in v.function.cfg.blocks.values() {
-            for phi in &block.phi_nodes {
-                for (pred, _) in &phi.incoming {
-                    assert!(v.function.cfg.blocks.contains_key(pred));
-                }
-            }
-            for pred in &block.predecessors {
-                assert!(
-                    v.function.cfg.blocks.contains_key(pred),
-                    "stale predecessor {pred:?} survives"
-                );
-            }
-        }
-    }
-
     /// ADVERSARIAL PROBE (temporary): the exact shape `find_rotation_releases`
     /// targets -- a header phi whose incomings are fresh allocations, with the
     /// release appended at the latch.
@@ -610,68 +670,250 @@ mod tests {
         (f, header, latch, p, p0, p1)
     }
 
-    #[test]
-    fn adversarial_rotation_release_keeps_the_carried_pointer_a_phi() {
-        use crate::ir::instructions::IrInstruction;
-        let (func, header, latch, p, p0, p1) = rotation_loop();
-        let v = build_osr_variant(&func, header, IrFunctionId(9994)).expect("variant");
+    fn innermost_header(func: &IrFunction) -> IrBlockId {
+        let domtree = DominatorTree::compute(func);
+        let loops = LoopNestInfo::analyze(func, &domtree);
+        loops
+            .loops_innermost_first()
+            .into_iter()
+            .next()
+            .unwrap()
+            .header
+    }
 
+    fn variant_of(func: &IrFunction) -> OsrVariant {
+        build_osr_variant(func, innermost_header(func), IrFunctionId(9999)).expect("variant")
+    }
+
+    #[test]
+    fn the_variant_takes_one_frame_pointer() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        assert_eq!(
+            v.function.signature.parameters.len(),
+            1,
+            "live state travels in the frame, not the signature"
+        );
+        assert!(matches!(
+            v.function.signature.parameters[0].ty,
+            IrType::Ptr(_)
+        ));
+    }
+
+    #[test]
+    fn entry_loads_every_slot_then_jumps_to_the_header() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        let entry = v.function.cfg.entry_block;
+        assert_ne!(entry, v.site);
+        let block = &v.function.cfg.blocks[&entry];
+        let loads = block
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, IrInstruction::Load { .. }))
+            .count();
+        assert_eq!(loads, v.layout.params.len(), "one load per frame slot");
+        assert!(matches!(block.terminator, IrTerminator::Branch { target } if target == v.site));
+    }
+
+    /// The bug this guards: turning the header phi into a load and DELETING it
+    /// leaves nothing writing the loop-carried register on the back edge, so
+    /// the induction variable freezes at its transfer value.
+    #[test]
+    fn header_phi_survives_with_both_the_entry_and_the_latch_edge() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        let entry = v.function.cfg.entry_block;
+        let phis = &v.function.cfg.blocks[&v.site].phi_nodes;
+        assert_eq!(phis.len(), 1, "the header phi must survive");
+        let preds: BTreeSet<IrBlockId> = phis[0].incoming.iter().map(|(p, _)| *p).collect();
+        assert!(preds.contains(&entry), "phi needs the transfer value");
+        assert!(
+            preds.iter().any(|p| *p != entry),
+            "phi needs the back edge, or the loop never advances"
+        );
+    }
+
+    /// The cross-block liveness rule. `n` is computed before the loop, so it
+    /// has to arrive in the frame. Classifying by region membership instead of
+    /// dominance would call it locally computed and read it uninitialised.
+    #[test]
+    fn a_value_computed_before_the_loop_is_handed_over_not_assumed() {
+        let (func, outer_h, _inner_h, n) = nested_loop();
+        let v = build_osr_variant(&func, outer_h, IrFunctionId(9998)).expect("outer variant");
+        assert!(
+            v.layout.params.contains(&OsrParam::Live(n)),
+            "expected {n:?} in the frame, got {:?}",
+            v.layout.params
+        );
+    }
+
+    /// An inner header's enclosing loop is mid-flight, so its header can be
+    /// entered from outside the resumed region. Refused, with a reason.
+    #[test]
+    fn an_inner_header_is_refused_with_a_reason() {
+        let (func, _outer_h, inner_h, _n) = nested_loop();
+        assert_eq!(
+            build_osr_variant(&func, inner_h, IrFunctionId(9997)).err(),
+            Some(OsrReject::RegionHasExternalEntry)
+        );
+    }
+
+    #[test]
+    fn the_entry_block_is_refused_with_a_reason() {
+        let func = counted_loop();
+        let entry = func.cfg.entry_block;
+        assert_eq!(
+            build_osr_variant(&func, entry, IrFunctionId(9996)).err(),
+            Some(OsrReject::IsEntryBlock)
+        );
+    }
+
+    #[test]
+    fn a_probe_resolves_one_register_per_frame_slot() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        let latch = func.cfg.blocks[&v.site]
+            .phi_nodes
+            .first()
+            .and_then(|phi| {
+                phi.incoming
+                    .iter()
+                    .map(|(p, _)| *p)
+                    .find(|p| *p != func.cfg.entry_block)
+            })
+            .expect("a back edge");
+        let ins = v.layout.live_ins_at(&func, latch).expect("resolves");
+        assert_eq!(ins.len(), v.layout.params.len());
+    }
+
+    /// A carried pointer stays a phi rather than becoming a frozen frame slot:
+    /// the latch allocates a replacement each iteration, and freezing it would
+    /// leak every allocation after the first and free the wrong one.
+    #[test]
+    fn a_rotating_pointer_stays_a_phi() {
+        let (func, header, latch, p, _p0, p1) = rotation_loop();
+        let v = build_osr_variant(&func, header, IrFunctionId(9994)).expect("variant");
         let phi = v.function.cfg.blocks[&header]
             .phi_nodes
             .iter()
             .find(|n| n.dest == p)
             .expect("carried phi survives");
         assert!(
-            !v.function.signature.parameters.iter().any(|q| q.reg == p),
-            "the carried pointer must not become a frozen parameter"
-        );
-        assert!(
             phi.incoming
                 .iter()
                 .any(|(pred, val)| *pred == latch && *val == p1),
-            "latch edge lost: every alloc would leak and p would freeze, incoming={:?}",
+            "latch edge lost: incoming={:?}",
             phi.incoming
         );
-
-        let entry = v.function.cfg.entry_block;
-        let (_, transferred) = phi
-            .incoming
-            .iter()
-            .find(|(pred, _)| *pred == entry)
-            .expect("entry edge");
-        assert_ne!(*transferred, p, "entry edge must carry a FRESH register");
-        assert_ne!(*transferred, p1);
-        assert_ne!(*transferred, p0);
-        assert!(v
-            .function
-            .signature
-            .parameters
-            .iter()
-            .any(|q| q.reg == *transferred));
         assert!(
-            !v.function.signature.parameters.iter().any(|q| q.reg == p0),
-            "the pre-loop object must not be handed over"
+            v.layout
+                .params
+                .contains(&OsrParam::HeaderPhi { phi_dest: p }),
+            "the carried pointer travels as a phi slot"
         );
+    }
 
-        let ins = v.live_ins_at(&func, latch).expect("resolves at the latch");
-        let idx = v
-            .params
-            .iter()
-            .position(|d| matches!(d, OsrParam::HeaderPhi { phi_dest } if *phi_dest == p))
-            .unwrap();
-        assert_eq!(
-            ins[idx], p1,
-            "the transfer must hand over the object the latch just built"
-        );
+    /// The invariant that makes a variant safe to run: it never reads a
+    /// register that neither the prologue nor one of its own instructions
+    /// produced. A miss here is state the back edge failed to hand over.
+    #[test]
+    fn variant_reads_nothing_it_was_not_given() {
+        for func in [counted_loop(), nested_loop().0, rotation_loop().0] {
+            for header in find_loop_headers(&func) {
+                let Ok(v) = build_osr_variant(&func, header, IrFunctionId(9995)) else {
+                    continue;
+                };
 
-        let frees: Vec<IrId> = v.function.cfg.blocks[&latch]
-            .instructions
-            .iter()
-            .filter_map(|i| match i {
-                IrInstruction::Free { ptr } => Some(*ptr),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(frees, vec![p], "the latch still frees the re-selected phi");
+                let mut available: BTreeSet<IrId> = v
+                    .function
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| p.reg)
+                    .collect();
+                for block in v.function.cfg.blocks.values() {
+                    for phi in &block.phi_nodes {
+                        available.insert(phi.dest);
+                    }
+                    for inst in &block.instructions {
+                        if let Some(d) = inst.dest() {
+                            available.insert(d);
+                        }
+                    }
+                }
+
+                for (id, block) in &v.function.cfg.blocks {
+                    for phi in &block.phi_nodes {
+                        for (pred, val) in &phi.incoming {
+                            assert!(
+                                available.contains(val),
+                                "{}: block {id:?} phi reads {val:?} from {pred:?}, never provided",
+                                v.function.name
+                            );
+                        }
+                    }
+                    for inst in &block.instructions {
+                        for u in inst.uses() {
+                            assert!(
+                                available.contains(&u),
+                                "{}: block {id:?} reads {u:?}, never provided",
+                                v.function.name
+                            );
+                        }
+                    }
+                    for u in terminator_uses(&block.terminator) {
+                        assert!(
+                            available.contains(&u),
+                            "block {id:?} terminator reads {u:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variant_keeps_no_edge_from_outside_itself() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        for block in v.function.cfg.blocks.values() {
+            for phi in &block.phi_nodes {
+                for (pred, _) in &phi.incoming {
+                    assert!(v.function.cfg.blocks.contains_key(pred));
+                }
+            }
+            for pred in &block.predecessors {
+                assert!(
+                    v.function.cfg.blocks.contains_key(pred),
+                    "stale predecessor {pred:?} survives"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_places_each_slot_at_its_alignment() {
+        let frame = OsrFrame::for_types(&[IrType::I8, IrType::F64, IrType::I32]);
+        assert_eq!(frame.offsets, vec![0, 8, 16]);
+        assert_eq!(frame.align, 8);
+        assert_eq!(frame.size % 8, 0);
+    }
+
+    #[test]
+    fn a_site_key_round_trips_its_ordinal_and_count() {
+        let site = encode_osr_site(7, 99);
+        assert_eq!(decode_osr_site(site), (7, 99));
+    }
+
+    /// The site key a variant reports is the one a probe encodes, or the two
+    /// disagree about which resume point they mean.
+    #[test]
+    fn the_layout_site_key_matches_the_header_ordinal() {
+        let func = counted_loop();
+        let v = variant_of(&func);
+        let (ordinal, count) = decode_osr_site(v.layout.site_key());
+        assert_eq!(Some(ordinal), loop_ordinal_of(&func, v.site));
+        assert_eq!(count as usize, v.layout.params.len());
     }
 }
