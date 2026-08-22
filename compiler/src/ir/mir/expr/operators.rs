@@ -754,7 +754,20 @@ impl<'a> HirToMirContext<'a> {
             // Mixed Dynamic + concrete arithmetic. Boxed DynamicValue* (Ptr(U8))
             // and type-erased raw values (Ptr(Void)) differ: only Ptr(U8) may be
             // unboxed, Ptr(Void) is cast to integer.
-            if (lhs_is_dyn || rhs_is_dyn) && !(lhs_is_dyn && rhs_is_dyn) {
+            // `x == null` is a pointer comparison, not a Dynamic one. `null`
+            // carries no type, so it lands on the Dynamic side and the mixed
+            // path below coerces it through `haxe_coerce_dynamic_to_int` -- a
+            // runtime call, a cast and a compare, to ask whether a pointer is
+            // zero. A tree walk is mostly null checks, so that call is per
+            // node in the hottest code a recursive structure has.
+            //
+            // Only a literal null qualifies. A Dynamic VARIABLE compared
+            // against a reference still needs the coercion, because a boxed
+            // DynamicValue's address is not its contents.
+            let comparing_to_null = matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+                && (matches!(lhs.kind, HirExprKind::Null) || matches!(rhs.kind, HirExprKind::Null));
+
+            if !comparing_to_null && (lhs_is_dyn || rhs_is_dyn) && !(lhs_is_dyn && rhs_is_dyn) {
                 let is_arith = matches!(
                     op,
                     HirBinaryOp::Add
