@@ -3914,6 +3914,34 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             )
                             .map(|v| v.into())
                             .map_err(|e| e.to_string())
+                    } else if target_ty.is_float_type() {
+                        // ...and there is no ptr-to-float bitcast either, so go
+                        // through an integer of the target's width. An abstract
+                        // over Int lowers its `this` to a pointer-typed slot
+                        // that holds the integer, so `@:to toFloat` arrives
+                        // here asking to reinterpret those bits -- which is a
+                        // bitcast the verifier rejects on the pointer but
+                        // accepts one step later on the integer.
+                        let bits = match ty {
+                            IrType::F32 => 32,
+                            _ => 64,
+                        };
+                        let int_ty = self.context.custom_width_int_type(bits);
+                        let as_int = self
+                            .builder
+                            .build_ptr_to_int(
+                                src_val.into_pointer_value(),
+                                int_ty,
+                                &format!("bitcast_ptr_int_{}", dest.as_u32()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        self.builder
+                            .build_bit_cast(
+                                as_int,
+                                target_ty.into_float_type(),
+                                &format!("bitcast_{}", dest.as_u32()),
+                            )
+                            .map_err(|e| e.to_string())
                     } else {
                         self.builder
                             .build_bit_cast(
