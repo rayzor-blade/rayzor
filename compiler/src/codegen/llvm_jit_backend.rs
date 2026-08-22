@@ -1863,13 +1863,24 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 continue;
             }
 
-            self.compile_function_body(*func_id, function, llvm_func)
-                .map_err(|e| {
-                    format!(
-                        "Error in function '{}' ({:?}): {}",
+            let body = self.compile_function_body(*func_id, function, llvm_func);
+            if let Err(e) = body {
+                // A compile error aborts the same way a verification failure
+                // does, so surveying only the latter still reports one name per
+                // build once the first bad body is reached.
+                if std::env::var_os("RAYZOR_LLVM_VERIFY_SURVEY").is_some() {
+                    eprintln!(
+                        "[verify] {} ({:?}) failed to compile: {}",
                         function.name, func_id, e
-                    )
-                })?;
+                    );
+                    verify_failures.push(function.name.clone());
+                    continue;
+                }
+                return Err(format!(
+                    "Error in function '{}' ({:?}): {}",
+                    function.name, func_id, e
+                ));
+            }
 
             // Per-function verification to catch return type mismatches early
             if !llvm_func.verify(true) {
