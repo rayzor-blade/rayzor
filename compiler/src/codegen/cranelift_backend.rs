@@ -2137,8 +2137,10 @@ impl CraneliftBackend {
         for (mir_block_id, mir_block) in &function.cfg.blocks {
             // debug!("Cranelift:   Block {:?} has {} phi nodes, {} instructions",
             //  mir_block_id, mir_block.phi_nodes.len(), mir_block.instructions.len());
-            // Skip entry block as we already created it
-            if mir_block_id.is_entry() {
+            // Reuse the Cranelift entry block, which already carries the
+            // function's parameters. The entry is whichever block the CFG names,
+            // not necessarily block 0.
+            if *mir_block_id == function.cfg.entry_block {
                 block_map.insert(*mir_block_id, entry_block);
             } else {
                 let cl_block = builder.create_block();
