@@ -393,56 +393,91 @@ pub fn init_rtti() {
     type_system::init_type_system();
 }
 
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+
 // ============================================================================
 // Global Variable Storage
 // ============================================================================
-// Thread-local storage for global variables used by JIT-compiled code.
-// Global IDs are small sequential u32 values, so we use a flat Vec for O(1) lookup
-// instead of HashMap (avoids SipHash overhead on every access).
+// Storage for Haxe static variables, shared by every backend.
+//
+// Two properties this has to have. It is process-wide, because a static a
+// Haxe program writes on one thread is the same variable another thread
+// reads. And a slot's address never moves, because the LLVM backend binds a
+// module global straight to one rather than calling in for each access -- a
+// slot that moved would leave compiled code pointing at freed memory.
+//
+// Chunks are allocated on demand and leaked. The read path takes no lock:
+// global ids are small and sequential, so the chunk table is a fixed array of
+// pointers and a miss is resolved once, by whichever thread gets there first.
 
-/// Initial capacity for the global store (grows as needed)
-const GLOBAL_STORE_INITIAL_CAP: usize = 64;
+/// Slots per chunk. Global ids are dense from zero, so one chunk covers most
+/// programs outright.
+const GLOBAL_CHUNK_SLOTS: usize = 1024;
+/// Chunks addressable, and so the ceiling on how many statics a program has.
+const GLOBAL_MAX_CHUNKS: usize = 4096;
 
-thread_local! {
-    static GLOBAL_STORE: RefCell<Vec<u64>> = RefCell::new(vec![0; GLOBAL_STORE_INITIAL_CAP]);
+static GLOBAL_CHUNKS: [AtomicPtr<AtomicU64>; GLOBAL_MAX_CHUNKS] =
+    [const { AtomicPtr::new(std::ptr::null_mut()) }; GLOBAL_MAX_CHUNKS];
+
+/// The slot a global id names, allocating its chunk if this is the first use.
+fn global_slot(global_id: usize) -> &'static AtomicU64 {
+    let chunk_index = global_id / GLOBAL_CHUNK_SLOTS;
+    assert!(
+        chunk_index < GLOBAL_MAX_CHUNKS,
+        "global id {global_id} is past the {} the store addresses",
+        GLOBAL_CHUNK_SLOTS * GLOBAL_MAX_CHUNKS
+    );
+    let cell = &GLOBAL_CHUNKS[chunk_index];
+
+    let mut chunk = cell.load(Ordering::Acquire);
+    if chunk.is_null() {
+        let fresh: Box<[AtomicU64]> = (0..GLOBAL_CHUNK_SLOTS).map(|_| AtomicU64::new(0)).collect();
+        let fresh = Box::into_raw(fresh) as *mut AtomicU64;
+        match cell.compare_exchange(
+            std::ptr::null_mut(),
+            fresh,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => chunk = fresh,
+            Err(won) => {
+                // Another thread got there first; its chunk is the one every
+                // reader will see, so this one is dropped rather than leaked.
+                drop(unsafe {
+                    Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                        fresh,
+                        GLOBAL_CHUNK_SLOTS,
+                    ))
+                });
+                chunk = won;
+            }
+        }
+    }
+
+    unsafe { &*chunk.add(global_id % GLOBAL_CHUNK_SLOTS) }
 }
 
 /// Store a value to a global variable
-///
-/// # Arguments
-/// * `global_id` - The global variable ID (small sequential integer)
-/// * `value` - The value to store (as a raw pointer cast to i64)
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_global_store(global_id: i64, value: i64) {
-    GLOBAL_STORE.with(|store| {
-        let mut s = store.borrow_mut();
-        let idx = global_id as usize;
-        if idx >= s.len() {
-            s.resize(idx + 1, 0);
-        }
-        s[idx] = value as u64;
-    });
+    global_slot(global_id as usize).store(value as u64, Ordering::Relaxed);
 }
 
 /// Load a value from a global variable
-///
-/// # Arguments
-/// * `global_id` - The global variable ID (small sequential integer)
-///
-/// # Returns
-/// The stored value, or 0 if not found
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
-    let val = GLOBAL_STORE.with(|store| {
-        let s = store.borrow();
-        let idx = global_id as usize;
-        if idx < s.len() {
-            s[idx] as i64
-        } else {
-            0
-        }
-    });
-    val
+    global_slot(global_id as usize).load(Ordering::Relaxed) as i64
+}
+
+/// The address of a global's storage.
+///
+/// For a backend that compiles a static access to a direct load instead of a
+/// call. Binding to this is what lets code from two backends see one variable:
+/// without it each keeps its own copy, and a static written by one reads as
+/// zero in the other.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_global_slot(global_id: i64) -> *mut u64 {
+    global_slot(global_id as usize).as_ptr()
 }
 
 #[cfg(test)]

@@ -182,6 +182,9 @@ pub struct LLVMJitBackend<'ctx> {
     /// Runtime symbols (name -> pointer) for FFI calls
     runtime_symbols: BTreeMap<String, usize>,
 
+    /// Globals declared here and waiting to be bound to the runtime's storage
+    /// once an execution engine exists to bind them with.
+    pending_global_bindings: Vec<(String, usize)>,
     /// How many hidden parameters lead each declaration -- an sret buffer, an
     /// environment, or both. Recorded when the declaration is bound rather
     /// than re-derived at each use, because declaring takes a dozen paths and
@@ -335,6 +338,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             tbaa_kind_id: context.get_kind_id("tbaa"),
             sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
+            pending_global_bindings: Vec::new(),
             hidden_prefix: BTreeMap::new(),
             indirect_targets: BTreeSet::new(),
             current_env_param: None,
@@ -1176,6 +1180,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 .create_jit_execution_engine(self.opt_level)
                 .map_err(|e| format!("Failed to create JIT execution engine: {}", e))?;
             self.execution_engine = Some(engine);
+            self.bind_pending_globals();
         }
 
         // Get function pointer using the mangled name
@@ -1840,6 +1845,35 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
     }
 
+    /// Point every static declared in this module at the runtime's storage.
+    ///
+    /// Called once an engine exists, since that is what binds an address. A
+    /// name the optimiser dropped is a static nothing read.
+    fn bind_pending_globals(&self) {
+        let Some(engine) = self.execution_engine.as_ref() else {
+            return;
+        };
+        for (name, addr) in &self.pending_global_bindings {
+            if let Some(global) = self.module.get_global(name) {
+                engine.add_global_mapping(&global, *addr);
+            }
+        }
+    }
+
+    /// Where the runtime keeps this static, if there is a runtime to ask.
+    ///
+    /// Ahead-of-time output has none: the whole program is compiled together,
+    /// so a definition in the module is consistent with itself and there is no
+    /// second backend to disagree with.
+    fn global_slot_address(&self, global_id: IrGlobalId) -> Option<usize> {
+        if self.aot_mode {
+            return None;
+        }
+        let slot_fn = *self.runtime_symbols.get("rayzor_global_slot")?;
+        let slot_fn: extern "C" fn(i64) -> *mut u64 = unsafe { std::mem::transmute(slot_fn) };
+        Some(slot_fn(global_id.0 as i64) as usize)
+    }
+
     /// Get or create an LLVM global variable for inline global access.
     /// This eliminates FFI calls to rayzor_global_load/store.
     fn get_or_create_global(&mut self, global_id: IrGlobalId) -> GlobalValue<'ctx> {
@@ -1855,13 +1889,26 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return global;
         }
 
-        // Create a new LLVM global variable (i64 to hold any value type)
         let global_name = format!("__rayzor_global_{}", global_id.0);
         let i64_type = self.context.i64_type();
-
         let global = self.module.add_global(i64_type, None, &global_name);
-        global.set_initializer(&i64_type.const_zero());
-        global.set_linkage(inkwell::module::Linkage::Internal);
+
+        // A static lives in the runtime's store, and this is a declaration of
+        // it -- bound to that slot once the engine exists. Defining it here
+        // instead gives this module a private copy, and a static written by
+        // Cranelift-compiled code then reads as zero in this one. Compiling
+        // ahead of time has no runtime to bind to and no other backend to
+        // agree with, so there the definition is the whole story.
+        match self.global_slot_address(global_id) {
+            Some(addr) => {
+                global.set_linkage(inkwell::module::Linkage::External);
+                self.pending_global_bindings.push((global_name, addr));
+            }
+            None => {
+                global.set_initializer(&i64_type.const_zero());
+                global.set_linkage(inkwell::module::Linkage::Internal);
+            }
+        }
 
         self.global_vars[idx] = Some(global);
         global
@@ -1970,6 +2017,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 engine.add_global_mapping(&func, *addr);
             }
         }
+        self.bind_pending_globals();
+        let engine = self.execution_engine.as_ref().unwrap();
         // Every function this code calls resolves to whatever already serves
         // it. Without this the declarations are unresolved symbols and the
         // engine refuses the module. A name the optimiser dropped is a
@@ -2286,6 +2335,12 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .module
             .create_jit_execution_engine(self.opt_level)
             .map_err(|e| format!("Failed to create JIT execution engine: {}", e))?;
+
+        for (name, addr) in &self.pending_global_bindings {
+            if let Some(global) = self.module.get_global(name) {
+                engine.add_global_mapping(&global, *addr);
+            }
+        }
 
         // Also add global mappings as a fallback for symbols that MCJIT
         // might resolve through the execution engine rather than RuntimeDyld
