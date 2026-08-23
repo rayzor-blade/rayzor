@@ -7,7 +7,7 @@ on:
       - 'website/**'
   workflow_dispatch:
   workflow_run:
-    workflows: ["Benchmarks"]
+    workflows: ["Benchmarks", "Conformance"]
     types:
       - completed
     branches:
@@ -172,6 +172,32 @@ jobs:
           else
             echo "ERROR: No benchmarks directory in final site!"
           fi
+
+      # Conformance publishes one small badge.json under a FIXED name. The
+      # benchmark results next door are date-stamped, so their filename moves
+      # every run and cannot back a badge.
+      - name: Publish conformance score
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/conformance.yml/runs \
+            --jq '.workflow_runs[] | select(.conclusion=="success" and .head_branch=="main") | .id' \
+            | head -1)
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful Conformance run yet — skipping"
+            exit 0
+          fi
+          ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name=="conformance-results") | .id' | head -1)
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "Run $RUN_ID has no conformance-results artifact — skipping"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/conformance.zip
+          mkdir -p _site/conformance
+          unzip -o /tmp/conformance.zip -d _site/conformance
+          echo "Published conformance score from run $RUN_ID:"
+          cat _site/conformance/badge.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
