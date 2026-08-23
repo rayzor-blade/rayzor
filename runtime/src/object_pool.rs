@@ -40,7 +40,12 @@ const MAX_POOLED: usize = 512;
 const GRANULE: usize = 16;
 const NUM_CLASSES: usize = MAX_POOLED / GRANULE;
 /// Reserved address space. Untouched pages cost nothing.
-const REGION_SIZE: usize = 24 << 30;
+/// Address space the pool carves chunks from.
+///
+/// This is a reservation, not memory: pages cost nothing until touched. It is
+/// sized well past any real working set so chunk addresses stay maskable, but
+/// not so far past that a host refuses the mapping outright.
+const REGION_SIZE: usize = 8 << 30;
 /// Objects start past the header, on a cache line.
 const CHUNK_DATA_OFFSET: usize = 64;
 
@@ -104,17 +109,31 @@ fn ensure_region() -> bool {
     if base != 0 {
         return base != usize::MAX;
     }
+    // MAP_NORESERVE, because the region is address space rather than memory.
+    // Without it a host that accounts commit up front sees a reservation far
+    // larger than its RAM and refuses the mapping -- and a refused reservation
+    // is the worst outcome available: every allocation still pays the check on
+    // its way to the same libc call it would have made anyway.
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
             REGION_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
             -1,
             0,
         )
     };
     if ptr == libc::MAP_FAILED {
+        // Say so. A pool that silently is not there looks exactly like a pool
+        // that is there and does not help.
+        if std::env::var_os("RZT_POOL_QUIET").is_none() {
+            eprintln!(
+                "[pool] could not reserve {} GiB of address space ({}); using libc",
+                REGION_SIZE >> 30,
+                std::io::Error::last_os_error()
+            );
+        }
         REGION_BASE.store(usize::MAX, Ordering::Release);
         return false;
     }
