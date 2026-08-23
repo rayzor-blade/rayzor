@@ -285,11 +285,12 @@ pub fn transfers_taken() -> Vec<(String, u64, u64)> {
 
 /// Whether resume points are built at all.
 ///
-/// Off by default while the probe side is being brought up: building variants
-/// costs compile time for code nothing can yet reach.
+/// On, unless `RAYZOR_NO_OSR` says otherwise. A loop entered once is the case
+/// tier promotion cannot reach on its own, so leaving this off means the top
+/// tier never arrives for exactly the code that needed it most.
 pub fn osr_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("RAYZOR_OSR").is_some())
+    *FLAG.get_or_init(|| std::env::var_os("RAYZOR_NO_OSR").is_none())
 }
 
 /// Whether tracing of OSR decisions is on.

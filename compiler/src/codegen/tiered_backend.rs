@@ -441,7 +441,10 @@ pub enum OptimizationTier {
 }
 
 impl OptimizationTier {
-    /// Get Cranelift optimization level for this tier (Phase 1-3 only)
+    /// Cranelift optimization level for this tier.
+    ///
+    /// Only meaningful for the tiers Cranelift builds; Maximum is LLVM's and
+    /// takes its optimisation level from there.
     pub fn cranelift_opt_level(&self) -> &'static str {
         match self {
             OptimizationTier::Interpreted => "none", // P0: Not used (interpreter)
@@ -471,8 +474,11 @@ impl OptimizationTier {
         matches!(self, OptimizationTier::Interpreted)
     }
 
-    /// Check if this tier uses LLVM backend
-    /// Note: LLVM is now a standalone backend, not part of tiered compilation
+    /// Check if this tier uses the LLVM backend.
+    ///
+    /// Maximum is reached by promotion like the tiers below it, so this is a
+    /// question about which backend built a tier's code, not about whether a
+    /// separate path produced it.
     pub fn uses_llvm(&self) -> bool {
         // Maximum tier uses LLVM for best optimization; other tiers use Cranelift
         matches!(self, OptimizationTier::Maximum)
@@ -672,9 +678,12 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
-                // A monolithic `main` never re-enters the dispatcher, so
-                // count-based promotion can't reach its inner functions;
-                // install the LLVM tier before main runs.
+                // A monolithic `main` never returns to the dispatcher, so its
+                // inner functions were once unreachable by invocation counting
+                // and the tier had to be installed before it ran. Resume points
+                // now carry a running loop into freshly compiled code, so this
+                // is a choice about paying the compile up front rather than the
+                // only way to arrive.
                 auto_upgrade_to_llvm_after_main_entry: true,
             },
 
@@ -833,11 +842,18 @@ pub struct TieredConfig {
     /// zero overhead in production.
     pub enable_stack_traces: bool,
 
-    /// After main-entry completes its tier-up, force-promote everything
-    /// the tier scheduler reached at least once to the LLVM (Maximum)
-    /// tier. Default `false`. Lets benchmark and "AOT-after-warmup"
-    /// scenarios skip the per-call hot-threshold counter and jump
-    /// straight to the high-tier backend once main has returned.
+    /// Once main has entered, promote everything the scheduler reached at
+    /// least once to LLVM in one blocking step, rather than letting each
+    /// function get there on its own. Default `false`.
+    ///
+    /// This exists for callers that want the top tier in place at a known
+    /// moment -- measuring steady-state top-tier performance, or compiling
+    /// ahead of a workload rather than during it. It is not needed to reach
+    /// LLVM: functions are promoted there by invocation count, and a loop
+    /// still running when its code lands transfers into it at a resume point.
+    ///
+    /// Setting it costs what it saves: every function is compiled whether or
+    /// not it turns out to be hot, and the program waits while that happens.
     pub auto_upgrade_to_llvm_after_main_entry: bool,
 }
 
@@ -2139,16 +2155,19 @@ impl TieredBackend {
             .unwrap_or(OptimizationTier::Interpreted)
     }
 
-    /// Upgrade all functions to LLVM (Maximum tier) immediately
+    /// Compile every function with LLVM now, and wait for it.
     ///
-    /// This bypasses the normal tier promotion and compiles everything with LLVM.
-    /// Useful for benchmarks where you want maximum performance from the start.
+    /// Promotion reaches the same tier on its own, a function at a time, as
+    /// each proves hot. This is for callers that want the whole program there
+    /// at a chosen moment instead: measuring what the top tier does, without
+    /// the earlier tiers appearing in the measurement.
     ///
-    /// Step 6 cleanup: no longer needs to stop the legacy background
-    /// worker (it's gone). Beadie's broker threads run independently
-    /// of LLVM compile; they may install Standard/Optimized pointers
-    /// while LLVM is compiling, but `install_beadie_pointer`'s
-    /// no-downgrade guard skips installs once Maximum lands.
+    /// The cost is that every function is compiled, hot or not, and nothing
+    /// runs until all of it is done.
+    ///
+    /// Beadie's brokers keep running while this compiles and may install
+    /// Cranelift pointers meanwhile; `install_beadie_pointer` refuses to
+    /// replace a higher tier, so those are dropped once Maximum lands.
     #[cfg(feature = "llvm-backend")]
     pub fn upgrade_to_llvm(&mut self) -> Result<(), String> {
         if self.config.verbosity >= 1 {
