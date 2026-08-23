@@ -58,6 +58,9 @@ struct AllocFuncIds {
     /// `haxe_string_free` — releases buffer AND Box-reclaims the header, so
     /// string allocs get ONLY this call, never an `IrInstruction::Free`.
     string_free_ids: BTreeSet<IrFunctionId>,
+    /// `haxe_object_free_deep` — releases an object and, through the owned-field
+    /// mask its class registered, whatever it owns beneath it.
+    free_deep_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
     /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
@@ -101,6 +104,7 @@ impl OptimizationPass for InsertFreePass {
             array_free_ids: BTreeSet::new(),
             ext_fresh_string_ids: BTreeSet::new(),
             string_free_ids: BTreeSet::new(),
+            free_deep_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
             nonaliasing_result_ids: BTreeSet::new(),
         };
@@ -147,6 +151,36 @@ impl OptimizationPass for InsertFreePass {
             );
             ids.anon_drop_ids.insert(drop_id);
             ids.anon_safe_ids.insert(drop_id);
+        }
+
+        // A class instance is released through the deep form, which frees what
+        // the object owns before the object itself. Nothing in Haxe source
+        // names it, so declare it here.
+        if ids.free_deep_ids.is_empty() {
+            let deep_id = module.alloc_function_id();
+            module.extern_functions.insert(
+                deep_id,
+                super::modules::IrExternFunction {
+                    id: deep_id,
+                    name: "haxe_object_free_deep".to_string(),
+                    symbol_id: crate::tast::SymbolId::from_raw(0),
+                    signature: super::IrFunctionSignature {
+                        parameters: vec![super::functions::IrParameter {
+                            name: "ptr".to_string(),
+                            ty: IrType::Ptr(Box::new(IrType::U8)),
+                            reg: IrId(0),
+                            by_ref: false,
+                        }],
+                        return_type: IrType::Void,
+                        calling_convention: super::CallingConvention::C,
+                        can_throw: false,
+                        type_params: vec![],
+                        uses_sret: false,
+                    },
+                    source: "runtime".to_string(),
+                },
+            );
+            ids.free_deep_ids.insert(deep_id);
         }
 
         // Likewise: nue code never calls haxe_array_free, so if we will need it
@@ -312,6 +346,9 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         "haxe_string_free" => {
             ids.string_free_ids.insert(fid);
         }
+        "haxe_object_free_deep" => {
+            ids.free_deep_ids.insert(fid);
+        }
         // Verified Box-fresh string producers; their string INPUTS are
         // read-and-copied (never retained), so they are also safe consumers.
         "haxe_string_lower"
@@ -426,9 +463,10 @@ impl Drop for FreeGraphFlush {
 
 /// Whether this value is already released anywhere in the function.
 ///
-/// A release takes four shapes — a bare `Free` for a plain allocation, and a
-/// call for a string, an array buffer or an anonymous object. Recognising only
-/// the bare form makes the other three invisible.
+/// A release takes five shapes — a bare `Free` for a plain allocation, and a
+/// call for a string, an array buffer, an anonymous object, or a class
+/// instance released through the deep form. Recognising only the bare form
+/// makes the other four invisible.
 ///
 /// That matters within a SINGLE run of the pass, not across runs: the set of
 /// values still needing a release is computed once, before any release is
@@ -448,6 +486,7 @@ fn already_released(
     string_free_id: Option<IrFunctionId>,
     array_free_id: Option<IrFunctionId>,
     anon_drop_id: Option<IrFunctionId>,
+    free_deep_id: Option<IrFunctionId>,
 ) -> bool {
     function.cfg.blocks.values().any(|b| {
         b.instructions.iter().any(|i| match i {
@@ -461,7 +500,8 @@ fn already_released(
                 args.first() == Some(&value)
                     && (Some(*func_id) == string_free_id
                         || Some(*func_id) == array_free_id
-                        || Some(*func_id) == anon_drop_id)
+                        || Some(*func_id) == anon_drop_id
+                        || Some(*func_id) == free_deep_id)
             }
             _ => false,
         })
@@ -717,6 +757,7 @@ fn insert_free_for_function(
     let array_free_id = ids.array_free_ids.iter().next().cloned();
     // ...and haxe_string_free for fresh strings.
     let string_free_id = ids.string_free_ids.iter().next().cloned();
+    let free_deep_id = ids.free_deep_ids.iter().next().cloned();
 
     // Step 4: Insert Free/Drop for each non-escaping alloc.
     // For allocs defined in the entry block (which dominates all returns), insert at return blocks.
@@ -954,6 +995,7 @@ fn insert_free_for_function(
             string_free_id,
             array_free_id,
             anon_drop_id,
+            free_deep_id,
         ) {
             continue;
         }
@@ -1106,13 +1148,34 @@ fn insert_free_for_function(
                     })
                     .unwrap_or_default()
             } else {
-                vec![IrInstruction::Free { ptr: child }]
+                // A class instance is not necessarily one allocation. It may
+                // own the objects its fields point at, and those may own more,
+                // so releasing only the object itself strands everything
+                // beneath it. The deep form walks the owned-field mask the
+                // class registered at startup and releases the subtree.
+                //
+                // Falls back to the plain release when the runtime entry is
+                // unavailable, which leaks exactly as before rather than
+                // leaving the object unreleased.
+                free_deep_id
+                    .map(|fid| {
+                        vec![IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: fid,
+                            args: vec![child],
+                            arg_ownership: vec![OwnershipMode::Move],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        }]
+                    })
+                    .unwrap_or_else(|| vec![IrInstruction::Free { ptr: child }])
             }
         };
         let free_call_ids: BTreeSet<IrFunctionId> = string_free_id
             .into_iter()
             .chain(array_free_id)
             .chain(anon_drop_id)
+            .chain(free_deep_id)
             .collect();
         // Plan first over an immutable view (site discovery + dominance),
         // then apply. A child's Free must be dominated by its definition or
