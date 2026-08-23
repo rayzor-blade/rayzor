@@ -25,24 +25,63 @@ TARGET_PKGS="php|js|cs|java|python|lua|flash|neko|hl|eval|cpp|jvm"
 mkdir -p "$WORK/run"
 printf 'issue\tstatus\tdetail\n' > "$OUT"
 
-n=0; pass=0; fail=0
+# How many files are candidates, so progress has a denominator.
+total=$(grep -lE "extends unit\.Test" "$SRC"/*.hx 2>/dev/null | wc -l | tr -d ' ')
+[[ "$LIMIT" != 0 && $LIMIT -lt $total ]] && total=$LIMIT
+
+seen=0
+c_PASS=0; c_WRONG_ANSWER=0; c_NO_OUTPUT=0
+c_COMPILE_FAIL=0; c_CRASH=0; c_TIMEOUT=0; c_SKIP=0
+
+# A run over the whole corpus is minutes of silence otherwise, and silence
+# looks the same as a hang. Every outcome goes through here: one line as it
+# lands, a tally every 25, both on stderr so the TSV on stdout stays clean.
+tally() {
+  printf '  ---- %d/%d   pass %d  wrong %d  no_output %d  compile_fail %d  crash %d  timeout %d  skip %d\n' \
+    "$seen" "$total" "$c_PASS" "$c_WRONG_ANSWER" "$c_NO_OUTPUT" \
+    "$c_COMPILE_FAIL" "$c_CRASH" "$c_TIMEOUT" "$c_SKIP" >&2
+}
+
+record() {  # record <test> <status> <detail>
+  local t="$1" st="$2" det="$3"
+  printf '%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" >> "$OUT"
+  case "$st" in
+    PASS)         c_PASS=$((c_PASS+1)) ;;
+    WRONG_ANSWER) c_WRONG_ANSWER=$((c_WRONG_ANSWER+1)) ;;
+    NO_OUTPUT)    c_NO_OUTPUT=$((c_NO_OUTPUT+1)) ;;
+    COMPILE_FAIL) c_COMPILE_FAIL=$((c_COMPILE_FAIL+1)) ;;
+    CRASH)        c_CRASH=$((c_CRASH+1)) ;;
+    TIMEOUT)      c_TIMEOUT=$((c_TIMEOUT+1)) ;;
+    SKIP)         c_SKIP=$((c_SKIP+1)) ;;
+  esac
+  seen=$((seen+1))
+  printf '  %-18s %-13s %s\n' "$t" "$st" "$(printf '%s' "$det" | cut -c1-54)" >&2
+  [[ $((seen % 25)) -eq 0 ]] && tally
+  return 0
+}
+
 for f in "$SRC"/*.hx; do
   base="$(basename "$f" .hx)"
-  [[ "$LIMIT" != 0 && $n -ge $LIMIT ]] && break
+  [[ "$LIMIT" != 0 && $seen -ge $LIMIT ]] && break
   grep -q "extends unit.Test" "$f" || continue
 
-  # A test that imports a target-language package is asserting about that
+  # A test that names a target-language package is asserting about that
   # target's semantics, not about Haxe. Out of scope: rayzor is its own
-  # target and will never satisfy it. Conditional compilation is NOT a
-  # filter -- a `#if cpp ... #else ... #end` still has a branch that is
-  # ours, so judging by `#if` would drop tests that legitimately apply.
-  if grep -qE "^[[:space:]]*(import|using)[[:space:]]+($TARGET_PKGS)\." "$f"; then
-    pkg=$(grep -oE "^[[:space:]]*(import|using)[[:space:]]+($TARGET_PKGS)\.[A-Za-z0-9_.]*" "$f" \
-          | awk '{print $2}' | sort -u | tr '\n' ' ')
-    printf '%s\tSKIP\ttargets %s\n' "$base" "${pkg% }" >> "$OUT"; continue
+  # target and will never satisfy it. Both spellings count -- an `import
+  # cpp.Pointer` and a bare `cpp.Reference<T>` in a type position say the
+  # same thing, and only the first is an import.
+  #
+  # Conditional compilation is NOT a filter: `#if cpp ... #else ... #end`
+  # still has a branch that is ours, so judging a file by its `#if`
+  # directives would drop tests that legitimately apply to us.
+  pkg=$( { grep -oE "^[[:space:]]*(import|using)[[:space:]]+($TARGET_PKGS)\.[A-Za-z0-9_.]*" "$f" \
+             | awk '{print $2}' | sed 's/\.$//'
+           grep -oE "\b($TARGET_PKGS)\.[A-Z][A-Za-z0-9_]*" "$f"
+         } | sort -u | tr '\n' ' ')
+  if [[ -n "$pkg" ]]; then
+    record "$base" SKIP "targets ${pkg% }"; continue
   fi
 
-  n=$((n+1))
 
   d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit"
   cp "$HERE/shims/unit/Test.hx" "$d/unit/Test.hx"
@@ -121,9 +160,9 @@ open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[las
 PYGEN
   gen=$?
   if [[ $gen -eq 3 ]]; then
-    printf '%s\tSKIP\tno test method live for this target\n' "$base" >> "$OUT"; n=$((n-1)); continue
+    record "$base" SKIP "no test method live for this target"; continue
   elif [[ $gen -ne 0 ]]; then
-    printf '%s\tSKIP\tharness could not inject main\n' "$base" >> "$OUT"; n=$((n-1)); continue
+    record "$base" SKIP "harness could not inject main"; continue
   fi
 
   # Run as a project, not a lone file. `rayzor run <file>` compiles that file
@@ -156,20 +195,22 @@ PYGEN
       *) status="COMPILE_FAIL" ;;
     esac
     if [[ "$det" == *"No main function found"* ]]; then
-      printf '%s\tSKIP\tharness could not inject main\n' "$base" >> "$OUT"; n=$((n-1))
+      record "$base" SKIP "harness could not inject main"
     elif [[ "$det" == *"'utest'"* ]]; then
-      printf '%s\tSKIP\tuses utest directly\n' "$base" >> "$OUT"; n=$((n-1))
+      record "$base" SKIP "uses utest directly"
     else
-      printf '%s\t%s\t%s\n' "$base" "$status" "${det//$'\t'/ }" >> "$OUT"; fail=$((fail+1))
+      record "$base" "$status" "$det"
     fi
   elif printf '%s' "$out" | grep -q '^CONFORMANCE_OK'; then
-    printf '%s\tPASS\t%s\n' "$base" "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')" >> "$OUT"; pass=$((pass+1))
+    record "$base" PASS "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')"
   elif printf '%s' "$out" | grep -q 'FAILCHECK\|CONFORMANCE_BAD'; then
-    printf '%s\tWRONG_ANSWER\t%s\n' "$base" "$(printf '%s' "$out" | grep -m1 'FAILCHECK' | cut -c1-90)" >> "$OUT"; fail=$((fail+1))
+    record "$base" WRONG_ANSWER "$(printf '%s' "$out" | grep -m1 'FAILCHECK' | cut -c1-90)"
   else
-    printf '%s\tNO_OUTPUT\t%s\n' "$base" "$(printf '%s' "$out" | tail -1 | cut -c1-90)" >> "$OUT"; fail=$((fail+1))
+    record "$base" NO_OUTPUT "$(printf '%s' "$out" | tail -1 | cut -c1-90)"
   fi
 done
 
-echo "ran $n  pass $pass  fail $fail"
+tally
+scored=$((c_PASS + c_WRONG_ANSWER + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_TIMEOUT))
+echo "scored $scored  pass $c_PASS  fail $((scored - c_PASS))  (skipped $c_SKIP)"
 echo "report: $OUT"
