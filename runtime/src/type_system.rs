@@ -28,6 +28,7 @@
 
 use log::debug;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Once, RwLock};
 
 /// Ensures primitive types are registered exactly once
@@ -3381,23 +3382,26 @@ pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32)
 /// Freeze the vtable registry into a flat array for O(1) lookup.
 /// Copies slot data so the flat table owns everything and survives
 /// registry mutations between benchmark runs.
-pub static mut VT_CALLS: u64 = 0;
-pub static mut VT_SLOW: u64 = 0;
-pub static mut VT_REBUILD: u64 = 0;
-pub static mut VT_NANOS: u64 = 0;
-pub static mut VT_MAX_NANOS: u64 = 0;
+// Dispatch counters. Atomic because the code that bumps them is JIT-compiled
+// and can be running on more than one thread, and because a shared reference
+// to a `static mut` is undefined behaviour the moment two of them exist.
+pub static VT_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static VT_SLOW: AtomicU64 = AtomicU64::new(0);
+pub static VT_REBUILD: AtomicU64 = AtomicU64::new(0);
+pub static VT_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static VT_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
 /// Frozen alongside VTABLE_FLAT: entries whose type_id exceeds the dense cap.
 static mut VTABLE_SPARSE: *const HashMap<u32, FlatVtable> = std::ptr::null();
 
 /// Called at exit when `RAYZOR_VTABLE_STATS=1`.
 pub fn report_vtable_stats() {
-    unsafe {
-        if std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
-            eprintln!(
-                "[vtable] calls={} slow_path={} flat_rebuilds={}",
-                VT_CALLS, VT_SLOW, VT_REBUILD
-            );
-        }
+    if std::env::var("RAYZOR_VTABLE_STATS").is_ok() {
+        eprintln!(
+            "[vtable] calls={} slow_path={} flat_rebuilds={}",
+            VT_CALLS.load(Ordering::Relaxed),
+            VT_SLOW.load(Ordering::Relaxed),
+            VT_REBUILD.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -3504,24 +3508,32 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
         // flat table is an array index; the registry fallback takes a read lock
         // and hashes, so a dispatch landing there costs orders of magnitude
         // more and nothing distinguishes the two from outside.
-        VT_CALLS += 1;
+        //
+        // Counted only when asked. An atomic read-modify-write on a line every
+        // thread dispatches through is not a diagnostic anyone is paying for
+        // by default.
         let stats = vtable_stats_enabled();
+        if stats {
+            VT_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
         let _t_in = stats.then(std::time::Instant::now);
-        if stats && VT_CALLS % 1_000_000 == 0 {
+        if stats && VT_CALLS.load(Ordering::Relaxed).is_multiple_of(1_000_000) {
             eprintln!(
                 "[vtable] calls={} slow_path={} flat_rebuilds={} ns_total={} ns_avg={} ns_max_single={}",
-                VT_CALLS,
-                VT_SLOW,
-                VT_REBUILD,
-                VT_NANOS,
-                VT_NANOS / VT_CALLS.max(1),
-                VT_MAX_NANOS
+                VT_CALLS.load(Ordering::Relaxed),
+                VT_SLOW.load(Ordering::Relaxed),
+                VT_REBUILD.load(Ordering::Relaxed),
+                VT_NANOS.load(Ordering::Relaxed),
+                VT_NANOS.load(Ordering::Relaxed) / VT_CALLS.load(Ordering::Relaxed).max(1),
+                VT_MAX_NANOS.load(Ordering::Relaxed)
             );
         }
         let _guard = ();
         // Lazy freeze on first call
         if VTABLE_FLAT.is_null() {
-            VT_REBUILD += 1;
+            if stats {
+                VT_REBUILD.fetch_add(1, Ordering::Relaxed);
+            }
             ensure_flat_vtable();
         }
         if !VTABLE_FLAT.is_null() {
@@ -3531,13 +3543,15 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 if slot < entry.len {
                     let v = *entry.slots.add(slot);
                     let ns = _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64);
-                    VT_NANOS += ns;
-                    if ns > VT_MAX_NANOS {
-                        VT_MAX_NANOS = ns;
+                    if stats {
+                        VT_NANOS.fetch_add(ns, Ordering::Relaxed);
+                    }
+                    if ns > VT_MAX_NANOS.load(Ordering::Relaxed) {
+                        VT_MAX_NANOS.store(ns, Ordering::Relaxed);
                         if ns > 1_000_000 && stats {
                             eprintln!(
                                 "[vtable] SLOW call #{} took {}ms on {:?} (type_id={} slot={})",
-                                VT_CALLS,
+                                VT_CALLS.load(Ordering::Relaxed),
                                 ns / 1_000_000,
                                 std::thread::current().id(),
                                 type_id,
@@ -3554,7 +3568,10 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 if let Some(entry) = sparse.get(&(type_id as u32)) {
                     if slot < entry.len {
                         let v = *entry.slots.add(slot);
-                        VT_NANOS += _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64);
+                        VT_NANOS.fetch_add(
+                            _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64),
+                            Ordering::Relaxed,
+                        );
                         return v;
                     }
                 }
@@ -3563,7 +3580,9 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
     }
 
     // Slow path fallback
-    unsafe { VT_SLOW += 1 };
+    if vtable_stats_enabled() {
+        VT_SLOW.fetch_add(1, Ordering::Relaxed);
+    }
     let registry = VTABLE_REGISTRY.read().unwrap();
     if let Some(map) = registry.as_ref() {
         if let Some(vtable) = map.get(&(type_id as u32)) {

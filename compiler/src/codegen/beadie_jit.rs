@@ -213,12 +213,6 @@ fn compile_into_fresh_backend(
         );
         return Err(err);
     }
-    // Which functions carry a hidden environment is read from every module
-    // before the first is declared. Learning it module by module answers
-    // differently depending on the order they arrive in, and this backend
-    // would then disagree with the one the rest of the program was compiled
-    // into.
-    backend.seed_indirect_targets(&modules);
     for module in modules.iter() {
         if let Err(e) = backend.compile_module_without_finalize(module) {
             emit_beadie_compile_event(

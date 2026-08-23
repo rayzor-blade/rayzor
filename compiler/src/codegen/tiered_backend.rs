@@ -2428,10 +2428,14 @@ impl TieredBackend {
 
         // Compile all modules to the same backend WITHOUT finalizing between modules
         let modules = self.modules.read().unwrap();
-        // Which functions carry a hidden environment depends on what every
-        // module does with them, so the whole set is read before the first
-        // signature is fixed.
-        backend.seed_indirect_targets(&modules);
+        // Deliberately NOT seeded over every module first. The set is keyed by
+        // `IrFunctionId`, which is module-local, so reading every module up
+        // front marks ids that name a different function in a different module
+        // and hands the environment parameter to functions that never needed
+        // one. That costs a push per call on every one of them -- the exact
+        // cost eebd36be removed for 25% on a call-heavy benchmark. Cranelift
+        // compiles every module here, so its set is complete by the end
+        // either way, and that is what the LLVM tier reads.
         for module in modules.iter() {
             backend.compile_module_without_finalize(module)?;
         }
