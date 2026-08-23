@@ -7,10 +7,11 @@
 
 > A Haxe compiler with tiered JIT compilation and native code generation
 
-[![Tests](https://github.com/darmie/rayzor/actions/workflows/tests.yml/badge.svg)](https://github.com/darmie/rayzor/actions/workflows/tests.yml)
-[![Examples](https://github.com/darmie/rayzor/actions/workflows/examples.yml/badge.svg)](https://github.com/darmie/rayzor/actions/workflows/examples.yml)
-[![Benchmarks](https://github.com/darmie/rayzor/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/darmie/rayzor/actions/workflows/benchmarks.yml)
-[![Benchmark Results](https://img.shields.io/badge/Benchmark-Results-blueviolet)](https://darmie.github.io/rayzor/benchmarks/)
+[![Tests](https://github.com/rayzor-blade/rayzor/actions/workflows/tests.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/tests.yml)
+[![Examples](https://github.com/rayzor-blade/rayzor/actions/workflows/examples.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/examples.yml)
+[![Benchmarks](https://github.com/rayzor-blade/rayzor/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/benchmarks.yml)
+[![Benchmark Results](https://img.shields.io/badge/Benchmark-Results-blueviolet)](https://rayzor-blade.com/benchmarks/)
+[![Haxe conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Frayzor-blade.com%2Fconformance%2Fbadge.json)](https://github.com/rayzor-blade/rayzor/tree/main/haxe-conformance)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 
@@ -40,7 +41,7 @@ none is planned.
 ## Quick start
 
 ```bash
-git clone https://github.com/darmie/rayzor.git
+git clone https://github.com/rayzor-blade/rayzor.git
 cd rayzor
 cargo build --release
 
@@ -227,4 +228,4 @@ Haxe Foundation, the Cranelift project, LLVM, and the Rust community.
 
 ## Contact
 
-[Issues](https://github.com/darmie/rayzor/issues) · [Discussions](https://github.com/darmie/rayzor/discussions)
+[Issues](https://github.com/rayzor-blade/rayzor/issues) · [Discussions](https://github.com/rayzor-blade/rayzor/discussions)

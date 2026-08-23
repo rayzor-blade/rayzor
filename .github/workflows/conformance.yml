@@ -1,0 +1,98 @@
+name: Conformance
+
+# Scores rayzor against the official HaxeFoundation/haxe regression corpus and
+# publishes the fraction that runs. This is a correctness measure and belongs
+# nowhere near the 199-test suite's number: that one counts crashes and
+# regressions, since only a fraction of its files self-check, so progress here
+# would read as regression there.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'compiler/**'
+      - 'runtime/**'
+      - 'haxe-conformance/**'
+      - '.github/workflows/conformance.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'compiler/**'
+      - 'runtime/**'
+      - 'haxe-conformance/**'
+      - '.github/workflows/conformance.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    name: Haxe conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 21
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rayzor-runtime static library
+        run: cargo build --release -p rayzor-runtime
+
+      # Before the CLI, which embeds it at build time -- generating it
+      # afterwards would not reach the binary that runs the corpus.
+      - name: Generate the standard library snapshot
+        run: cargo run --release -p snapshot-gen
+
+      - name: Build rayzor CLI
+        run: cargo build --release --features llvm-backend
+
+      # Keyed on the pin, so a corpus bump is what invalidates it.
+      - name: Cache the Haxe corpus
+        uses: actions/cache@v4
+        with:
+          path: haxe-conformance/corpus
+          key: haxe-corpus-${{ hashFiles('haxe-conformance/corpus.pin') }}
+
+      - name: Fetch the Haxe corpus
+        run: ./haxe-conformance/fetch.sh
+
+      # Never fails the build. The score is a measurement, and a measurement
+      # that can go red creates pressure to skip tests rather than fix the
+      # compiler. Regressions are visible in the number and the diffable TSV.
+      - name: Run the corpus
+        env:
+          WORK: ${{ runner.temp }}/conformance
+          OUT: ${{ runner.temp }}/conformance/report.tsv
+        run: ./haxe-conformance/run.sh
+
+      - name: Summarise
+        env:
+          REPORT: ${{ runner.temp }}/conformance/report.tsv
+        run: |
+          python3 haxe-conformance/summarise.py "$REPORT" conformance-out
+          cp "$REPORT" conformance-out/
+          cat conformance-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: conformance-out/
+          retention-days: 90
