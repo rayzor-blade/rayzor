@@ -298,7 +298,13 @@ fn pool_enabled() -> bool {
         return true;
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RZT_POOL").as_deref() == Ok("1"))
+    // On, unless RZT_POOL says otherwise. It was off while a refused region
+    // reservation made it look like a slowdown -- the mapping failed and every
+    // allocation paid the check on its way to libc anyway. With the reservation
+    // granted it serves 32-byte objects in a pop or a bump, and on a memory
+    // constrained host the allocation-heavy benchmark completes with it and is
+    // killed without it.
+    *ON.get_or_init(|| std::env::var("RZT_POOL").as_deref() != Ok("0"))
 }
 
 /// Tests drive the pool through this, not the environment: the answer above is
