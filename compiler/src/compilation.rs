@@ -4035,6 +4035,20 @@ impl CompilationUnit {
             self.file_source_by_filename
                 .entry(filename.to_string())
                 .or_insert_with(|| source.to_string());
+            // For the same reason, nothing fed this file's DECLARATIONS to the
+            // static-signature index either, and that index is what types a
+            // field access or a call into the module. Without it a cached
+            // import contributes symbols and MIR but nothing that can answer
+            // "does this class have a field `low`", so accesses into it fail
+            // with E0100 and every call becomes a runtime trap -- while the
+            // same program built with --no-cache compiles clean.
+            //
+            // The default stdlib imports are re-parsed for exactly this reason
+            // where the manifest is loaded; a cached import needs it too, and
+            // there the set cannot be known in advance. Parsing is a fraction
+            // of the compile the cache just saved, and only files actually
+            // imported pay it.
+            let _ = self.parse_file(&filename, source);
             return true;
         }
 
