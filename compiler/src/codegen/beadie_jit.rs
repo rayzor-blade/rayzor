@@ -145,7 +145,59 @@ pub struct BeadieJit {
     opt_level: &'static str,
 }
 
+/// The opt level that means "compile this with LLVM, not Cranelift".
+///
+/// The top tier rides the same adapter, registry and install path as the
+/// others rather than a parallel set of its own: beadie already carries the
+/// work across threads as an `Arc<Bead>` with the modules behind an
+/// `Arc<RwLock<_>>`, which is the whole difficulty, and it does not care which
+/// compiler runs on the far side.
+pub const LLVM_OPT_LEVEL: &str = "llvm";
+
 impl BeadieJit {
+    /// The LLVM compile, when this adapter is the top tier. `None` means this
+    /// is a Cranelift tier and the caller should take its own path.
+    ///
+    /// It leaks its own context and engine, exactly as the Cranelift path
+    /// leaks its backend, so the code stays mapped for the life of the
+    /// process.
+    fn compile_with_llvm(&self, def: &BeadieFunctionDef) -> Option<Result<usize, String>> {
+        if self.opt_level != LLVM_OPT_LEVEL {
+            return None;
+        }
+        #[cfg(feature = "llvm-backend")]
+        {
+            let started = Instant::now();
+            emit_beadie_compile_event("beadie_compile_start", def.func_id, LLVM_OPT_LEVEL, "");
+            let result = super::tiered_backend::compile_llvm_bead(
+                &def.modules,
+                def.func_id,
+                &self.runtime_symbols,
+            );
+            let detail = format!("dur_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+            match &result {
+                Ok(_) => emit_beadie_compile_event(
+                    "beadie_compile_finish",
+                    def.func_id,
+                    LLVM_OPT_LEVEL,
+                    &detail,
+                ),
+                Err(e) => emit_beadie_compile_event(
+                    "beadie_compile_error",
+                    def.func_id,
+                    LLVM_OPT_LEVEL,
+                    &format!("error={} {detail}", sanitize_event_detail(e)),
+                ),
+            }
+            Some(result)
+        }
+        #[cfg(not(feature = "llvm-backend"))]
+        {
+            let _ = def;
+            Some(Err("built without the LLVM backend".to_string()))
+        }
+    }
+
     /// Build a fresh-backend adapter. `opt_level` is forwarded to
     /// [`CraneliftBackend::with_symbols_and_opt`] on every dispatch.
     pub fn new(runtime_symbols: RuntimeSymbolTable, opt_level: &'static str) -> Self {
@@ -279,6 +331,9 @@ impl JitBackend for BeadieJit {
     /// Single-shot path: full multi-module compile + extract pointer +
     /// leak the backend. Used by `BackendAdapter::with_policy`.
     fn compile(&self, _bead: &Arc<Bead>, def: BeadieFunctionDef) -> Result<*mut (), Self::Error> {
+        if let Some(ptr) = self.compile_with_llvm(&def) {
+            return ptr.map(|p| p as *mut ()).map_err(CompileError::new);
+        }
         let (ptr, backend) =
             compile_into_fresh_backend(&def, &self.runtime_symbols, self.opt_level)
                 .map_err(CompileError::new)?;
@@ -300,6 +355,11 @@ impl JitBackend for BeadieJit {
         _bead: &Arc<Bead>,
         def: BeadieFunctionDef,
     ) -> Result<CompileOutcome, Self::Error> {
+        if let Some(ptr) = self.compile_with_llvm(&def) {
+            return ptr
+                .map(|p| CompileOutcome::Ready(p as *mut ()))
+                .map_err(CompileError::new);
+        }
         let (ptr, backend) =
             compile_into_fresh_backend(&def, &self.runtime_symbols, self.opt_level)
                 .map_err(CompileError::new)?;
