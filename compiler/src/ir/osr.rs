@@ -1103,12 +1103,18 @@ mod tests {
     fn slots_do_not_collide_across_functions_or_sites() {
         let (a, b) = ("slot_fn_a", "slot_fn_b");
         let (s0, s1) = (encode_osr_site(0, 1), encode_osr_site(1, 1));
-        publish_helper(a, s0, 1usize as *mut ());
-        publish_helper(a, s1, 2usize as *mut ());
-        publish_helper(b, s0, 3usize as *mut ());
-        assert_eq!(helper_for(a, s0), 1usize as *mut ());
-        assert_eq!(helper_for(a, s1), 2usize as *mut ());
-        assert_eq!(helper_for(b, s0), 3usize as *mut ());
+        // Stand-ins for compiled code: never dereferenced, only compared.
+        let (p1, p2, p3) = (
+            std::ptr::without_provenance_mut::<()>(1),
+            std::ptr::without_provenance_mut::<()>(2),
+            std::ptr::without_provenance_mut::<()>(3),
+        );
+        publish_helper(a, s0, p1);
+        publish_helper(a, s1, p2);
+        publish_helper(b, s0, p3);
+        assert_eq!(helper_for(a, s0), p1);
+        assert_eq!(helper_for(a, s1), p2);
+        assert_eq!(helper_for(b, s0), p3);
     }
 
     #[test]

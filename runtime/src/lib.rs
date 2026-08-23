@@ -36,7 +36,6 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::alloc::{alloc, dealloc, realloc, Layout};
-use std::cell::RefCell;
 use std::ptr;
 
 // Export Vec module (old API - keeping for backward compat)

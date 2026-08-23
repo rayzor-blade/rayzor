@@ -5612,7 +5612,7 @@ impl CraneliftBackend {
             let seen = builder
                 .ins()
                 .load(types::I64, MemFlagsData::new(), count_v, 0);
-            let bumped = builder.ins().iadd_imm(seen, 1);
+            let bumped = builder.ins().iadd_imm_s(seen, 1);
             builder.ins().store(MemFlagsData::new(), bumped, count_v, 0);
 
             let mut sig =

@@ -1228,7 +1228,7 @@ fn insert_free_for_function(
             }
         }
         // Apply, highest index first within each block.
-        plan.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+        plan.sort_by_key(|a| std::cmp::Reverse((a.0, a.1)));
         for (bid, i, o) in plan {
             let mut insts = Vec::new();
             for &c in &closure[&o] {
@@ -2397,6 +2397,7 @@ fn fresh_single_holder(
         })
     });
     if !is_fresh {
+        dbg_holder(value, "not a fresh allocation");
         return false;
     }
 
@@ -2411,6 +2412,7 @@ fn fresh_single_holder(
     for block in function.cfg.blocks.values() {
         for phi in &block.phi_nodes {
             if phi.incoming.iter().any(|(_, v)| derived.contains(v)) {
+                dbg_holder(value, "reaches a phi");
                 return false;
             }
         }
@@ -2436,11 +2438,23 @@ fn fresh_single_holder(
         }
         if let IrTerminator::Return { value: Some(v) } = &block.terminator {
             if derived.contains(v) {
+                dbg_holder(value, "is returned");
                 return false;
             }
         }
     }
+    if uses != 0 {
+        dbg_holder(value, &format!("has {uses} uses besides the handover"));
+    }
     uses == 0
+}
+
+/// Why a value was not accepted as handed over. The predicate has four ways to
+/// say no and the mask that results says none of them.
+fn dbg_holder(value: IrId, reason: &str) {
+    if std::env::var_os("RZT_DBG_OWNED").is_some() {
+        eprintln!("[owned]   {value:?} rejected: {reason}");
+    }
 }
 
 /// Functions whose returned value is a freshly built class instance the caller
@@ -2581,11 +2595,26 @@ fn compute_owned_fields(
     returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
 ) -> OwnedFields {
     let mut param_fields: BTreeMap<IrFunctionId, BTreeMap<usize, i64>> = BTreeMap::new();
+    // Which values in a function are its own parameters, or carried from one.
+    // The store a constructor makes of its parameter is the callee half of a
+    // handover, and this is what recognises it.
+    let mut param_derived: BTreeMap<IrFunctionId, BTreeMap<IrId, usize>> = BTreeMap::new();
     for (fid, f) in bodied(module) {
         let m = param_to_field_map(f, ids, returns_alias);
-        if !m.is_empty() {
-            param_fields.insert(fid, m);
+        if m.is_empty() {
+            continue;
         }
+        let mut carried: BTreeMap<IrId, usize> = BTreeMap::new();
+        for &pi in m.keys() {
+            let Some(param) = f.signature.parameters.get(pi) else {
+                continue;
+            };
+            for id in alias_closure(&BTreeSet::from([param.reg]), f, ids, returns_alias, false) {
+                carried.insert(id, pi);
+            }
+        }
+        param_fields.insert(fid, m);
+        param_derived.insert(fid, carried);
     }
 
     // (type id, GEP index) -> every store seen was a proven handover
@@ -2595,7 +2624,7 @@ fn compute_owned_fields(
         *e &= ok;
     };
 
-    for (_, function) in bodied(module) {
+    for (fid, function) in bodied(module) {
         let type_ids = alloc_type_ids(function, ids);
         if type_ids.is_empty() {
             continue;
@@ -2614,6 +2643,21 @@ fn compute_owned_fields(
                         let Some(&tid) = type_ids.get(&base) else {
                             continue;
                         };
+                        // A function storing its own parameter into a field is
+                        // the callee half of a handover, and whether it is one
+                        // is decided at the call site, by the arm below. This
+                        // store can never look fresh -- a parameter is not an
+                        // allocation -- and evidence combines with AND, so
+                        // noting it here would poison the field for good and
+                        // no caller could ever prove ownership of it.
+                        if param_derived
+                            .get(&fid)
+                            .and_then(|carried| carried.get(value))
+                            .and_then(|pi| param_fields.get(&fid).and_then(|m| m.get(pi)))
+                            .is_some_and(|mapped| *mapped == idx)
+                        {
+                            continue;
+                        }
                         note(
                             (tid, idx),
                             fresh_single_holder(
@@ -2656,7 +2700,8 @@ fn compute_owned_fields(
     }
 
     let mut owned = OwnedFields::default();
-    for ((tid, idx), ok) in evidence {
+    for ((tid, idx), ok) in &evidence {
+        let (tid, idx, ok) = (*tid, *idx, *ok);
         if !ok {
             continue;
         }
@@ -2667,6 +2712,22 @@ fn compute_owned_fields(
         }
     }
     if std::env::var_os("RZT_DBG_OWNED").is_some() {
+        // The stages, not just the answer: an empty mask set says nothing
+        // about whether no store was seen or every store was rejected.
+        for (fid, map) in &param_fields {
+            let name = module
+                .functions
+                .get(fid)
+                .map(|f| f.name.as_str())
+                .unwrap_or("?");
+            eprintln!("[owned] {name} {fid:?} stores params into fields {map:?}");
+        }
+        for ((tid, idx), ok) in &evidence {
+            eprintln!(
+                "[owned] type_id={tid} gep={idx} handover={}",
+                if *ok { "proven" } else { "REJECTED" }
+            );
+        }
         for (tid, mask) in &owned.masks {
             eprintln!("[owned] type_id={tid} mask={mask:#x}");
         }

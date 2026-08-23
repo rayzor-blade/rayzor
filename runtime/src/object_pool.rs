@@ -181,7 +181,7 @@ fn class_of(size: usize) -> Option<usize> {
     if size == 0 || size > MAX_POOLED {
         return None;
     }
-    Some((size + GRANULE - 1) / GRANULE - 1)
+    Some(size.div_ceil(GRANULE) - 1)
 }
 
 /// Allocate `size` bytes for a heap object.
