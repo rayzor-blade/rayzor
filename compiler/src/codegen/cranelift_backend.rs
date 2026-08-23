@@ -561,25 +561,7 @@ impl CraneliftBackend {
 
         // Scan for indirect call targets (FunctionRef/MakeClosure/CallIndirect args).
         // These must keep the env parameter for closure/vtable compatibility.
-        for function in mir_module.functions.values() {
-            for block in function.cfg.blocks.values() {
-                for inst in &block.instructions {
-                    match inst {
-                        crate::ir::IrInstruction::FunctionRef { func_id, .. }
-                        | crate::ir::IrInstruction::MakeClosure { func_id, .. } => {
-                            self.indirect_target_functions.insert(*func_id);
-                        }
-                        // Also mark all direct call targets from __vtable_init__ as indirect
-                        crate::ir::IrInstruction::CallDirect { func_id, .. }
-                            if function.name == "__vtable_init__" =>
-                        {
-                            self.indirect_target_functions.insert(*func_id);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        crate::ir::abi::collect_indirect_targets(mir_module, &mut self.indirect_target_functions);
 
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
@@ -851,6 +833,20 @@ impl CraneliftBackend {
     ///
     /// This is used when compiling multiple modules to the same backend.
     /// Call `finalize()` after all modules are compiled.
+    /// Learn which functions are reached other than by name, before declaring
+    /// any of them. Every module compiled together has to be in this sweep:
+    /// scanning them one at a time as they are declared answers the question
+    /// differently depending on the order they arrive in, and a signature
+    /// cannot be revised once code has been emitted against it.
+    pub fn seed_indirect_targets<M: std::borrow::Borrow<IrModule>>(&mut self, modules: &[M]) {
+        for module in modules {
+            crate::ir::abi::collect_indirect_targets(
+                module.borrow(),
+                &mut self.indirect_target_functions,
+            );
+        }
+    }
+
     pub fn compile_module_without_finalize(&mut self, mir_module: &IrModule) -> Result<(), String> {
         // Skip modules that only have extern functions (no implementations)
         let has_implementations = mir_module
@@ -879,24 +875,7 @@ impl CraneliftBackend {
         );
 
         // Scan for indirect targets (same as compile_module)
-        for function in mir_module.functions.values() {
-            for block in function.cfg.blocks.values() {
-                for inst in &block.instructions {
-                    match inst {
-                        crate::ir::IrInstruction::FunctionRef { func_id, .. }
-                        | crate::ir::IrInstruction::MakeClosure { func_id, .. } => {
-                            self.indirect_target_functions.insert(*func_id);
-                        }
-                        crate::ir::IrInstruction::CallDirect { func_id, .. }
-                            if function.name == "__vtable_init__" =>
-                        {
-                            self.indirect_target_functions.insert(*func_id);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        crate::ir::abi::collect_indirect_targets(mir_module, &mut self.indirect_target_functions);
 
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
@@ -1447,17 +1426,8 @@ impl CraneliftBackend {
         let is_c_calling_conv =
             function.signature.calling_convention == crate::ir::CallingConvention::C;
 
-        // Skip env for functions that are never used as indirect call targets.
-        // Keep env for: FunctionRef/MakeClosure targets, __vtable_init__, __init__,
-        // and main (called externally with env=0).
-        let is_entry = function.name == "main"
-            || function.name == "__vtable_init__"
-            || function.name == "__init__"
-            || function.name.starts_with("Main");
-        let needs_env = !is_extern
-            && !already_has_env_param
-            && !is_c_calling_conv
-            && (self.indirect_target_functions.contains(&mir_func_id) || is_entry);
+        let needs_env =
+            crate::ir::abi::needs_env_param(function, mir_func_id, &self.indirect_target_functions);
         if needs_env {
             sig.params.push(AbiParam::new(types::I64));
             self.functions_with_env.insert(mir_func_id);

@@ -636,10 +636,11 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5)
+    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
-    // - Manual LLVM upgrade after warmup (blazing_threshold = MAX)
+    // Every tier including LLVM is reached by heat. Promoting by hand would
+    // measure a tier the runtime never picks on its own.
     // Suppress beadie/tier-transition chatter — bench output should
     // stay clean; the runner already reports compile/execute timings.
     let mut config = TierPreset::Benchmark.to_config();
@@ -834,6 +835,10 @@ fn setup_llvm_benchmark<'ctx>(
         LLVMJitBackend::with_symbols(context, symbols).map_err(|e| format!("backend: {}", e))?;
 
     // Two-pass compilation for cross-module function references:
+    // 0. Read every module before declaring any, so a function's hidden
+    //    parameters are decided by the whole program rather than by however
+    //    much of it has been declared so far.
+    backend.seed_indirect_targets(&mir_modules);
     // 1. First declare ALL functions from ALL modules
     for module in &mir_modules {
         backend

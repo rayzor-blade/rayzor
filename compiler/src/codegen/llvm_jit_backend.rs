@@ -42,7 +42,7 @@ use crate::ir::{
     IrInstruction, IrModule, IrPhiNode, IrTerminator, IrType, IrValue, UnaryOp, VectorConvertKind,
     VectorMinMaxKind, VectorUnaryOpKind,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, Once};
 
 /// Static Once for thread-safe LLVM initialization
@@ -182,6 +182,15 @@ pub struct LLVMJitBackend<'ctx> {
     /// Runtime symbols (name -> pointer) for FFI calls
     runtime_symbols: BTreeMap<String, usize>,
 
+    /// How many hidden parameters lead each declaration -- an sret buffer, an
+    /// environment, or both. Recorded when the declaration is bound rather
+    /// than re-derived at each use, because declaring takes a dozen paths and
+    /// several of them reuse a symbol declared for a different function.
+    hidden_prefix: BTreeMap<IrFunctionId, usize>,
+    /// Functions that can be reached other than by name, over every module in
+    /// this compile. Seeded before anything is declared, because the answer
+    /// decides a signature and a signature cannot be revised afterwards.
+    indirect_targets: BTreeSet<IrFunctionId>,
     /// Extern function IDs (no hidden env parameter)
     extern_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
@@ -326,6 +335,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             tbaa_kind_id: context.get_kind_id("tbaa"),
             sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
+            hidden_prefix: BTreeMap::new(),
+            indirect_targets: BTreeSet::new(),
             current_env_param: None,
             aot_mode: false,
             alloca_ids: std::collections::BTreeSet::new(),
@@ -1281,11 +1292,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Ok(self.function_pointers.clone())
     }
 
+    /// Learn which functions are reached other than by name, before declaring
+    /// any of them. Every module compiled together has to be in this sweep:
+    /// scanning them one at a time as they are declared answers the question
+    /// differently depending on the order they arrive in, and a signature
+    /// cannot be revised once code has been emitted against it.
+    pub fn seed_indirect_targets<M: std::borrow::Borrow<IrModule>>(&mut self, modules: &[M]) {
+        for module in modules {
+            crate::ir::abi::collect_indirect_targets(module.borrow(), &mut self.indirect_targets);
+        }
+    }
+
     /// Declare all functions in a module without compiling their bodies
     ///
     /// Call this for ALL modules first before calling compile_module_bodies.
     /// This ensures all function references can be resolved across modules.
     pub fn declare_module(&mut self, module: &IrModule) -> Result<(), String> {
+        crate::ir::abi::collect_indirect_targets(module, &mut self.indirect_targets);
         // Pre-allocate global_vars Vec for O(1) access without bounds checking
         let max_global_id = module.next_global_id as usize;
         if max_global_id > self.global_vars.len() {
@@ -1844,42 +1867,79 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         global
     }
 
-    /// Compile function bodies for a module (call declare_module for ALL modules first)
-    /// Compile ONE function, leaving the rest of the program where it is.
+    /// Compile the named functions, leaving the rest of the program where it is.
     ///
-    /// Compiling every function to reach one hot function costs a few hundred
+    /// Compiling every function to reach a hot one costs a few hundred
     /// milliseconds and produces code for functions that were never hot. This
-    /// declares everything -- signatures only, which is cheap -- compiles a
-    /// single body, and binds every other declaration to the code that already
-    /// exists for it. What comes back is one function's worth of work.
+    /// declares everything -- signatures only, which is cheap -- compiles just
+    /// the requested bodies, and binds every other declaration to the code that
+    /// already exists for it.
     ///
     /// `known` maps a function to the address currently serving it, from
-    /// whichever tier compiled it. A call from the compiled function reaches
-    /// its callee through that address; a callee with no address yet is left
-    /// undefined, and calling it would fault, so the caller passes only what it
-    /// has.
-    pub fn compile_one_function(
+    /// whichever tier compiled it. A call out of the compiled code reaches its
+    /// callee through that address; a callee with no address yet is left
+    /// undefined, and calling it would fault, so only what is known is bound.
+    ///
+    /// MCJIT finalises a module once, so every body in a batch is compiled
+    /// before the engine exists. A later batch needs a new backend.
+    pub fn compile_functions(
         &mut self,
         modules: &[IrModule],
-        target: IrFunctionId,
+        targets: &[IrFunctionId],
         known: &BTreeMap<IrFunctionId, usize>,
-    ) -> Result<usize, String> {
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         for module in modules {
             self.declare_module(module)?;
         }
 
-        let function = modules
-            .iter()
-            .find_map(|m| m.functions.get(&target))
-            .ok_or_else(|| format!("{target:?} is in none of these modules"))?;
-        let llvm_func = *self
-            .function_map
-            .get(&target)
-            .ok_or_else(|| format!("{target:?} was not declared"))?;
-        if llvm_func.count_basic_blocks() == 0 {
-            self.compile_function_body(target, function, llvm_func)?;
-            self.stamp_fn_subtarget_attrs(llvm_func);
+        let mut compiled: Vec<(IrFunctionId, String)> = Vec::new();
+        for target in targets {
+            let Some(function) = modules.iter().find_map(|m| m.functions.get(target)) else {
+                continue;
+            };
+            if function.cfg.blocks.is_empty() {
+                continue;
+            }
+            let Some(llvm_func) = self.function_map.get(target).copied() else {
+                continue;
+            };
+            if llvm_func.count_basic_blocks() == 0 {
+                // One body failing leaves that function at the tier below,
+                // which is slower but correct. Taking the batch down with it
+                // would strand the others there too.
+                if let Err(e) = self.compile_function_body(*target, function, llvm_func) {
+                    if std::env::var_os("RAYZOR_LLVM_VERIFY_SURVEY").is_some() {
+                        eprintln!("[llvm] {} did not compile: {e}", function.name);
+                    }
+                    continue;
+                }
+                self.stamp_fn_subtarget_attrs(llvm_func);
+                if !llvm_func.verify(false) {
+                    if std::env::var_os("RAYZOR_LLVM_VERIFY_SURVEY").is_some() {
+                        eprintln!("[llvm] {} did not verify", function.name);
+                    }
+                    continue;
+                }
+                compiled.push((*target, llvm_func.get_name().to_string_lossy().to_string()));
+            }
         }
+        if compiled.is_empty() {
+            return Err("no requested function had a body to compile".to_string());
+        }
+
+        // Names, taken now. The optimiser runs global DCE, which erases
+        // declarations nothing referenced -- and every FunctionValue held
+        // across it then points at freed memory. A name survives it, and
+        // whatever the module still has under that name is what to bind.
+        let to_bind: Vec<(String, usize)> = self
+            .function_map
+            .iter()
+            .filter(|(_, llvm_fn)| llvm_fn.count_basic_blocks() == 0)
+            .filter_map(|(func_id, llvm_fn)| {
+                let addr = *known.get(func_id)?;
+                Some((llvm_fn.get_name().to_string_lossy().to_string(), addr))
+            })
+            .collect();
 
         // Before the engine exists, or MCJIT resolves relocations against a
         // symbol table that does not have these yet.
@@ -1892,6 +1952,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         self.stamp_host_subtarget_attrs();
+        self.verify_and_optimize()?;
         let engine = match self.execution_engine.as_ref() {
             Some(engine) => engine,
             None => {
@@ -1909,26 +1970,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 engine.add_global_mapping(&func, *addr);
             }
         }
-        // Every function this one calls resolves to the code already serving
+        // Every function this code calls resolves to whatever already serves
         // it. Without this the declarations are unresolved symbols and the
-        // engine refuses the module.
-        for (func_id, llvm_fn) in &self.function_map {
-            if *func_id == target || llvm_fn.count_basic_blocks() > 0 {
-                continue;
-            }
-            if let Some(addr) = known.get(func_id) {
-                engine.add_global_mapping(llvm_fn, *addr);
+        // engine refuses the module. A name the optimiser dropped is a
+        // declaration nothing referenced, which needs no address.
+        for (name, addr) in &to_bind {
+            if let Some(llvm_fn) = self.module.get_function(name) {
+                engine.add_global_mapping(&llvm_fn, *addr);
             }
         }
 
-        let name = llvm_func.get_name().to_string_lossy().to_string();
-        let addr = engine
-            .get_function_address(&name)
-            .map_err(|e| format!("no address for {name}: {e:?}"))?;
-        self.function_pointers.insert(target, addr as usize);
-        Ok(addr as usize)
+        let mut addresses = BTreeMap::new();
+        for (target, name) in compiled {
+            let addr = engine
+                .get_function_address(&name)
+                .map_err(|e| format!("no address for {name}: {e:?}"))?;
+            self.function_pointers.insert(target, addr as usize);
+            addresses.insert(target, addr as usize);
+        }
+        Ok(addresses)
     }
 
+    /// Compile function bodies for a module (call declare_module for ALL modules first)
     pub fn compile_module_bodies(&mut self, module: &IrModule) -> Result<(), String> {
         let mut verify_failures: Vec<String> = Vec::new();
         for (func_id, function) in &module.functions {
@@ -2068,6 +2131,47 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
     /// Finalize compilation and create execution engine
     /// Call this after all modules have been compiled
+    /// Verify the module and run the middle-end pipeline over it.
+    ///
+    /// `create_jit_execution_engine` sets only the CodeGen level; it does not
+    /// inline, vectorise, or run GVN. Code reaching MCJIT without this has had
+    /// no optimisation worth the name, which for a tier called Maximum is worse
+    /// than the tier below it.
+    fn verify_and_optimize(&self) -> Result<(), String> {
+        self.verify_module_localized()?;
+
+        if self.opt_level == OptimizationLevel::None {
+            return Ok(());
+        }
+        let passes = match self.opt_level {
+            OptimizationLevel::None => "default<O0>",
+            OptimizationLevel::Less => "default<O1>",
+            OptimizationLevel::Default => "default<O2>",
+            OptimizationLevel::Aggressive => "default<O3>",
+        };
+        let target_triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&target_triple).map_err(|e| format!("target: {}", e))?;
+        let target_machine = target
+            .create_target_machine(
+                &target_triple,
+                TargetMachine::get_host_cpu_name()
+                    .to_str()
+                    .unwrap_or("generic"),
+                TargetMachine::get_host_cpu_features()
+                    .to_str()
+                    .unwrap_or(""),
+                self.opt_level,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or("target machine for optimization")?;
+        self.module
+            .run_passes(passes, &target_machine, Self::create_pass_options())
+            .map_err(|e| format!("optimization passes: {}", e))?;
+
+        self.verify_module_localized()
+    }
+
     pub fn finalize(&mut self) -> Result<(), String> {
         if self.execution_engine.is_some() {
             return Ok(()); // Already finalized
@@ -2577,6 +2681,25 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
     }
 
+    /// Bind a declaration to a function id, recording how many parameters of
+    /// it the source never mentions.
+    fn bind_declaration(
+        &mut self,
+        func_id: IrFunctionId,
+        llvm_func: FunctionValue<'ctx>,
+        function: &IrFunction,
+    ) {
+        let user_params = function
+            .signature
+            .parameters
+            .iter()
+            .filter(|p| p.ty != IrType::Void)
+            .count();
+        let hidden = (llvm_func.count_params() as usize).saturating_sub(user_params);
+        self.hidden_prefix.insert(func_id, hidden);
+        self.function_map.insert(func_id, llvm_func);
+    }
+
     /// Declare a function signature
     ///
     /// Uses the function's unique name (not just ID) to avoid collisions when
@@ -2648,14 +2771,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // Replace known math runtime functions with LLVM intrinsic wrappers
             // (e.g. haxe_math_sqrt → @llvm.sqrt.f64 → single fsqrt instruction)
             if let Some(llvm_func) = self.try_create_math_intrinsic(&func_name, &fn_type)? {
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 self.math_intrinsic_ids.insert(func_id);
                 return Ok(llvm_func);
             }
 
             // Replace Std functions with inline implementations (e.g., Std.int → fptosi)
             if let Some(llvm_func) = self.try_create_std_intrinsic(&func_name, &fn_type)? {
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }
 
@@ -2663,18 +2786,18 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // extern path is the one the tiered per-function declare hits;
             // declare_extern_function has the same two checks).
             if let Some(llvm_func) = self.try_create_prefetch_intrinsic(&func_name, &fn_type)? {
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }
             if let Some(llvm_func) = self.try_create_cpu_relax_intrinsic(&func_name, &fn_type)? {
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }
 
             // Replace array operations with inline implementations
             // (e.g. haxe_array_length → inline load from offset 8)
             if let Some(llvm_func) = self.try_create_array_intrinsic(&func_name, &fn_type)? {
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }
 
@@ -2682,7 +2805,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             if let Some(existing_func) = self.module.get_function(&func_name) {
                 let existing_params = existing_func.get_type().get_param_types();
                 if existing_params.len() == param_types.len() {
-                    self.function_map.insert(func_id, existing_func);
+                    self.bind_declaration(func_id, existing_func, function);
                     return Ok(existing_func);
                 }
                 // Signature mismatch - create with unique name
@@ -2692,7 +2815,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     fn_type,
                     Some(inkwell::module::Linkage::External),
                 );
-                self.function_map.insert(func_id, llvm_func);
+                self.bind_declaration(func_id, llvm_func, function);
                 return Ok(llvm_func);
             }
 
@@ -2701,7 +2824,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 fn_type,
                 Some(inkwell::module::Linkage::External),
             );
-            self.function_map.insert(func_id, llvm_func);
+            self.bind_declaration(func_id, llvm_func, function);
             return Ok(llvm_func);
         }
 
@@ -2722,7 +2845,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             // C one. Named after the function id so it stays greppable.
             let unique_name = format!("{}_{}", func_name, func_id.0);
             if let Some(unique_func) = self.module.get_function(&unique_name) {
-                self.function_map.insert(func_id, unique_func);
+                self.bind_declaration(func_id, unique_func, function);
+                if function.signature.uses_sret {
+                    self.sret_function_ids.insert(func_id);
+                }
+                return Ok(unique_func);
+            }
+            return self.declare_function_with_name(func_id, function, &unique_name);
+        }
+        // Bare-name reuse is only sound for genuine runtime/extern symbols and
+        // stdlib MIR wrappers, which have one implementation per name by
+        // contract. `IrFunction::name` is the BARE method name, so every
+        // class's `step`, `new`, or `forward` shares one -- collapsing them
+        // binds the second class's calls to the first class's body. Cranelift
+        // carries the same guard and the same comment; nothing but the
+        // hidden env making the arities differ was enforcing it here.
+        let name_reuse_allowed = function.cfg.blocks.is_empty()
+            || crate::stdlib::runtime_mapping::StdlibMapping::builtin()
+                .is_mir_wrapper_function(&function.name);
+        if !name_reuse_allowed && self.module.get_function(&func_name).is_some() {
+            let unique_name = format!("{}_{}", func_name, func_id.0);
+            if let Some(unique_func) = self.module.get_function(&unique_name) {
+                self.bind_declaration(func_id, unique_func, function);
                 if function.signature.uses_sret {
                     self.sret_function_ids.insert(func_id);
                 }
@@ -2731,15 +2875,32 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return self.declare_function_with_name(func_id, function, &unique_name);
         }
         if let Some(existing_func) = self.module.get_function(&func_name) {
-            // Build expected signature to compare
-            let expected_param_types: Result<Vec<BasicMetadataTypeEnum>, _> = function
+            // Build expected signature to compare -- hidden parameters
+            // included, exactly as the declaration below builds them. Comparing
+            // only the user parameters against the other declaration's full
+            // list decides "same signature" on a shorter list than the one it
+            // is comparing to, so two functions that differ only in what is
+            // hidden read as identical and the second silently reuses the
+            // first's body.
+            let mut expected_params: Vec<BasicMetadataTypeEnum> = Vec::new();
+            if function.signature.uses_sret {
+                expected_params.push(
+                    self.context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .into(),
+                );
+            }
+            if crate::ir::abi::needs_env_param(function, func_id, &self.indirect_targets) {
+                expected_params.push(self.context.i64_type().into());
+            }
+            for param in function
                 .signature
                 .parameters
                 .iter()
                 .filter(|param| param.ty != IrType::Void)
-                .map(|param| self.translate_type(&param.ty).map(|t| t.into()))
-                .collect();
-            let expected_params = expected_param_types?;
+            {
+                expected_params.push(self.translate_type(&param.ty)?.into());
+            }
 
             let existing_type = existing_func.get_type();
             let existing_params: Vec<BasicMetadataTypeEnum> =
@@ -2763,7 +2924,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
             if signatures_match {
                 // Signatures match, safe to reuse
-                self.function_map.insert(func_id, existing_func);
+                self.bind_declaration(func_id, existing_func, function);
                 // Still need to track sret for this func_id even when reusing
                 if function.signature.uses_sret {
                     self.sret_function_ids.insert(func_id);
@@ -2774,7 +2935,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 // Generate a unique name using the func_id to disambiguate
                 let unique_name = format!("{}_{}", func_name, func_id.0);
                 if let Some(unique_func) = self.module.get_function(&unique_name) {
-                    self.function_map.insert(func_id, unique_func);
+                    self.bind_declaration(func_id, unique_func, function);
                     // Track sret for this func_id
                     if function.signature.uses_sret {
                         self.sret_function_ids.insert(func_id);
@@ -2810,8 +2971,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             );
         }
 
-        if !already_has_env_param {
-            // Add hidden env parameter (i64)
+        // A function nothing calls through a pointer has no environment to
+        // receive, and Cranelift declares it without one. Both backends ask the
+        // same question so either can call the other's code.
+        if crate::ir::abi::needs_env_param(function, func_id, &self.indirect_targets) {
             param_types.push(self.context.i64_type().into());
         }
 
@@ -2836,7 +2999,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         let llvm_func = self.module.add_function(&func_name, fn_type, None);
 
-        self.function_map.insert(func_id, llvm_func);
+        self.bind_declaration(func_id, llvm_func, function);
         Ok(llvm_func)
     }
 
@@ -2876,8 +3039,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             );
         }
 
-        if !already_has_env_param {
-            // Add hidden env parameter (i64)
+        // A function nothing calls through a pointer has no environment to
+        // receive, and Cranelift declares it without one. Both backends ask the
+        // same question so either can call the other's code.
+        if crate::ir::abi::needs_env_param(function, func_id, &self.indirect_targets) {
             param_types.push(self.context.i64_type().into());
         }
 
@@ -2898,7 +3063,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         };
 
         let llvm_func = self.module.add_function(func_name, fn_type, None);
-        self.function_map.insert(func_id, llvm_func);
+        self.bind_declaration(func_id, llvm_func, function);
         Ok(llvm_func)
     }
 
@@ -2964,6 +3129,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // - Lambda with explicit env: no extra hidden env; first IR param is env
         // - Haxe with sret: param 0 = sret ptr, param 1 = env, params 2+ = IR params
         // - Haxe no sret: param 0 = env, params 1+ = IR params
+        // Whether an env slot is actually there is read off the declaration
+        // rather than re-derived. Declaring takes a dozen paths -- reusing an
+        // existing symbol, renaming around a C collision -- and a rule applied
+        // a second time here would disagree with any of them that took a
+        // shortcut. The parameters the declaration actually has cannot.
+        let hidden_params = self
+            .hidden_prefix
+            .get(&func_id)
+            .copied()
+            .unwrap_or_else(|| {
+                (llvm_func.count_params() as usize).saturating_sub(non_void_params.len())
+            });
+        let has_hidden_env =
+            !is_c_abi && !already_has_env_param && hidden_params > usize::from(uses_sret);
         let param_offset = if is_c_abi {
             0 // C ABI: no hidden parameters
         } else if already_has_env_param {
@@ -2972,10 +3151,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             } else {
                 0 // explicit env is the first user parameter
             }
-        } else if uses_sret {
-            2 // Haxe with sret: sret + env
         } else {
-            1 // Haxe: just env
+            usize::from(uses_sret) + usize::from(has_hidden_env)
         };
 
         // Then map non-void parameters to their LLVM values
@@ -2985,7 +3162,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.current_sret_ptr = Some(llvm_param.into_pointer_value());
                 continue;
             }
-            if !is_c_abi && !already_has_env_param && i == (if uses_sret { 1 } else { 0 }) {
+            if !is_c_abi && has_hidden_env && i == usize::from(uses_sret) {
                 // Skip the hidden env parameter (Haxe ABI only)
                 self.current_env_param = Some(llvm_param);
                 continue;
@@ -7581,8 +7758,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .map(|p| p.is_int_type() && p.into_int_type().get_bit_width() == 64)
             .unwrap_or(false);
 
-        // Determine convention based on parameter count and signature patterns
-        let (uses_sret, expects_env) = if num_llvm_params == num_ir_args {
+        // What the declaration actually carries, when it was recorded. Reading
+        // the convention off the argument count instead is a guess, and it is
+        // wrong for a call that omits a trailing defaulted argument: a
+        // receiver-first method then looks exactly like an sret call.
+        let recorded = self.hidden_prefix.get(&func_id).copied();
+        let (uses_sret, expects_env) = if let Some(hidden) = recorded {
+            match hidden {
+                0 => (false, false),
+                1 if first_is_ptr && !first_is_i64 => (true, false),
+                1 => (false, true),
+                _ => (true, true),
+            }
+        } else if num_llvm_params == num_ir_args {
             // Exact match - C calling convention (no hidden params)
             (false, false)
         } else if num_llvm_params == num_ir_args + 1 && first_is_ptr {

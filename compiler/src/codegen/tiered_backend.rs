@@ -680,7 +680,11 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    blazing_threshold: u64::MAX, // Manual LLVM upgrade after warmup
+                    // Reached by heat like every other tier, and inside the
+                    // warmup window so the measured runs are steady state.
+                    // Promotion compiles the hot function rather than the
+                    // program around it, so arriving early is cheap.
+                    blazing_threshold: 10,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
@@ -727,7 +731,7 @@ impl TierPreset {
             TierPreset::Script => "Script - Fast startup, quick JIT, no LLVM",
             TierPreset::Application => "Application - Balanced tiering with LLVM",
             TierPreset::Server => "Server - Aggressive optimization, low LLVM threshold",
-            TierPreset::Benchmark => "Benchmark - Immediate bailout, manual LLVM upgrade",
+            TierPreset::Benchmark => "Benchmark - Immediate bailout, LLVM on heat",
             TierPreset::Development => "Development - Verbose logging, fast iteration",
             TierPreset::Embedded => "Embedded - Interpreter only, minimal resources",
             TierPreset::Custom(_) => "Custom - user-defined config (rayzor.toml [tier])",
@@ -1934,7 +1938,7 @@ impl TieredBackend {
 
         // Process LLVM queue (main thread compilation)
         // This is safe because execute_function runs on the main thread
-        self.process_llvm_queue();
+        self.process_llvm_queue(func_id);
 
         // Phase B step 3: poll the beadie bead registry for a pointer
         // produced by a background compile since the last call. If one
@@ -2424,6 +2428,10 @@ impl TieredBackend {
 
         // Compile all modules to the same backend WITHOUT finalizing between modules
         let modules = self.modules.read().unwrap();
+        // Which functions carry a hidden environment depends on what every
+        // module does with them, so the whole set is read before the first
+        // signature is fixed.
+        backend.seed_indirect_targets(&modules);
         for module in modules.iter() {
             backend.compile_module_without_finalize(module)?;
         }
@@ -2829,7 +2837,14 @@ impl TieredBackend {
     ///
     /// LLVM's add_global_mapping requires main thread, so background workers
     /// queue requests and this function processes them during execute_function calls.
-    fn process_llvm_queue(&mut self) {
+    /// Drain the queue of functions that have asked for the top tier.
+    ///
+    /// `entering` is the function about to run. It gets a resume point even
+    /// though nothing queued it: only the entry is ever profiled, so a
+    /// function whose loop runs for the life of the program is never counted
+    /// hot and would otherwise be the one frame optimised code can never
+    /// reach -- which is the whole reason resume points exist.
+    fn process_llvm_queue(&mut self, entering: IrFunctionId) {
         // Check if there are any pending LLVM compilations
         let pending: Vec<IrFunctionId> = {
             let mut queue = self.llvm_queue.lock().unwrap();
@@ -2853,15 +2868,22 @@ impl TieredBackend {
             );
         }
 
-        // Compile with LLVM (this will compile ALL modules and return ALL function pointers)
+        // Compile the functions that asked for it, not the program around them.
         #[cfg(feature = "llvm-backend")]
         {
-            match self.compile_all_with_llvm() {
+            // `RAYZOR_LLVM_WHOLE_MODULE` puts promotion back on the compile
+            // -everything path, to tell a fault in compiling one function
+            // apart from one in promoting at all.
+            let compiled = if std::env::var_os("RAYZOR_LLVM_WHOLE_MODULE").is_some() {
+                self.compile_all_with_llvm()
+            } else {
+                self.compile_pending_with_llvm(&pending, entering)
+            };
+            match compiled {
                 Ok(all_pointers) => {
                     // Re-register source info at new LLVM addresses
                     self.register_source_info_for_pointers(&all_pointers);
 
-                    // Install ALL compiled function pointers (not just pending ones)
                     let mut fp_lock = self.function_pointers.write().unwrap();
                     let mut ft_lock = self.function_tiers.write().unwrap();
 
@@ -2982,6 +3004,138 @@ impl TieredBackend {
     /// MCJIT is stable on these platforms and provides the best JIT experience.
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
+    /// Extend `targets` with everything they call that nothing else can serve.
+    ///
+    /// Almost every callee already has an address from the tier below, and
+    /// binds to it. The exceptions are functions that tier skipped -- 256-bit
+    /// vectors have no Cranelift type, for one -- which exist only as a body
+    /// nobody has compiled.
+    #[cfg(feature = "llvm-backend")]
+    fn add_unserved_callees(
+        modules: &[crate::ir::IrModule],
+        known: &BTreeMap<IrFunctionId, usize>,
+        targets: &mut Vec<IrFunctionId>,
+    ) {
+        use crate::ir::IrInstruction;
+
+        let mut seen: std::collections::BTreeSet<IrFunctionId> = targets.iter().copied().collect();
+        let mut frontier = targets.clone();
+        while let Some(func_id) = frontier.pop() {
+            let Some(function) = modules.iter().find_map(|m| m.functions.get(&func_id)) else {
+                continue;
+            };
+            for block in function.cfg.blocks.values() {
+                for inst in &block.instructions {
+                    let callee = match inst {
+                        IrInstruction::CallDirect { func_id, .. }
+                        | IrInstruction::FunctionRef { func_id, .. }
+                        | IrInstruction::MakeClosure { func_id, .. } => *func_id,
+                        _ => continue,
+                    };
+                    if known.contains_key(&callee) || !seen.insert(callee) {
+                        continue;
+                    }
+                    let has_body = modules
+                        .iter()
+                        .find_map(|m| m.functions.get(&callee))
+                        .is_some_and(|f| !f.cfg.blocks.is_empty());
+                    if has_body {
+                        targets.push(callee);
+                        frontier.push(callee);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compile the queued functions, and only those.
+    ///
+    /// Reaching one hot function used to mean compiling every function in the
+    /// program. Declaring is cheap and compiling is not, so this declares them
+    /// all and compiles the handful that are actually hot, binding every other
+    /// declaration to the code already serving it.
+    #[cfg(feature = "llvm-backend")]
+    fn compile_pending_with_llvm(
+        &self,
+        pending: &[IrFunctionId],
+        entering: IrFunctionId,
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
+        let _llvm_guard = super::llvm_jit_backend::llvm_lock();
+
+        let mut modules = self.tree_shake_modules_for_llvm();
+        let wanted: std::collections::BTreeSet<IrFunctionId> = pending.iter().copied().collect();
+        // Resume points for what is being compiled, plus the frame that is
+        // about to run. Building one for every function in the program is IR
+        // built and thrown away; building one for none of them leaves a
+        // long-running loop stranded at the tier it started in.
+        let mut resumable = wanted.clone();
+        resumable.insert(entering);
+        let osr_variants = Self::add_osr_variants(&mut modules, Some(&resumable));
+
+        let known: BTreeMap<IrFunctionId, usize> = self
+            .function_pointers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+
+        let mut targets: Vec<IrFunctionId> = pending.to_vec();
+        targets.extend(osr_variants.iter().map(|(id, _, _)| *id));
+        // A callee with no address anywhere has to be compiled here too. Left
+        // undefined it is a symbol MCJIT cannot resolve, and MCJIT answers that
+        // by killing the process rather than returning an error.
+        Self::add_unserved_callees(&modules, &known, &mut targets);
+
+        let context = Box::leak(Box::new(Context::create()));
+        let symbols: Vec<(&str, *const u8)> = self
+            .runtime_symbols
+            .iter()
+            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
+            .collect();
+        let mut backend = LLVMJitBackend::with_symbols(context, &symbols)?;
+
+        // Seeded from every module, not from what survived shaking. Shaking
+        // drops functions, and with them the references that are the only
+        // evidence a survivor is reached through a pointer. Cranelift reads
+        // the unshaken set, so reading the shaken one here gives the two
+        // backends different signatures for the same function.
+        backend.seed_indirect_targets(&self.modules.read().unwrap());
+        let compiled = backend.compile_functions(&modules, &targets, &known)?;
+
+        // Publish each resume point now the engine has addresses. A back edge
+        // reads its slot every iteration and starts transferring the moment it
+        // is non-null, so this is what arms them.
+        for (variant_id, parent_name, site_key) in &osr_variants {
+            match compiled.get(variant_id) {
+                Some(ptr) => {
+                    crate::ir::osr::publish_helper(parent_name, *site_key, *ptr as *mut ())
+                }
+                None => {
+                    if crate::ir::osr::osr_trace_enabled() {
+                        eprintln!("[osr] no address for {parent_name} site=0x{site_key:x}");
+                    }
+                }
+            }
+        }
+
+        // The code stays mapped for the life of the process; a pointer handed
+        // out here is called long after this returns.
+        let _leaked = Box::leak(Box::new(backend));
+
+        // A resume point is reached through its slot, never through the tier
+        // dispatch table, so it alone is not installed as a function. Every
+        // other function compiled here IS installed, including the callees
+        // dragged in above: dropping them would leave code nothing can reach
+        // and nothing records, to be compiled again on the next drain.
+        let osr_ids: std::collections::BTreeSet<IrFunctionId> =
+            osr_variants.iter().map(|(id, _, _)| *id).collect();
+        Ok(compiled
+            .into_iter()
+            .filter(|(id, _)| !osr_ids.contains(id))
+            .collect())
+    }
+
     /// Add a resumable second entry point for every loop that has one, and
     /// report what to publish once the engine hands back addresses.
     ///
@@ -2993,7 +3147,10 @@ impl TieredBackend {
     /// NAME identifies the site because an IrFunctionId is a slot number local
     /// to one module, not an identity.
     #[cfg(feature = "llvm-backend")]
-    fn add_osr_variants(modules: &mut [crate::ir::IrModule]) -> Vec<(IrFunctionId, String, u64)> {
+    fn add_osr_variants(
+        modules: &mut [crate::ir::IrModule],
+        only: Option<&std::collections::BTreeSet<IrFunctionId>>,
+    ) -> Vec<(IrFunctionId, String, u64)> {
         use crate::ir::osr;
 
         if !osr::osr_enabled() {
@@ -3021,7 +3178,9 @@ impl TieredBackend {
             let candidates: Vec<(IrFunctionId, crate::ir::IrBlockId)> = module
                 .functions
                 .iter()
-                .filter(|(_, f)| !f.cfg.blocks.is_empty())
+                .filter(|(id, f)| {
+                    !f.cfg.blocks.is_empty() && only.is_none_or(|want| want.contains(id))
+                })
                 .flat_map(|(id, f)| osr::find_loop_headers(f).into_iter().map(move |h| (*id, h)))
                 .collect();
 
@@ -3111,7 +3270,10 @@ impl TieredBackend {
         // the function it came from. A frame already running baseline code can
         // then finish here rather than waiting to return, which is the only way
         // optimised code reaches a loop that is entered once.
-        let osr_variants = Self::add_osr_variants(&mut modules);
+        let osr_variants = Self::add_osr_variants(&mut modules, None);
+        // The whole program decides this, not the shaken part -- see the
+        // note at the first seeding site.
+        backend.seed_indirect_targets(&self.modules.read().unwrap());
         for module in &modules {
             backend.declare_module(module)?;
         }
@@ -3279,6 +3441,9 @@ impl TieredBackend {
         // before LLVM compilation. Without this, LLVM compiles all functions
         // including unused wrappers, which can cause heap corruption on Linux.
         let modules = self.tree_shake_modules_for_llvm();
+        // The whole program decides this, not the shaken part -- see the
+        // note at the first seeding site.
+        backend.seed_indirect_targets(&self.modules.read().unwrap());
         for module in &modules {
             backend.declare_module(module)?;
         }

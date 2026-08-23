@@ -15,6 +15,7 @@ pub use mir as hir_to_mir; // keeps the established path working
 pub mod tast_to_hir; // TAST to HIR lowering // Drop point analysis for automatic memory deallocation
 
 // MIR modules (the existing IR serves as MIR)
+pub mod abi; // Hidden parameters, stated once for every backend
 pub mod blade; // BLADE format - Blazing Language Artifact Deployment Environment (.blade files)
 pub mod blocks;
 pub mod bounds_check_elimination; // Bounds Check Elimination for array loops
