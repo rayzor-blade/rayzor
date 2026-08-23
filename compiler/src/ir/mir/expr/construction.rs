@@ -415,10 +415,16 @@ impl<'a> HirToMirContext<'a> {
         // `alloc_size_with_inheritance` below walks the same chain -- so
         // running the parent's constructor over it is correct.
         if !has_constructor {
-            if let Some((func_id, owner_type)) =
+            if let Some((func_id, _owner_type)) =
                 self.inherited_constructor(*class_type, actual_symbol_id)
             {
-                constructor_type_id = owner_type;
+                // Keyed by the class being constructed, which is the key the
+                // entry is registered under and the only one this context can
+                // resolve. The parent's own TypeId belongs to the context that
+                // lowered the parent: when the parent lives in another module,
+                // `inherited_constructor` reaches it BY NAME and no TypeId
+                // entry for it exists here, so keying by it finds nothing and
+                // the call falls through to a forward-declaration stub.
                 has_constructor = true;
                 ctor_path = "inherited";
                 self.constructor_map.insert(*class_type, func_id);
