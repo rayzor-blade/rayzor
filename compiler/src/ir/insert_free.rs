@@ -2375,6 +2375,29 @@ fn param_to_field_map(
 /// "Fresh" is the allocation itself; "single-holder" is that its only use is
 /// the handover site given. Both are needed: a fresh object stored into two
 /// places has two holders, and freeing it through either dangles the other.
+/// Whether a callee lets the receiver it is handed escape.
+///
+/// Asked of the callee's body directly rather than read from
+/// `compute_param_retention`, whose result is opt-in behind
+/// `RZT_PARAM_RETENTION` and empty by default -- consulting it gets "unknown"
+/// for every function, which is indistinguishable from "escapes". Nested calls
+/// are given an empty map here, so anything reached through one stays
+/// conservative.
+fn receiver_escapes(callee_id: IrFunctionId, module: &IrModule, ids: &AllocFuncIds) -> bool {
+    let Some(callee) = module.functions.get(&callee_id) else {
+        return true;
+    };
+    // No body to read: whatever it does with the receiver is unknown.
+    if callee.cfg.blocks.is_empty() {
+        return true;
+    }
+    let Some(receiver) = callee.signature.parameters.first() else {
+        return true;
+    };
+    let derived = build_derived_set(receiver.reg, callee);
+    param_retained(&derived, callee, ids, &BTreeMap::new())
+}
+
 fn fresh_single_holder(
     value: IrId,
     handover: &IrInstruction,
@@ -2382,6 +2405,7 @@ fn fresh_single_holder(
     ids: &AllocFuncIds,
     fresh_object_fns: &BTreeSet<IrFunctionId>,
     returns_alias: &BTreeMap<IrFunctionId, Vec<bool>>,
+    module: &IrModule,
 ) -> bool {
     let is_fresh = function.cfg.blocks.values().any(|b| {
         b.instructions.iter().any(|i| match i {
@@ -2429,9 +2453,35 @@ fn fresh_single_holder(
                 | IrInstruction::BitCast { .. }
                 | IrInstruction::SsaBarrier { .. }
                 | IrInstruction::Copy { .. } => {}
+                // Writing INTO the object is how it is initialised, not a
+                // second holder of it. Writing the object into something else
+                // is, and that is the `value` side, which still counts.
+                IrInstruction::Store {
+                    ptr, value: stored, ..
+                } if derived.contains(ptr) && !derived.contains(stored) => {}
+                // The constructor that fills it in. It takes the object as its
+                // receiver and gives it straight back; a callee that keeps hold
+                // of it is what `param_retention` reports, and that still
+                // counts as another holder.
+                IrInstruction::CallDirect { func_id, args, .. }
+                    if args.first().is_some_and(|a| derived.contains(a))
+                        && !args[1..].iter().any(|a| derived.contains(a))
+                        && !receiver_escapes(*func_id, module, ids) => {}
                 other => {
                     if other.uses().iter().any(|u| derived.contains(u)) {
                         uses += 1;
+                        if let IrInstruction::CallDirect { func_id, args, .. } = other {
+                            let receiver = args.first().is_some_and(|a| derived.contains(a));
+                            dbg_holder(
+                                value,
+                                &format!(
+                                    "passed to {func_id:?} (receiver={receiver}, escapes={})",
+                                    receiver_escapes(*func_id, module, ids)
+                                ),
+                            );
+                        } else {
+                            dbg_holder(value, &format!("also held by {other:?}"));
+                        }
                     }
                 }
             }
@@ -2667,6 +2717,7 @@ fn compute_owned_fields(
                                 ids,
                                 fresh_object_fns,
                                 returns_alias,
+                                module,
                             ),
                         );
                     }
@@ -2689,6 +2740,7 @@ fn compute_owned_fields(
                                     ids,
                                     fresh_object_fns,
                                     returns_alias,
+                                    module,
                                 ),
                             );
                         }
@@ -3552,6 +3604,30 @@ fn compute_param_retention(
     retention
 }
 
+/// How many instructions read this value.
+fn reads_of(value: IrId, function: &IrFunction) -> usize {
+    function
+        .cfg
+        .blocks
+        .values()
+        .map(|b| {
+            b.instructions
+                .iter()
+                .filter(|i| i.uses().contains(&value))
+                .count()
+                + b.phi_nodes
+                    .iter()
+                    .filter(|p| p.incoming.iter().any(|(_, v)| *v == value))
+                    .count()
+                + usize::from(match &b.terminator {
+                    IrTerminator::Return { value: Some(v) } => *v == value,
+                    IrTerminator::CondBranch { condition, .. } => *condition == value,
+                    _ => false,
+                })
+        })
+        .sum()
+}
+
 fn param_retained(
     derived: &BTreeSet<IrId>,
     function: &IrFunction,
@@ -3573,7 +3649,18 @@ fn param_retained(
                 IrInstruction::Throw { exception } if in_set(exception) => return true,
                 // Reading THROUGH the param extracts a field (e.g. an interior
                 // buffer pointer) whose flow we don't track — conservative.
-                IrInstruction::Load { ptr, .. } if in_set(ptr) => return true,
+                //
+                // Unless nothing reads what was loaded. `this.x = v` lowers to
+                // the store followed by a load of the field back, whose result
+                // is dead, and `InsertFreePass` runs before any dead-code pass
+                // at every level. Counting that as an escape makes EVERY
+                // constructor look like it lets its receiver go, and then no
+                // object can ever be handed to a field.
+                IrInstruction::Load { dest, ptr, .. }
+                    if in_set(ptr) && reads_of(*dest, function) > 0 =>
+                {
+                    return true
+                }
                 IrInstruction::Return { value: Some(v) } if in_set(v) => return true,
                 IrInstruction::CallIndirect { func_ptr, args, .. }
                     if in_set(func_ptr) || args.iter().any(in_set) =>
