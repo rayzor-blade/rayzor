@@ -264,6 +264,68 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Comparison against a type parameter. A generic body is lowered ONCE
+        // with its parameters erased to i64, so `a == b` on `T` compiles to a
+        // raw integer compare: correct for Int, wrong for every value whose
+        // identity is not its bits. Two equal Strings arrive as two different
+        // HaxeString pointers and compare unequal -- and since a generic
+        // `eq<T>(a, b)` is what test helpers are made of, that reads as the
+        // program computing the wrong answer.
+        //
+        // `haxe_reflect_compare_typed` already decides by type tag, and the
+        // tag is a placeholder that monomorphisation replaces with the
+        // concrete one, the same way Reflect.compare inside a generic gets it.
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            let type_param_of = |ty: crate::tast::TypeId| -> Option<String> {
+                let ti = self.type_table.get(ty)?;
+                match &ti.kind {
+                    crate::tast::core::TypeKind::TypeParameter { symbol_id, .. } => self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|sym| self.string_interner.get(sym.name))
+                        .map(|n| n.to_string()),
+                    _ => None,
+                }
+            };
+            if let Some(tp_name) = type_param_of(lhs.ty).or_else(|| type_param_of(rhs.ty)) {
+                let lhs_reg = self.lower_expression(lhs)?;
+                let rhs_reg = self.lower_expression(rhs)?;
+                let as_i64 = |this: &mut Self, reg| {
+                    let ty = this.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                    if ty == IrType::I64 {
+                        Some(reg)
+                    } else {
+                        this.builder.build_cast(reg, ty, IrType::I64).or(Some(reg))
+                    }
+                };
+                let lhs_i64 = as_i64(self, lhs_reg)?;
+                let rhs_i64 = as_i64(self, rhs_reg)?;
+
+                let tag = self.builder.build_const(IrValue::I32(0))?;
+                if let Some(func) = self.builder.current_function_mut() {
+                    func.type_param_tag_fixups.push((tag, tp_name));
+                }
+
+                let cmp_func = self.get_or_register_extern_function(
+                    "haxe_reflect_compare_typed",
+                    vec![IrType::I64, IrType::I64, IrType::I32],
+                    IrType::I64,
+                );
+                let ordering = self.builder.build_call_direct(
+                    cmp_func,
+                    vec![lhs_i64, rhs_i64, tag],
+                    IrType::I64,
+                )?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                let cmp_op = if matches!(op, HirBinaryOp::Eq) {
+                    CompareOp::Eq
+                } else {
+                    CompareOp::Ne
+                };
+                return self.builder.build_cmp(cmp_op, ordering, zero);
+            }
+        }
+
         // String comparison: Eq/Ne/Lt/Le/Gt/Ge on strings need content comparison
         if matches!(
             op,
