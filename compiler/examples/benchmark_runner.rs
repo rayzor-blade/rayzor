@@ -235,6 +235,21 @@ struct Benchmark {
     source: String,
 }
 
+/// Let a measurement run pick a different top-tier threshold.
+///
+/// The preset is where this belongs, and it is the preset's field that gets
+/// set: measuring what promotion costs and returns means running the same
+/// build with a different config, not a different code path inside the tier
+/// engine that no config can see.
+fn apply_threshold_override(config: &mut TieredConfig) {
+    if let Some(threshold) = std::env::var("RAYZOR_BLAZING_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        config.profile_config.blazing_threshold = threshold;
+    }
+}
+
 fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     let plugin = rayzor_runtime::plugin_impl::get_plugin();
     let symbols = plugin.runtime_symbols();
@@ -385,7 +400,8 @@ fn setup_precompiled_tiered_benchmark(
         .ok_or("No entry function ID in bundle")?;
 
     // Use Benchmark preset - fast tier promotion, immediate bailout
-    let config = TierPreset::Benchmark.to_config();
+    let mut config = TierPreset::Benchmark.to_config();
+    apply_threshold_override(&mut config);
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
@@ -636,15 +652,15 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5)
+    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
-    // The top tier is not reached here: promoting costs more than it returns
-    // while only the entry function is ever counted as hot. Promoting by hand
+    // Every tier including the top one is reached by heat. Promoting by hand
     // would measure a tier the runtime never picks on its own.
     // Suppress beadie/tier-transition chatter — bench output should
     // stay clean; the runner already reports compile/execute timings.
     let mut config = TierPreset::Benchmark.to_config();
+    apply_threshold_override(&mut config);
     config.verbosity = 0;
 
     let mut backend =

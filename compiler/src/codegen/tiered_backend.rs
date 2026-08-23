@@ -687,14 +687,13 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    // The top tier is NOT reached by heat here. Measured on
-                    // nbody, promoting costs far more than the promoted code
-                    // returns: only the entry is ever counted, so promotion
-                    // compiles `main` while every function its loop calls
-                    // stays where it was, and the program pays the compile for
-                    // no change to what runs. Lower it again only alongside
-                    // profiling that can see inner functions.
-                    blazing_threshold: u64::MAX,
+                    // Reached by heat, like every other tier, and inside the
+                    // warmup window so the measured runs are steady state.
+                    // Affordable because the compile happens on beadie's
+                    // broker thread rather than where the program is waiting;
+                    // it was not, when reaching this tier meant stalling for
+                    // it.
+                    blazing_threshold: 10,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
@@ -973,21 +972,6 @@ type BeadieAdapters = (
     Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // optimized
     Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // maximum (LLVM)
 );
-
-/// The count at which a function is wanted at the top tier.
-///
-/// `RAYZOR_BLAZING_THRESHOLD` overrides the preset, for measuring what
-/// reaching that tier costs and returns without shipping a different default.
-fn blazing_threshold(config: &ProfileConfig) -> u64 {
-    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
-    OVERRIDE
-        .get_or_init(|| {
-            std::env::var("RAYZOR_BLAZING_THRESHOLD")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or(config.blazing_threshold)
-}
 
 fn tier_event_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -2299,7 +2283,7 @@ impl TieredBackend {
             let config = self.profile_data.config();
 
             // Determine target tier based on count (allows skipping tiers)
-            let target_tier = if count >= blazing_threshold(&config) {
+            let target_tier = if count >= config.blazing_threshold {
                 OptimizationTier::Maximum
             } else if count >= config.hot_threshold {
                 OptimizationTier::Optimized
