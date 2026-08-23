@@ -3148,6 +3148,31 @@ impl TieredBackend {
     ) -> Result<(BTreeMap<IrFunctionId, usize>, BTreeMap<String, usize>), String> {
         let _llvm_guard = super::llvm_jit_backend::llvm_lock();
 
+        // Someone has already compiled the module. Compiling it again would
+        // build a second copy of every function in a second context, and
+        // publishing those pointers would leave functions installed from the
+        // first compile calling into the second -- which is a crash, not a
+        // slowdown. Every function asks for this promotion, so without the
+        // check every function would compile the whole module again.
+        if super::llvm_jit_backend::is_llvm_compiled_globally() {
+            let Some(existing) = super::llvm_jit_backend::get_global_llvm_pointers() else {
+                return Err("LLVM already compiled but its pointers are gone".to_string());
+            };
+            let mut resolved = BTreeMap::new();
+            for func_id in &needed_func_ids {
+                let name = modules
+                    .iter()
+                    .find_map(|m| m.functions.get(func_id))
+                    .map(|f| {
+                        super::llvm_jit_backend::LLVMJitBackend::mangle_function_name(&f.name)
+                    });
+                if let Some(ptr) = name.and_then(|n| existing.get(&n)) {
+                    resolved.insert(*func_id, *ptr);
+                }
+            }
+            return Ok((resolved, existing));
+        }
+
         let context = Box::leak(Box::new(Context::create()));
         let symbols: Vec<(&str, *const u8)> = runtime_symbols
             .iter()
