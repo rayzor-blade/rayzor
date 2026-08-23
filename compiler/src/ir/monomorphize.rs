@@ -554,7 +554,7 @@ impl Monomorphizer {
             return;
         }
 
-        let fixups: Vec<_> = func.type_param_tag_fixups.drain(..).collect();
+        let fixups = std::mem::take(&mut func.type_param_tag_fixups);
         for (reg_id, type_param_name) in &fixups {
             let concrete_type = match self.substitution_map.get(type_param_name) {
                 Some(ty) => ty.clone(),
@@ -693,8 +693,8 @@ impl Monomorphizer {
                                 // Only insert newly created functions into the module
                                 if is_new {
                                     // Drain pending funcs created by instantiate_with_sub_map
-                                    let pending: Vec<_> =
-                                        self.pending_transitive_funcs.drain(..).collect();
+                                    let pending =
+                                        std::mem::take(&mut self.pending_transitive_funcs);
                                     for f in pending {
                                         module.functions.insert(f.id, f);
                                     }

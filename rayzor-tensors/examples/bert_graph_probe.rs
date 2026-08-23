@@ -86,8 +86,10 @@ fn main() {
         .nth(1)
         .expect("usage: bert_graph_probe <dir>");
     let as_f32 = |b: Vec<u8>| -> Vec<f32> {
-        b.chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| f32::from_le_bytes(c))
             .collect()
     };
     let read_f32 = |name: &str| -> Vec<f32> {

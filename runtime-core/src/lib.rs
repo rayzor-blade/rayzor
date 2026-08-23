@@ -16,11 +16,6 @@
 //! See `docs/design/runtime_core_extraction.md` for the migration plan.
 
 #![cfg_attr(not(test), no_std)]
-// `vdotq_s32` and friends sit behind the unstable `stdarch_neon_dotprod`
-// library feature. Crate-level gate mirrors `rayzor-runtime`'s top of
-// `runtime/src/lib.rs`; without it the SDOT kernels in `quant::sdot`
-// fail to compile under aarch64.
-#![cfg_attr(target_arch = "aarch64", feature(stdarch_neon_dotprod))]
 
 extern crate alloc;
 
