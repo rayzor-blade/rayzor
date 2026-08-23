@@ -1738,6 +1738,10 @@ register_symbol!("rayzor_pool_served", crate::object_pool::rayzor_pool_served);
 register_symbol!("rayzor_global_store", crate::rayzor_global_store);
 register_symbol!("rayzor_global_load", crate::rayzor_global_load);
 register_symbol!("rayzor_global_slot", crate::rayzor_global_slot);
+register_symbol!(
+    "rayzor_uncompiled_function",
+    crate::rayzor_uncompiled_function
+);
 
 // ============================================================================
 // Tracked Heap Allocator (Rust allocator with double-free protection)

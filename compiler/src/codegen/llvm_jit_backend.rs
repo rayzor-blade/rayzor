@@ -3131,6 +3131,49 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     }
 
     /// Compile function body
+    /// Body for a forward-declaration stub: say which function this was, then
+    /// abort. The reporter does not return.
+    fn compile_uncompiled_stub_body(
+        &mut self,
+        function: &IrFunction,
+        llvm_func: FunctionValue<'ctx>,
+    ) -> Result<(), String> {
+        const REPORTER: &str = "rayzor_uncompiled_function";
+        let entry = self.context.append_basic_block(llvm_func, "entry");
+        self.builder.position_at_end(entry);
+
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let usize_ty = self.context.i64_type();
+        let reporter = match self.module.get_function(REPORTER) {
+            Some(f) => f,
+            None => {
+                let sig = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr_ty.into(), usize_ty.into()], false);
+                self.module.add_function(REPORTER, sig, None)
+            }
+        };
+
+        let display = function.display_name();
+        let name_ptr = self
+            .builder
+            .build_global_string_ptr(display, "stub_name")
+            .map_err(|e| format!("stub name for '{display}': {e}"))?;
+        let len = usize_ty.const_int(display.len() as u64, false);
+        self.builder
+            .build_call(
+                reporter,
+                &[name_ptr.as_pointer_value().into(), len.into()],
+                "",
+            )
+            .map_err(|e| format!("reporting uncompiled '{display}': {e}"))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| format!("terminating stub '{display}': {e}"))?;
+        Ok(())
+    }
+
     fn compile_function_body(
         &mut self,
         func_id: IrFunctionId,
@@ -3144,6 +3187,16 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         self.alloca_ids.clear();
         self.current_sret_ptr = None;
         self.current_env_param = None;
+
+        // A forward-declaration stub has no body to lower. Name itself and
+        // stop, rather than falling through to a bare `unreachable`: that
+        // lowers to SIGTRAP with no output, which reads identically whether
+        // the construct is unsupported, the defining module never compiled,
+        // or we miscompiled it. Reached only if something calls it, so the
+        // many stubs a program never touches stay silent.
+        if function.is_forward_stub() {
+            return self.compile_uncompiled_stub_body(function, llvm_func);
+        }
 
         // Check if this function uses sret (struct return)
         let uses_sret = self.sret_function_ids.contains(&func_id);
