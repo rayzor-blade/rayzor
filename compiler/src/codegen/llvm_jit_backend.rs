@@ -1845,6 +1845,90 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     }
 
     /// Compile function bodies for a module (call declare_module for ALL modules first)
+    /// Compile ONE function, leaving the rest of the program where it is.
+    ///
+    /// Compiling every function to reach one hot function costs a few hundred
+    /// milliseconds and produces code for functions that were never hot. This
+    /// declares everything -- signatures only, which is cheap -- compiles a
+    /// single body, and binds every other declaration to the code that already
+    /// exists for it. What comes back is one function's worth of work.
+    ///
+    /// `known` maps a function to the address currently serving it, from
+    /// whichever tier compiled it. A call from the compiled function reaches
+    /// its callee through that address; a callee with no address yet is left
+    /// undefined, and calling it would fault, so the caller passes only what it
+    /// has.
+    pub fn compile_one_function(
+        &mut self,
+        modules: &[IrModule],
+        target: IrFunctionId,
+        known: &BTreeMap<IrFunctionId, usize>,
+    ) -> Result<usize, String> {
+        for module in modules {
+            self.declare_module(module)?;
+        }
+
+        let function = modules
+            .iter()
+            .find_map(|m| m.functions.get(&target))
+            .ok_or_else(|| format!("{target:?} is in none of these modules"))?;
+        let llvm_func = *self
+            .function_map
+            .get(&target)
+            .ok_or_else(|| format!("{target:?} was not declared"))?;
+        if llvm_func.count_basic_blocks() == 0 {
+            self.compile_function_body(target, function, llvm_func)?;
+            self.stamp_fn_subtarget_attrs(llvm_func);
+        }
+
+        // Before the engine exists, or MCJIT resolves relocations against a
+        // symbol table that does not have these yet.
+        for (name, addr) in &self.runtime_symbols {
+            let c_name = std::ffi::CString::new(name.as_str())
+                .map_err(|e| format!("runtime symbol name: {e}"))?;
+            unsafe {
+                llvm_sys::support::LLVMAddSymbol(c_name.as_ptr(), *addr as *mut std::ffi::c_void);
+            }
+        }
+
+        self.stamp_host_subtarget_attrs();
+        let engine = match self.execution_engine.as_ref() {
+            Some(engine) => engine,
+            None => {
+                let engine = self
+                    .module
+                    .create_jit_execution_engine(self.opt_level)
+                    .map_err(|e| format!("MCJIT engine: {e}"))?;
+                self.execution_engine = Some(engine);
+                self.execution_engine.as_ref().unwrap()
+            }
+        };
+
+        for (name, addr) in &self.runtime_symbols {
+            if let Some(func) = self.module.get_function(name) {
+                engine.add_global_mapping(&func, *addr);
+            }
+        }
+        // Every function this one calls resolves to the code already serving
+        // it. Without this the declarations are unresolved symbols and the
+        // engine refuses the module.
+        for (func_id, llvm_fn) in &self.function_map {
+            if *func_id == target || llvm_fn.count_basic_blocks() > 0 {
+                continue;
+            }
+            if let Some(addr) = known.get(func_id) {
+                engine.add_global_mapping(llvm_fn, *addr);
+            }
+        }
+
+        let name = llvm_func.get_name().to_string_lossy().to_string();
+        let addr = engine
+            .get_function_address(&name)
+            .map_err(|e| format!("no address for {name}: {e:?}"))?;
+        self.function_pointers.insert(target, addr as usize);
+        Ok(addr as usize)
+    }
+
     pub fn compile_module_bodies(&mut self, module: &IrModule) -> Result<(), String> {
         let mut verify_failures: Vec<String> = Vec::new();
         for (func_id, function) in &module.functions {
