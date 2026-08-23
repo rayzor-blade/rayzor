@@ -66,7 +66,15 @@ main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
 PYGEN
 
-  out=$( cd "$d" && "$RAYZOR" run "unit/issues/$base.hx" --release --no-cache 2>&1 )
+  # Run as a project, not a lone file. `rayzor run <file>` compiles that file
+  # and the standard library and nothing else: a class the test inherits from
+  # -- `unit.Test`, which every one of them extends -- is known well enough to
+  # declare a forward reference and never compiled, so the reference becomes a
+  # trap stub and the test dies on SIGTRAP with nothing said. A manifest with a
+  # class path compiles the siblings too.
+  printf '[project]\nname = "conformance"\nentry = "unit/issues/%s.hx"\n\n[build]\nclass-paths = ["."]\n' \
+    "$base" > "$d/rayzor.toml"
+  out=$( cd "$d" && "$RAYZOR" run --release --no-cache 2>&1 )
   code=$?
 
   if [[ $code -ne 0 ]]; then
