@@ -22,6 +22,15 @@ RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
 # Package roots that only exist on one Haxe target.
 TARGET_PKGS="php|js|cs|java|python|lua|flash|neko|hl|eval|cpp|jvm"
 
+# Fail loudly if the fixtures are missing. Without them every test compiles
+# without unit.Test and the run reports a confident 0%, which looks like a
+# catastrophic regression rather than a harness that cannot find its own
+# files. A measurement that cannot be taken must not report a number.
+for fixture in shims/unit/Test.hx shims/unit/ConfCheck.hx shims/utest/Assert.hx runwith.py; do
+  [[ -f "$HERE/$fixture" ]] || { echo "harness incomplete: $HERE/$fixture is missing" >&2; exit 2; }
+done
+[[ -d "$SRC" ]] || { echo "no corpus at $SRC -- run ./fetch.sh, or set SRC" >&2; exit 2; }
+
 mkdir -p "$WORK/run"
 printf 'issue\tstatus\tdetail\n' > "$OUT"
 
