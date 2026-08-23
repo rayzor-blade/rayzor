@@ -237,6 +237,7 @@ impl AotCompiler {
         let mut backend = LLVMJitBackend::with_aot_mode(&context, llvm_opt)?;
 
         // Two-pass: declare all, then compile all bodies
+        backend.seed_indirect_targets(&modules);
         for module in &modules {
             backend.declare_module(module)?;
         }
