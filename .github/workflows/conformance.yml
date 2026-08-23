@@ -38,6 +38,10 @@ jobs:
   conformance:
     name: Haxe conformance
     runs-on: ubuntu-latest
+    # The corpus is ~350 compiles at well under a second each. Anything near
+    # this ceiling is a hang, not slow progress, and the default six hours
+    # would sit on a runner for that long before saying so.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +84,7 @@ jobs:
         env:
           WORK: ${{ runner.temp }}/conformance
           OUT: ${{ runner.temp }}/conformance/report.tsv
+          TIMEOUT: 60
         run: ./haxe-conformance/run.sh
 
       - name: Summarise

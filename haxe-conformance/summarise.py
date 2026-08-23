@@ -9,7 +9,7 @@ import json
 import pathlib
 import sys
 
-ORDER = ["PASS", "WRONG_ANSWER", "NO_OUTPUT", "COMPILE_FAIL", "CRASH", "SKIP"]
+ORDER = ["PASS", "WRONG_ANSWER", "NO_OUTPUT", "COMPILE_FAIL", "CRASH", "TIMEOUT", "SKIP"]
 
 
 def read(path):

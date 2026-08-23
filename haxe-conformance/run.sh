@@ -15,6 +15,7 @@ REPO="${REPO:-$(cd "$HERE/.." && pwd)}"
 SRC="${SRC:-$HERE/corpus/tests/unit/src/unit/issues}"
 WORK="${WORK:-${TMPDIR:-/tmp}/rayzor_conformance}"
 LIMIT="${LIMIT:-0}"
+TIMEOUT="${TIMEOUT:-60}"
 OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
 
@@ -133,7 +134,11 @@ PYGEN
   # class path compiles the siblings too.
   printf '[project]\nname = "conformance"\nentry = "unit/issues/%s.hx"\n\n[build]\nclass-paths = ["."]\n' \
     "$base" > "$d/rayzor.toml"
-  out=$( cd "$d" && "$RAYZOR" run --release --no-cache 2>&1 )
+  # Bounded. A test that now compiles can also loop forever, and without a
+  # limit one of those stalls the whole corpus -- in CI, until the job is
+  # killed hours later. `timeout` is not on every platform we run this on, so
+  # the watchdog is python3, which the harness already needs.
+  out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache 2>&1 )
   code=$?
 
   if [[ $code -ne 0 ]]; then
@@ -146,6 +151,7 @@ PYGEN
     [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -iE 'error|panic|signal' | head -1 | cut -c1-90)
     [[ -z "$det" ]] && det="exit $code"
     case "$code" in
+      124) status="TIMEOUT"; det="exceeded ${TIMEOUT}s" ;;
       132|134|139|133) status="CRASH" ;;
       *) status="COMPILE_FAIL" ;;
     esac
