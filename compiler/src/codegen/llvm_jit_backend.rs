@@ -1302,6 +1302,14 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// scanning them one at a time as they are declared answers the question
     /// differently depending on the order they arrive in, and a signature
     /// cannot be revised once code has been emitted against it.
+    /// Take a set of indirect targets computed elsewhere.
+    ///
+    /// The tier compile runs on its own thread and cannot hold the module list
+    /// while it does, so the set is read before it starts and handed over.
+    pub fn seed_indirect_target_ids(&mut self, targets: BTreeSet<IrFunctionId>) {
+        self.indirect_targets.extend(targets);
+    }
+
     pub fn seed_indirect_targets<M: std::borrow::Borrow<IrModule>>(&mut self, modules: &[M]) {
         for module in modules {
             crate::ir::abi::collect_indirect_targets(module.borrow(), &mut self.indirect_targets);

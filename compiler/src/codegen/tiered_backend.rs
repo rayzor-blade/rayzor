@@ -381,6 +381,13 @@ pub struct TieredBackend {
     beadie_beads_optimized:
         Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
 
+    /// The top tier's adapter and bead registry. Same types as the others so
+    /// routing, polling and installation are the same code; what differs is
+    /// only which compiler runs on the broker thread.
+    beadie_adapter_maximum: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>,
+    beadie_beads_maximum:
+        Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
+
     /// Phase B: counter — number of times `record_call` attempted to
     /// route a promotion through beadie, summed across both Standard
     /// and Optimized tiers. Includes failures.
@@ -964,7 +971,23 @@ pub struct BeadieStats {
 type BeadieAdapters = (
     Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // standard
     Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // optimized
+    Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // maximum (LLVM)
 );
+
+/// The count at which a function is wanted at the top tier.
+///
+/// `RAYZOR_BLAZING_THRESHOLD` overrides the preset, for measuring what
+/// reaching that tier costs and returns without shipping a different default.
+fn blazing_threshold(config: &ProfileConfig) -> u64 {
+    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            std::env::var("RAYZOR_BLAZING_THRESHOLD")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(config.blazing_threshold)
+}
 
 fn tier_event_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -1079,8 +1102,18 @@ fn build_beadie_adapters(
         /*batch_limit=*/ 16,
     );
     let optimized = super::beadie_jit::build_batched_adapter_at(
-        symbols_snapshot,
+        Arc::clone(&symbols_snapshot),
         OptimizationTier::Optimized.cranelift_opt_level(),
+        beadie_threshold,
+        /*capacity=*/ 64,
+        /*batch_limit=*/ 16,
+    );
+    // The top tier rides the same broker. It is the one that most needs to:
+    // an LLVM compile is long enough that doing it where the program is
+    // waiting costs more than the faster code returns.
+    let maximum = super::beadie_jit::build_batched_adapter_at(
+        symbols_snapshot,
+        super::beadie_jit::LLVM_OPT_LEVEL,
         beadie_threshold,
         /*capacity=*/ 64,
         /*batch_limit=*/ 16,
@@ -1097,7 +1130,7 @@ fn build_beadie_adapters(
             beadie_threshold,
         );
     }
-    Ok((standard, optimized))
+    Ok((standard, optimized, maximum))
 }
 
 impl TieredBackend {
@@ -1154,7 +1187,7 @@ impl TieredBackend {
         // can't call any `haxe_*` runtime helper, which is fine for
         // tests of pure-arithmetic kernels but useless for real code.
         // Production callers go through `with_symbols`.
-        let (beadie_adapter, beadie_adapter_optimized) =
+        let (beadie_adapter, beadie_adapter_optimized, beadie_adapter_maximum) =
             build_beadie_adapters(&[], config.verbosity)?;
 
         Ok(Self {
@@ -1176,6 +1209,8 @@ impl TieredBackend {
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
+            beadie_adapter_maximum,
+            beadie_beads_maximum: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
@@ -1220,7 +1255,7 @@ impl TieredBackend {
         }
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let (beadie_adapter, beadie_adapter_optimized) =
+        let (beadie_adapter, beadie_adapter_optimized, beadie_adapter_maximum) =
             build_beadie_adapters(symbols, config.verbosity)?;
 
         Ok(Self {
@@ -1242,6 +1277,8 @@ impl TieredBackend {
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
+            beadie_adapter_maximum,
+            beadie_beads_maximum: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
@@ -1460,6 +1497,7 @@ impl TieredBackend {
         match tier {
             OptimizationTier::Standard => Some(&self.beadie_adapter),
             OptimizationTier::Optimized => Some(&self.beadie_adapter_optimized),
+            OptimizationTier::Maximum => Some(&self.beadie_adapter_maximum),
             _ => None,
         }
     }
@@ -1474,6 +1512,7 @@ impl TieredBackend {
         match tier {
             OptimizationTier::Standard => Some(&self.beadie_beads),
             OptimizationTier::Optimized => Some(&self.beadie_beads_optimized),
+            OptimizationTier::Maximum => Some(&self.beadie_beads_maximum),
             _ => None,
         }
     }
@@ -1619,7 +1658,11 @@ impl TieredBackend {
     /// Standard (same no-downgrade logic as the install path).
     fn maybe_install_compiled_beadie_pointer(&self, func_id: IrFunctionId) -> bool {
         // Optimized first — higher tier wins.
-        for tier in [OptimizationTier::Optimized, OptimizationTier::Standard] {
+        for tier in [
+            OptimizationTier::Maximum,
+            OptimizationTier::Optimized,
+            OptimizationTier::Standard,
+        ] {
             let Some(beads_arc) = self.beadie_beads_for(tier) else {
                 continue;
             };
@@ -2256,7 +2299,7 @@ impl TieredBackend {
             let config = self.profile_data.config();
 
             // Determine target tier based on count (allows skipping tiers)
-            let target_tier = if count >= config.blazing_threshold {
+            let target_tier = if count >= blazing_threshold(&config) {
                 OptimizationTier::Maximum
             } else if count >= config.hot_threshold {
                 OptimizationTier::Optimized
@@ -2283,33 +2326,25 @@ impl TieredBackend {
                 Some(target_tier),
                 &format!("count={}", count),
             );
-            // Phase B step 5/6: route Standard + Optimized through
-            // beadie. The legacy queue + worker infrastructure is
-            // gone (step 6 deletion), so there's no fallback for
-            // those tiers — beadie owns them.
+            // Every compiled tier goes through beadie, the top one included.
+            // It used to be excluded on the grounds that LLVM's
+            // `add_global_mapping` needs the main thread; it does not. The
+            // context, module and engine are built on the broker thread and
+            // left there, and an address is all that comes back. Compiling it
+            // where the program was waiting cost more than the faster code
+            // returned, which is what kept the tier out of reach.
             //
             // Baseline is handled by `execute_function`, where we have
             // `&mut self` and can invoke `compile_all_modules_jit`.
             //
-            // Maximum (LLVM) doesn't go through beadie either — it
-            // must run on the main thread because of LLVM's
-            // `add_global_mapping` constraint. Queue it here; the
-            // queue is drained at the next `execute_function` entry
-            // (a natural safe point on the main thread).
-            //
             // ProfileData increment above stays in place so the tier
             // statistics report accurate hotness regardless of who
             // owns the compile.
-            #[cfg(feature = "llvm-backend")]
-            if matches!(target_tier, OptimizationTier::Maximum) {
-                let mut queue = self.llvm_queue.lock().unwrap();
-                if !queue.contains(&func_id) {
-                    queue.push_back(func_id);
-                }
-            }
             if matches!(
                 target_tier,
-                OptimizationTier::Standard | OptimizationTier::Optimized
+                OptimizationTier::Standard
+                    | OptimizationTier::Optimized
+                    | OptimizationTier::Maximum
             ) {
                 self.beadie_routes_attempted.fetch_add(1, Ordering::Relaxed);
                 match target_tier {
@@ -2317,7 +2352,7 @@ impl TieredBackend {
                         self.beadie_standard_routes_attempted
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                    OptimizationTier::Optimized => {
+                    OptimizationTier::Optimized | OptimizationTier::Maximum => {
                         self.beadie_optimized_routes_attempted
                             .fetch_add(1, Ordering::Relaxed);
                     }
@@ -3057,90 +3092,29 @@ impl TieredBackend {
 
     /// Compile the queued functions, and only those.
     ///
-    /// Reaching one hot function used to mean compiling every function in the
-    /// program. Declaring is cheap and compiling is not, so this declares them
-    /// all and compiles the handful that are actually hot, binding every other
-    /// declaration to the code already serving it.
+    /// The fallback for when the LLVM tier is not routed through beadie. It
+    /// compiles where the caller stands, so the program waits for it; the
+    /// beadie route exists because that wait is the whole cost of the tier.
     #[cfg(feature = "llvm-backend")]
     fn compile_pending_with_llvm(
         &self,
         pending: &[IrFunctionId],
-        entering: IrFunctionId,
+        _entering: IrFunctionId,
     ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
-        let _llvm_guard = super::llvm_jit_backend::llvm_lock();
-
-        let mut modules = self.tree_shake_modules_for_llvm();
-        let wanted: std::collections::BTreeSet<IrFunctionId> = pending.iter().copied().collect();
-        // Resume points for what is being compiled, plus the frame that is
-        // about to run. Building one for every function in the program is IR
-        // built and thrown away; building one for none of them leaves a
-        // long-running loop stranded at the tier it started in.
-        let mut resumable = wanted.clone();
-        resumable.insert(entering);
-        let osr_variants = Self::add_osr_variants(&mut modules, Some(&resumable));
-
-        let known: BTreeMap<IrFunctionId, usize> = self
-            .function_pointers
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
-
-        let mut targets: Vec<IrFunctionId> = pending.to_vec();
-        targets.extend(osr_variants.iter().map(|(id, _, _)| *id));
-        // A callee with no address anywhere has to be compiled here too. Left
-        // undefined it is a symbol MCJIT cannot resolve, and MCJIT answers that
-        // by killing the process rather than returning an error.
-        Self::add_unserved_callees(&modules, &known, &mut targets);
-
-        let context = Box::leak(Box::new(Context::create()));
-        let symbols: Vec<(&str, *const u8)> = self
-            .runtime_symbols
-            .iter()
-            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
-            .collect();
-        let mut backend = LLVMJitBackend::with_symbols(context, &symbols)?;
-
-        // Seeded from every module, not from what survived shaking. Shaking
-        // drops functions, and with them the references that are the only
-        // evidence a survivor is reached through a pointer. Cranelift reads
-        // the unshaken set, so reading the shaken one here gives the two
-        // backends different signatures for the same function.
-        backend.seed_indirect_targets(&self.modules.read().unwrap());
-        let compiled = backend.compile_functions(&modules, &targets, &known)?;
-
-        // Publish each resume point now the engine has addresses. A back edge
-        // reads its slot every iteration and starts transferring the moment it
-        // is non-null, so this is what arms them.
-        for (variant_id, parent_name, site_key) in &osr_variants {
-            match compiled.get(variant_id) {
-                Some(ptr) => {
-                    crate::ir::osr::publish_helper(parent_name, *site_key, *ptr as *mut ())
+        let mut installed = BTreeMap::new();
+        let mut last_error = None;
+        for func_id in pending {
+            match compile_llvm_bead(&self.modules, *func_id, &self.runtime_symbols) {
+                Ok(ptr) => {
+                    installed.insert(*func_id, ptr);
                 }
-                None => {
-                    if crate::ir::osr::osr_trace_enabled() {
-                        eprintln!("[osr] no address for {parent_name} site=0x{site_key:x}");
-                    }
-                }
+                Err(e) => last_error = Some(e),
             }
         }
-
-        // The code stays mapped for the life of the process; a pointer handed
-        // out here is called long after this returns.
-        let _leaked = Box::leak(Box::new(backend));
-
-        // A resume point is reached through its slot, never through the tier
-        // dispatch table, so it alone is not installed as a function. Every
-        // other function compiled here IS installed, including the callees
-        // dragged in above: dropping them would leave code nothing can reach
-        // and nothing records, to be compiled again on the next drain.
-        let osr_ids: std::collections::BTreeSet<IrFunctionId> =
-            osr_variants.iter().map(|(id, _, _)| *id).collect();
-        Ok(compiled
-            .into_iter()
-            .filter(|(id, _)| !osr_ids.contains(id))
-            .collect())
+        if installed.is_empty() {
+            return Err(last_error.unwrap_or_else(|| "nothing queued compiled".to_string()));
+        }
+        Ok(installed)
     }
 
     /// Add a resumable second entry point for every loop that has one, and
@@ -4018,4 +3992,73 @@ mod tests {
             Some(OptimizationTier::Baseline)
         );
     }
+}
+
+/// Compile one hot function with LLVM, wherever this is called.
+///
+/// Called by beadie on its broker thread with the shared module list, so the
+/// program does not wait for it. Everything LLVM owns -- the context, the
+/// module, the engine -- is created here and left mapped for the life of the
+/// process; the address that comes back is a plain number, which is all that
+/// has to cross back.
+#[cfg(feature = "llvm-backend")]
+pub(crate) fn compile_llvm_bead(
+    modules: &std::sync::Arc<std::sync::RwLock<Vec<crate::ir::IrModule>>>,
+    func_id: IrFunctionId,
+    symbols: &[(String, usize)],
+) -> Result<usize, String> {
+    let _llvm_guard = super::llvm_jit_backend::llvm_lock();
+
+    // Read once, then let go: the compile is long and the program is running
+    // against this same list.
+    let (mut shaken, seed, known) = {
+        let live = modules.read().unwrap();
+        if !live.iter().any(|m| m.functions.contains_key(&func_id)) {
+            return Err(format!("{func_id:?} is in none of the loaded modules"));
+        }
+        let seed = crate::ir::abi::indirect_targets(&live);
+        let shaken: Vec<crate::ir::IrModule> = live.clone();
+        let known: BTreeMap<IrFunctionId, usize> = BTreeMap::new();
+        (shaken, seed, known)
+    };
+
+    // A resume point for the function being compiled, so a loop already
+    // running in it can move across rather than wait to be re-entered.
+    let resumable = BTreeSet::from([func_id]);
+    let osr_variants = TieredBackend::add_osr_variants(&mut shaken, Some(&resumable));
+
+    let mut targets = vec![func_id];
+    targets.extend(osr_variants.iter().map(|(id, _, _)| *id));
+    TieredBackend::add_unserved_callees(&shaken, &known, &mut targets);
+
+    let context = Box::leak(Box::new(Context::create()));
+    let symbol_refs: Vec<(&str, *const u8)> = symbols
+        .iter()
+        .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
+        .collect();
+    let mut backend = LLVMJitBackend::with_symbols(context, &symbol_refs)?;
+    backend.seed_indirect_target_ids(seed);
+
+    let compiled = backend.compile_functions(&shaken, &targets, &known)?;
+
+    // Arm each resume point now the engine has addresses. A back edge reads
+    // its slot every iteration and starts transferring the moment it is
+    // non-null.
+    for (variant_id, parent_name, site_key) in &osr_variants {
+        match compiled.get(variant_id) {
+            Some(ptr) => crate::ir::osr::publish_helper(parent_name, *site_key, *ptr as *mut ()),
+            None => {
+                if crate::ir::osr::osr_trace_enabled() {
+                    eprintln!("[osr] no address for {parent_name} site=0x{site_key:x}");
+                }
+            }
+        }
+    }
+
+    let _leaked = Box::leak(Box::new(backend));
+
+    compiled
+        .get(&func_id)
+        .copied()
+        .ok_or_else(|| format!("no address for {func_id:?} after compiling it"))
 }
