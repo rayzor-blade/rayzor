@@ -381,6 +381,18 @@ pub struct TieredBackend {
     beadie_beads_optimized:
         Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
 
+    /// Adapter that promotes a function from Cranelift to LLVM. Separate
+    /// from the Cranelift adapters because it drives a different backend
+    /// type, and separate from their registries for the same reason a
+    /// bead's compile state is one-shot.
+    #[cfg(feature = "llvm-backend")]
+    beadie_adapter_llvm: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieLlvm>>,
+
+    /// Bead registry for the LLVM adapter.
+    #[cfg(feature = "llvm-backend")]
+    beadie_beads_llvm:
+        Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieLlvm>>>>,
+
     /// Phase B: counter — number of times `record_call` attempted to
     /// route a promotion through beadie, summed across both Standard
     /// and Optimized tiers. Includes failures.
@@ -401,8 +413,24 @@ pub struct TieredBackend {
     beadie_optimized_installs: Arc<AtomicU64>,
 }
 
+/// Invocations before a function is promoted to LLVM.
+///
+/// One, because the compile covers the whole module: the first function to run
+/// starts it for everything, and the rest reach the same code. A loop that is
+/// still running when it lands picks it up through its resume point.
+#[cfg(feature = "llvm-backend")]
+const LLVM_PROMOTION_THRESHOLD: u32 = 1;
+
+/// Invocations before the threshold at which the compile is submitted.
+///
+/// Zero at a threshold of one: there is nothing earlier to submit it at.
+#[cfg(feature = "llvm-backend")]
+const LLVM_PROMOTION_QUEUE_AHEAD: u32 = 0;
+
 /// Optimization tier level (5-tier system with interpreter)
-/// Note: All JIT tiers now use Cranelift. LLVM is available as a standalone backend.
+///
+/// The Cranelift tiers are promoted into by beadie; Maximum is LLVM, reached
+/// the same way rather than by a separate call that compiles everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OptimizationTier {
     Interpreted, // Phase 0: MIR interpreter (instant startup, ~5-10x native speed)
@@ -1134,6 +1162,7 @@ impl TieredBackend {
         let (beadie_adapter, beadie_adapter_optimized) =
             build_beadie_adapters(&[], config.verbosity)?;
 
+        let runtime_symbols_shared: Arc<Vec<(String, usize)>> = Arc::new(Vec::new());
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
             baseline_backend,
@@ -1143,7 +1172,7 @@ impl TieredBackend {
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
             start_interpreted,
-            runtime_symbols: Arc::new(Vec::new()),
+            runtime_symbols: Arc::clone(&runtime_symbols_shared),
             llvm_queue: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
@@ -1153,6 +1182,14 @@ impl TieredBackend {
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "llvm-backend")]
+            beadie_adapter_llvm: super::beadie_jit::build_llvm_adapter(
+                Arc::clone(&runtime_symbols_shared),
+                LLVM_PROMOTION_THRESHOLD,
+                LLVM_PROMOTION_QUEUE_AHEAD,
+            ),
+            #[cfg(feature = "llvm-backend")]
+            beadie_beads_llvm: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
@@ -1200,6 +1237,7 @@ impl TieredBackend {
         let (beadie_adapter, beadie_adapter_optimized) =
             build_beadie_adapters(symbols, config.verbosity)?;
 
+        let runtime_symbols_shared: Arc<Vec<(String, usize)>> = Arc::new(runtime_symbols);
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
             baseline_backend,
@@ -1209,7 +1247,7 @@ impl TieredBackend {
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
             start_interpreted,
-            runtime_symbols: Arc::new(runtime_symbols),
+            runtime_symbols: Arc::clone(&runtime_symbols_shared),
             llvm_queue: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
@@ -1219,6 +1257,14 @@ impl TieredBackend {
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "llvm-backend")]
+            beadie_adapter_llvm: super::beadie_jit::build_llvm_adapter(
+                Arc::clone(&runtime_symbols_shared),
+                LLVM_PROMOTION_THRESHOLD,
+                LLVM_PROMOTION_QUEUE_AHEAD,
+            ),
+            #[cfg(feature = "llvm-backend")]
+            beadie_beads_llvm: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
@@ -2204,6 +2250,43 @@ impl TieredBackend {
 
     /// Record a function call (for profiling and tier promotion)
     /// This should be called before executing a function
+    /// Ask beadie to promote `func_id` to LLVM, and install the pointer if one
+    /// is already waiting.
+    ///
+    /// Non-blocking: the first call submits the compile and returns, and a
+    /// later call picks the result up. The compile covers the whole module, so
+    /// only the first function through here does the work.
+    #[cfg(feature = "llvm-backend")]
+    fn route_llvm_promotion(&self, func_id: IrFunctionId) {
+        // A function already at the top tier has nothing to ask for.
+        {
+            let tiers = self.function_tiers.read().unwrap();
+            if tiers.get(&func_id).copied() == Some(OptimizationTier::Maximum) {
+                return;
+            }
+        }
+
+        let modules_handle = Arc::clone(&self.modules);
+        let ready = {
+            let mut beads = self.beadie_beads_llvm.lock().unwrap();
+            let bound = beads.entry(func_id).or_insert_with(|| {
+                self.beadie_adapter_llvm
+                    .register(std::ptr::null_mut(), None)
+            });
+            let outcome = self.beadie_adapter_llvm.on_invoke_outcome(bound, move |_| {
+                super::beadie_jit::BeadieFunctionDef {
+                    modules: modules_handle,
+                    func_id,
+                }
+            });
+            outcome.or_else(|| bound.bead().compiled())
+        };
+
+        if let Some(ptr) = ready {
+            self.install_beadie_pointer(func_id, ptr as usize, OptimizationTier::Maximum);
+        }
+    }
+
     pub fn record_call(&self, func_id: IrFunctionId) {
         self.profile_data.record_function_call(func_id);
         let count = self.profile_data.get_function_count(func_id);
@@ -2211,6 +2294,14 @@ impl TieredBackend {
         if !self.config.enable_tier_promotion {
             return;
         }
+
+        // Ask for the LLVM tier on the way past. The compile runs on beadie's
+        // worker while this call carries on, so a function entered once still
+        // reaches it -- through its resume point if it is still inside a loop
+        // when the code lands, and through the installed pointer next time it
+        // is called if it is not.
+        #[cfg(feature = "llvm-backend")]
+        self.route_llvm_promotion(func_id);
 
         // Sample promotion checks, not the underlying execution counter.
         let sample_rate = self.profile_data.config().sample_rate.max(1);
