@@ -322,7 +322,7 @@ impl IrModule {
     /// body over every same-named empty stub. Restricted to bodies that
     /// reference no other function, so the CFG copy needs no id renumbering.
     pub fn link_selfcontained_wrapper_stubs(&mut self) {
-        use crate::ir::{IrInstruction, IrTerminator};
+        use crate::ir::IrInstruction;
         let refs_other_fn = |cfg: &crate::ir::IrControlFlowGraph| {
             cfg.blocks.values().any(|b| {
                 b.instructions.iter().any(|i| {
@@ -335,18 +335,12 @@ impl IrModule {
                 })
             })
         };
-        let is_stub = |cfg: &crate::ir::IrControlFlowGraph| {
-            cfg.blocks.len() == 1
-                && cfg.blocks.values().all(|b| {
-                    b.instructions.is_empty() && matches!(b.terminator, IrTerminator::Unreachable)
-                })
-        };
         // One real body per wrapper name.
         let mut bodies: BTreeMap<String, crate::ir::IrControlFlowGraph> = BTreeMap::new();
         for func in self.functions.values() {
             let name = func.qualified_name.as_deref().unwrap_or(&func.name);
             if !func.cfg.blocks.is_empty()
-                && !is_stub(&func.cfg)
+                && !func.is_forward_stub()
                 && !refs_other_fn(&func.cfg)
                 && !bodies.contains_key(name)
             {
@@ -357,7 +351,7 @@ impl IrModule {
             return;
         }
         for func in self.functions.values_mut() {
-            if is_stub(&func.cfg) {
+            if func.is_forward_stub() {
                 let name = func.qualified_name.as_deref().unwrap_or(&func.name);
                 if let Some(cfg) = bodies.get(name) {
                     func.cfg = cfg.clone();

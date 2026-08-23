@@ -235,6 +235,26 @@ impl Default for FunctionAttributes {
 }
 
 impl IrFunction {
+    /// True if this body is a forward-declaration stub rather than real code.
+    ///
+    /// A function referenced before its defining module is lowered gets a
+    /// placeholder body: one block, no instructions, `Unreachable`. Backends
+    /// must recognise the shape to install a diagnostic in its place, and the
+    /// self-contained wrapper linker must recognise it to know which bodies
+    /// are still waiting to be filled. One definition so those cannot drift.
+    pub fn is_forward_stub(&self) -> bool {
+        self.cfg.blocks.len() == 1
+            && self.cfg.blocks.values().all(|b| {
+                b.instructions.is_empty()
+                    && matches!(b.terminator, crate::ir::IrTerminator::Unreachable)
+            })
+    }
+
+    /// The name to show a human: qualified where we have it, bare otherwise.
+    pub fn display_name(&self) -> &str {
+        self.qualified_name.as_deref().unwrap_or(&self.name)
+    }
+
     /// True if any signature or register type is a vector wider than 128 bits.
     ///
     /// Only the LLVM backend has 256-bit vectors (`SIMD32i8`/`SIMD8i32`).

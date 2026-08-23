@@ -34,6 +34,9 @@ pub struct CraneliftBackend {
 
     /// Map from MIR function IDs to Cranelift function IDs
     function_map: BTreeMap<IrFunctionId, FuncId>,
+    /// Names a trap stub can point at, so it can report which function it
+    /// stands in for. Interned: one program can install a great many stubs.
+    stub_name_data: BTreeMap<String, DataId>,
 
     /// Display name per Cranelift FuncId, captured at declare_function time
     /// for the JIT-symbol-map dump (RAYZOR_DUMP_JIT_MAP=1). Prefers
@@ -318,6 +321,7 @@ impl CraneliftBackend {
             module,
             ctx,
             function_map: BTreeMap::new(),
+            stub_name_data: BTreeMap::new(),
             funcid_display_name: BTreeMap::new(),
             funcid_source_loc: BTreeMap::new(),
             backend_id,
@@ -1828,6 +1832,42 @@ impl CraneliftBackend {
     /// Define a minimal trap stub for a function that failed compilation.
     /// This prevents cranelift's finalize_definitions from panicking on
     /// declared-but-uncompiled functions.
+    /// Declare the runtime function a stub calls to name itself.
+    fn declare_uncompiled_reporter(&mut self) -> Result<FuncId, String> {
+        const NAME: &str = "rayzor_uncompiled_function";
+        if let Some(&existing) = self.runtime_functions.get(NAME) {
+            return Ok(existing);
+        }
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(self.pointer_type));
+        sig.params.push(AbiParam::new(self.pointer_type));
+        let func_id = self
+            .module
+            .declare_function(NAME, Linkage::Import, &sig)
+            .map_err(|e| format!("declaring {NAME}: {e}"))?;
+        self.runtime_functions.insert(NAME.to_string(), func_id);
+        Ok(func_id)
+    }
+
+    /// The stub's own name, as bytes it can point at.
+    fn intern_stub_name(&mut self, display: &str) -> Result<DataId, String> {
+        if let Some(&existing) = self.stub_name_data.get(display) {
+            return Ok(existing);
+        }
+        let symbol = format!("stubname_{}", self.stub_name_data.len());
+        let data_id = self
+            .module
+            .declare_data(&symbol, Linkage::Local, false, false)
+            .map_err(|e| format!("declaring stub name data: {e}"))?;
+        let mut desc = DataDescription::new();
+        desc.define(display.as_bytes().to_vec().into_boxed_slice());
+        self.module
+            .define_data(data_id, &desc)
+            .map_err(|e| format!("defining stub name data: {e}"))?;
+        self.stub_name_data.insert(display.to_string(), data_id);
+        Ok(data_id)
+    }
+
     fn define_trap_stub(
         &mut self,
         mir_func_id: IrFunctionId,
@@ -1891,13 +1931,34 @@ impl CraneliftBackend {
             }
         }
 
-        // Build a minimal function body that just traps
+        // The body says which function this was before it stops. A bare trap
+        // kills the process with SIGTRAP and nothing else, which reads the same
+        // whether the construct was unsupported, the defining module was never
+        // compiled, or the compiler miscompiled it -- and a corpus of those is
+        // undiagnosable. Reached only when something actually calls it, so
+        // stubs for functions nobody calls stay silent.
+        let reporter = self.declare_uncompiled_reporter()?;
+        let display = function
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| function.name.clone());
+        let name_data = self.intern_stub_name(&display)?;
+
         let mut builder_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut builder_ctx);
         let block = builder.create_block();
         builder.append_block_params_for_function_params(block);
         builder.switch_to_block(block);
         builder.seal_block(block);
+
+        let gv = self.module.declare_data_in_func(name_data, builder.func);
+        let name_ptr = builder.ins().symbol_value(self.pointer_type, gv);
+        let name_len = builder
+            .ins()
+            .iconst(self.pointer_type, display.len() as i64);
+        let callee = self.module.declare_func_in_func(reporter, builder.func);
+        builder.ins().call(callee, &[name_ptr, name_len]);
+        // It does not return, but Cranelift needs the block terminated.
         builder
             .ins()
             .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());

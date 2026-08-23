@@ -468,6 +468,29 @@ pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
     global_slot(global_id as usize).load(Ordering::Relaxed) as i64
 }
 
+/// Report a function the compiler could not build, then stop.
+///
+/// A function that failed to compile is given a stub so the rest of the
+/// program still links. Left as a bare trap, calling one kills the process
+/// with SIGTRAP and says nothing -- indistinguishable from a miscompile, from
+/// a module that was never compiled, and from an unsupported construct. The
+/// name is what tells those apart, so the stub carries it.
+///
+/// # Safety
+/// `name` must point to `len` bytes of UTF-8 for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_uncompiled_function(name: *const u8, len: usize) -> ! {
+    let what = if name.is_null() {
+        "<unnamed>".to_string()
+    } else {
+        String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned()
+    };
+    eprintln!("rayzor: `{what}` was never compiled, and something called it.");
+    eprintln!("        The compiler could not build this function and installed a stub in its");
+    eprintln!("        place. Whatever it uses is unsupported, or failed to compile earlier.");
+    std::process::abort()
+}
+
 /// The address of a global's storage.
 ///
 /// For a backend that compiles a static access to a direct load instead of a
