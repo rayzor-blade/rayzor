@@ -25,9 +25,8 @@ pub fn quantise_int8_row(src: &[f32], dst: &mut [i8]) -> f32 {
     scale
 }
 
-/// i32 dot of two i8 vectors — `vdotq_s32` (SDOT) on aarch64+dotprod
-/// (the crate enables `stdarch_neon_dotprod` there), scalar i32
-/// accumulation elsewhere.
+/// i32 dot of two i8 vectors — `vdotq_s32` (SDOT) on aarch64+dotprod,
+/// scalar i32 accumulation elsewhere.
 ///
 /// # Safety
 /// `a[..k]` and `b[..k]` must reference live storage.

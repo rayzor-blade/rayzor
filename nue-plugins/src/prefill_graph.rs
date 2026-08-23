@@ -119,7 +119,7 @@ mod imp {
         let Some(m) = reg.by_handle.get(&handle) else {
             return 0;
         };
-        for (&s, _) in m.buckets.iter() {
+        for &s in m.buckets.keys() {
             if seq <= s {
                 return s;
             }

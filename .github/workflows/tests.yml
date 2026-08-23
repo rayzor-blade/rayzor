@@ -60,12 +60,8 @@ jobs:
           - os: ubuntu-latest
             toolchain: stable
             compiler_features: ""
-          # runtime-core gates the NEON dotprod intrinsics behind
-          # `feature(stdarch_neon_dotprod)`, still unstable in 1.97, and the
-          # macOS runners are arm64 — so this target needs nightly to build at
-          # all. Drop back to stable once vdotq_s32 and friends land.
           - os: macos-latest
-            toolchain: nightly
+            toolchain: stable
             compiler_features: ""
           # Cranelift only. llvm-sys drives `llvm-config` and links the
           # component archives, and the official LLVM release for Windows is
