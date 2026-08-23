@@ -204,10 +204,20 @@ PYGEN
       132|134|139|133) status="CRASH" ;;
       *) status="COMPILE_FAIL" ;;
     esac
-    if [[ "$det" == *"No main function found"* ]]; then
+    # "No main function found" is only OUR fault if we failed to write one.
+    # When the generated file plainly has a main and the compiler cannot see
+    # it, that is a compiler defect -- in every case observed so far the RD
+    # parser rejected a construct, fell back, and the fallback lost the class
+    # body. Calling that a skip charges our own gaps to the harness and hides
+    # them from the score.
+    if [[ "$det" == *"No main function found"* ]] \
+       && ! grep -q "static function main" "$d/unit/issues/$base.hx"; then
       record "$base" SKIP "harness could not inject main"
     elif [[ "$det" == *"'utest'"* ]]; then
       record "$base" SKIP "uses utest directly"
+    elif [[ "$det" == *"No main function found"* ]]; then
+      record "$base" COMPILE_FAIL "main present but not found: $(printf '%s' "$out" \
+        | grep -oE "expected [^;]*" | head -1)"
     else
       record "$base" "$status" "$det"
     fi
