@@ -83,9 +83,10 @@ for f in "$SRC"/*.hx; do
   fi
 
 
-  d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit"
+  d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit" "$d/utest"
   cp "$HERE/shims/unit/Test.hx" "$d/unit/Test.hx"
   cp "$HERE/shims/unit/ConfCheck.hx" "$d/unit/ConfCheck.hx"
+  cp "$HERE/shims/utest/Assert.hx" "$d/utest/Assert.hx"
 
   # Inject main() as the last member of the class; awk -v cannot carry newlines.
   # Exits 3 when the class declares no test method that is live for us.
