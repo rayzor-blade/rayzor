@@ -652,10 +652,10 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
+    // - Fast tier promotion (thresholds: 2, 3, 5)
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
-    // Every tier including the top one is reached by heat. Promoting by hand
+    // The top tier is not reached here; see the preset. Promoting by hand
     // would measure a tier the runtime never picks on its own.
     // Suppress beadie/tier-transition chatter — bench output should
     // stay clean; the runner already reports compile/execute timings.

@@ -687,13 +687,17 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    // Reached by heat, like every other tier, and inside the
-                    // warmup window so the measured runs are steady state.
-                    // Affordable because the compile happens on beadie's
-                    // broker thread rather than where the program is waiting;
-                    // it was not, when reaching this tier meant stalling for
-                    // it.
-                    blazing_threshold: 10,
+                    // Out of reach until promotion can find the code that
+                    // runs. Only the entry is ever counted hot, so promoting
+                    // compiles `main` and nothing else -- which pays on nbody,
+                    // whose loop IS main, and pays for nothing on fibonacci,
+                    // binarytrees and deltablue, whose work is in callees that
+                    // stay where they were. Three benchmarks lost to buy one.
+                    //
+                    // The compile itself is no longer the problem; it happens
+                    // on beadie's broker thread. What is missing is a profile
+                    // that can see past the entry function.
+                    blazing_threshold: u64::MAX,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
