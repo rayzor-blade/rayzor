@@ -7,21 +7,21 @@ rayzor and reports what fraction of standard Haxe actually runs.
 
 `tests/unit/src/unit/issues/` — 1165 files, one per upstream GitHub issue, each
 a small self-contained regression test. 451 of them extend `unit.Test` and are
-runnable; the rest are macro-only, type-declaration-only, or target-specific.
+runnable; the rest are macro-only or type-declaration-only.
 
-Fetch it without cloning the whole compiler:
-
-```
-git clone --filter=blob:none --sparse --depth 1 \
-    https://github.com/HaxeFoundation/haxe.git haxe-tests
-cd haxe-tests && git sparse-checkout set tests/unit tests/misc std
-```
+The corpus is **not vendored**. Haxe's LICENSE says a file carrying no license
+header outside `std/` and `libs/` is GPL-2.0-or-later, and none of the 1165
+files carries one — so copying them into this Apache-2.0 repository would mix
+incompatible licences. `fetch.sh` clones them instead, blobless and sparse, at
+the revision in `corpus.pin`, into a gitignored `corpus/`.
 
 ## Running
 
 ```
-SRC=<path>/haxe-tests/tests/unit/src/unit/issues ./scripts/haxe_conformance.sh
-LIMIT=25 ./scripts/haxe_conformance.sh      # pilot
+./fetch.sh                 # once, and again when corpus.pin moves
+./run.sh                   # whole corpus
+LIMIT=25 ./run.sh          # pilot
+SRC=<path> ./run.sh        # score a clone you already have
 ```
 
 The official suite depends on `utest`, which is reflection-heavy. `unit/Test.hx`
@@ -29,6 +29,19 @@ here is a minimal stand-in providing only what the corpus uses — `eq` (2125
 call sites), `t` (533), `f` (265), `noAssert` (139), `feq` (97), `aeq` (35),
 `assert` (14), `exc` (10). Each test class gets a `main()` injected as its last
 member, so its own `test*()` methods are legitimately reachable.
+
+## What is out of scope
+
+A test that **imports** a target-language package (`php.Syntax`, `cpp.Star`,
+`flash.Vector`, `jvm.NativeArray`) asserts about that target's semantics, not
+about Haxe, and rayzor will never satisfy it. Those are skipped and the reason
+is recorded.
+
+Conditional compilation is deliberately *not* a filter. `#if cpp … #else … #end`
+still has a branch that is ours, so judging a file by its `#if` directives would
+drop tests that legitimately apply. Conditionals are consulted for one narrower
+purpose: deciding which `test*()` methods are live, so the injected `main()`
+does not call a method that only exists under another target.
 
 ## Scoring
 
@@ -39,6 +52,21 @@ produce no output at all, including SIGTRAP at exit 133, and the existing
 
 Outcomes are `PASS`, `COMPILE_FAIL`, `CRASH` (132/133/134/139), `WRONG_ANSWER`,
 `NO_OUTPUT`, `SKIP`, written as TSV so runs diff against each other.
+
+A crash whose cause is an uncompiled function records that function's name
+(`uncompiled unit.issues.Issue2725.new`) rather than an exit code, which turns
+the failing set into a ranked list of what the compiler cannot yet build.
+
+## Layout
+
+```
+run.sh              the harness
+fetch.sh            pinned, blobless, sparse clone of the upstream corpus
+corpus.pin          upstream revision the numbers describe
+shims/unit/         minimal Test.hx / ConfCheck.hx, standing in for utest
+known-failing/      repros distilled from failures
+corpus/             fetched, gitignored
+```
 
 ## known-failing/
 
