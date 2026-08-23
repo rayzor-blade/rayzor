@@ -636,11 +636,12 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
+    // - Fast tier promotion (thresholds: 2, 3, 5)
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
-    // Every tier including LLVM is reached by heat. Promoting by hand would
-    // measure a tier the runtime never picks on its own.
+    // The top tier is not reached here: promoting costs more than it returns
+    // while only the entry function is ever counted as hot. Promoting by hand
+    // would measure a tier the runtime never picks on its own.
     // Suppress beadie/tier-transition chatter — bench output should
     // stay clean; the runner already reports compile/execute timings.
     let mut config = TierPreset::Benchmark.to_config();

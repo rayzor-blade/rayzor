@@ -680,11 +680,14 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    // Reached by heat like every other tier, and inside the
-                    // warmup window so the measured runs are steady state.
-                    // Promotion compiles the hot function rather than the
-                    // program around it, so arriving early is cheap.
-                    blazing_threshold: 10,
+                    // The top tier is NOT reached by heat here. Measured on
+                    // nbody, promoting costs far more than the promoted code
+                    // returns: only the entry is ever counted, so promotion
+                    // compiles `main` while every function its loop calls
+                    // stays where it was, and the program pays the compile for
+                    // no change to what runs. Lower it again only alongside
+                    // profiling that can see inner functions.
+                    blazing_threshold: u64::MAX,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
