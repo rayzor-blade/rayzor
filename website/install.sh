@@ -25,8 +25,18 @@ case "$(uname -s)" in
   Darwin) os=macos ;;
   Linux)  os=linux ;;
   MINGW*|MSYS*|CYGWIN*)
-    die "Windows is not installable this way. Download the zip from
-    https://github.com/$REPO/releases/$CHANNEL and put rayzor.exe on your PATH." ;;
+    # Git Bash and MSYS2 are Windows underneath, so the Linux build will not
+    # run here. WSL is the better target anyway: LLVM.org's Windows release
+    # ships no component archives to link against, so the native Windows
+    # build has no LLVM tier, while the Linux build under WSL has the whole
+    # compiler. This same script installs it there.
+    die "this is a Windows shell, not Linux.
+
+    Recommended: run it inside WSL, where you get the LLVM tier too:
+        wsl -- sh -c 'curl -fsSL https://rayzor.tech/install.sh | sh'
+
+    Native Windows build (Cranelift only, no LLVM tier):
+        https://github.com/$REPO/releases/$CHANNEL" ;;
   *) die "unsupported operating system: $(uname -s)" ;;
 esac
 
