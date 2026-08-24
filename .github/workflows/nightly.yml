@@ -45,14 +45,16 @@ jobs:
             asset: rayzor-linux-x86_64.tar.gz
             features: "--no-default-features --features llvm-static"
             wasm_opt: true
-          # Cranelift only. llvm-sys drives `llvm-config` and links the
-          # component archives; the official LLVM release for Windows is
-          # toolchain-only and ships neither, so no LLVM_SYS_211_PREFIX can
-          # satisfy it. This build has no LLVM tier -- see tests.yml.
+          # LLVM.org's Windows release is toolchain-only and carries no
+          # llvm-config or component archives, which is what llvm-sys links
+          # against -- but conda-forge's `llvmdev` package carries both. The
+          # build below tries LLVM and falls back to Cranelift if the link
+          # fails, so a Windows artifact ships either way and the log says
+          # which shape it is.
           - os: windows-latest
             label: windows-x86_64
             asset: rayzor-windows-x86_64.zip
-            features: "--no-default-features --features cranelift-backend"
+            features: ""
             wasm_opt: false
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +74,31 @@ jobs:
           brew install llvm@21
           echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
 
+      # The development files LLVM.org's Windows installer leaves out.
+      - name: Install LLVM 21 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o llvmdev.conda `
+            https://anaconda.org/conda-forge/llvmdev/21.1.8/download/win-64/llvmdev-21.1.8-h830ff33_0.conda
+          # A .conda is a zip holding zstd-compressed tarballs; pkg-* carries
+          # the files, info-* only metadata.
+          New-Item -ItemType Directory -Force -Path llvmdev | Out-Null
+          Expand-Archive -Path llvmdev.conda -DestinationPath llvmdev-raw -Force
+          $pkg = Get-ChildItem llvmdev-raw -Filter 'pkg-*.tar.zst' | Select-Object -First 1
+          tar -xf $pkg.FullName -C llvmdev
+          $prefix = (Resolve-Path llvmdev).Path
+          if (-not (Test-Path "$prefix\Library\bin\llvm-config.exe")) {
+            Write-Host "no llvm-config.exe in the package; falling back to Cranelift"
+            "RAYZOR_WIN_FEATURES=--no-default-features --features cranelift-backend" `
+              | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          } else {
+            "LLVM_SYS_211_PREFIX=$prefix\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            "RAYZOR_WIN_FEATURES=--no-default-features --features llvm-static" `
+              | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            & "$prefix\Library\bin\llvm-config.exe" --version
+          }
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -82,7 +109,21 @@ jobs:
         run: cargo run --release -p snapshot-gen
 
       - name: Build rayzor
-        run: cargo build -p rayzor --release ${{ matrix.features }}
+        shell: bash
+        run: |
+          FEATURES="${{ matrix.features }}"
+          # Windows resolves its feature set above, and retries on Cranelift if
+          # linking LLVM fails -- an artifact without the top tier beats none.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            FEATURES="${RAYZOR_WIN_FEATURES:---no-default-features --features cranelift-backend}"
+            echo "windows feature set: $FEATURES"
+            if ! cargo build -p rayzor --release $FEATURES; then
+              echo "::warning::LLVM build failed on Windows; falling back to Cranelift"
+              cargo build -p rayzor --release --no-default-features --features cranelift-backend
+            fi
+          else
+            cargo build -p rayzor --release $FEATURES
+          fi
 
       # Bundled wasm optimizer, kept a SEPARATE binary so Binaryen's llvm::
       # symbols cannot ODR-collide with LLVM in the main one. The CLI finds it
