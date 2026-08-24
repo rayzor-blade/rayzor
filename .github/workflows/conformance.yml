@@ -42,10 +42,10 @@ jobs:
   conformance:
     name: Haxe conformance
     runs-on: ubuntu-latest
-    # The corpus is ~350 compiles at well under a second each. Anything near
-    # this ceiling is a hang, not slow progress, and the default six hours
-    # would sit on a runner for that long before saying so.
-    timeout-minutes: 45
+    # Generous, because a runner is far slower at this than a laptop: the
+    # corpus is ~5 minutes locally and overran 45 here. Still bounded, since
+    # the default six hours would sit on a runner that long before saying so.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -88,18 +88,28 @@ jobs:
         env:
           WORK: ${{ runner.temp }}/conformance
           OUT: ${{ runner.temp }}/conformance/report.tsv
-          TIMEOUT: 60
+          # Tighter than the local default. A test that cannot compile and run
+          # in this long is stuck, and paying a minute each for those is what
+          # turns a five-minute corpus into an overrun.
+          TIMEOUT: 25
         run: ./haxe-conformance/run.sh
 
       - name: Summarise
+        if: always()
         env:
           REPORT: ${{ runner.temp }}/conformance/report.tsv
         run: |
+          if [ ! -s "$REPORT" ]; then
+            echo "no report written — the corpus step produced nothing" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 haxe-conformance/summarise.py "$REPORT" conformance-out
           cp "$REPORT" conformance-out/
           cat conformance-out/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: conformance-results
