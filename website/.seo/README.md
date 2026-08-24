@@ -10,7 +10,7 @@ that a copy was complete.
 
 ## Carries over unchanged
 
-The canonical host is `https://rayzor-blade.com/`, and the home page must keep
+The canonical host is `https://rayzor.tech/`, and the home page must keep
 that exact URL — new pages are additions beneath it, never a relocation of the
 existing one.
 

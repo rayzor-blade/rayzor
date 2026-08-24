@@ -984,7 +984,7 @@ function buildHead(page, helmet, headScripts) {
     '<meta property="og:image:type" content="image/png">',
     "",
     '<meta name="twitter:card" content="summary_large_image">',
-    '<meta property="twitter:domain" content="rayzor-blade.com">',
+    '<meta property="twitter:domain" content="rayzor.tech">',
     `<meta property="twitter:url" content="${url}">`,
     `<meta name="twitter:title" content="${escapeAttr(page.title)}">`,
     `<meta name="twitter:description" content="${escapeAttr(social)}">`,
@@ -1216,6 +1216,55 @@ function buildPage(page, bench) {
   return { bytes: Buffer.byteLength(parts.join("\n")), dynamic: page.interactive === true };
 }
 
+/** Sitemap, generated from PAGES so a new page cannot be added without one.
+    lastmod comes from each source's mtime: a date that moves only when the
+    page actually changes is worth more to a crawler than today's date on
+    every URL, which is what a build-time stamp would give. */
+function writeSitemap() {
+  const urls = PAGES.map((page) => {
+    const loc = SITE.origin + (page.canonical === "/" ? "/" : page.canonical);
+    const src = path.join(IMPORT_DIR, page.src);
+    let lastmod = null;
+    try {
+      lastmod = fs.statSync(src).mtime.toISOString().slice(0, 10);
+    } catch {}
+    // The home page is the entry point; the rest are siblings of equal weight.
+    const priority = page.canonical === "/" ? "1.0" : "0.8";
+    return [
+      "  <url>",
+      `    <loc>${loc}</loc>`,
+      lastmod ? `    <lastmod>${lastmod}</lastmod>` : null,
+      "    <changefreq>weekly</changefreq>",
+      `    <priority>${priority}</priority>`,
+      "  </url>",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...urls,
+    "</urlset>",
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(OUT_DIR, "sitemap.xml"), xml);
+  return PAGES.length;
+}
+
+/** robots.txt, naming the sitemap so a crawler finds it without being told. */
+function writeRobots() {
+  const body = [
+    "User-agent: *",
+    "Allow: /",
+    "",
+    `Sitemap: ${SITE.origin}/sitemap.xml`,
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(OUT_DIR, "robots.txt"), body);
+}
+
 function copyAssets() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const name of ["logo.svg", "favicon.svg"]) {
@@ -1240,6 +1289,10 @@ function main() {
     const { bytes, dynamic } = buildPage(page, bench);
     console.log(`  ${page.out.padEnd(18)} ${String(bytes).padStart(7)} bytes${dynamic ? "  + client" : ""}`);
   }
+  const mapped = writeSitemap();
+  writeRobots();
+  console.log(`  ${"sitemap.xml".padEnd(18)} ${String(mapped).padStart(7)} urls`);
+  console.log(`  ${"robots.txt".padEnd(18)}`);
 }
 
 main();
