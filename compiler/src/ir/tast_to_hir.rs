@@ -558,6 +558,43 @@ impl<'a> TastToHirContext<'a> {
         // this, those defaults would silently never execute.
         if let Some(constructor) = class.constructors.first() {
             hir_constructor = Some(self.lower_constructor(constructor, &class.fields));
+        } else if class
+            .fields
+            .iter()
+            .any(|f| !f.is_static && f.initializer.is_some())
+        {
+            // A class that declares none of its own still has to run its
+            // declaration-site defaults, and the branch above only reaches
+            // them through a constructor that exists. A subclass is where
+            // this bites: `class D extends P { var n = 2; }` inherits P's
+            // constructor, which knows nothing of D's fields, so n stays 0
+            // and an initialised array stays null -- a wrong value first,
+            // and a null dereference wherever it is used.
+            let field_inits: Vec<HirFieldInit> = class
+                .fields
+                .iter()
+                .filter(|f| !f.is_static && f.initializer.is_some())
+                .map(|f| HirFieldInit {
+                    field: f.symbol_id,
+                    value: self.lower_expression(f.initializer.as_ref().unwrap()),
+                })
+                .collect();
+            // A synthesised constructor REPLACES the inherited one, so without
+            // this the parent's own initialisation stops happening: the child's
+            // fields start reading correctly and the parent's start reading
+            // zero, which trades one silent wrong value for another.
+            let super_call = class.super_class.map(|_| HirSuperCall { args: Vec::new() });
+            hir_constructor = Some(HirConstructor {
+                params: Vec::new(),
+                super_call,
+                field_inits,
+                pre_super_stmts: Vec::new(),
+                body: HirBlock {
+                    statements: Vec::new(),
+                    expr: None,
+                    scope: self.current_scope,
+                },
+            });
         }
 
         // Process methods
