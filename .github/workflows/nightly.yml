@@ -163,7 +163,9 @@ jobs:
 
             Install: `curl -fsSL https://rayzor.tech/install.sh | bash`
 
-            The Windows build has no LLVM tier: LLVM's official Windows
-            release ships no component archives to link against.
+            The native Windows build is Cranelift-only: LLVM's official
+            Windows release ships no component archives to link against.
+            For the LLVM tier on Windows, use WSL and install the Linux
+            build -- `install.sh` does that automatically when run there.
           files: release/*
           fail_on_unmatched_files: true
