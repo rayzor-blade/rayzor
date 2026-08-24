@@ -30,9 +30,13 @@ env:
 permissions:
   contents: read
 
+# Queue, never cancel. This is a measurement, not a gate: a run killed by the
+# next push produces no number at all, and during active development the next
+# push always arrives before a run finishes -- every run so far was cancelled
+# and the badge never published once. Benchmarks queue for the same reason.
 concurrency:
   group: conformance-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   conformance:
