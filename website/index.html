@@ -581,10 +581,10 @@
       <div style="padding:24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9">
         <div style="display:flex;align-items:flex-start;gap:10px">
           <span style="color:#F97316">$</span>
-          <span style="color:#C9CCD2;flex:1;white-space:pre-wrap">curl -fsSL https://rayzor.tech/install.sh | bash</span>
+          <span style="color:#C9CCD2;flex:1;white-space:pre-wrap">curl -fsSL https://rayzor.tech/install.sh | sh</span>
           <button data-dc-on="click" data-dc-h="9" style="border:1px solid #26282F;background:transparent;color:#6F757E;border-radius:6px;padding:3px 8px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;flex:none" class="dch36">copy</button>
         </div>
-        <div style="margin-top:16px;line-height:1.75;color:#5B616B">LLVM is needed for the aot backend only — the Cranelift JIT and the wasm target don't require it.</div>
+        <div style="margin-top:16px;line-height:1.75;color:#5B616B">Installs to ~/.rayzor/bin. The download carries its own LLVM, so nothing else needs installing.</div>
         <div style="margin-top:22px;padding-top:20px;border-top:1px solid #1A1C21;color:#4E535B">then</div>
         <div style="margin-top:10px"><span style="color:#F97316">$</span> <span style="color:#C9CCD2">rayzor init --name my-app</span></div>
         <div><span style="color:#F97316">$</span> <span style="color:#C9CCD2">rayzor run src/Main.hx</span></div>
@@ -895,13 +895,13 @@
     const OS = {
       unix: {
         label: "macOS & Linux",
-        cmd: "curl -fsSL https://rayzor.tech/install.sh | bash",
-        note: "LLVM is needed for the aot backend only — the Cranelift JIT and the wasm target don't require it."
+        cmd: "curl -fsSL https://rayzor.tech/install.sh | sh",
+        note: "Installs to ~/.rayzor/bin. The download carries its own LLVM, so nothing else needs installing."
       },
       win: {
         label: "Windows",
-        cmd: "curl -fsSL https://rayzor.tech/install.sh | bash",
-        note: "Run it under Git Bash or WSL. Native PowerShell install is not there yet — cargo install --git https://github.com/rayzor-blade/rayzor works anywhere the Rust toolchain does."
+        cmd: "wsl -- sh -c 'curl -fsSL https://rayzor.tech/install.sh | sh'",
+        note: "WSL gets the same build as Linux, LLVM tier included. Without WSL there is a native build under Releases — it runs on Cranelift, since LLVM ships no linkable libraries for Windows."
       }
     };
     const WORKLOADS = [
