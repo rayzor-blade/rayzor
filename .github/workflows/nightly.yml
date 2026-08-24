@@ -1,0 +1,169 @@
+name: Nightly
+
+# Rolling prerelease of the compiler, so `install.sh` has something to fetch.
+# The download is self-contained: LLVM's C++ ABI does not hold across major
+# versions, so a plain download cannot assume a version-matched libLLVM is
+# installed and links LLVM's component archives instead. That is ~223 MB
+# against ~51 MB for the system-linked build -- a trade that belongs to a
+# package manager's build, not to this one.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macos-aarch64
+            asset: rayzor-macos-aarch64.tar.gz
+            features: "--no-default-features --features llvm-static"
+            wasm_opt: true
+          - os: macos-13
+            label: macos-x86_64
+            asset: rayzor-macos-x86_64.tar.gz
+            features: "--no-default-features --features llvm-static"
+            wasm_opt: true
+          - os: ubuntu-latest
+            label: linux-x86_64
+            asset: rayzor-linux-x86_64.tar.gz
+            features: "--no-default-features --features llvm-static"
+            wasm_opt: true
+          # Cranelift only. llvm-sys drives `llvm-config` and links the
+          # component archives; the official LLVM release for Windows is
+          # toolchain-only and ships neither, so no LLVM_SYS_211_PREFIX can
+          # satisfy it. This build has no LLVM tier -- see tests.yml.
+          - os: windows-latest
+            label: windows-x86_64
+            asset: rayzor-windows-x86_64.zip
+            features: "--no-default-features --features cranelift-backend"
+            wasm_opt: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 21 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-21 llvm-21-dev libpolly-21-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 21 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@21
+          echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The lowered standard library the shipped binary carries, and the build
+      # script embeds it -- so it has to exist before the binary is built, or
+      # a user's first compile pays to lower the library from source.
+      - name: Generate the standard library snapshot
+        run: cargo run --release -p snapshot-gen
+
+      - name: Build rayzor
+        run: cargo build -p rayzor --release ${{ matrix.features }}
+
+      # Bundled wasm optimizer, kept a SEPARATE binary so Binaryen's llvm::
+      # symbols cannot ODR-collide with LLVM in the main one. The CLI finds it
+      # as a sibling of its own exe, so wasm optimization needs no external
+      # binaryen install.
+      - name: Build rayzor-wasm-opt helper
+        if: matrix.wasm_opt
+        run: cargo build -p rayzor-wasm-opt-helper --release
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/rayzor dist/
+          [ -f target/release/rayzor-wasm-opt ] && cp target/release/rayzor-wasm-opt dist/ || true
+          chmod +x dist/*
+          tar -czf "${{ matrix.asset }}" -C dist .
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/rayzor.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
+          (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.asset }}" `
+            | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
+
+      - name: Smoke-test the binary it just built
+        shell: bash
+        run: |
+          BIN=target/release/rayzor
+          [ "${{ runner.os }}" = "Windows" ] && BIN=target/release/rayzor.exe
+          "$BIN" --version
+          printf 'class Main { public static function main() { Sys.println("nightly ok"); } }\n' > /tmp/Main.hx
+          "$BIN" run /tmp/Main.hx | tee /tmp/out.txt
+          grep -q "nightly ok" /tmp/out.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+
+  publish:
+    name: Publish nightly
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+            -exec cp {} release/ \;
+          ls -la release
+          # A publish with nothing in it would replace a working nightly with
+          # an empty one, which is worse than not publishing.
+          test -n "$(ls -A release)"
+
+      # One rolling tag. `install.sh` fetches from a stable URL rather than
+      # having to discover the newest release first.
+      - name: Publish rolling nightly
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly
+          prerelease: true
+          body: |
+            Rolling development build from `main` (${{ github.sha }}).
+            Rebuilt on every scheduled run — not a stable release.
+
+            Install: `curl -fsSL https://rayzor.tech/install.sh | bash`
+
+            The Windows build has no LLVM tier: LLVM's official Windows
+            release ships no component archives to link against.
+          files: release/*
+          fail_on_unmatched_files: true
