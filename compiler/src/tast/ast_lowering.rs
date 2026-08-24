@@ -6418,11 +6418,49 @@ impl<'a> AstLowering<'a> {
                                     return Ok(resolved);
                                 }
                             }
-                            let underlying = None; // Abstract enums have no explicit underlying type
+                            // Reuse the type the declaration interned, which
+                            // carries the underlying. Building a fresh one here
+                            // discards it at every annotation site, and a
+                            // missing underlying lowers to a 32-bit slot -- so
+                            // a static of an abstract over any reference type
+                            // gets half a pointer and faults on first use, and
+                            // one over Float loses everything after the point.
+                            // Mirrors the Class and Interface arms above.
+                            if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
+                                if symbol.type_id.is_valid() && type_arg_ids.is_empty() {
+                                    // An abstract over Dynamic is the exception.
+                                    // Dynamic is pointer-shaped, but a scalar
+                                    // assigned into one is not boxed on the way
+                                    // in, so honouring the underlying here hands
+                                    // the backend a raw integer to dereference.
+                                    // Leave those on the old representation until
+                                    // that assignment boxes.
+                                    let over_dynamic = {
+                                        let tt = self.context.type_table.borrow();
+                                        tt.get(symbol.type_id)
+                                            .and_then(|ti| match &ti.kind {
+                                                crate::tast::core::TypeKind::Abstract {
+                                                    underlying: Some(u),
+                                                    ..
+                                                } => tt.get(*u).map(|u| {
+                                                    matches!(
+                                                        u.kind,
+                                                        crate::tast::core::TypeKind::Dynamic
+                                                    )
+                                                }),
+                                                _ => None,
+                                            })
+                                            .unwrap_or(false)
+                                    };
+                                    if !over_dynamic {
+                                        return Ok(symbol.type_id);
+                                    }
+                                }
+                            }
                             Ok(self.context.type_table.borrow_mut().create_type(
                                 crate::tast::core::TypeKind::Abstract {
                                     symbol_id,
-                                    underlying,
+                                    underlying: None,
                                     type_args: type_arg_ids,
                                 },
                             ))
