@@ -43,10 +43,10 @@ const OUT_DIR = path.resolve(argOf("--out", HERE));
 // ---------------------------------------------------------------------------
 
 const SITE = {
-  origin: "https://rayzor-blade.com",
+  origin: "https://rayzor.tech",
   name: "Rayzor",
   themeColor: "#f97316",
-  image: "https://rayzor-blade.com/ograph-image.png",
+  image: "https://rayzor.tech/ograph-image.png",
   // Built from terms someone would type into a search box, not from the
   // implementation's vocabulary — backend names belong in featureList.
   tagline: "Faster Haxe, Native Performance",

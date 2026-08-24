@@ -10,8 +10,8 @@
 [![Tests](https://github.com/rayzor-blade/rayzor/actions/workflows/tests.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/tests.yml)
 [![Examples](https://github.com/rayzor-blade/rayzor/actions/workflows/examples.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/examples.yml)
 [![Benchmarks](https://github.com/rayzor-blade/rayzor/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/rayzor-blade/rayzor/actions/workflows/benchmarks.yml)
-[![Benchmark Results](https://img.shields.io/badge/Benchmark-Results-blueviolet)](https://rayzor-blade.com/benchmarks/)
-[![Haxe conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Frayzor-blade.com%2Fconformance%2Fbadge.json)](https://github.com/rayzor-blade/rayzor/tree/main/haxe-conformance)
+[![Benchmark Results](https://img.shields.io/badge/Benchmark-Results-blueviolet)](https://rayzor.tech/benchmarks/)
+[![Haxe conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Frayzor.tech%2Fconformance%2Fbadge.json)](https://github.com/rayzor-blade/rayzor/tree/main/haxe-conformance)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
 
