@@ -1,0 +1,517 @@
+//! `import` and `using`, including import.hx.
+
+use super::*;
+use crate::tast::node::HasSourceLocation;
+use crate::tast::{core::*, node::MemoryEffects, node::*, type_resolution, *};
+use parser::{
+    AbstractDecl, BinaryOp, BlockElement, ClassDecl, ClassField, ClassFieldKind, EnumConstructor,
+    EnumDecl, Expr, ExprKind, Function, FunctionParam, HaxeFile, Import, InterfaceDecl, Metadata,
+    Modifier, ModuleField, Package, Type, TypeDeclaration, TypeParam, TypedefDecl, UnaryOp, Using,
+};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::rc::Rc;
+use tracing::warn;
+
+impl<'a> AstLowering<'a> {
+    /// Initialize span converter for proper source location tracking
+    pub fn initialize_span_converter(&mut self, file_id: u32, source_text: String) {
+        self.context.initialize_span_converter(file_id, source_text);
+    }
+
+    /// Initialize span converter with specific filename for proper source location tracking
+    pub fn initialize_span_converter_with_filename(
+        &mut self,
+        file_id: u32,
+        source_text: String,
+        file_name: String,
+    ) {
+        self.context
+            .initialize_span_converter_with_filename(file_id, source_text, file_name);
+    }
+
+    /// Lower a complete Haxe file to TAST
+
+    /// Process import.hx files in the directory hierarchy
+    pub(crate) fn process_import_hx_files(
+        &mut self,
+        _current_file: &HaxeFile,
+    ) -> LoweringResult<()> {
+        use crate::tast::stdlib_loader::{StdLibConfig, StdLibLoader};
+        use std::path::PathBuf;
+
+        // Determine the current file's directory
+        // In a real implementation, we'd get this from the compilation context
+        // For now, we'll use a simple approach
+        let current_dir = PathBuf::from("/Users/amaterasu/Vibranium/rayzor/compiler/examples");
+
+        // Create a loader for import.hx files
+        let mut config = StdLibConfig::default();
+        config.load_import_hx = true;
+        config.std_paths = vec![]; // We're not loading std lib here
+        config.default_imports = vec![]; // No default imports
+
+        let mut loader = StdLibLoader::new(config);
+
+        // Look for import.hx files in the current directory and parent directories
+        let mut search_dir = current_dir.clone();
+        let mut import_files = Vec::new();
+
+        loop {
+            let import_hx_files = loader.load_import_hx(&search_dir);
+            import_files.extend(import_hx_files);
+
+            // Move to parent directory
+            match search_dir.parent() {
+                Some(parent) => search_dir = parent.to_path_buf(),
+                None => break,
+            }
+
+            // Stop at project root (avoid going too far up)
+            if search_dir.ends_with("rayzor") {
+                break;
+            }
+        }
+
+        // Process import.hx files in reverse order (parent directories first)
+        import_files.reverse();
+
+        for import_file in import_files {
+            // Process imports from import.hx
+            for import in &import_file.imports {
+                self.process_import_from_import_hx(import)?;
+            }
+
+            // Process using statements from import.hx
+            for using in &import_file.using {
+                self.process_using_from_import_hx(using)?;
+            }
+
+            // Process type declarations from import.hx
+            // Pre-register first (creates symbols in scope), then fully lower enums
+            // so their variant constructor types are properly set (not left as TypeId::invalid)
+            for declaration in &import_file.declarations {
+                self.pre_register_declaration(declaration)?;
+            }
+            for declaration in &import_file.declarations {
+                if let TypeDeclaration::Enum(enum_decl) = declaration {
+                    let _ = self.lower_enum_declaration(enum_decl);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process an import from import.hx file
+    fn process_import_from_import_hx(&mut self, import: &Import) -> LoweringResult<()> {
+        // Similar to lower_import, but adds to global scope
+        let imported_symbols = match &import.mode {
+            parser::ImportMode::Normal => import.path.last().map(|s| vec![s.as_str()]),
+            parser::ImportMode::Alias(alias) => Some(vec![alias.as_str()]),
+            parser::ImportMode::Field(field) => Some(vec![field.as_str()]),
+            parser::ImportMode::Wildcard => None,
+            parser::ImportMode::WildcardWithExclusions(_) => None,
+        };
+
+        // Register imported symbols in the symbol table for type resolution
+        if let Some(ref symbols) = imported_symbols {
+            for symbol_name in symbols {
+                let interned_name = self.context.intern_string(symbol_name);
+
+                // Build qualified path for namespace resolver lookup
+                let qualified_path = super::namespace::QualifiedPath {
+                    package: import.path[..import.path.len() - 1]
+                        .iter()
+                        .map(|s| self.context.intern_string(s))
+                        .collect(),
+                    name: interned_name,
+                };
+
+                // Check if symbol already exists in namespace resolver (from compiled dependencies)
+                // This is preferred over scope hierarchy because namespace has the real types
+                let imported_symbol = if let Some(existing) = self
+                    .context
+                    .namespace_resolver
+                    .lookup_symbol(&qualified_path)
+                {
+                    existing
+                } else if let Some(existing) = self.resolve_symbol_in_scope_hierarchy(interned_name)
+                {
+                    existing
+                } else {
+                    // Create a placeholder symbol for the imported type
+                    let new_sym = self
+                        .context
+                        .symbol_table
+                        .create_class_in_scope(interned_name, ScopeId::first());
+
+                    // Update qualified name
+                    self.context.update_symbol_qualified_name(new_sym);
+                    new_sym
+                };
+
+                // Add to root scope so it can be resolved globally
+                self.context
+                    .scope_tree
+                    .get_scope_mut(ScopeId::first())
+                    .expect("Root scope should exist")
+                    .add_symbol(imported_symbol, interned_name);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process a using statement from import.hx file
+    fn process_using_from_import_hx(&mut self, using: &Using) -> LoweringResult<()> {
+        // Register the using statement globally
+        // In a full implementation, we'd track these for static extension resolution
+        let _path = using.path.join(".");
+        // TODO: Track global using statements for static extension resolution
+        Ok(())
+    }
+
+    /// Extract module name from file
+    fn extract_module_name(&self, file: &HaxeFile) -> String {
+        if let Some(package) = &file.package {
+            package.path.join(".")
+        } else {
+            "default".to_string()
+        }
+    }
+
+    /// Lower an import declaration
+    pub(crate) fn lower_import(&mut self, import: &Import) -> LoweringResult<TypedImport> {
+        let imported_symbols = match &import.mode {
+            parser::ImportMode::Normal => import
+                .path
+                .last()
+                .map(|s| vec![self.context.intern_string(s)]),
+            parser::ImportMode::Alias(alias) => Some(vec![self.context.intern_string(alias)]),
+            parser::ImportMode::Field(field) => Some(vec![self.context.intern_string(field)]),
+            parser::ImportMode::Wildcard => None,
+            parser::ImportMode::WildcardWithExclusions(_) => None,
+        };
+
+        let alias = match &import.mode {
+            parser::ImportMode::Alias(alias) => Some(self.context.intern_string(alias)),
+            _ => None,
+        };
+
+        // Create import entry for the import resolver
+        let package_path: Vec<_> = import
+            .path
+            .iter()
+            .take(import.path.len().saturating_sub(1)) // All but last element are package path
+            .map(|s| self.context.string_interner.intern(s))
+            .collect();
+
+        let type_name = import
+            .path
+            .last()
+            .map(|s| self.context.string_interner.intern(s))
+            .unwrap_or_else(|| self.context.string_interner.intern("Unknown"));
+
+        let qualified_path = super::namespace::QualifiedPath::new(package_path, type_name);
+
+        // println!("Debug qualified path: {:?}", import.path);
+
+        let alias_interned = alias;
+
+        let exclusions = match &import.mode {
+            parser::ImportMode::WildcardWithExclusions(excl) => excl
+                .iter()
+                .map(|e| self.context.string_interner.intern(e))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        // Clone qualified_path before moving it into import_entry
+        let qualified_path_for_lookup = qualified_path.clone();
+
+        let import_entry = super::namespace::ImportEntry {
+            package_path: qualified_path,
+            alias: alias_interned,
+            exclusions,
+            is_wildcard: matches!(
+                import.mode,
+                parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_)
+            ),
+            location: self.context.create_location_from_span(import.span),
+        };
+
+        // Add import to current scope
+        self.context
+            .import_resolver
+            .add_import(self.context.current_scope, import_entry);
+
+        // Register imported symbols in the symbol table for type resolution
+        if let Some(ref symbols) = imported_symbols {
+            for &symbol_name in symbols {
+                // IMPORTANT: Check if this symbol was already pre-registered (e.g., from stdlib loading)
+                // If so, reuse that symbol instead of creating a duplicate
+                // First try to look up by the full qualified path from the import
+                let imported_symbol = if let Some(existing_symbol) = self
+                    .context
+                    .namespace_resolver
+                    .lookup_symbol(&qualified_path_for_lookup)
+                {
+                    // Reuse the pre-registered symbol from namespace
+                    existing_symbol
+                } else if import.path.len() > 1 {
+                    // Import has a package path (e.g., rayzor.concurrent.Thread).
+                    // Search by qualified_name first to avoid bare-name collisions
+                    // (e.g., sys.thread.Thread vs rayzor.concurrent.Thread).
+                    let full_qualified_name = import.path.join(".");
+                    let qn_interned = self.context.string_interner.intern(&full_qualified_name);
+                    if let Some(existing_symbol) = self
+                        .context
+                        .symbol_table
+                        .resolve_qualified_name(qn_interned)
+                    {
+                        // Found the correct symbol — remap the name in the symbol table
+                        // so expression resolution (symbol_table.lookup_symbol) finds it
+                        self.context.symbol_table.remap_symbol_in_scope(
+                            ScopeId::first(),
+                            symbol_name,
+                            existing_symbol,
+                        );
+                        existing_symbol
+                    } else if let Some(existing_symbol) = self
+                        .resolve_symbol_in_scope_hierarchy(symbol_name)
+                        .filter(|sid| {
+                            // Only reuse if the existing symbol has no qualified_name OR its
+                            // qualified_name matches the imported path. Otherwise it's a DIFFERENT
+                            // class with the same simple name (e.g. stdlib `Json` vs user `tink.Json`)
+                            // and reusing it would silently route user imports to stdlib.
+                            self.context
+                                .symbol_table
+                                .get_symbol(*sid)
+                                .map(|sym| {
+                                    sym.qualified_name.is_none()
+                                        || sym.qualified_name == Some(qn_interned)
+                                })
+                                .unwrap_or(false)
+                        })
+                    {
+                        // Bare-name fallback — set qualified_name to match the import path
+                        // so downstream code (e.g., Send/Sync validation) can identify the type
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(existing_symbol)
+                        {
+                            if sym.qualified_name.is_none() {
+                                sym.qualified_name = Some(qn_interned);
+                            }
+                        }
+                        existing_symbol
+                    } else {
+                        // Create placeholder with correct qualified_name
+                        let new_sym = self
+                            .context
+                            .symbol_table
+                            .create_class_in_scope(symbol_name, ScopeId::first());
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
+                            sym.qualified_name = Some(qn_interned);
+                        }
+                        new_sym
+                    }
+                } else if let Some(existing_symbol) =
+                    self.resolve_symbol_in_scope_hierarchy(symbol_name)
+                {
+                    // Symbol already exists (likely from pre-registration)
+                    // Reuse the existing symbol regardless of its kind (Class, Enum, Interface, etc.)
+                    // This preserves the correct type info from the compiled file
+                    if let Some(sym) = self.context.symbol_table.get_symbol(existing_symbol) {
+                        // CRITICAL FIX: If the symbol has an invalid type_id, create a type for it
+                        // This happens for extern classes that were created as placeholders but
+                        // never had their type assigned
+                        if !sym.type_id.is_valid()
+                            && sym.kind == crate::tast::symbols::SymbolKind::Class
+                        {
+                            let class_type = self.context.type_table.borrow_mut().create_type(
+                                crate::tast::core::TypeKind::Class {
+                                    symbol_id: existing_symbol,
+                                    type_args: Vec::new(),
+                                },
+                            );
+                            self.context
+                                .symbol_table
+                                .update_symbol_type(existing_symbol, class_type);
+                            self.context
+                                .symbol_table
+                                .register_type_symbol_mapping(class_type, existing_symbol);
+                        }
+                        existing_symbol
+                    } else {
+                        // Symbol ID exists but can't get symbol data - create new
+                        let new_sym = self
+                            .context
+                            .symbol_table
+                            .create_class_in_scope(symbol_name, ScopeId::first());
+                        // Use the full import path as the qualified name
+                        let full_qualified_name = import.path.join(".");
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
+                            sym.qualified_name =
+                                Some(self.context.string_interner.intern(&full_qualified_name));
+                        }
+                        new_sym
+                    }
+                } else if let Some(existing) = self
+                    .context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), symbol_name)
+                {
+                    // Symbol exists in root scope (from a previously compiled file)
+                    // Reuse it to preserve correct type kind (Abstract, Enum, etc.)
+                    existing.id
+                } else {
+                    // Create a placeholder symbol for the imported type
+                    let new_sym = self
+                        .context
+                        .symbol_table
+                        .create_class_in_scope(symbol_name, ScopeId::first());
+
+                    // CRITICAL FIX: Set the qualified name to the FULL import path, not just the class name.
+                    // When importing "rayzor.Bytes", the qualified name should be "rayzor.Bytes", not just "Bytes".
+                    // This is needed for runtime mapping to work correctly (e.g., "rayzor_Bytes" pattern matching).
+                    let full_qualified_name = import.path.join(".");
+                    if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
+                        sym.qualified_name =
+                            Some(self.context.string_interner.intern(&full_qualified_name));
+                    }
+
+                    // CRITICAL: For imported classes (especially extern classes like StringMap),
+                    // we must create a class type and link it to the symbol. Without this,
+                    // new StringMap<Int>() will have TypeId::invalid() because the symbol has no type.
+                    let class_type = self.context.type_table.borrow_mut().create_type(
+                        crate::tast::core::TypeKind::Class {
+                            symbol_id: new_sym,
+                            type_args: Vec::new(), // Type args are applied at instantiation
+                        },
+                    );
+                    self.context
+                        .symbol_table
+                        .update_symbol_type(new_sym, class_type);
+                    self.context
+                        .symbol_table
+                        .register_type_symbol_mapping(class_type, new_sym);
+
+                    new_sym
+                };
+
+                // Add to root scope so it can be resolved
+                // Note: If symbol was pre-registered, it should already be in the scope,
+                // but adding it again is idempotent
+                self.context
+                    .scope_tree
+                    .get_scope_mut(ScopeId::first())
+                    .expect("Root scope should exist")
+                    .add_symbol(imported_symbol, symbol_name);
+
+                self.import_enum_constructors(imported_symbol);
+            }
+        }
+
+        Ok(TypedImport {
+            module_path: self.context.intern_string(&import.path.join(".")),
+            imported_symbols,
+            alias,
+            source_location: self.context.create_location_from_span(import.span),
+        })
+    }
+
+    /// Lower a using declaration
+    pub(crate) fn lower_using(&mut self, using: &Using) -> LoweringResult<TypedUsing> {
+        let module_path_str = using.path.join(".");
+        let module_path = self.context.intern_string(&module_path_str);
+
+        // Try to resolve the using module to a class symbol for static extension resolution
+        // The module path is typically just the class name (e.g., "StringTools")
+        // or a qualified path (e.g., "haxe.StringTools")
+        let class_name = using
+            .path
+            .last()
+            .map(|s| s.as_str())
+            .unwrap_or(&module_path_str);
+        let class_name_interned = self.context.intern_string(class_name);
+
+        // First try to find via namespace resolver (handles qualified paths)
+        let package_path: Vec<_> = using
+            .path
+            .iter()
+            .take(using.path.len().saturating_sub(1))
+            .map(|s| self.context.string_interner.intern(s))
+            .collect();
+        let qualified_path =
+            super::namespace::QualifiedPath::new(package_path, class_name_interned);
+
+        let class_symbol_id = if let Some(symbol_id) = self
+            .context
+            .namespace_resolver
+            .lookup_symbol(&qualified_path)
+        {
+            // Found via namespace resolver
+            Some(symbol_id)
+        } else if let Some(class_symbol) = self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), class_name_interned)
+        {
+            // Found in global scope - but check if this symbol was actually lowered
+            // If scope_id is ScopeId(0), it was only pre-registered but not lowered
+            // In that case, search for a symbol with the same name that WAS lowered
+            if class_symbol.scope_id == ScopeId::first() {
+                // This symbol wasn't lowered - search for one that was
+                let mut found_lowered = None;
+                for sym in self
+                    .context
+                    .symbol_table
+                    .symbols_of_kind(crate::tast::symbols::SymbolKind::Class)
+                {
+                    if sym.name == class_name_interned && sym.scope_id != ScopeId::first() {
+                        found_lowered = Some(sym.id);
+                        break;
+                    }
+                }
+                if found_lowered.is_some() {
+                    found_lowered
+                } else {
+                    // No lowered symbol found, use pre-registered one (will trigger loading)
+                    Some(class_symbol.id)
+                }
+            } else {
+                Some(class_symbol.id)
+            }
+        } else {
+            None
+        };
+
+        if let Some(symbol_id) = class_symbol_id {
+            // Found the class - register it for static extension resolution
+            // Check if the class has been fully compiled (scope_id should not be ScopeId::first() or ScopeId(0))
+            let needs_loading = if let Some(sym) = self.context.symbol_table.get_symbol(symbol_id) {
+                // If scope_id is still the root scope (ScopeId(0)), the class was only pre-registered
+                // and not actually compiled with its method bodies
+                sym.scope_id == ScopeId::first()
+            } else {
+                true
+            };
+
+            if needs_loading {
+                // Queue the module for loading - the compilation unit will load it
+                self.pending_usings.push(module_path_str.clone());
+            }
+
+            self.using_modules.push((class_name_interned, symbol_id));
+        }
+        // Note: If class not found, static extensions will still work through the
+        // "LAST RESORT" mechanism in hir_to_mir.rs which searches all stdlib classes
+
+        Ok(TypedUsing {
+            module_path,
+            target_type: None, // TODO: Handle target type if specified
+            source_location: self.context.create_location_from_span(using.span),
+        })
+    }
+}
