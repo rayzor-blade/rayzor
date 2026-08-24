@@ -192,8 +192,8 @@ impl<'a> AstLowering<'a> {
     ) -> SymbolId {
         // Try to resolve method from receiver's type
         match &receiver.kind {
-            TypedExpressionKind::This { this_type: _ } => {
-                // If calling method on 'this', look in current class
+            TypedExpressionKind::This { this_type } => {
+                let _ = this_type;
                 if let Some(class_symbol) = self.context.class_context_stack.last() {
                     if let Some(methods) = self.class_methods.get(class_symbol) {
                         if let Some((_, method_symbol, _)) =
@@ -355,15 +355,25 @@ impl<'a> AstLowering<'a> {
                 if Some(*class_sym) == current_class {
                     continue;
                 }
-                if let Some(rb) = receiver_bare_for_filter.as_deref() {
-                    let owner_bare = self
-                        .context
-                        .symbol_table
-                        .get_symbol(*class_sym)
-                        .and_then(|s| self.context.string_interner.get(s.name));
-                    if owner_bare.is_some_and(|o| o != rb) {
-                        continue;
-                    }
+                // The filter only bit when the receiver's class could be
+                // named. A builtin cannot -- Array<Int> yields nothing -- so
+                // every candidate was admitted and a lone same-named method
+                // won by default: declaring `abstract Wrap(Array<Int>)` with
+                // a `push` captured EVERY Array.push in the program, and the
+                // forwarding body then called itself forever. An unnameable
+                // receiver is the case where a name match is least justified,
+                // not most. Require the name, and let the qualified
+                // placeholder below handle what this cannot resolve.
+                let Some(rb) = receiver_bare_for_filter.as_deref() else {
+                    continue;
+                };
+                let owner_bare = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*class_sym)
+                    .and_then(|s| self.context.string_interner.get(s.name));
+                if owner_bare.is_some_and(|o| o != rb) {
+                    continue;
                 }
                 if let Some((_, method_symbol, _)) =
                     methods.iter().find(|(name, _, _)| *name == method_name)
