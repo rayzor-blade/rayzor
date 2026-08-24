@@ -93,6 +93,16 @@ for f in "$SRC"/*.hx; do
 
 
   d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit" "$d/utest"
+  # The corpus is not self-contained: tests reference siblings that upstream
+  # ships beside them -- HelperMacros, MyClass, MyEnum, and the macros under
+  # issues/misc. Without them a test fails on a missing type, which reads as
+  # a resolution defect in the compiler rather than a file we did not provide.
+  # Copied first so our shims below win where the names collide.
+  cp "$SRC"/../*.hx "$d/unit/" 2>/dev/null || true
+  if [[ -d "$SRC/misc" ]]; then
+    mkdir -p "$d/unit/issues/misc"
+    cp "$SRC"/misc/*.hx "$d/unit/issues/misc/" 2>/dev/null || true
+  fi
   cp "$HERE/shims/unit/Test.hx" "$d/unit/Test.hx"
   cp "$HERE/shims/unit/ConfCheck.hx" "$d/unit/ConfCheck.hx"
   cp "$HERE/shims/utest/Assert.hx" "$d/utest/Assert.hx"

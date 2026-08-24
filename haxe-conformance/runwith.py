@@ -17,4 +17,8 @@ except subprocess.TimeoutExpired as e:
     sys.exit(124)
 sys.stdout.write(p.stdout.decode("utf-8", "replace"))
 sys.stdout.write(p.stderr.decode("utf-8", "replace"))
-sys.exit(p.returncode)
+# A signal comes back negative here, and exiting with it wraps: SIGSEGV
+# arrives as -11 and leaves as 245, which reads as an ordinary failure
+# and files a crash under whatever bucket that number lands in. Report
+# signals the way a shell does, so they stay recognisable as signals.
+sys.exit(128 - p.returncode if p.returncode < 0 else p.returncode)
