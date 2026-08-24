@@ -900,8 +900,8 @@
       },
       win: {
         label: "Windows",
-        cmd: "wsl -- sh -c 'curl -fsSL https://rayzor.tech/install.sh | sh'",
-        note: "WSL gets the same build as Linux, LLVM tier included. Without WSL there is a native build under Releases — it runs on Cranelift, since LLVM ships no linkable libraries for Windows."
+        cmd: "irm https://rayzor.tech/install.ps1 | iex",
+        note: "Installs to %USERPROFILE%\\.rayzor and puts it on your PATH. Prefer WSL? The macOS & Linux command works there unchanged."
       }
     };
     const WORKLOADS = [
