@@ -477,13 +477,13 @@
 const OS = {
   unix: {
     label: "macOS & Linux",
-    cmd: "curl -fsSL https://rayzor.tech/install.sh | bash",
-    note: "LLVM is needed for the aot backend only — the Cranelift JIT and the wasm target don't require it."
+    cmd: "curl -fsSL https://rayzor.tech/install.sh | sh",
+    note: "Installs to ~/.rayzor/bin. The download carries its own LLVM, so nothing else needs installing."
   },
   win: {
     label: "Windows",
-    cmd: "curl -fsSL https://rayzor.tech/install.sh | bash",
-    note: "Run it under Git Bash or WSL. Native PowerShell install is not there yet — cargo install --git https://github.com/rayzor-blade/rayzor works anywhere the Rust toolchain does."
+    cmd: "wsl -- sh -c 'curl -fsSL https://rayzor.tech/install.sh | sh'",
+    note: "WSL gets the same build as Linux, LLVM tier included. Without WSL there is a native build under Releases — it runs on Cranelift, since LLVM ships no linkable libraries for Windows."
   }
 };
 const WORKLOADS = [
