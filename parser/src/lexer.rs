@@ -442,7 +442,22 @@ impl<'a> Lexer<'a> {
             //   `/`, `=`, `<`, `>`, `]`): trailing-dot float.
             // `.` followed by `.` is a range operator — leave it alone.
             // `.` followed by alpha/`_` is field access — leave it alone.
-            let is_trailing_dot_float = !next.is_ascii_alphabetic() && next != b'_' && next != b'.';
+            // `.` followed by `e`/`E` and exponent digits is one float in
+            // exponent form (`123.e12` = 1.23e14), not a field access. Without
+            // this the dot ends the number and `e12` lexes as a field name, so
+            // the literal becomes a member read on a Float and fails to
+            // compile -- while `123.E12` and `123e12` are accepted.
+            let dot_then_exponent = (next == b'e' || next == b'E') && {
+                let mut probe = self.pos + 2;
+                if probe < self.source.len()
+                    && (self.source[probe] == b'+' || self.source[probe] == b'-')
+                {
+                    probe += 1;
+                }
+                probe < self.source.len() && self.source[probe].is_ascii_digit()
+            };
+            let is_trailing_dot_float =
+                (!next.is_ascii_alphabetic() && next != b'_' && next != b'.') || dot_then_exponent;
             let is_fraction = next.is_ascii_digit();
             if is_fraction {
                 is_float = true;
