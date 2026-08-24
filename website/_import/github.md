@@ -9,7 +9,7 @@ date: 2026-08-15T22:02:30Z
 - Added an Architecture page built from docs/architecture/ARCHITECTURE.md, with the repo's pipeline mermaid diagram rendered live
 - Added first-class SIMD coverage — the full rayzor.SIMD* family (SIMD4f, SIMD4i32, SIMD16i8, SIMD8i32, SIMD32i8) read from compiler/src/ir/mir/types.rs, plus construction, ops and tier policy from the SIMD e2e tests
 - Homepage gained a SIMD section; docs sidebar now links Architecture and SIMD
-- Benchmarks card rebuilt around the real targets and methodology from rayzor-blade.com/benchmarks/
+- Benchmarks card rebuilt around the real targets and methodology from rayzor.tech/benchmarks/
 
 ## Screen map
 | Screen | Built from |
