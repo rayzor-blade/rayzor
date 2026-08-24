@@ -9,6 +9,7 @@ class ConfCheck {
         failures++;
         Sys.println("FAILCHECK " + msg);
     }
+
     public static function ok():Void { checks++; }
     public static function summary():Void {
         if (failures == 0) Sys.println("CONFORMANCE_OK " + checks);

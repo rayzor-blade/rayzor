@@ -200,7 +200,15 @@ PYGEN
   out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache 2>&1 )
   code=$?
 
-  if [[ $code -ne 0 ]]; then
+  # A test that reported a failed assertion and THEN died computed a wrong
+  # answer; the crash is downstream of it, usually while rendering the very
+  # value that was wrong. Scoring it as a crash hides the wrong answer and
+  # inflates the crash count.
+  if [[ $code -ne 0 ]] && printf '%s' "$out" | grep -q '^FAILCHECK'; then
+    det=$(printf '%s' "$out" | grep -m1 '^FAILVALUES' | cut -c1-90)
+    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -m1 '^FAILCHECK' | cut -c1-90)
+    record "$base" WRONG_ANSWER "${det} (then exit $code)"
+  elif [[ $code -ne 0 ]]; then
     det=$(printf '%s' "$out" | grep -oE '\[E[0-9]+\][^"]{0,80}' | head -1)
     # A named uncompiled function is the most actionable thing a run can say:
     # it points at the exact construct the compiler could not build. Prefer it
