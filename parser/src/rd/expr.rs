@@ -778,7 +778,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_switch_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
         self.stream.expect(TokenKind::KwSwitch)?;
-        self.stream.expect(TokenKind::LParen)?;
+        // The parentheses are optional in Haxe -- `switch x { ... }` is as
+        // ordinary as `switch (x) { ... }`, and requiring them rejected the
+        // unparenthesised form outright.
+        let parenthesised = self.stream.eat(TokenKind::LParen).is_some();
         let scrutinee = self.parse_expression()?;
         // Handle inline type check: `switch (cast this : Int) { ... }`
         let scrutinee = if self.stream.eat(TokenKind::Colon).is_some() {
@@ -794,7 +797,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         } else {
             scrutinee
         };
-        self.stream.expect(TokenKind::RParen)?;
+        if parenthesised {
+            self.stream.expect(TokenKind::RParen)?;
+        }
         self.stream.expect(TokenKind::LBrace)?;
 
         let mut cases = Vec::new();
