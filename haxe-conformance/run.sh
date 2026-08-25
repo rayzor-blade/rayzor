@@ -217,10 +217,21 @@ PYGEN
                              | head -1 | sed -E 's/rayzor: `(.*)` was never compiled/uncompiled \1/')
     [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -iE 'error|panic|signal' | head -1 | cut -c1-90)
     [[ -z "$det" ]] && det="exit $code"
+    # Any death by signal is a crash: the watchdog reports them the way a shell
+    # does, as 128+signo. Naming individual numbers filed the ones nobody had
+    # seen yet as compile failures -- SIGBUS is 138 on macOS and 135 on Linux,
+    # so the same defect was a crash on one platform and a clean compile error
+    # on the other, which flatters whichever platform is being quoted.
     case "$code" in
       124) status="TIMEOUT"; det="exceeded ${TIMEOUT}s" ;;
-      132|134|139|133) status="CRASH" ;;
-      *) status="COMPILE_FAIL" ;;
+      *)
+        if (( code >= 128 )); then
+          status="CRASH"
+          [[ "$det" == "exit $code" ]] && det="exit $code (signal $((code - 128)))"
+        else
+          status="COMPILE_FAIL"
+        fi
+        ;;
     esac
     # "No main function found" is only OUR fault if we failed to write one.
     # When the generated file plainly has a main and the compiler cannot see
