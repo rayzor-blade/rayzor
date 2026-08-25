@@ -604,7 +604,12 @@ impl<'a> TastToHirContext<'a> {
                 visibility: self.convert_visibility(method.visibility),
                 is_static: method.is_static,
                 is_override: method.metadata.is_override,
-                is_abstract: false, // Abstract methods would have no body
+                // `abstract function foo():T;` declares the slot and leaves the
+                // body to a subclass. Compiling it as an ordinary method builds
+                // a function whose declared return type no value ever satisfies,
+                // which installs a trap stub that SIGILLs when the override is
+                // called through it.
+                is_abstract: method.body.is_empty(),
             });
         }
 

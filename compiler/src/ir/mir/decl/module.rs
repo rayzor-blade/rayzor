@@ -233,6 +233,14 @@ impl<'a> HirToMirContext<'a> {
                             continue;
                         }
 
+                        // An abstract method contributes its signature and its
+                        // vtable slot, which the declare pass has already
+                        // registered; the body belongs to whichever subclass
+                        // overrides it.
+                        if method.is_abstract {
+                            continue;
+                        }
+
                         // Skip synthetic methods on @:cstruct / @:gpuStruct — handled at call site
                         {
                             let has_no_body = method.function.body.is_none()

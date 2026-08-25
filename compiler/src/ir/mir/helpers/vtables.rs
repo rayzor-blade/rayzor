@@ -76,6 +76,29 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn build_class_vtables(&mut self) {
+        // A method supplying an inherited `abstract function` is an override in
+        // everything but the keyword, which Haxe does not require here. Link it
+        // before the emptiness check, or a hierarchy whose only virtual methods
+        // are abstract builds no vtable at all and the call lands on the
+        // declaration instead of the implementation.
+        let declared: Vec<_> = self
+            .class_method_by_name
+            .keys()
+            .map(|(cls, name)| (*cls, *name))
+            .collect();
+        for (cls, name) in declared {
+            if self.override_methods.contains(&(cls, name)) {
+                continue;
+            }
+            let inherits_abstract = self
+                .parent_chain(cls)
+                .into_iter()
+                .any(|parent| self.abstract_methods.contains(&(parent, name)));
+            if inherits_abstract {
+                self.override_methods.insert((cls, name));
+            }
+        }
+
         if self.override_methods.is_empty() {
             return;
         }

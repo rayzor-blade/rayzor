@@ -367,6 +367,10 @@ impl<'a> HirToMirContext<'a> {
                 self.override_methods
                     .insert((class.symbol_id, method.function.name));
             }
+            if method.is_abstract {
+                self.abstract_methods
+                    .insert((class.symbol_id, method.function.name));
+            }
         }
 
         let parent_symbol = class.extends_symbol.or_else(|| {

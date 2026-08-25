@@ -437,6 +437,11 @@ pub struct HirToMirContext<'a> {
 
     /// (child_class_symbol, method_name) for methods with is_override=true
     override_methods: BTreeSet<(SymbolId, InternedString)>,
+    /// (class, method name) for each `abstract function` declaration. Haxe does
+    /// not ask a subclass to write `override` when it supplies one, so these are
+    /// what tells the vtable builder that a same-named method further down is
+    /// filling this slot rather than declaring a new one.
+    abstract_methods: BTreeSet<(SymbolId, InternedString)>,
 
     /// class SymbolId → parent class SymbolId (from extends)
     class_parent_map: BTreeMap<SymbolId, SymbolId>,
@@ -1348,6 +1353,7 @@ impl<'a> HirToMirContext<'a> {
             class_type_to_symbol: BTreeMap::new(),
             field_class_names: BTreeMap::new(),
             override_methods: BTreeSet::new(),
+            abstract_methods: BTreeSet::new(),
             class_parent_map: BTreeMap::new(),
             class_method_by_name: BTreeMap::new(),
             class_virtual_slots: BTreeMap::new(),
