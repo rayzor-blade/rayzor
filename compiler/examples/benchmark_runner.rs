@@ -652,7 +652,7 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
+    // - Request asynchronous Maximum promotion on the second entry
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
     // Maximum is reached automatically through Beadie + OSR. Promoting by
@@ -1894,7 +1894,7 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
         <ul>
             <li><strong>rayzor-cranelift</strong> &mdash; Source &rarr; MIR (O2) &rarr; Cranelift JIT. Compile includes parsing, type-checking, MIR lowering, optimization, and JIT compilation.</li>
             <li><strong>rayzor-llvm</strong> &mdash; Source &rarr; MIR (O2) &rarr; LLVM MCJIT. Same frontend pipeline, LLVM backend for peak throughput.</li>
-            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. Uses the <em>Benchmark</em> tier preset: thresholds (2/3/5/10) and immediate bailout. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
+            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. The <em>Benchmark</em> preset requests asynchronous Maximum promotion on the second entry so LLVM becomes ready inside the existing warmup budget. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
             <li><strong>rayzor-precompiled</strong> &mdash; Pre-bundled .rzb (MIR already O2-optimized) &rarr; Cranelift JIT. Compile is bundle load + JIT only (no parsing/lowering).</li>
             <li><strong>rayzor-precompiled-tiered</strong> &mdash; Pre-bundled .rzb &rarr; automatic tiered execution through per-function LLVM promotion.</li>
         </ul>

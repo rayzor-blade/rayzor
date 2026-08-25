@@ -687,11 +687,14 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    // Reach Maximum through the same Beadie route as every
-                    // other automatic promotion. The LLVM bead compiles the
-                    // hot function, publishes its OSR entries, and installs
-                    // the pointer once verification succeeds.
-                    blazing_threshold: 10,
+                    // Benchmarks need Maximum ready inside their existing
+                    // warmup budget. Adding whole-program invocations while
+                    // waiting for it exhausts allocation-heavy kernels such
+                    // as binarytrees before measurement begins. Request the
+                    // LLVM bead at the interpreter threshold; it still
+                    // compiles asynchronously, verifies, publishes OSR, and
+                    // installs through the normal automatic promotion path.
+                    blazing_threshold: 2,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
@@ -3819,7 +3822,7 @@ mod tests {
     fn benchmark_preset_reaches_maximum_automatically() {
         let config = TierPreset::Benchmark.to_config_without_env();
 
-        assert_eq!(config.profile_config.blazing_threshold, 10);
+        assert_eq!(config.profile_config.blazing_threshold, 2);
         assert!(config.enable_tier_promotion);
         assert!(!config.auto_upgrade_to_llvm_after_main_entry);
     }
