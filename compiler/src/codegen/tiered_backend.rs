@@ -687,17 +687,11 @@ impl TierPreset {
                     interpreter_threshold: 2,
                     warm_threshold: 3,
                     hot_threshold: 5,
-                    // Out of reach until promotion can find the code that
-                    // runs. Only the entry is ever counted hot, so promoting
-                    // compiles `main` and nothing else -- which pays on nbody,
-                    // whose loop IS main, and pays for nothing on fibonacci,
-                    // binarytrees and deltablue, whose work is in callees that
-                    // stay where they were. Three benchmarks lost to buy one.
-                    //
-                    // The compile itself is no longer the problem; it happens
-                    // on beadie's broker thread. What is missing is a profile
-                    // that can see past the entry function.
-                    blazing_threshold: u64::MAX,
+                    // Reach Maximum through the same Beadie route as every
+                    // other automatic promotion. The LLVM bead compiles the
+                    // hot function, publishes its OSR entries, and installs
+                    // the pointer once verification succeeds.
+                    blazing_threshold: 10,
                     sample_rate: 1,
                 },
                 verbosity: 1,            // Show tier transitions
@@ -3820,6 +3814,15 @@ mod tests {
     use super::*;
     use crate::ir::mir_builder::MirBuilder;
     use crate::ir::{BinaryOp, IrType};
+
+    #[test]
+    fn benchmark_preset_reaches_maximum_automatically() {
+        let config = TierPreset::Benchmark.to_config_without_env();
+
+        assert_eq!(config.profile_config.blazing_threshold, 10);
+        assert!(config.enable_tier_promotion);
+        assert!(!config.auto_upgrade_to_llvm_after_main_entry);
+    }
 
     fn build_add_module() -> (IrModule, IrFunctionId) {
         let mut builder = MirBuilder::new("tiered_threshold_test");

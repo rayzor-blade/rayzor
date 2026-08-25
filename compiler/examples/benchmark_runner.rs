@@ -202,7 +202,7 @@ impl Target {
         match self {
             Target::RayzorInterpreter => "MIR Interpreter (instant startup)",
             Target::RayzorCranelift => "Cranelift JIT (compile from source)",
-            Target::RayzorTiered => "Tiered (source -> interp -> Cranelift)",
+            Target::RayzorTiered => "Tiered (source -> interp -> Cranelift -> LLVM)",
             Target::RayzorPrecompiled => "Pre-bundled MIR + JIT (skip parsing)",
             Target::RayzorPrecompiledTiered => "Pre-bundled MIR + tiered + LLVM",
             #[cfg(feature = "llvm-backend")]
@@ -652,11 +652,11 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Fast tier promotion (thresholds: 2, 3, 5)
+    // - Fast tier promotion (thresholds: 2, 3, 5, 10)
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
-    // The top tier is not reached here; see the preset. Promoting by hand
-    // would measure a tier the runtime never picks on its own.
+    // Maximum is reached automatically through Beadie + OSR. Promoting by
+    // hand would measure a different path than the runtime uses on its own.
     // Suppress beadie/tier-transition chatter — bench output should
     // stay clean; the runner already reports compile/execute timings.
     let mut config = TierPreset::Benchmark.to_config();
@@ -698,7 +698,7 @@ fn setup_tiered_benchmark(
 /// waiting on. `Baseline` is reached during warmup on the calling thread and
 /// says nothing about whether the background compile has landed.
 const TIER_PROMOTION_TARGET: compiler::codegen::tiered_backend::OptimizationTier =
-    compiler::codegen::tiered_backend::OptimizationTier::Standard;
+    compiler::codegen::tiered_backend::OptimizationTier::Maximum;
 
 /// Iterate until the function reaches `TIER_PROMOTION_TARGET`, or give up.
 ///
@@ -1366,9 +1366,8 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 );
             }
 
-            // No forced upgrade here. This target exists to measure what
-            // tiered execution actually delivers, and hoisting every function
-            // to the top tier first measures the top tier instead.
+            // No forced upgrade here. This target measures the Maximum tier
+            // reached automatically through Beadie + OSR.
 
             // Benchmark runs
             for _ in 0..bench_runs {
@@ -1444,14 +1443,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 );
             }
 
-            // Upgrade to LLVM tier for maximum performance
-            #[cfg(feature = "llvm-backend")]
-            {
-                // "already done" is expected when multiple backends exist - silently ignore
-                let _ = state.backend.upgrade_to_llvm();
-            }
-
-            // Benchmark runs at highest tier
+            // Benchmark runs after automatic Maximum-tier promotion.
             for _ in 0..bench_runs {
                 let exec = run_precompiled_tiered_iteration(&mut state)?;
                 compile_times.push(load_time); // Load time = "compile time"
@@ -1902,9 +1894,9 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
         <ul>
             <li><strong>rayzor-cranelift</strong> &mdash; Source &rarr; MIR (O2) &rarr; Cranelift JIT. Compile includes parsing, type-checking, MIR lowering, optimization, and JIT compilation.</li>
             <li><strong>rayzor-llvm</strong> &mdash; Source &rarr; MIR (O2) &rarr; LLVM MCJIT. Same frontend pipeline, LLVM backend for peak throughput.</li>
-            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT. Uses the <em>Benchmark</em> tier preset: interpreter thresholds (2/3/5), immediate bailout, synchronous optimization. Compile includes parsing + module loading; execution includes interpreter startup and JIT tier-up.</li>
+            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. Uses the <em>Benchmark</em> tier preset: thresholds (2/3/5/10) and immediate bailout. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
             <li><strong>rayzor-precompiled</strong> &mdash; Pre-bundled .rzb (MIR already O2-optimized) &rarr; Cranelift JIT. Compile is bundle load + JIT only (no parsing/lowering).</li>
-            <li><strong>rayzor-precompiled-tiered</strong> &mdash; Pre-bundled .rzb &rarr; tiered execution with LLVM upgrade after warmup.</li>
+            <li><strong>rayzor-precompiled-tiered</strong> &mdash; Pre-bundled .rzb &rarr; automatic tiered execution through per-function LLVM promotion.</li>
         </ul>
         <p>All targets share the same runtime (<code>librayzor_runtime</code>) and execute the same Haxe source code.
         MIR optimization level O2 includes: dead code elimination, constant folding, copy propagation, function inlining, LICM, and CSE.</p>
