@@ -86,6 +86,24 @@ impl<'a> HirToMirContext<'a> {
         };
         let return_type = Box::new(self.convert_type(expr.ty));
 
+        // A function value carries no defaults: `fill_default_args` works from
+        // the callee's IrFunctionId, which a call through a pointer does not
+        // have. Emitting the call anyway hands the backend fewer arguments than
+        // the signature declares, which Cranelift reports as a failed assertion
+        // inside its ABI code rather than as anything the author can act on.
+        if arg_regs.len() < param_types.len() {
+            self.errors.push(LoweringError {
+                message: format!(
+                    "function value called with {} of {} arguments; a parameter's \
+                     default value is only applied when the function is called by name",
+                    arg_regs.len(),
+                    param_types.len()
+                ),
+                location: expr.source_location.clone(),
+            });
+            return None;
+        }
+
         let func_signature = IrType::Function {
             params: param_types,
             return_type,
