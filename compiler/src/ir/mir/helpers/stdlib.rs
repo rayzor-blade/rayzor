@@ -509,16 +509,7 @@ impl<'a> HirToMirContext<'a> {
                         let mut arg_regs = Vec::new();
                         for arg in args.iter() {
                             if let Some(reg) = self.lower_expression(arg) {
-                                let reg_ty =
-                                    self.builder.get_register_type(reg).unwrap_or(IrType::I64);
-                                let final_reg = if reg_ty != IrType::I64 {
-                                    self.builder
-                                        .build_cast(reg, reg_ty, IrType::I64)
-                                        .unwrap_or(reg)
-                                } else {
-                                    reg
-                                };
-                                arg_regs.push(final_reg);
+                                arg_regs.push(self.erase_reflect_compare_arg(reg));
                             }
                         }
                         let tag_reg = match info {

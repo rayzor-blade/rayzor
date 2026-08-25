@@ -307,6 +307,26 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Erase a typed Reflect.compare operand into the runtime's i64 slot.
+    /// Floats must preserve their IEEE bits: a numeric F64 -> I64 cast turns
+    /// both 0.1 and 0.2 into zero, so the runtime can no longer order them.
+    pub(crate) fn erase_reflect_compare_arg(&mut self, reg: IrId) -> IrId {
+        let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+        match reg_ty {
+            IrType::I64 => reg,
+            IrType::F64 => self.builder.build_bitcast(reg, IrType::I64).unwrap_or(reg),
+            IrType::F32 => self
+                .builder
+                .build_cast(reg, IrType::F32, IrType::F64)
+                .and_then(|wide| self.builder.build_bitcast(wide, IrType::I64))
+                .unwrap_or(reg),
+            other => self
+                .builder
+                .build_cast(reg, other, IrType::I64)
+                .unwrap_or(reg),
+        }
+    }
+
     /// Detect reflective Type allocation calls that return fresh class instances.
     pub(crate) fn is_reflective_type_alloc_call(&self, callee: &HirExpr, arg_count: usize) -> bool {
         let is_alloc_method = |name: &str| matches!(name, "createInstance" | "createEmptyInstance");

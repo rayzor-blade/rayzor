@@ -388,19 +388,7 @@ impl<'a> HirToMirContext<'a> {
                                 // Cast value args to I64 — haxe_reflect_compare_typed
                                 // takes type-erased i64 values, not typed structs
                                 for i in 0..arg_regs.len().min(2) {
-                                    let reg_ty = self
-                                        .builder
-                                        .get_register_type(arg_regs[i])
-                                        .unwrap_or(IrType::I64);
-                                    if reg_ty != IrType::I64 {
-                                        if let Some(cast) = self.builder.build_cast(
-                                            arg_regs[i],
-                                            reg_ty,
-                                            IrType::I64,
-                                        ) {
-                                            arg_regs[i] = cast;
-                                        }
-                                    }
+                                    arg_regs[i] = self.erase_reflect_compare_arg(arg_regs[i]);
                                     arg_types[i] = IrType::I64;
                                 }
 
