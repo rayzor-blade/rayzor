@@ -37,13 +37,15 @@ jobs:
             wasm_opt: true
           # Cross-compiled from arm64: GitHub retired the Intel macOS runners,
           # so `macos-13` never gets a machine and the job queues forever.
-          # Cranelift only -- Homebrew's llvm@21 on an arm64 runner is arm64,
-          # so there is nothing for an x86_64 llvm-static build to link.
+          # Homebrew's llvm@21 there is arm64, so the x86_64 LLVM comes from
+          # conda-forge's llvmdev instead -- the build carries the same tier as
+          # every other target.
           - os: macos-14
             label: macos-x86_64
             asset: rayzor-macos-x86_64.tar.gz
             target: x86_64-apple-darwin
-            features: "--no-default-features --features cranelift-backend"
+            llvmdev: osx-64/llvmdev-21.1.8-h36529c3_1.conda
+            features: "--no-default-features --features llvm-static"
             wasm_opt: false
           - os: ubuntu-latest
             label: linux-x86_64
@@ -53,13 +55,11 @@ jobs:
           # LLVM.org's Windows release is toolchain-only and carries no
           # llvm-config or component archives, which is what llvm-sys links
           # against -- but conda-forge's `llvmdev` package carries both. The
-          # build below tries LLVM and falls back to Cranelift if the link
-          # fails, so a Windows artifact ships either way and the log says
-          # which shape it is.
+          # against -- conda-forge's llvmdev carries both.
           - os: windows-latest
             label: windows-x86_64
             asset: rayzor-windows-x86_64.zip
-            features: ""
+            features: "--no-default-features --features llvm-static"
             wasm_opt: false
     steps:
       - uses: actions/checkout@v4
@@ -74,10 +74,28 @@ jobs:
           echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
 
       - name: Install LLVM 21 (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.llvmdev == ''
         run: |
           brew install llvm@21
           echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> "$GITHUB_ENV"
+
+      # The LLVM for a target the runner is not. Homebrew only has the host's
+      # architecture, so a cross build takes its LLVM from conda-forge, which
+      # publishes the development files for every platform we build.
+      - name: Install cross LLVM 21 (${{ matrix.llvmdev }})
+        if: matrix.llvmdev != ''
+        run: |
+          curl -fsSL -o llvmdev.conda \
+            "https://anaconda.org/conda-forge/llvmdev/21.1.8/download/${{ matrix.llvmdev }}"
+          mkdir -p llvmdev && cd llvmdev
+          # A .conda is a zip of zstd tarballs; pkg-* carries the files.
+          unzip -q ../llvmdev.conda
+          tar -xf pkg-*.tar.zst
+          cd ..
+          PREFIX="$PWD/llvmdev"
+          test -x "$PREFIX/bin/llvm-config"
+          "$PREFIX/bin/llvm-config" --version
+          echo "LLVM_SYS_211_PREFIX=$PREFIX" >> "$GITHUB_ENV"
 
       # The development files LLVM.org's Windows installer leaves out.
       - name: Install LLVM 21 (Windows)
@@ -93,16 +111,14 @@ jobs:
           $pkg = Get-ChildItem llvmdev-raw -Filter 'pkg-*.tar.zst' | Select-Object -First 1
           tar -xf $pkg.FullName -C llvmdev
           $prefix = (Resolve-Path llvmdev).Path
+          # No fallback. A build that quietly drops the LLVM tier ships a
+          # weaker compiler under the same name, and nobody learns that until
+          # they measure it.
           if (-not (Test-Path "$prefix\Library\bin\llvm-config.exe")) {
-            Write-Host "no llvm-config.exe in the package; falling back to Cranelift"
-            "RAYZOR_WIN_FEATURES=--no-default-features --features cranelift-backend" `
-              | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          } else {
-            "LLVM_SYS_211_PREFIX=$prefix\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-            "RAYZOR_WIN_FEATURES=--no-default-features --features llvm-static" `
-              | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-            & "$prefix\Library\bin\llvm-config.exe" --version
+            throw "llvmdev carried no llvm-config.exe under $prefix\Library\bin"
           }
+          "LLVM_SYS_211_PREFIX=$prefix\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & "$prefix\Library\bin\llvm-config.exe" --version
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -124,18 +140,7 @@ jobs:
         run: |
           FEATURES="${{ matrix.features }}"
           [ -n "${TARGET:-}" ] && FEATURES="$FEATURES --target $TARGET"
-          # Windows resolves its feature set above, and retries on Cranelift if
-          # linking LLVM fails -- an artifact without the top tier beats none.
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            FEATURES="${RAYZOR_WIN_FEATURES:---no-default-features --features cranelift-backend}"
-            echo "windows feature set: $FEATURES"
-            if ! cargo build -p rayzor --release $FEATURES; then
-              echo "::warning::LLVM build failed on Windows; falling back to Cranelift"
-              cargo build -p rayzor --release --no-default-features --features cranelift-backend
-            fi
-          else
-            cargo build -p rayzor --release $FEATURES
-          fi
+          cargo build -p rayzor --release $FEATURES
 
       # Bundled wasm optimizer, kept a SEPARATE binary so Binaryen's llvm::
       # symbols cannot ODR-collide with LLVM in the main one. The CLI finds it
@@ -221,9 +226,7 @@ jobs:
 
             Install: `curl -fsSL https://rayzor.tech/install.sh | bash`
 
-            The native Windows build is Cranelift-only: LLVM's official
-            Windows release ships no component archives to link against.
-            For the LLVM tier on Windows, use WSL and install the Linux
-            build -- `install.sh` does that automatically when run there.
+            Every target carries the LLVM tier. On Windows, WSL remains the
+            smoother path -- `install.sh` installs the Linux build there.
           files: release/*
           fail_on_unmatched_files: true
