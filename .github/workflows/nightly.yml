@@ -35,11 +35,16 @@ jobs:
             asset: rayzor-macos-aarch64.tar.gz
             features: "--no-default-features --features llvm-static"
             wasm_opt: true
-          - os: macos-13
+          # Cross-compiled from arm64: GitHub retired the Intel macOS runners,
+          # so `macos-13` never gets a machine and the job queues forever.
+          # Cranelift only -- Homebrew's llvm@21 on an arm64 runner is arm64,
+          # so there is nothing for an x86_64 llvm-static build to link.
+          - os: macos-14
             label: macos-x86_64
             asset: rayzor-macos-x86_64.tar.gz
-            features: "--no-default-features --features llvm-static"
-            wasm_opt: true
+            target: x86_64-apple-darwin
+            features: "--no-default-features --features cranelift-backend"
+            wasm_opt: false
           - os: ubuntu-latest
             label: linux-x86_64
             asset: rayzor-linux-x86_64.tar.gz
@@ -108,10 +113,17 @@ jobs:
       - name: Generate the standard library snapshot
         run: cargo run --release -p snapshot-gen
 
+      - name: Add the cross target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build rayzor
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           FEATURES="${{ matrix.features }}"
+          [ -n "${TARGET:-}" ] && FEATURES="$FEATURES --target $TARGET"
           # Windows resolves its feature set above, and retries on Cranelift if
           # linking LLVM fails -- an artifact without the top tier beats none.
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -137,8 +149,10 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp target/release/rayzor dist/
-          [ -f target/release/rayzor-wasm-opt ] && cp target/release/rayzor-wasm-opt dist/ || true
+          OUT=target/release
+          [ -n "${{ matrix.target }}" ] && OUT=target/${{ matrix.target }}/release
+          cp "$OUT/rayzor" dist/
+          [ -f "$OUT/rayzor-wasm-opt" ] && cp "$OUT/rayzor-wasm-opt" dist/ || true
           chmod +x dist/*
           tar -czf "${{ matrix.asset }}" -C dist .
           shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
@@ -153,7 +167,10 @@ jobs:
           (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.asset }}" `
             | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
 
+      # Only where the binary can actually run: a cross-compiled x86_64
+      # build cannot be executed on the arm64 runner that produced it.
       - name: Smoke-test the binary it just built
+        if: matrix.target == ''
         shell: bash
         run: |
           BIN=target/release/rayzor
