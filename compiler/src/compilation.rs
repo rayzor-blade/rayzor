@@ -6089,6 +6089,61 @@ impl CompilationUnit {
         self.add_file_from_path(&path)
     }
 
+    /// Where an unqualified supertype could live, reading outwards through the
+    /// enclosing packages.
+    ///
+    /// A module in `unit.issues` names `unit.Test` as plain `Test`, so nothing
+    /// in the file says which file to load. Only the names actually used as a
+    /// supertype are offered, and each is a candidate rather than a claim:
+    /// `load_imports_efficiently` keeps the ones that resolve to a file and
+    /// ignores the rest, so a guess that is wrong costs a failed path lookup.
+    fn enclosing_package_candidates(ast: &parser::haxe_ast::HaxeFile) -> Vec<String> {
+        use parser::haxe_ast::{Type, TypeDeclaration};
+
+        let Some(package) = ast.package.as_ref() else {
+            return Vec::new();
+        };
+        if package.path.is_empty() {
+            return Vec::new();
+        }
+
+        // Only a bare name is ambiguous; a qualified one already says where to look.
+        let bare_name = |ty: &Type| -> Option<String> {
+            match ty {
+                Type::Path { path, .. } if path.package.is_empty() && path.sub.is_none() => {
+                    Some(path.name.clone())
+                }
+                _ => None,
+            }
+        };
+
+        let mut names: Vec<String> = Vec::new();
+        for decl in &ast.declarations {
+            match decl {
+                TypeDeclaration::Class(class) => {
+                    names.extend(class.extends.as_ref().and_then(bare_name));
+                    names.extend(class.implements.iter().filter_map(bare_name));
+                }
+                TypeDeclaration::Interface(iface) => {
+                    names.extend(iface.extends.iter().filter_map(bare_name));
+                }
+                _ => {}
+            }
+        }
+        if names.is_empty() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+        for name in names {
+            // Nearest enclosing package first, so a closer definition wins.
+            for depth in (1..package.path.len()).rev() {
+                candidates.push(format!("{}.{}", package.path[..depth].join("."), name));
+            }
+        }
+        candidates
+    }
+
     /// Analyze dependencies and get compilation order
     ///
     /// This builds a dependency graph from all user files and determines
@@ -7689,6 +7744,7 @@ impl CompilationUnit {
                     imports.extend(discovered);
                     let user_deps = Self::extract_all_dependencies(ast);
                     imports.extend(user_deps);
+                    imports.extend(Self::enclosing_package_candidates(ast));
                     (imports, usings)
                 },
             );
