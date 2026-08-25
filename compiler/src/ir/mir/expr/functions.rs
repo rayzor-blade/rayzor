@@ -349,6 +349,8 @@ impl<'a> HirToMirContext<'a> {
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
         self.reassigned_in_scope.clear();
+        self.capture_cells.clear();
+        self.boxed_capture_symbols.clear();
 
         if let Some(body) = &hir_func.body {
             let mut analyzer = DropPointAnalyzer::new();
@@ -369,6 +371,7 @@ impl<'a> HirToMirContext<'a> {
             self.current_drop_points = None;
             self.current_stmt_index = 0;
         }
+        self.refresh_boxed_capture_symbols();
 
         // Set current_this_type for implicit field access resolution
         self.current_this_type = this_type;
@@ -392,6 +395,7 @@ impl<'a> HirToMirContext<'a> {
         for (i, param) in hir_func.params.iter().enumerate() {
             if let Some(sig_param) = func.signature.parameters.get(i + param_offset) {
                 self.symbol_map.insert(param.symbol_id, sig_param.reg);
+                let _ = self.box_capture_binding(param.symbol_id, sig_param.reg);
             }
         }
 
@@ -466,6 +470,8 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.symbol_map.clear();
+        self.capture_cells.clear();
+        self.boxed_capture_symbols.clear();
 
         // Register-keyed: IrIds restart per function, so stale entries
         // from the previous body would collide with unrelated registers.

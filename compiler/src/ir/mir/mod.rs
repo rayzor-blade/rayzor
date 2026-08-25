@@ -106,6 +106,14 @@ pub struct HirToMirContext<'a> {
     /// Mapping from HIR symbols to MIR registers (for variables/parameters)
     symbol_map: BTreeMap<SymbolId, IrId>,
 
+    /// Mutable bindings captured by closures are represented by shared heap
+    /// cells. This maps the binding to its cell in the current function.
+    capture_cells: BTreeMap<SymbolId, IrId>,
+
+    /// Bindings the function-wide prepass found in a mutable closure capture.
+    /// They are boxed at their declaration so the cell dominates every use.
+    boxed_capture_symbols: BTreeSet<SymbolId>,
+
     /// Resolved IR types for pattern-bound variables (overrides convert_type for TypeParameter types)
     symbol_ir_types: BTreeMap<SymbolId, IrType>,
 
@@ -706,6 +714,8 @@ pub(crate) struct SavedLoweringState {
     current_function: Option<IrFunctionId>,
     current_block: Option<IrBlockId>,
     symbol_map: BTreeMap<SymbolId, IrId>,
+    capture_cells: BTreeMap<SymbolId, IrId>,
+    boxed_capture_symbols: BTreeSet<SymbolId>,
     current_env_layout: Option<EnvironmentLayout>,
     // Drop tracking state - must be saved/restored to prevent lambda bodies
     // from inheriting (and freeing) the parent function's owned values
@@ -1281,6 +1291,8 @@ impl<'a> HirToMirContext<'a> {
         let mut ctx = Self {
             builder: IrBuilder::new(module_name.clone(), source_file),
             symbol_map: BTreeMap::new(),
+            capture_cells: BTreeMap::new(),
+            boxed_capture_symbols: BTreeSet::new(),
             symbol_ir_types: BTreeMap::new(),
             symbol_type_ids: BTreeMap::new(),
             object_literal_target_ty: None,

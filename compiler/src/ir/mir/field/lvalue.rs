@@ -24,7 +24,23 @@ use std::rc::Rc;
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_lvalue_read(&mut self, lvalue: &HirLValue) -> Option<IrId> {
         match lvalue {
-            HirLValue::Variable(symbol) => self.symbol_map.get(symbol).copied(),
+            HirLValue::Variable(symbol) => {
+                if let Some(&cell) = self.capture_cells.get(symbol) {
+                    let ty = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .map(|sym| self.convert_type(sym.type_id))
+                        .or_else(|| {
+                            self.symbol_map
+                                .get(symbol)
+                                .and_then(|reg| self.builder.get_register_type(*reg))
+                        })
+                        .unwrap_or(IrType::I64);
+                    self.builder.build_load(cell, ty)
+                } else {
+                    self.symbol_map.get(symbol).copied()
+                }
+            }
             HirLValue::Field { object, field } => {
                 if let Some(obj_reg) = self.lower_expression(object) {
                     let receiver_ty = object.ty;
@@ -83,6 +99,12 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_store_global(global_id, value);
                     // Untrack from drop system — value escapes to global storage
                     self.owned_heap_values.remove(symbol);
+                    return;
+                }
+
+                if let Some(&cell) = self.capture_cells.get(symbol) {
+                    let _ = self.builder.build_store(cell, value);
+                    self.symbol_map.insert(*symbol, value);
                     return;
                 }
 

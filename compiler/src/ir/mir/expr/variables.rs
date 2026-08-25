@@ -124,6 +124,26 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Outside the closure, captured mutable locals use the same cell the
+        // environment stores. Reload on every access so assignments made by a
+        // callback are immediately visible to the enclosing function.
+        if let Some(&cell) = self.capture_cells.get(symbol) {
+            let value_ty = self
+                .symbol_table
+                .get_symbol(*symbol)
+                .map(|sym| self.convert_type(sym.type_id))
+                .or_else(|| {
+                    self.symbol_map
+                        .get(symbol)
+                        .and_then(|reg| self.builder.get_register_type(*reg))
+                })
+                .unwrap_or(IrType::I64);
+            let loaded = self.builder.build_load(cell, value_ty.clone())?;
+            self.builder.register_local(loaded, value_ty)?;
+            self.symbol_map.insert(*symbol, loaded);
+            return Some(loaded);
+        }
+
         // A `this` variable that is not the synthetic SymbolId(0) comes from an
         // implicit `this` created during AST lowering (field access in a method
         // or constructor); redirect it so the symbol_map lookup finds the

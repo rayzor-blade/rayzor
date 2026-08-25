@@ -62,6 +62,9 @@ impl<'a> HirToMirContext<'a> {
                         // SSA local, so the write must go through the global.
                         if let Some(&global_id) = self.global_symbol_map.get(symbol) {
                             self.builder.build_store_global(global_id, new_value);
+                        } else if let Some(&cell) = self.capture_cells.get(symbol) {
+                            self.builder.build_store(cell, new_value);
+                            self.symbol_map.insert(*symbol, new_value);
                         } else {
                             // If we're inside a lambda with captured variables, also store back to environment
                             if let Some(ref env_layout) = self.current_env_layout {

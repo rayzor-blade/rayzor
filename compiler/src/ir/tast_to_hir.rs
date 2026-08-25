@@ -5708,10 +5708,29 @@ impl<'a> TastToHirContext<'a> {
         let captures: Vec<_> = referenced_vars
             .into_iter()
             .filter(|(sym, _)| !locally_defined.contains(sym))
-            .map(|(symbol, ty)| HirCapture {
-                symbol,
-                mode: HirCaptureMode::ByValue, // Default to by-value capture
-                ty,
+            .map(|(symbol, ty)| {
+                // Haxe captures mutable local bindings by reference. Capturing
+                // the current SSA value loses assignments made on either side
+                // of the closure boundary (`var x; () -> x = ...`). Immutable
+                // bindings, fields and type/function symbols can keep their
+                // value representation; object mutation still aliases through
+                // the captured object pointer.
+                let mode = self
+                    .symbol_table
+                    .get_symbol(symbol)
+                    .map(|sym| {
+                        if matches!(
+                            sym.kind,
+                            crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+                        ) && sym.mutability != crate::tast::Mutability::Immutable
+                        {
+                            HirCaptureMode::ByMutableRef
+                        } else {
+                            HirCaptureMode::ByValue
+                        }
+                    })
+                    .unwrap_or(HirCaptureMode::ByValue);
+                HirCapture { symbol, mode, ty }
             })
             .collect();
 

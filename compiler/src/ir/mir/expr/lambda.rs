@@ -22,6 +22,43 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    pub(crate) fn refresh_boxed_capture_symbols(&mut self) {
+        let captures = self
+            .current_drop_points
+            .as_ref()
+            .map(|points| points.lambda_captures.clone())
+            .unwrap_or_default();
+        self.boxed_capture_symbols = captures
+            .into_iter()
+            .filter(|symbol| {
+                self.symbol_table.get_symbol(*symbol).map_or(false, |sym| {
+                    matches!(
+                        sym.kind,
+                        crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+                    ) && sym.mutability != crate::tast::Mutability::Immutable
+                })
+            })
+            .collect();
+    }
+
+    /// Put a captured mutable binding in a shared cell at its declaration.
+    /// Allocating here (rather than at the lambda expression) makes the cell
+    /// dominate closures created conditionally and lets multiple closures
+    /// reuse exactly the same binding.
+    pub(crate) fn box_capture_binding(&mut self, symbol: SymbolId, value: IrId) -> Option<IrId> {
+        if !self.boxed_capture_symbols.contains(&symbol) {
+            return Some(value);
+        }
+        if let Some(&cell) = self.capture_cells.get(&symbol) {
+            self.builder.build_store(cell, value)?;
+            return Some(cell);
+        }
+        let cell = self.build_heap_alloc(8)?;
+        self.builder.build_store(cell, value)?;
+        self.capture_cells.insert(symbol, cell);
+        Some(cell)
+    }
+
     pub(crate) fn lower_lambda(
         &mut self,
         params: &[HirParam],
@@ -82,7 +119,19 @@ impl<'a> HirToMirContext<'a> {
                     named_this.then(|| SymbolId::from_raw(0))
                 })
                 .unwrap_or(capture.symbol);
-            if let Some(&captured_val) = self.symbol_map.get(&capture_symbol) {
+            let captured_val = if capture.mode == HirCaptureMode::ByMutableRef {
+                self.capture_cells
+                    .get(&capture_symbol)
+                    .copied()
+                    .or_else(|| {
+                        let value = self.symbol_map.get(&capture_symbol).copied()?;
+                        self.boxed_capture_symbols.insert(capture_symbol);
+                        self.box_capture_binding(capture_symbol, value)
+                    })
+            } else {
+                self.symbol_map.get(&capture_symbol).copied()
+            };
+            if let Some(captured_val) = captured_val {
                 debug!("  Found! Register: {:?}", captured_val);
                 captured_values.push(captured_val);
             } else {
@@ -144,6 +193,8 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(entry_block);
         self.symbol_map.clear();
+        self.capture_cells.clear();
+        self.boxed_capture_symbols.clear();
         // Register-keyed: IrIds restart per function, so stale entries
         // from the previous body would collide with unrelated registers.
         self.interface_call_result_types.clear();
@@ -163,7 +214,14 @@ impl<'a> HirToMirContext<'a> {
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
         self.reassigned_in_scope.clear();
-        self.current_drop_points = None;
+        self.current_drop_points = match &body.kind {
+            HirExprKind::Block(block) => {
+                let mut analyzer = DropPointAnalyzer::new();
+                Some(analyzer.analyze_function(block))
+            }
+            _ => None,
+        };
+        self.refresh_boxed_capture_symbols();
         self.current_stmt_index = 0;
 
         // Map lambda parameters to registers and register them as locals, the same
@@ -171,6 +229,7 @@ impl<'a> HirToMirContext<'a> {
         for (i, param) in params.iter().enumerate() {
             let param_reg = IrId::new(param_offset + i as u32);
             self.symbol_map.insert(param.symbol_id, param_reg);
+            let _ = self.box_capture_binding(param.symbol_id, param_reg);
 
             // Also register parameter as a local so type inference can find it
             let param_type = self.convert_type(param.ty);
@@ -209,6 +268,10 @@ impl<'a> HirToMirContext<'a> {
                 // Use layout to load field (handles casting automatically)
                 let value_reg = layout.load_field(&mut self.builder, env_ptr, field.symbol)?;
                 self.symbol_map.insert(field.symbol, value_reg);
+                if field.mode == HirCaptureMode::ByMutableRef {
+                    let cell = layout.load_cell_ptr(&mut self.builder, env_ptr, field.symbol)?;
+                    self.capture_cells.insert(field.symbol, cell);
+                }
             }
         }
 

@@ -1,6 +1,6 @@
 use tracing::debug;
 
-use crate::ir::hir::HirCapture;
+use crate::ir::hir::{HirCapture, HirCaptureMode};
 use crate::ir::{BinaryOp, IrBuilder, IrId, IrType};
 use crate::tast::{SymbolId, TypeId};
 
@@ -11,6 +11,8 @@ pub struct EnvironmentField {
     pub index: usize,
     /// Symbol of the captured variable
     pub symbol: SymbolId,
+    /// Whether the environment slot contains the value or a shared cell pointer.
+    pub mode: HirCaptureMode,
     /// Final type after conversion (what the lambda code expects)
     pub ty: IrType,
     /// Storage type in environment (how it's actually stored)
@@ -95,6 +97,7 @@ impl EnvironmentLayout {
             fields.push(EnvironmentField {
                 index,
                 symbol: capture.symbol,
+                mode: capture.mode,
                 ty: final_ty,
                 storage_ty,
                 offset,
@@ -134,8 +137,16 @@ impl EnvironmentLayout {
         // Register the pointer's type
         builder.register_local(field_ptr, IrType::Ptr(Box::new(IrType::Void)))?;
 
-        // Load the value (always as I64 from storage)
+        // Load the environment slot (always I64). Mutable captures store a
+        // pointer to a shared heap cell in this slot; both the enclosing
+        // function and every closure dereference that same cell.
         let loaded = builder.build_load(field_ptr, field.storage_ty.clone())?;
+        if field.mode == HirCaptureMode::ByMutableRef {
+            builder.register_local(loaded, IrType::Ptr(Box::new(IrType::Void)))?;
+            let value = builder.build_load(loaded, field.ty.clone())?;
+            builder.register_local(value, field.ty.clone())?;
+            return Some(value);
+        }
         // Register the loaded value's type - CRITICAL: For pointer types, register with
         // the SEMANTIC type (field.ty = Ptr), not storage type (I64). This ensures that
         // downstream type checks recognize this as a pointer and don't truncate it.
@@ -197,6 +208,16 @@ impl EnvironmentLayout {
     ) -> Option<()> {
         let field = self.find_field(symbol)?;
 
+        if field.mode == HirCaptureMode::ByMutableRef {
+            let offset_const = builder.build_int(field.offset as i64, IrType::I64)?;
+            let field_ptr = builder.build_binop(BinaryOp::Add, env_ptr, offset_const)?;
+            builder.register_local(field_ptr, IrType::Ptr(Box::new(IrType::Void)))?;
+            let cell_ptr = builder.build_load(field_ptr, field.storage_ty.clone())?;
+            builder.register_local(cell_ptr, IrType::Ptr(Box::new(IrType::Void)))?;
+            builder.build_store(cell_ptr, value)?;
+            return Some(());
+        }
+
         // Cast if needed (I32 → I64 for storage). Floats are reinterpreted
         // rather than converted, mirroring `load_field`.
         let store_value = if field.needs_cast {
@@ -223,5 +244,24 @@ impl EnvironmentLayout {
         builder.build_store(field_ptr, store_value)?;
 
         Some(())
+    }
+
+    /// Load the shared-cell pointer stored for a mutable capture.
+    pub fn load_cell_ptr(
+        &self,
+        builder: &mut IrBuilder,
+        env_ptr: IrId,
+        symbol: SymbolId,
+    ) -> Option<IrId> {
+        let field = self.find_field(symbol)?;
+        if field.mode != HirCaptureMode::ByMutableRef {
+            return None;
+        }
+        let offset_const = builder.build_int(field.offset as i64, IrType::I64)?;
+        let field_ptr = builder.build_binop(BinaryOp::Add, env_ptr, offset_const)?;
+        builder.register_local(field_ptr, IrType::Ptr(Box::new(IrType::Void)))?;
+        let cell_ptr = builder.build_load(field_ptr, field.storage_ty.clone())?;
+        builder.register_local(cell_ptr, IrType::Ptr(Box::new(IrType::Void)))?;
+        Some(cell_ptr)
     }
 }

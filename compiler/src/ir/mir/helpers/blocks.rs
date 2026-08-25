@@ -128,6 +128,8 @@ impl<'a> HirToMirContext<'a> {
             current_function: self.builder.current_function,
             current_block: self.builder.current_block,
             symbol_map: self.symbol_map.clone(),
+            capture_cells: self.capture_cells.clone(),
+            boxed_capture_symbols: self.boxed_capture_symbols.clone(),
             current_env_layout: self.current_env_layout.clone(),
             // Save drop tracking state so lambda bodies don't inherit parent's owned values
             owned_heap_values: self.owned_heap_values.clone(),
@@ -154,6 +156,8 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = state.current_function;
         self.builder.current_block = state.current_block;
         self.symbol_map = state.symbol_map;
+        self.capture_cells = state.capture_cells;
+        self.boxed_capture_symbols = state.boxed_capture_symbols;
         self.current_env_layout = state.current_env_layout;
         self.owned_heap_values = state.owned_heap_values;
         self.drop_scope_stack = state.drop_scope_stack;

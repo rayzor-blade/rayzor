@@ -741,7 +741,7 @@ pub struct HirCapture {
     pub ty: TypeId,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HirCaptureMode {
     ByValue,
     ByRef,

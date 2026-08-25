@@ -573,6 +573,17 @@ fn try_build_phi_candidate(
                             return None; // Storing tracked pointer - escapes
                         }
 
+                        // The rewriter only replaces accesses through a GEP
+                        // with a known field index. A direct store through the
+                        // allocation root (for example an 8-byte closure
+                        // capture cell) would survive after its malloc is
+                        // removed and leave a dangling MIR register.
+                        let has_field = phi_gep_map.contains_key(ptr)
+                            || malloc_gep_maps.values().any(|map| map.contains_key(ptr));
+                        if !has_field {
+                            return None;
+                        }
+
                         // Track field type from the stored value (for phi_tracked GEPs)
                         if phi_tracked.contains(ptr) {
                             if let Some(&field_idx) = phi_gep_map.get(ptr) {
@@ -601,6 +612,12 @@ fn try_build_phi_candidate(
                 }
 
                 IrInstruction::Load { ptr, ty, .. } => {
+                    if all_tracked.contains(ptr)
+                        && !phi_gep_map.contains_key(ptr)
+                        && !malloc_gep_maps.values().any(|map| map.contains_key(ptr))
+                    {
+                        return None;
+                    }
                     // Track field types from loads on the phi (takes precedence over Store)
                     if phi_tracked.contains(ptr) {
                         if let Some(&field_idx) = phi_gep_map.get(ptr) {
@@ -1593,10 +1610,9 @@ fn try_build_candidate_function_wide(
                             return None; // Tracked pointer used as stored value — escapes
                         }
                         // Track field type from the stored value
-                        if let Some(&field_idx) = gep_map.get(ptr) {
-                            if let Some(ty) = value_types.get(value) {
-                                field_types.entry(field_idx).or_insert_with(|| ty.clone());
-                            }
+                        let &field_idx = gep_map.get(ptr)?;
+                        if let Some(ty) = value_types.get(value) {
+                            field_types.entry(field_idx).or_insert_with(|| ty.clone());
                         }
                     } else if tracked.contains(value) {
                         return None; // Pointer escapes via store
@@ -1605,10 +1621,9 @@ fn try_build_candidate_function_wide(
 
                 IrInstruction::Load { ptr, ty, .. } => {
                     if tracked.contains(ptr) {
-                        if let Some(&field_idx) = gep_map.get(ptr) {
-                            // Load type takes precedence over Store type
-                            field_types.insert(field_idx, ty.clone());
-                        }
+                        let &field_idx = gep_map.get(ptr)?;
+                        // Load type takes precedence over Store type
+                        field_types.insert(field_idx, ty.clone());
                     }
                 }
 

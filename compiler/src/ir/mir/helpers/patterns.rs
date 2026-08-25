@@ -90,6 +90,7 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
                 }
+                let _ = self.box_capture_binding(*symbol, value);
             }
             _ => {
                 self.bind_pattern(pattern, value);
@@ -106,6 +107,7 @@ impl<'a> HirToMirContext<'a> {
         match pattern {
             HirPattern::Variable { symbol, .. } => {
                 self.symbol_map.insert(*symbol, value);
+                let _ = self.box_capture_binding(*symbol, value);
             }
             HirPattern::Wildcard => {
                 // Wildcard doesn't bind anything.
