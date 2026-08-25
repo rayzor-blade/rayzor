@@ -35,7 +35,11 @@ mkdir -p "$WORK/run"
 printf 'issue\tstatus\tdetail\n' > "$OUT"
 
 # How many files are candidates, so progress has a denominator.
-total=$(grep -lE "extends unit\.Test" "$SRC"/*.hx 2>/dev/null | wc -l | tr -d ' ')
+# Both spellings. A file in `package unit.issues` may name the base class
+# `Test` or `unit.Test`, and matching only the qualified form dropped 714 of
+# the 1165 issue files before they were ever compiled -- not skipped, not
+# reported, just absent from the denominator.
+total=$(grep -lE "extends[[:space:]]+(unit\.)?Test\b" "$SRC"/*.hx 2>/dev/null | wc -l | tr -d ' ')
 [[ "$LIMIT" != 0 && $LIMIT -lt $total ]] && total=$LIMIT
 
 seen=0
@@ -72,7 +76,7 @@ record() {  # record <test> <status> <detail>
 for f in "$SRC"/*.hx; do
   base="$(basename "$f" .hx)"
   [[ "$LIMIT" != 0 && $seen -ge $LIMIT ]] && break
-  grep -q "extends unit.Test" "$f" || continue
+  grep -qE "extends[[:space:]]+(unit\.)?Test\b" "$f" || continue
 
   # A test that names a target-language package is asserting about that
   # target's semantics, not about Haxe. Out of scope: rayzor is its own
