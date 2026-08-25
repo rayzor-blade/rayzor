@@ -145,6 +145,25 @@ impl<'a> HirToMirContext<'a> {
                         .collect()
                 };
 
+                // This path emits the call for a resolved method and never
+                // filled defaults, so `m.f(2)` on `f(a:Int, b:String = "d")`
+                // reached the backend one argument short. Cranelift pads an
+                // under-arity call with zero rather than trapping, so the
+                // default did not fail loudly -- it silently became 0.
+                let mut arg_regs = arg_regs;
+                let call_arg_types: Vec<TypeId> = if *is_method {
+                    args.iter().skip(1).map(|a| a.ty).collect()
+                } else {
+                    args.iter().map(|a| a.ty).collect()
+                };
+                self.bind_skipped_optional_args(
+                    func_id,
+                    &mut arg_regs,
+                    &call_arg_types,
+                    *is_method,
+                );
+                self.fill_default_args(func_id, &mut arg_regs, *is_method);
+
                 let actual_return_type =
                     if let Some(func) = self.builder.module.functions.get(&func_id) {
                         func.signature.return_type.clone()
