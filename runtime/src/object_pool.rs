@@ -104,6 +104,18 @@ thread_local! {
 
 /// Reserve the region on first use. Failure is not fatal: every path falls
 /// back to libc, so the pool simply stays empty.
+#[cfg(not(unix))]
+fn ensure_region() -> bool {
+    // No mmap here, and the pool is an optimisation rather than a requirement:
+    // every allocation path already falls back to libc when the region is
+    // absent, which is exactly what a failed reservation does on unix. Taking
+    // that path deliberately costs a pool, not correctness -- where reserving
+    // address space by hand would cost a second allocator to maintain.
+    REGION_BASE.store(usize::MAX, Ordering::Release);
+    false
+}
+
+#[cfg(unix)]
 fn ensure_region() -> bool {
     let base = REGION_BASE.load(Ordering::Acquire);
     if base != 0 {
