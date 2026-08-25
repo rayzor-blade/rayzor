@@ -891,6 +891,47 @@ impl<'a> AstLowering<'a> {
                                         }
                                     }
                                 }
+                                parser::ExprKind::Function(func) if !func.name.is_empty() => {
+                                    // `function foo() {...}` in statement position
+                                    // declares `foo`. The expression form yields an
+                                    // anonymous literal, so without binding the name
+                                    // here the declaration is unreachable and every
+                                    // later call reports an unknown name.
+                                    match self.lower_expression(expr) {
+                                        Ok(typed_expr) => {
+                                            let fn_name = self.context.intern_string(&func.name);
+                                            let fn_type = typed_expr.expr_type;
+                                            let fn_symbol = self
+                                                .context
+                                                .symbol_table
+                                                .create_variable_with_type(
+                                                    fn_name,
+                                                    self.context.current_scope,
+                                                    fn_type,
+                                                );
+                                            if let Some(scope) = self
+                                                .context
+                                                .scope_tree
+                                                .get_scope_mut(self.context.current_scope)
+                                            {
+                                                scope.add_symbol(fn_symbol, fn_name);
+                                            }
+                                            statements.push(TypedStatement::VarDeclaration {
+                                                symbol_id: fn_symbol,
+                                                var_type: fn_type,
+                                                initializer: Some(typed_expr),
+                                                mutability:
+                                                    crate::tast::symbols::Mutability::Mutable,
+                                                source_location: self
+                                                    .context
+                                                    .span_to_location(&expr.span),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            self.collected_errors.push(e);
+                                        }
+                                    }
+                                }
                                 _ => {
                                     // Regular expression - lower and wrap in statement
                                     match self.lower_expression(expr) {
