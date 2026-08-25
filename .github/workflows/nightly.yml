@@ -112,7 +112,11 @@ jobs:
           mkdir mm | Out-Null
           tar -xf micromamba.tar.bz2 -C mm
           $mm = Join-Path (Resolve-Path mm).Path 'Library\bin\micromamba.exe'
-          & $mm create -y -p "$PWD\llvmenv" -c conda-forge "llvmdev=21.1.8"
+          # zlib and libxml2-devel carry the import libraries LLVM was linked
+          # against; llvmdev pulls in only the runtime halves, which have no
+          # `.lib` at all.
+          & $mm create -y -p "$PWD\llvmenv" -c conda-forge `
+            "llvmdev=21.1.8" "zlib" "libxml2-devel"
           $prefix = "$PWD\llvmenv\Library"
           if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
             throw "llvmdev installed no llvm-config.exe under $prefix\bin"
@@ -124,6 +128,35 @@ jobs:
             throw "llvm-config reports a libdir that does not exist: $libdir"
           }
           & "$prefix\bin\llvm-config.exe" --version
+
+          # llvm-config names its system libraries by the file names LLVM was
+          # BUILT against, and conda-forge has since renamed zstd's import
+          # library. Alias it rather than pinning an old zstd, so a version
+          # bump cannot quietly take the link out again.
+          if ((Test-Path "$libdir\zstd.lib") -and
+              -not (Test-Path "$libdir\zstd.dll.lib")) {
+            Copy-Item "$libdir\zstd.lib" "$libdir\zstd.dll.lib"
+          }
+
+          # Check every library the linker will be told to open, here rather
+          # than ten minutes later at link time, where it surfaces as a bare
+          # LNK1181 naming only the first one missing. The Windows SDK supplies
+          # its own, so those are not this environment's to provide.
+          $sdk = @('psapi.lib','shell32.lib','ole32.lib','uuid.lib',
+                   'advapi32.lib','ws2_32.lib','ntdll.lib','kernel32.lib',
+                   'user32.lib','userenv.lib','dbghelp.lib','delayimp.lib',
+                   'legacy_stdio_definitions.lib')
+          $missing = @()
+          foreach ($lib in (& "$prefix\bin\llvm-config.exe" `
+                              --system-libs --link-static).Split(' ')) {
+            $lib = $lib.Trim()
+            if (-not $lib -or $sdk -contains $lib.ToLower()) { continue }
+            if (-not (Test-Path (Join-Path $libdir $lib))) { $missing += $lib }
+          }
+          if ($missing.Count) {
+            throw "llvm-config names system libraries this env does not provide: $($missing -join ', ')"
+          }
+          Write-Host "all llvm-config --system-libs resolve under $libdir"
           "LLVM_SYS_211_PREFIX=$prefix" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@stable
