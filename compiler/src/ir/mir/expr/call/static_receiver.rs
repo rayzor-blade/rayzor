@@ -274,6 +274,8 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            let call_arg_types: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+            self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, false);
             self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
             self.fill_default_args(func_id, &mut arg_regs, false);
 

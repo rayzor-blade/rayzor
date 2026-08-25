@@ -475,6 +475,10 @@ pub struct HirToMirContext<'a> {
     /// Keyed by IrFunctionId, value is Vec<TypeId> of param types (excludes implicit 'this').
     /// Used for structural subtyping: detecting class→anon or wider-anon→anon at call sites.
     function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
+    /// Which parameters may be omitted at a call site. Haxe lets a caller skip a
+    /// LEADING optional and supply the ones after it, so binding positionally
+    /// puts an argument in the wrong slot rather than merely leaving one empty.
+    function_param_optional: BTreeMap<IrFunctionId, Vec<bool>>,
 
     /// Per-parameter qualified type *names* for imported functions whose
     /// HIR didn't go through this context's lowering (BLADE-cache loads
@@ -1363,6 +1367,7 @@ impl<'a> HirToMirContext<'a> {
             external_constructor_param_counts: BTreeMap::new(),
             external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),
+            function_param_optional: BTreeMap::new(),
             external_function_param_iface_names: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),

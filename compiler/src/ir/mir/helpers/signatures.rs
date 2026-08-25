@@ -158,6 +158,108 @@ impl<'a> HirToMirContext<'a> {
         builder.build()
     }
 
+    /// Place supplied arguments in the parameters they can actually occupy,
+    /// filling any LEADING optional the caller skipped.
+    ///
+    /// `f(?a:Int, b:String)` called as `f("x")` binds `b`, not `a` -- Haxe lets
+    /// a caller omit an optional and supply what follows. Binding positionally
+    /// put the String in the Int slot, which reads back as a raw pointer and,
+    /// when the parameter is a Bool the body branches on, reaches the backend as
+    /// a pointer where a condition belongs.
+    ///
+    /// Only a mismatch that could not possibly be a conversion moves anything:
+    /// a reference offered to a scalar parameter, or a scalar to a reference.
+    /// Anything the existing coercions handle is left alone, so calls that
+    /// already bind correctly are untouched.
+    pub(crate) fn bind_skipped_optional_args(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut Vec<IrId>,
+        arg_types: &[TypeId],
+        has_implicit_this: bool,
+    ) {
+        let Some(optional) = self.function_param_optional.get(&func_id).cloned() else {
+            return;
+        };
+        let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() else {
+            return;
+        };
+        // An optional parameter need not carry a default: `?a:Int` is Null<Int>
+        // and is filled with nothing rather than with a value.
+        let defaults = self
+            .function_param_defaults
+            .get(&func_id)
+            .cloned()
+            .unwrap_or_else(|| vec![None; param_types.len()]);
+
+        let offset = usize::from(has_implicit_this);
+        let supplied = arg_regs.len().saturating_sub(offset);
+        // Only a caller that left something out can have skipped anything.
+        if supplied == 0 || supplied >= param_types.len() {
+            return;
+        }
+
+        let bindable = |a: &IrType, p: &IrType| -> bool {
+            let a_ref = matches!(a, IrType::Ptr(_) | IrType::String | IrType::Any);
+            let p_ref = matches!(p, IrType::Ptr(_) | IrType::String | IrType::Any);
+            a_ref == p_ref
+        };
+
+        let mut plan: Vec<Option<usize>> = Vec::with_capacity(param_types.len());
+        let mut next_arg = 0usize;
+        for (p_idx, p_ty) in param_types.iter().enumerate() {
+            if next_arg >= supplied {
+                plan.push(None);
+                continue;
+            }
+            let arg_ir = self.convert_type(arg_types[next_arg]);
+            let param_ir = self.convert_type(*p_ty);
+            let can_skip = optional.get(p_idx).copied().unwrap_or(false);
+            if !bindable(&arg_ir, &param_ir) && can_skip {
+                plan.push(None);
+            } else {
+                plan.push(Some(next_arg));
+                next_arg += 1;
+            }
+        }
+
+        // Nothing was skipped, or an argument found no home -- leave the call as
+        // it was rather than guessing at a shape this cannot describe.
+        if next_arg != supplied || plan.iter().all(|slot| slot.is_some()) {
+            return;
+        }
+
+        let supplied_regs: Vec<IrId> = arg_regs[offset..].to_vec();
+        let mut rebound: Vec<IrId> = arg_regs[..offset].to_vec();
+        for (p_idx, slot) in plan.iter().enumerate() {
+            match slot {
+                Some(a_idx) => rebound.push(supplied_regs[*a_idx]),
+                None => {
+                    let reg = match defaults.get(p_idx) {
+                        Some(Some(default_expr)) => self.lower_expression(&default_expr.clone()),
+                        // Skipped and undefaulted: the parameter is Null<T>, so
+                        // it reads as absent rather than as a value.
+                        _ => {
+                            let empty = match self.convert_type(param_types[p_idx]) {
+                                IrType::I32 | IrType::U32 => IrValue::I32(0),
+                                IrType::F32 => IrValue::F32(0.0),
+                                IrType::F64 => IrValue::F64(0.0),
+                                IrType::Bool => IrValue::Bool(false),
+                                _ => IrValue::I64(0),
+                            };
+                            self.builder.build_const(empty)
+                        }
+                    };
+                    let Some(reg) = reg else {
+                        return;
+                    };
+                    rebound.push(reg);
+                }
+            }
+        }
+        *arg_regs = rebound;
+    }
+
     pub(crate) fn fill_default_args(
         &mut self,
         func_id: IrFunctionId,

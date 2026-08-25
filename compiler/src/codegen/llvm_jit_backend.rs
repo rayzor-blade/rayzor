@@ -6650,6 +6650,18 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             "cond_bool",
                         )
                         .map_err(|e| format!("Failed to convert cond: {}", e))?
+                } else if cond_raw.is_pointer_value() {
+                    // A branch condition should be a scalar. A pointer here means
+                    // an earlier stage put a reference where a Bool belongs --
+                    // seen when a call binds a String to a leading optional
+                    // parameter it should have skipped. Report which branch, and
+                    // let the rest of the module keep compiling; `into_int_value`
+                    // aborts the whole run with a backtrace instead.
+                    return Err(format!(
+                        "branch condition is a reference, not a Bool: {:?}. \
+                         An argument was bound to a parameter of another type.",
+                        cond_raw.get_type()
+                    ));
                 } else {
                     let int_val = cond_raw.into_int_value();
                     // If it's already i1, use it directly; otherwise compare with 0

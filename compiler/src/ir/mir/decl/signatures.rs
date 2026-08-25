@@ -95,6 +95,14 @@ impl<'a> HirToMirContext<'a> {
         // Store parameter HIR types for structural subtyping materialization at call sites
         let param_types: Vec<TypeId> = hir_func.params.iter().map(|p| p.ty).collect();
         self.function_param_hir_types.insert(func_id, param_types);
+        let optional: Vec<bool> = hir_func
+            .params
+            .iter()
+            .map(|p| p.is_optional || p.default.is_some())
+            .collect();
+        if optional.iter().any(|o| *o) {
+            self.function_param_optional.insert(func_id, optional);
+        }
 
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
@@ -221,6 +229,14 @@ impl<'a> HirToMirContext<'a> {
         // Store parameter HIR types for structural subtyping materialization at call sites
         let param_types: Vec<TypeId> = hir_func.params.iter().map(|p| p.ty).collect();
         self.function_param_hir_types.insert(func_id, param_types);
+        let optional: Vec<bool> = hir_func
+            .params
+            .iter()
+            .map(|p| p.is_optional || p.default.is_some())
+            .collect();
+        if optional.iter().any(|o| *o) {
+            self.function_param_optional.insert(func_id, optional);
+        }
 
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
