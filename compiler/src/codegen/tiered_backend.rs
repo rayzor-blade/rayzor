@@ -3570,7 +3570,10 @@ impl TieredBackend {
     /// On Linux: Uses gcc or clang
     ///
     /// Returns error if no linker is available - caller should fall back to Cranelift
-    #[cfg(feature = "llvm-backend")]
+    #[cfg(all(
+        feature = "llvm-backend",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     fn link_to_dylib(
         &self,
         obj_path: &Path,
@@ -3671,9 +3674,6 @@ impl TieredBackend {
                 .to_string(),
         ];
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        return Err("LLVM AOT compilation not supported on this platform".to_string());
-
         let output = std::process::Command::new(&linker)
             .args(&args)
             .output()
@@ -3689,6 +3689,24 @@ impl TieredBackend {
         let _ = std::fs::remove_file(&stubs_obj_path);
 
         Ok(())
+    }
+
+    /// Platforms this build has no shared-object link recipe for.
+    ///
+    /// A separate definition rather than an early return inside the body above:
+    /// code following a `return` is still name-resolved, so the linker arguments
+    /// built only for macOS and Linux would have to exist here as well.
+    #[cfg(all(
+        feature = "llvm-backend",
+        not(any(target_os = "macos", target_os = "linux"))
+    ))]
+    fn link_to_dylib(
+        &self,
+        _obj_path: &Path,
+        _dylib_path: &Path,
+        _runtime_symbols: &[(String, usize)],
+    ) -> Result<(), String> {
+        Err("LLVM AOT compilation is not supported on this platform".to_string())
     }
 
     /// Find a suitable linker on the system
