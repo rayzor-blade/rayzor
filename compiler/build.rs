@@ -402,7 +402,12 @@ fn build_llvm21_const_compat() {
 
     cc::Build::new()
         .cpp(true)
-        .flag_if_supported("-std=c++17")
+        // `std` rather than a raw flag: LLVM 21's headers are C++17, and MSVC
+        // spells the dialect `/std:c++17`. Passing the GCC spelling alone left
+        // cl.exe defaulting to C++14 -- `flag_if_supported` drops what the
+        // compiler rejects, so the headers failed on inline variables, nested
+        // namespaces and `auto` template parameters instead of on a bad flag.
+        .std("c++17")
         .include(include_dir)
         .file("src/llvm21_const_compat.cpp")
         .compile("rayzor_llvm21_const_compat");
