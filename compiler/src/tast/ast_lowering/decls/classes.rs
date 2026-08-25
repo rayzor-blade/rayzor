@@ -304,7 +304,16 @@ impl<'a> AstLowering<'a> {
                     self.lower_type(ret_type)
                         .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
                 } else {
-                    self.context.type_table.borrow().dynamic_type()
+                    // An un-annotated return is only inferred when the body is
+                    // lowered, which happens after this. A caller written ABOVE
+                    // the method therefore resolves it as Dynamic, and Dynamic
+                    // carries no field layout -- so a returned anonymous
+                    // structure reads its fields back as null, and the same
+                    // source says different things depending on the order the
+                    // two methods appear in. Recover the shape here for the
+                    // case that can be read straight off the syntax.
+                    self.anonymous_return_type_from_ast(func)
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
                 };
                 let function_type = self
                     .context
@@ -1075,5 +1084,65 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+    }
+
+    /// The anonymous structure an un-annotated method returns, when the return
+    /// expression is an object literal whose field values are literals.
+    ///
+    /// Read off the syntax rather than lowered: this runs while the class is
+    /// still being registered, so lowering here would create symbols in the
+    /// wrong scope and evaluate expressions twice. Anything less direct keeps
+    /// today's `Dynamic`.
+    fn anonymous_return_type_from_ast(
+        &mut self,
+        func: &parser::haxe_ast::Function,
+    ) -> Option<TypeId> {
+        use parser::haxe_ast::ExprKind;
+
+        fn returned_expr(expr: &parser::haxe_ast::Expr) -> Option<&parser::haxe_ast::Expr> {
+            match &expr.kind {
+                ExprKind::Return(Some(inner)) => Some(inner),
+                ExprKind::Block(elements) => {
+                    elements.iter().rev().find_map(|element| match element {
+                        parser::BlockElement::Expr(e) => returned_expr(e),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            }
+        }
+
+        let body = func.body.as_ref()?;
+        let ExprKind::Object(fields) = &returned_expr(body)?.kind else {
+            return None;
+        };
+        if fields.is_empty() {
+            return None;
+        }
+
+        let mut field_types = Vec::with_capacity(fields.len());
+        for field in fields {
+            let type_id = {
+                let table = self.context.type_table.borrow();
+                match &field.expr.kind {
+                    ExprKind::String(_) => table.string_type(),
+                    ExprKind::Int(_) => table.int_type(),
+                    ExprKind::Float(_) => table.float_type(),
+                    ExprKind::Bool(_) => table.bool_type(),
+                    // A field whose type needs the expression evaluated is not
+                    // decidable from syntax; leaving the whole thing Dynamic is
+                    // what already happens, and a wrong field type is worse
+                    // than none -- it reads back as garbage instead of null.
+                    _ => return None,
+                }
+            };
+            let name = self.context.intern_string(&field.name);
+            field_types.push((name, type_id));
+        }
+
+        Some(crate::tast::type_resolution::create_anonymous_object_type(
+            &self.context.type_table,
+            field_types,
+        ))
     }
 }
