@@ -218,6 +218,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let meta = self.parse_metadata_list();
             let optional_from_meta = meta.iter().any(|m| m.name == "optional");
 
+            // Access modifiers on a structure field. `Ref<T> = { public
+            // function get():T; }` is ordinary Haxe and appears throughout
+            // haxe.macro, so without these the field name reads as `public`
+            // and the parse dies on the keyword that follows it.
+            while self.stream.eat(TokenKind::KwPublic).is_some()
+                || self.stream.eat(TokenKind::KwPrivate).is_some()
+                || self.stream.eat(TokenKind::KwStatic).is_some()
+                || self.stream.eat(TokenKind::KwOverride).is_some()
+                || self.stream.eat(TokenKind::KwInline).is_some()
+                || self.stream.eat(TokenKind::KwDynamic).is_some()
+            {}
+
             // Function field: `function name(params):RetType`. Used by stdlib
             // typedefs like `Iterable<T> = { function iterator():Iterator<T>; }`.
             // We collect the params and return type into a `Type::Function`
@@ -261,6 +273,21 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let optional_from_question = self.stream.eat(TokenKind::Question).is_some();
             let field_name = self.stream.current_text().to_string();
             self.stream.advance();
+            // Property accessors: `var id(default, never):Int`. What the field
+            // reads and writes as is the declared type either way, so the
+            // accessor pair only has to be consumed.
+            if self.stream.at(TokenKind::LParen) {
+                self.stream.advance();
+                let mut depth = 1;
+                while depth > 0 && !self.stream.is_eof() {
+                    if self.stream.at(TokenKind::LParen) {
+                        depth += 1;
+                    } else if self.stream.at(TokenKind::RParen) {
+                        depth -= 1;
+                    }
+                    self.stream.advance();
+                }
+            }
             self.stream.expect(TokenKind::Colon)?;
             let type_hint = self.parse_type()?;
 
