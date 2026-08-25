@@ -21,8 +21,15 @@ the revision in `corpus.pin`, into a gitignored `corpus/`.
 ./fetch.sh                 # once, and again when corpus.pin moves
 ./run.sh                   # whole corpus
 LIMIT=25 ./run.sh          # pilot
+JOBS=1 ./run.sh            # force serial execution (default: up to 8 workers)
 SRC=<path> ./run.sh        # score a clone you already have
 ```
+
+The harness builds each issue in its own work directory and schedules bounded
+parallel workers. Corpus sibling fixtures and the assertion shims live in one
+shared, read-only class-path tree, so they are copied once per run instead of
+once per issue. Set `JOBS` to tune CPU and memory use; final TSV rows remain in
+source order regardless of which worker finishes first.
 
 The official suite depends on `utest`, which is reflection-heavy. `unit/Test.hx`
 here is a minimal stand-in providing only what the corpus uses — `eq` (2125

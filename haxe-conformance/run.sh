@@ -18,6 +18,19 @@ LIMIT="${LIMIT:-0}"
 TIMEOUT="${TIMEOUT:-60}"
 OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
+JOBS="${JOBS:-0}"
+
+# Keep enough parallelism to use the machine without letting a corpus run
+# launch hundreds of compiler processes at once. JOBS=1 retains the old
+# serial behaviour; JOBS=N makes performance experiments reproducible.
+if [[ "$JOBS" == 0 ]]; then
+  JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+  [[ "$JOBS" -gt 8 ]] && JOBS=8
+fi
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "JOBS must be a positive integer (got: $JOBS)" >&2
+  exit 2
+}
 
 # Package roots that only exist on one Haxe target.
 TARGET_PKGS="php|js|cs|java|python|lua|flash|neko|hl|eval|cpp|jvm"
@@ -31,8 +44,22 @@ for fixture in shims/unit/Test.hx shims/unit/ConfCheck.hx shims/utest/Assert.hx 
 done
 [[ -d "$SRC" ]] || { echo "no corpus at $SRC -- run ./fetch.sh, or set SRC" >&2; exit 2; }
 
-mkdir -p "$WORK/run"
+RUN_ROOT="$WORK/run"
+SHARED="$WORK/shared-$$"
+RESULTS="$WORK/results-$$"
+mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS"
 printf 'issue\tstatus\tdetail\n' > "$OUT"
+
+# These files are identical for every issue. Keeping one class-path tree avoids
+# copying ~74 sibling fixtures per test (roughly 76k copies for a full run).
+# Tests only write beneath RUN_ROOT; SHARED is read-only input to every worker.
+cp "$SRC"/../*.hx "$SHARED/unit/" 2>/dev/null || true
+if [[ -d "$SRC/misc" ]]; then
+  cp "$SRC"/misc/*.hx "$SHARED/unit/issues/misc/" 2>/dev/null || true
+fi
+cp "$HERE/shims/unit/Test.hx" "$SHARED/unit/Test.hx"
+cp "$HERE/shims/unit/ConfCheck.hx" "$SHARED/unit/ConfCheck.hx"
+cp "$HERE/shims/utest/Assert.hx" "$SHARED/utest/Assert.hx"
 
 # How many files are candidates, so progress has a denominator.
 # Both spellings. A file in `package unit.issues` may name the base class
@@ -43,6 +70,7 @@ total=$(grep -lE "extends[[:space:]]+(unit\.)?Test\b" "$SRC"/*.hx 2>/dev/null | 
 [[ "$LIMIT" != 0 && $LIMIT -lt $total ]] && total=$LIMIT
 
 seen=0
+queued=0
 c_PASS=0; c_WRONG_ANSWER=0; c_NO_OUTPUT=0
 c_COMPILE_FAIL=0; c_CRASH=0; c_TIMEOUT=0; c_SKIP=0
 
@@ -73,10 +101,15 @@ record() {  # record <test> <status> <detail>
   return 0
 }
 
-for f in "$SRC"/*.hx; do
+emit_result() { # emit_result <path> <test> <status> <detail>
+  local result="$1" t="$2" st="$3" det="$4"
+  printf '%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" > "$result"
+}
+
+process_one() { # process_one <source> <result-file>
+  local f="$1" result="$2"
+  local base pkg d gen out code det status
   base="$(basename "$f" .hx)"
-  [[ "$LIMIT" != 0 && $seen -ge $LIMIT ]] && break
-  grep -qE "extends[[:space:]]+(unit\.)?Test\b" "$f" || continue
 
   # A test that names a target-language package is asserting about that
   # target's semantics, not about Haxe. Out of scope: rayzor is its own
@@ -92,24 +125,16 @@ for f in "$SRC"/*.hx; do
            grep -oE "\b($TARGET_PKGS)\.[A-Z][A-Za-z0-9_]*" "$f"
          } | sort -u | tr '\n' ' ')
   if [[ -n "$pkg" ]]; then
-    record "$base" SKIP "targets ${pkg% }"; continue
+    emit_result "$result" "$base" SKIP "targets ${pkg% }"
+    return
   fi
 
-
-  d="$WORK/run/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues" "$d/unit" "$d/utest"
+  d="$RUN_ROOT/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues"
   # The corpus is not self-contained: tests reference siblings that upstream
   # ships beside them -- HelperMacros, MyClass, MyEnum, and the macros under
   # issues/misc. Without them a test fails on a missing type, which reads as
   # a resolution defect in the compiler rather than a file we did not provide.
-  # Copied first so our shims below win where the names collide.
-  cp "$SRC"/../*.hx "$d/unit/" 2>/dev/null || true
-  if [[ -d "$SRC/misc" ]]; then
-    mkdir -p "$d/unit/issues/misc"
-    cp "$SRC"/misc/*.hx "$d/unit/issues/misc/" 2>/dev/null || true
-  fi
-  cp "$HERE/shims/unit/Test.hx" "$d/unit/Test.hx"
-  cp "$HERE/shims/unit/ConfCheck.hx" "$d/unit/ConfCheck.hx"
-  cp "$HERE/shims/utest/Assert.hx" "$d/utest/Assert.hx"
+  # They and the harness shims live in SHARED, the second class path below.
 
   # Inject main() as the last member of the class; awk -v cannot carry newlines.
   # Exits 3 when the class declares no test method that is live for us.
@@ -184,9 +209,11 @@ open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[las
 PYGEN
   gen=$?
   if [[ $gen -eq 3 ]]; then
-    record "$base" SKIP "no test method live for this target"; continue
+    emit_result "$result" "$base" SKIP "no test method live for this target"
+    return
   elif [[ $gen -ne 0 ]]; then
-    record "$base" SKIP "harness could not inject main"; continue
+    emit_result "$result" "$base" SKIP "harness could not inject main"
+    return
   fi
 
   # Run as a project, not a lone file. `rayzor run <file>` compiles that file
@@ -195,8 +222,8 @@ PYGEN
   # declare a forward reference and never compiled, so the reference becomes a
   # trap stub and the test dies on SIGTRAP with nothing said. A manifest with a
   # class path compiles the siblings too.
-  printf '[project]\nname = "conformance"\nentry = "unit/issues/%s.hx"\n\n[build]\nclass-paths = ["."]\n' \
-    "$base" > "$d/rayzor.toml"
+  printf '[project]\nname = "conformance"\nentry = "unit/issues/%s.hx"\n\n[build]\nclass-paths = [".", "%s"]\n' \
+    "$base" "$SHARED" > "$d/rayzor.toml"
   # Bounded. A test that now compiles can also loop forever, and without a
   # limit one of those stalls the whole corpus -- in CI, until the job is
   # killed hours later. `timeout` is not on every platform we run this on, so
@@ -211,7 +238,7 @@ PYGEN
   if [[ $code -ne 0 ]] && printf '%s' "$out" | grep -q '^FAILCHECK'; then
     det=$(printf '%s' "$out" | grep -m1 '^FAILVALUES' | cut -c1-90)
     [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -m1 '^FAILCHECK' | cut -c1-90)
-    record "$base" WRONG_ANSWER "${det} (then exit $code)"
+    emit_result "$result" "$base" WRONG_ANSWER "${det} (then exit $code)"
   elif [[ $code -ne 0 ]]; then
     det=$(printf '%s' "$out" | grep -oE '\[E[0-9]+\][^"]{0,80}' | head -1)
     # A named uncompiled function is the most actionable thing a run can say:
@@ -245,23 +272,73 @@ PYGEN
     # them from the score.
     if [[ "$det" == *"No main function found"* ]] \
        && ! grep -q "static function main" "$d/unit/issues/$base.hx"; then
-      record "$base" SKIP "harness could not inject main"
+      emit_result "$result" "$base" SKIP "harness could not inject main"
     elif [[ "$det" == *"'utest'"* ]]; then
-      record "$base" SKIP "uses utest directly"
+      emit_result "$result" "$base" SKIP "uses utest directly"
     elif [[ "$det" == *"No main function found"* ]]; then
-      record "$base" COMPILE_FAIL "main present but not found: $(printf '%s' "$out" \
+      emit_result "$result" "$base" COMPILE_FAIL "main present but not found: $(printf '%s' "$out" \
         | grep -oE "expected [^;]*" | head -1)"
     else
-      record "$base" "$status" "$det"
+      emit_result "$result" "$base" "$status" "$det"
     fi
   elif printf '%s' "$out" | grep -q '^CONFORMANCE_OK'; then
-    record "$base" PASS "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')"
+    emit_result "$result" "$base" PASS "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')"
   elif printf '%s' "$out" | grep -q 'FAILCHECK\|CONFORMANCE_BAD'; then
-    record "$base" WRONG_ANSWER "$(printf '%s' "$out" | grep -m1 'FAILCHECK' | cut -c1-90)"
+    emit_result "$result" "$base" WRONG_ANSWER "$(printf '%s' "$out" | grep -m1 'FAILCHECK' | cut -c1-90)"
   else
-    record "$base" NO_OUTPUT "$(printf '%s' "$out" | tail -1 | cut -c1-90)"
+    emit_result "$result" "$base" NO_OUTPUT "$(printf '%s' "$out" | tail -1 | cut -c1-90)"
   fi
+}
+
+worker_pids=()
+worker_results=()
+
+reap_one() {
+  local i pid result t st det
+  while true; do
+    for i in "${!worker_pids[@]}"; do
+      pid="${worker_pids[$i]}"
+      if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" || true
+        result="${worker_results[$i]}"
+        if [[ ! -f "$result" ]]; then
+          echo "conformance worker $pid exited without a result" >&2
+          exit 2
+        fi
+        IFS=$'\t' read -r t st det < "$result"
+        record "$t" "$st" "$det"
+        unset 'worker_pids[$i]' 'worker_results[$i]'
+        return
+      fi
+    done
+    sleep 0.02
+  done
+}
+
+for f in "$SRC"/*.hx; do
+  grep -qE "extends[[:space:]]+(unit\.)?Test\b" "$f" || continue
+  [[ "$LIMIT" != 0 && $queued -ge $LIMIT ]] && break
+  base="$(basename "$f" .hx)"
+  result="$RESULTS/$(printf '%05d' "$queued")-$base.tsv"
+  process_one "$f" "$result" &
+  worker_pids+=("$!")
+  worker_results+=("$result")
+  queued=$((queued+1))
+  [[ ${#worker_pids[@]} -ge $JOBS ]] && reap_one
 done
+while [[ ${#worker_pids[@]} -gt 0 ]]; do
+  reap_one
+done
+
+# Progress is reported in completion order, but the durable report must be
+# stable so two runs can be diffed directly. Result names carry the source
+# index, and shell glob order restores that order without serialising workers.
+ordered_out="$OUT.ordered.$$"
+printf 'issue\tstatus\tdetail\n' > "$ordered_out"
+for result in "$RESULTS"/*.tsv; do
+  cat "$result" >> "$ordered_out"
+done
+mv "$ordered_out" "$OUT"
 
 tally
 scored=$((c_PASS + c_WRONG_ANSWER + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_TIMEOUT))
