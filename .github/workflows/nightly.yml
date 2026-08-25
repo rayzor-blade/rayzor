@@ -98,27 +98,33 @@ jobs:
           echo "LLVM_SYS_211_PREFIX=$PREFIX" >> "$GITHUB_ENV"
 
       # The development files LLVM.org's Windows installer leaves out.
+      # INSTALLED, not unzipped: a conda package carries its build-time prefix
+      # (`C:/bld/llvm-package_*/work/build`) inside llvm-config.exe, and conda
+      # rewrites that on install. Unpacking the tarball by hand skips the
+      # rewrite, so llvm-config reports a libdir that does not exist and the
+      # link fails with the archives sitting right there.
       - name: Install LLVM 21 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          curl.exe -fsSL -o llvmdev.conda `
-            https://anaconda.org/conda-forge/llvmdev/21.1.8/download/win-64/llvmdev-21.1.8-h830ff33_0.conda
-          # A .conda is a zip holding zstd-compressed tarballs; pkg-* carries
-          # the files, info-* only metadata.
-          New-Item -ItemType Directory -Force -Path llvmdev | Out-Null
-          Expand-Archive -Path llvmdev.conda -DestinationPath llvmdev-raw -Force
-          $pkg = Get-ChildItem llvmdev-raw -Filter 'pkg-*.tar.zst' | Select-Object -First 1
-          tar -xf $pkg.FullName -C llvmdev
-          $prefix = (Resolve-Path llvmdev).Path
-          # No fallback. A build that quietly drops the LLVM tier ships a
-          # weaker compiler under the same name, and nobody learns that until
-          # they measure it.
-          if (-not (Test-Path "$prefix\Library\bin\llvm-config.exe")) {
-            throw "llvmdev carried no llvm-config.exe under $prefix\Library\bin"
+          curl.exe -fsSL -o micromamba.tar.bz2 `
+            https://micro.mamba.pm/api/micromamba/win-64/latest
+          mkdir mm | Out-Null
+          tar -xf micromamba.tar.bz2 -C mm
+          $mm = Join-Path (Resolve-Path mm).Path 'Library\bin\micromamba.exe'
+          & $mm create -y -p "$PWD\llvmenv" -c conda-forge "llvmdev=21.1.8"
+          $prefix = "$PWD\llvmenv\Library"
+          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
+            throw "llvmdev installed no llvm-config.exe under $prefix\bin"
           }
-          "LLVM_SYS_211_PREFIX=$prefix\Library" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          & "$prefix\Library\bin\llvm-config.exe" --version
+          # Prove the reported paths point at THIS install, not the build box.
+          $libdir = & "$prefix\bin\llvm-config.exe" --libdir
+          Write-Host "llvm-config --libdir = $libdir"
+          if (-not (Test-Path $libdir)) {
+            throw "llvm-config reports a libdir that does not exist: $libdir"
+          }
+          & "$prefix\bin\llvm-config.exe" --version
+          "LLVM_SYS_211_PREFIX=$prefix" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
