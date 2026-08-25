@@ -419,6 +419,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
     }
 
     fn is_at_class_field_start(&self) -> bool {
+        // `overload` is not a keyword, so it arrives as an identifier; a field
+        // may still open with it.
+        if self.stream.peek().kind == TokenKind::Ident && self.stream.current_text() == "overload" {
+            return true;
+        }
         matches!(
             self.stream.peek().kind,
             TokenKind::KwPublic
@@ -431,6 +436,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::KwDynamic
                 | TokenKind::KwVar
                 | TokenKind::KwFunction
+                | TokenKind::KwMacro
+                // `abstract function foo():T;` declares a method with no body
+                // inside an abstract class.
+                | TokenKind::KwAbstract
                 | TokenKind::At
                 | TokenKind::AtColon
         )
@@ -441,7 +450,29 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let start = self.stream.current_offset();
 
         let meta = self.parse_metadata_list();
+        // Consumed HERE rather than in `parse_access_and_modifiers`, which also
+        // serves module-level declarations: there `abstract` opens an abstract
+        // TYPE (`abstract Void` in StdTypes), and eating it leaves the type
+        // dispatch looking at the name.
+        //
+        // Both keywords parse to declarations the compiler cannot yet honour --
+        // an abstract method lowers as a body-less function and traps when
+        // called, and overload resolution picks the first candidate. Parsing
+        // them anyway is the point: the corpus scores what the compiler does,
+        // and a parse error hides those gaps from it entirely.
+        let mut saw_field_keyword = true;
+        while saw_field_keyword {
+            saw_field_keyword = self.stream.eat(TokenKind::KwAbstract).is_some();
+            if self.stream.peek().kind == TokenKind::Ident
+                && self.stream.current_text() == "overload"
+            {
+                self.stream.advance();
+                saw_field_keyword = true;
+            }
+        }
         let (access, modifiers) = self.parse_access_and_modifiers();
+        // Either order: `abstract public function` and `public abstract function`.
+        while self.stream.eat(TokenKind::KwAbstract).is_some() {}
 
         // `final` is collected as a Modifier by parse_access_and_modifiers,
         // so when the user wrote `final array:Array<T>;` we're now positioned
