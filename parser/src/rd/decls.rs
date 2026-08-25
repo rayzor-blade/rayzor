@@ -123,6 +123,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 Ok(TypeDeclaration::Typedef(decl))
             }
             TokenKind::KwAbstract => {
+                // `abstract class Foo {}` declares a class that cannot be
+                // instantiated directly -- not an abstract TYPE. Reading it as
+                // one took `class` for the type's name and asked what its
+                // underlying type was. Nothing here rejects `new Foo()` yet;
+                // what the keyword changes is instantiation, and the shape of
+                // the declaration is a class either way.
+                if self.stream.peek_at(1).kind == TokenKind::KwClass {
+                    self.stream.advance(); // 'abstract'
+                    let mut decl = self.parse_class()?;
+                    decl.meta = meta;
+                    decl.access = access;
+                    decl.modifiers = modifiers;
+                    return Ok(TypeDeclaration::Class(decl));
+                }
                 let mut decl = self.parse_abstract()?;
                 decl.meta = meta;
                 decl.access = access;
