@@ -639,6 +639,17 @@ impl<'a> AstLowering<'a> {
                 }
             });
 
+        // `@:keep` on a class covers everything the class declares. Reachability
+        // is decided per function and never consults the owning class, so the
+        // flag has to reach each member symbol to survive dead-code elimination.
+        if symbol_flags.is_keep() {
+            for member in methods.iter().chain(constructors.iter()) {
+                self.context
+                    .symbol_table
+                    .add_symbol_flags(member.symbol_id, crate::tast::symbols::SymbolFlags::KEEP);
+            }
+        }
+
         let typed_class = TypedClass {
             symbol_id: class_symbol,
             name: class_name,
