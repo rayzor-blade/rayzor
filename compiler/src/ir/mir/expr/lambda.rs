@@ -62,7 +62,27 @@ impl<'a> HirToMirContext<'a> {
         debug!("symbol_map has {} entries", self.symbol_map.len());
         for capture in &filtered_captures {
             debug!("Looking for captured symbol {:?}", capture.symbol);
-            if let Some(&captured_val) = self.symbol_map.get(&capture.symbol) {
+            // An implicit `this` gets a fresh symbol at each site AST lowering
+            // synthesises one, so a closure reading an instance field captures a
+            // symbol that was never bound to a register. The receiver is always
+            // SymbolId(0); reading a variable already redirects a `this`-named
+            // symbol there, and a capture has to do the same or every closure
+            // touching a field of its enclosing object fails to compile.
+            let capture_symbol = self
+                .symbol_map
+                .get(&capture.symbol)
+                .map(|_| capture.symbol)
+                .or_else(|| {
+                    let named_this = self
+                        .symbol_table
+                        .get_symbol(capture.symbol)
+                        .and_then(|sym| self.string_interner.get(sym.name))
+                        .map(|name| name == "this")
+                        .unwrap_or(false);
+                    named_this.then(|| SymbolId::from_raw(0))
+                })
+                .unwrap_or(capture.symbol);
+            if let Some(&captured_val) = self.symbol_map.get(&capture_symbol) {
                 debug!("  Found! Register: {:?}", captured_val);
                 captured_values.push(captured_val);
             } else {
