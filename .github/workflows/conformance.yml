@@ -92,20 +92,37 @@ jobs:
           # in this long is stuck, and paying a minute each for those is what
           # turns a five-minute corpus into an overrun.
           TIMEOUT: 25
+        # The score is a measurement. Letting the step's exit status fail the
+        # job skipped the summary and the upload with it, so a run that died
+        # partway produced no number AND no evidence of why.
+        continue-on-error: true
         run: ./haxe-conformance/run.sh
 
       - name: Summarise
         if: always()
         env:
+          WORK: ${{ runner.temp }}/conformance
           REPORT: ${{ runner.temp }}/conformance/report.tsv
         run: |
+          mkdir -p conformance-out
           if [ ! -s "$REPORT" ]; then
             echo "no report written — the corpus step produced nothing" \
               >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            exit 1
+          fi
+          cp "$REPORT" conformance-out/
+          # Only a complete run may publish a score. The website takes its
+          # badge from the newest SUCCESSFUL run, so summarising a truncated
+          # report would publish a drop that reflects where the corpus stopped
+          # rather than anything about the compiler. Keep the partial report as
+          # an artifact and fail, so the badge holds at the last full run.
+          if [ ! -f "$WORK/COMPLETE" ]; then
+            rows=$(( $(wc -l < "$REPORT") - 1 ))
+            echo "corpus stopped after $rows tests — not scoring a partial run" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           python3 haxe-conformance/summarise.py "$REPORT" conformance-out
-          cp "$REPORT" conformance-out/
           cat conformance-out/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results

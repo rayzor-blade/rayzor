@@ -252,3 +252,9 @@ tally
 scored=$((c_PASS + c_WRONG_ANSWER + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_TIMEOUT))
 echo "scored $scored  pass $c_PASS  fail $((scored - c_PASS))  (skipped $c_SKIP)"
 echo "report: $OUT"
+
+# Written only after every test has been recorded. A run that dies partway
+# leaves a report that looks ordinary but is short, and a score taken from it
+# reads as a large regression that never happened.
+: > "$WORK/COMPLETE"
+exit 0
