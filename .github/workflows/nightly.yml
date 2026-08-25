@@ -181,6 +181,34 @@ jobs:
           [ -n "${TARGET:-}" ] && FEATURES="$FEATURES --target $TARGET"
           cargo build -p rayzor --release $FEATURES
 
+      # LLVM pulls zlib, zstd and libxml2 in through IMPORT libraries, so those
+      # DLLs have to sit beside the exe: Windows searches the executable's own
+      # directory first, and without them the process cannot start at all --
+      # which surfaces as a bare exit 127 with no output, not a missing-DLL
+      # message. Copying them here also makes the published archive standalone
+      # rather than dependent on a conda env being on PATH.
+      - name: Bundle the runtime DLLs the binary links against (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $envBin = "$PWD\llvmenv\Library\bin"
+          $needed = @('zlib.dll', 'zstd.dll', 'libxml2.dll')
+          $missing = @()
+          foreach ($dll in $needed) {
+            $src = Join-Path $envBin $dll
+            if (Test-Path $src) {
+              Copy-Item $src target\release\ -Force
+              Write-Host "bundled $dll"
+            } else {
+              $missing += $dll
+            }
+          }
+          if ($missing.Count) {
+            Write-Host "--- $envBin ---"
+            Get-ChildItem $envBin -Filter *.dll | ForEach-Object { Write-Host "  $($_.Name)" }
+            throw "the env provides no $($missing -join ', ') to sit beside the binary"
+          }
+
       # Bundled wasm optimizer, kept a SEPARATE binary so Binaryen's llvm::
       # symbols cannot ODR-collide with LLVM in the main one. The CLI finds it
       # as a sibling of its own exe, so wasm optimization needs no external
@@ -207,6 +235,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/rayzor.exe dist/
+          Copy-Item target/release/*.dll dist/ -Force
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.asset }}" -Force
           (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.asset }}" `
             | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
