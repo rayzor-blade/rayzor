@@ -985,7 +985,6 @@ fn run_with_timeout(mut cmd: Command, dur: Duration) -> Result<std::process::Out
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn()?;
-    let pid = child.id();
 
     let so = Arc::new(Mutex::new(Vec::new()));
     let se = Arc::new(Mutex::new(Vec::new()));
@@ -1019,9 +1018,7 @@ fn run_with_timeout(mut cmd: Command, dur: Duration) -> Result<std::process::Out
             break status;
         }
         if start.elapsed() > dur {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+            let _ = child.kill();
             let s = child.wait()?;
             // Let the reader threads finish draining the (now closed) pipes.
             let _ = so_thread.join();
