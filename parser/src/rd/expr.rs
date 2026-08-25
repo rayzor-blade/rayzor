@@ -610,6 +610,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 })
             }
             TokenKind::KwFunction => self.parse_function_literal(),
+            // `inline` marks a local function or a call site for inlining. It
+            // qualifies what follows rather than forming a value of its own, so
+            // consume it and parse the expression it qualifies.
+            TokenKind::KwInline => {
+                self.stream.advance();
+                self.parse_unary()
+            }
             TokenKind::DollarIdent => {
                 let text = token.text(self.source).to_string();
                 self.stream.advance();
