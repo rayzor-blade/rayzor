@@ -272,6 +272,25 @@ impl<'a> HirToMirContext<'a> {
             arg_regs.len()
         };
 
+        if std::env::var_os("RAYZOR_DEFAULTS_DEBUG").is_some() {
+            let name = self
+                .builder
+                .module
+                .functions
+                .get(&func_id)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            eprintln!(
+                "[defaults] {} id={:?} args={} implicit_this={} has_defaults={} has_optional={}",
+                name,
+                func_id,
+                arg_regs.len(),
+                has_implicit_this,
+                self.function_param_defaults.contains_key(&func_id),
+                self.function_param_optional.contains_key(&func_id),
+            );
+        }
+
         // Try HIR-level defaults first (available for freshly compiled functions)
         if let Some(defaults) = self.function_param_defaults.get(&func_id).cloned() {
             if user_arg_count >= defaults.len() {
