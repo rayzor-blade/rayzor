@@ -107,20 +107,33 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          Write-Host "Downloading Micromamba..."
           curl.exe -fsSL -o micromamba.tar.bz2 `
             https://micro.mamba.pm/api/micromamba/win-64/latest
-          mkdir mm | Out-Null
-          tar -xf micromamba.tar.bz2 -C mm
+          
+          Write-Host "Extracting Micromamba using 7-Zip..."
+          # 7z extracts the .bz2 to a .tar, then un-tars it into the 'mm' directory
+          7z x micromamba.tar.bz2 -y | Out-Null
+          7z x micromamba.tar -omm -y | Out-Null
+          
           $mm = Join-Path (Resolve-Path mm).Path 'Library\bin\micromamba.exe'
-          # zlib and libxml2-devel carry the import libraries LLVM was linked
-          # against; llvmdev pulls in only the runtime halves, which have no
-          # `.lib` at all.
-          & $mm create -y -p "$PWD\llvmenv" -c conda-forge `
+          Write-Host "Found micromamba at $mm"
+          
+          Write-Host "Creating environment (this may take a few minutes)..."
+          # --log-level=info forces sequential text logs instead of UI spinners
+          & $mm create -y -p "$PWD\llvmenv" -c conda-forge --log-level=info `
             "llvmdev=21.1.8" "zlib" "libxml2-devel"
+
+          # In PowerShell, native executables failing don't inherently fail the step
+          if ($LASTEXITCODE -ne 0) {
+            throw "Micromamba failed with exit code $LASTEXITCODE"
+          }
+
           $prefix = "$PWD\llvmenv\Library"
           if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
             throw "llvmdev installed no llvm-config.exe under $prefix\bin"
           }
+          
           # Prove the reported paths point at THIS install, not the build box.
           $libdir = & "$prefix\bin\llvm-config.exe" --libdir
           Write-Host "llvm-config --libdir = $libdir"
