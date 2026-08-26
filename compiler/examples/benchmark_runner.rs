@@ -484,11 +484,17 @@ fn run_benchmark_cranelift(
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
+    unit.finalize_mir_references();
 
     let mir_modules = unit.get_mir_modules();
 
-    // Tree-shake before optimization to avoid optimizing dead stdlib code
-    let mut modules: Vec<IrModule> = mir_modules.iter().map(|m| (**m).clone()).collect();
+    // get_mir_modules() returns per-file intermediates followed by the merged
+    // program. The runtime compiles that final module; compiling every entry
+    // duplicates stdlib bodies and can retain unresolved standalone externs.
+    let mut modules: Vec<IrModule> = mir_modules
+        .last()
+        .map(|m| vec![(**m).clone()])
+        .ok_or("No MIR modules")?;
     if let Some(entry) = find_benchmark_entry(&modules) {
         tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
     }
@@ -539,6 +545,7 @@ fn run_benchmark_interpreter(
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
+    unit.finalize_mir_references();
 
     let mir_modules = unit.get_mir_modules();
 
@@ -637,8 +644,11 @@ fn setup_tiered_benchmark(
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
+    unit.finalize_mir_references();
 
     let mut mir_modules = unit.get_mir_modules();
+    let merged_module = mir_modules.pop().ok_or("No MIR modules")?;
+    let mut mir_modules = vec![merged_module];
 
     // Apply MIR optimization (O2) before loading into tiered backend.
     // Without this, SRA doesn't run, so 875K heap allocs/frame leak in mandelbrot.
@@ -666,7 +676,7 @@ fn setup_tiered_benchmark(
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
 
-    // Compile ALL modules (like the direct LLVM benchmark does)
+    // Load the final merged module, matching the normal run path.
     for module in &mir_modules {
         backend
             .compile_module((**module).clone())
@@ -755,6 +765,7 @@ fn run_benchmark_tiered(
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
+    unit.finalize_mir_references();
 
     let mir_modules = unit.get_mir_modules();
 
@@ -831,8 +842,11 @@ fn setup_llvm_benchmark<'ctx>(
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
+    unit.finalize_mir_references();
 
     let mut mir_modules = unit.get_mir_modules();
+    let merged_module = mir_modules.pop().ok_or("No MIR modules")?;
+    let mut mir_modules = vec![merged_module];
 
     // Apply MIR optimizations (O2) before LLVM compilation.
     // MIR inlining + constant folding + DCE feed better IR to LLVM,
@@ -851,18 +865,14 @@ fn setup_llvm_benchmark<'ctx>(
     let mut backend =
         LLVMJitBackend::with_symbols(context, symbols).map_err(|e| format!("backend: {}", e))?;
 
-    // Two-pass compilation for cross-module function references:
-    // 0. Read every module before declaring any, so a function's hidden
-    //    parameters are decided by the whole program rather than by however
-    //    much of it has been declared so far.
+    // The merged module contains the complete program and is the same unit the
+    // normal run path hands to codegen.
     backend.seed_indirect_targets(&mir_modules);
-    // 1. First declare ALL functions from ALL modules
     for module in &mir_modules {
         backend
             .declare_module(module)
             .map_err(|e| format!("declare: {}", e))?;
     }
-    // 2. Then compile all function bodies
     for module in &mir_modules {
         backend
             .compile_module_bodies(module)

@@ -1529,6 +1529,7 @@ impl TieredBackend {
         }
 
         let modules_handle = Arc::clone(&self.modules);
+        let known_functions = Arc::clone(&self.function_pointers);
         let beads_arc = match self.beadie_beads_for(target_tier) {
             Some(b) => b,
             None => return false,
@@ -1545,6 +1546,7 @@ impl TieredBackend {
             let outcome =
                 adapter.on_invoke_outcome(bound, move |_| super::beadie_jit::BeadieFunctionDef {
                     modules: modules_handle,
+                    known_functions,
                     func_id,
                 });
             outcome.or_else(|| bound.bead().compiled())
@@ -3089,7 +3091,12 @@ impl TieredBackend {
         let mut installed = BTreeMap::new();
         let mut last_error = None;
         for func_id in pending {
-            match compile_llvm_bead(&self.modules, *func_id, &self.runtime_symbols) {
+            match compile_llvm_bead(
+                &self.modules,
+                &self.function_pointers,
+                *func_id,
+                &self.runtime_symbols,
+            ) {
                 Ok(ptr) => {
                     installed.insert(*func_id, ptr);
                 }
@@ -4016,6 +4023,7 @@ mod tests {
 #[cfg(feature = "llvm-backend")]
 pub(crate) fn compile_llvm_bead(
     modules: &std::sync::Arc<std::sync::RwLock<Vec<crate::ir::IrModule>>>,
+    known_functions: &std::sync::Arc<std::sync::RwLock<BTreeMap<IrFunctionId, usize>>>,
     func_id: IrFunctionId,
     symbols: &[(String, usize)],
 ) -> Result<usize, String> {
@@ -4023,16 +4031,21 @@ pub(crate) fn compile_llvm_bead(
 
     // Read once, then let go: the compile is long and the program is running
     // against this same list.
-    let (mut shaken, seed, known) = {
+    let (mut shaken, seed) = {
         let live = modules.read().unwrap();
         if !live.iter().any(|m| m.functions.contains_key(&func_id)) {
             return Err(format!("{func_id:?} is in none of the loaded modules"));
         }
         let seed = crate::ir::abi::indirect_targets(&live);
         let shaken: Vec<crate::ir::IrModule> = live.clone();
-        let known: BTreeMap<IrFunctionId, usize> = BTreeMap::new();
-        (shaken, seed, known)
+        (shaken, seed)
     };
+    // Snapshot after cloning the modules and release the lock before LLVM's
+    // comparatively long compile. Functions installed concurrently remain a
+    // safe omission: add_unserved_callees will compile those bodies in this
+    // batch, while every function already served by a lower tier is bound to
+    // its existing address.
+    let known = known_functions.read().unwrap().clone();
 
     // A resume point for the function being compiled, so a loop already
     // running in it can move across rather than wait to be re-entered.
@@ -4042,6 +4055,17 @@ pub(crate) fn compile_llvm_bead(
     let mut targets = vec![func_id];
     targets.extend(osr_variants.iter().map(|(id, _, _)| *id));
     TieredBackend::add_unserved_callees(&shaken, &known, &mut targets);
+    emit_tier_event(
+        "llvm_compile_scope",
+        Some(func_id),
+        Some(OptimizationTier::Maximum),
+        &format!(
+            "targets={} osr_variants={} known={}",
+            targets.len(),
+            osr_variants.len(),
+            known.len()
+        ),
+    );
 
     let context = Box::leak(Box::new(Context::create()));
     let symbol_refs: Vec<(&str, *const u8)> = symbols

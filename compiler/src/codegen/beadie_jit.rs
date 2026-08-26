@@ -46,6 +46,7 @@
 //! optimisation that would avoid leaking a fresh backend per
 //! promotion.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -93,8 +94,9 @@ fn emit_beadie_compile_event(kind: &str, func_id: IrFunctionId, opt_level: &str,
     );
 }
 
-/// The compile unit beadie hands the backend at dispatch time: the
-/// live module set + the target `IrFunctionId`.
+/// The compile unit beadie hands the backend at dispatch time: the live module
+/// set, addresses already serving cold functions, and the target
+/// `IrFunctionId`.
 ///
 /// `modules` is shared via the same `Arc<RwLock<Vec<IrModule>>>` that
 /// lives on [`crate::codegen::tiered_backend::TieredBackend`]. Late
@@ -106,6 +108,9 @@ fn emit_beadie_compile_event(kind: &str, func_id: IrFunctionId, opt_level: &str,
 /// `TieredBackend` around.
 pub struct BeadieFunctionDef {
     pub modules: Arc<RwLock<Vec<IrModule>>>,
+    /// Addresses already serving functions in a lower tier. LLVM binds
+    /// declarations to these instead of recursively compiling their bodies.
+    pub known_functions: Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
     pub func_id: IrFunctionId,
 }
 
@@ -118,8 +123,10 @@ impl BeadieFunctionDef {
         func_id: IrFunctionId,
     ) -> (Self, Arc<RwLock<Vec<IrModule>>>) {
         let modules = Arc::new(RwLock::new(vec![module]));
+        let known_functions = Arc::new(RwLock::new(BTreeMap::new()));
         let def = Self {
             modules: Arc::clone(&modules),
+            known_functions,
             func_id,
         };
         (def, modules)
@@ -171,6 +178,7 @@ impl BeadieJit {
             emit_beadie_compile_event("beadie_compile_start", def.func_id, LLVM_OPT_LEVEL, "");
             let result = super::tiered_backend::compile_llvm_bead(
                 &def.modules,
+                &def.known_functions,
                 def.func_id,
                 &self.runtime_symbols,
             );
@@ -448,6 +456,10 @@ mod tests {
         )
     }
 
+    extern "C" fn lower_tier_double(x: i64) -> i64 {
+        x * 2
+    }
+
     /// The adapter constructs cleanly and the supplied runtime symbol
     /// table is adopted (held internally as the snapshot beadie will
     /// reuse on every compile).
@@ -498,6 +510,7 @@ mod tests {
         let (_def, modules_handle) = BeadieFunctionDef::from_single_module(module, func_id);
         let outcome = adapter.on_invoke_outcome(&bound, move |_| BeadieFunctionDef {
             modules: modules_handle,
+            known_functions: Arc::new(RwLock::new(BTreeMap::new())),
             func_id,
         });
         // First call before the threshold is met returns None.
@@ -724,8 +737,13 @@ mod tests {
         let bound = adapter.register(std::ptr::null_mut(), None);
 
         let (_def, modules_handle) = BeadieFunctionDef::from_single_module(module, caller_id);
+        let known_functions = Arc::new(RwLock::new(BTreeMap::from([(
+            callee_id,
+            lower_tier_double as *const () as usize,
+        )])));
         let _ = adapter.on_invoke_outcome(&bound, move |_| BeadieFunctionDef {
             modules: modules_handle,
+            known_functions,
             func_id: caller_id,
         });
 
