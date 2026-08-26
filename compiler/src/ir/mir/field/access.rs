@@ -1389,6 +1389,108 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let idx_reg = self.lower_expression(index)?;
+
+        // Map index: `a[k]` where `a` is a Map (or IntMap/StringMap/ObjectMap
+        // extern class) must call the map's get, not GEP into array storage.
+        // The element type is the map's value type.
+        if let Some((get_fn_name, key_ir_type, value_type_id)) = self.map_index_info(object.ty) {
+            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+            let key_reg = if key_ir_type == IrType::I64 {
+                let idx_ty = self
+                    .builder
+                    .get_register_type(idx_reg)
+                    .unwrap_or(IrType::I64);
+                if idx_ty != IrType::I64 {
+                    self.builder
+                        .build_cast(idx_reg, idx_ty, IrType::I64)
+                        .unwrap_or(idx_reg)
+                } else {
+                    idx_reg
+                }
+            } else {
+                idx_reg
+            };
+            let get_fn = self.get_or_register_extern_function(
+                get_fn_name,
+                vec![ptr_void, key_ir_type],
+                IrType::I64,
+            );
+            let raw_value =
+                self.builder
+                    .build_call_direct(get_fn, vec![obj_reg, key_reg], IrType::I64)?;
+            let value_ir_type = self.convert_type(value_type_id);
+            return match &value_ir_type {
+                IrType::Ptr(_) | IrType::F64 => self
+                    .builder
+                    .build_bitcast(raw_value, value_ir_type)
+                    .or(Some(raw_value)),
+                _ => Some(raw_value),
+            };
+        }
+
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
+    }
+
+    /// For a Map-typed index target, return `(get_fn_name, key IrType, value TypeId)`.
+    /// `None` when the object is an array/string, which use array-style indexing.
+    fn map_index_info(&self, obj_ty: TypeId) -> Option<(&'static str, IrType, TypeId)> {
+        let (key_type, value_type) = match self.type_table.get(obj_ty).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Map {
+                key_type,
+                value_type,
+            }) => (*key_type, *value_type),
+            Some(crate::tast::TypeKind::Class {
+                symbol_id,
+                type_args,
+                ..
+            }) => {
+                let class_name = self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|s| self.string_interner.get(s.name));
+                match class_name {
+                    Some("IntMap") => (
+                        self.type_table.int_type(),
+                        type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| self.type_table.dynamic_type()),
+                    ),
+                    Some("StringMap") => (
+                        self.type_table.string_type(),
+                        type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| self.type_table.dynamic_type()),
+                    ),
+                    Some("ObjectMap") => (
+                        type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| self.type_table.dynamic_type()),
+                        type_args
+                            .get(1)
+                            .copied()
+                            .unwrap_or_else(|| self.type_table.dynamic_type()),
+                    ),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let key_kind = self.type_table.get(key_type).map(|t| &t.kind);
+        let is_int_key = matches!(
+            key_kind,
+            Some(crate::tast::TypeKind::Int) | Some(crate::tast::TypeKind::Bool)
+        );
+        let is_string_key = matches!(key_kind, Some(crate::tast::TypeKind::String));
+        let (fn_name, key_ir) = if is_int_key {
+            ("haxe_intmap_get", IrType::I64)
+        } else if is_string_key {
+            ("haxe_stringmap_get", IrType::Ptr(Box::new(IrType::U8)))
+        } else {
+            ("haxe_objectmap_get", IrType::Ptr(Box::new(IrType::U8)))
+        };
+        Some((fn_name, key_ir, value_type))
     }
 }
