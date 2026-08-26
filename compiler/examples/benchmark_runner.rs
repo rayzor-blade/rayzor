@@ -466,6 +466,25 @@ fn find_benchmark_entry(modules: &[IrModule]) -> Option<(String, String)> {
     None
 }
 
+/// Prepare the same self-contained program unit as `rayzor run`: select the
+/// final merged module, remove unreachable stdlib code, then resolve wrapper
+/// stubs before optimization and codegen.
+fn prepare_benchmark_modules(
+    mir_modules: &[std::sync::Arc<IrModule>],
+) -> Result<Vec<IrModule>, String> {
+    let mut modules = vec![mir_modules
+        .last()
+        .map(|module| (**module).clone())
+        .ok_or("No MIR modules")?];
+    if let Some(entry) = find_benchmark_entry(&modules) {
+        tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
+    }
+    for module in &mut modules {
+        module.link_selfcontained_wrapper_stubs();
+    }
+    Ok(modules)
+}
+
 fn run_benchmark_cranelift(
     bench: &Benchmark,
     symbols: &[(&str, *const u8)],
@@ -488,16 +507,7 @@ fn run_benchmark_cranelift(
 
     let mir_modules = unit.get_mir_modules();
 
-    // get_mir_modules() returns per-file intermediates followed by the merged
-    // program. The runtime compiles that final module; compiling every entry
-    // duplicates stdlib bodies and can retain unresolved standalone externs.
-    let mut modules: Vec<IrModule> = mir_modules
-        .last()
-        .map(|m| vec![(**m).clone()])
-        .ok_or("No MIR modules")?;
-    if let Some(entry) = find_benchmark_entry(&modules) {
-        tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
-    }
+    let mut modules = prepare_benchmark_modules(&mir_modules)?;
 
     // Apply MIR optimizations (O2) for fair comparison with tiered backend
     let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
@@ -646,9 +656,12 @@ fn setup_tiered_benchmark(
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
     unit.finalize_mir_references();
 
-    let mut mir_modules = unit.get_mir_modules();
-    let merged_module = mir_modules.pop().ok_or("No MIR modules")?;
-    let mut mir_modules = vec![merged_module];
+    let lowered_modules = unit.get_mir_modules();
+    let mut mir_modules: Vec<std::sync::Arc<IrModule>> =
+        prepare_benchmark_modules(&lowered_modules)?
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect();
 
     // Apply MIR optimization (O2) before loading into tiered backend.
     // Without this, SRA doesn't run, so 875K heap allocs/frame leak in mandelbrot.
@@ -844,9 +857,12 @@ fn setup_llvm_benchmark<'ctx>(
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
     unit.finalize_mir_references();
 
-    let mut mir_modules = unit.get_mir_modules();
-    let merged_module = mir_modules.pop().ok_or("No MIR modules")?;
-    let mut mir_modules = vec![merged_module];
+    let lowered_modules = unit.get_mir_modules();
+    let mut mir_modules: Vec<std::sync::Arc<IrModule>> =
+        prepare_benchmark_modules(&lowered_modules)?
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect();
 
     // Apply MIR optimizations (O2) before LLVM compilation.
     // MIR inlining + constant folding + DCE feed better IR to LLVM,
