@@ -1320,6 +1320,13 @@ fn run_benchmark_isolated(
         });
     }
 
+    // Tier events are written by the isolated child to stderr. Preserve them
+    // when explicitly requested so CI can prove which functions reached LLVM
+    // without mixing normal benchmark diagnostics into every run.
+    if std::env::var_os("RAYZOR_PROFILE_TIER_EVENTS").is_some() && !out.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    }
+
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Echo the child's own output, but collapse the repeats.
     //
@@ -1383,13 +1390,13 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             // never arrives rather than quietly measuring something else.
             let promoted = wait_for_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
             if !promoted {
-                eprintln!(
-                    "  [tier] warning: {} never left {:?} after {} iterations — \
-                     this measurement is not comparable to a promoted run",
+                return Err(format!(
+                    "{} never left {:?} after {} iterations; refusing to publish an \
+                     unpromoted tiered measurement",
                     bench.name,
                     state.backend.get_function_tier(state.main_id),
                     TIER_PROMOTION_ITERATION_LIMIT
-                );
+                ));
             }
 
             // No forced upgrade here. This target measures the Maximum tier
@@ -1460,13 +1467,13 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let promoted =
                 wait_for_precompiled_tier_promotion(&mut state, TIER_PROMOTION_ITERATION_LIMIT);
             if !promoted {
-                eprintln!(
-                    "  [tier] warning: {} never left {:?} after {} iterations — \
-                     this measurement is not comparable to a promoted run",
+                return Err(format!(
+                    "{} never left {:?} after {} iterations; refusing to publish an \
+                     unpromoted precompiled-tiered measurement",
                     bench.name,
                     state.backend.get_function_tier(state.main_id),
                     TIER_PROMOTION_ITERATION_LIMIT
-                );
+                ));
             }
 
             // Benchmark runs after automatic Maximum-tier promotion.

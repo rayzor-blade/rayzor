@@ -4054,7 +4054,15 @@ pub(crate) fn compile_llvm_bead(
 
     let mut targets = vec![func_id];
     targets.extend(osr_variants.iter().map(|(id, _, _)| *id));
-    TieredBackend::add_unserved_callees(&shaken, &known, &mut targets);
+    // Native direct calls do not pass back through TieredBackend::record_call,
+    // so their callees cannot independently demonstrate hotness. Compile the
+    // promoted root's static call closure into this LLVM unit: calls inside the
+    // root then stay in optimized code instead of being permanently bound to
+    // their current Cranelift addresses. Only the root pointer is installed;
+    // dependency bodies are not globally promoted, and unrelated functions
+    // remain declarations bound through `known` below.
+    let no_served_functions = BTreeMap::new();
+    TieredBackend::add_unserved_callees(&shaken, &no_served_functions, &mut targets);
     emit_tier_event(
         "llvm_compile_scope",
         Some(func_id),

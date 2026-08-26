@@ -62,7 +62,7 @@ jobs:
       # cargo caches are keyed per job, so building it there costs a full
       # compiler rebuild on every kernel.
       - name: Build benchmark runner
-        run: cargo build --release --package compiler --features all-backends --example benchmark_runner
+        run: cargo build --release --package compiler --features all-backends,llvm-dynamic --example benchmark_runner
 
       - name: Generate precompiled bundles and stdlib symbol cache
         run: |
@@ -201,6 +201,7 @@ jobs:
         # told they are current rather than left to guess from timestamps.
         env:
           RAYZOR_BENCH_BUNDLES_ARE_FRESH: "1"
+          RAYZOR_PROFILE_TIER_EVENTS: "1"
         run: ./target/release/examples/benchmark_runner ${{ matrix.kernel }} --json --disable-trace
 
       # Each runner produces only its own kernel; `collect` merges them back
