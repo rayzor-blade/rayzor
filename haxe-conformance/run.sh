@@ -63,10 +63,21 @@ fi
 # These files are identical for every issue. Keeping one class-path tree avoids
 # copying ~74 sibling fixtures per test (roughly 76k copies for a full run).
 # Tests only write beneath RUN_ROOT; SHARED is read-only input to every worker.
+#
+# The corpus is not self-contained in one directory: issues reference siblings
+# under unit/ (HelperMacros, MyClass, ...), nested helper packages under
+# unit/issues/misc/ (issue12259, issue12672, issue8543), and packages that live
+# beside unit/ entirely -- scripthost/, misc/, and a few root-package helpers.
+# A module any of these provides must be on the class path or the test fails as
+# if the name never existed.
+SRC_ROOT="$(cd "$SRC/../.." && pwd)"   # .../tests/unit/src
 cp "$SRC"/../*.hx "$SHARED/unit/" 2>/dev/null || true
 if [[ -d "$SRC/misc" ]]; then
-  cp "$SRC"/misc/*.hx "$SHARED/unit/issues/misc/" 2>/dev/null || true
+  cp -R "$SRC"/misc/. "$SHARED/unit/issues/misc/" 2>/dev/null || true
 fi
+cp "$SRC_ROOT"/*.hx "$SHARED/" 2>/dev/null || true
+[[ -d "$SRC_ROOT/scripthost" ]] && cp -R "$SRC_ROOT"/scripthost "$SHARED/" 2>/dev/null || true
+[[ -d "$SRC_ROOT/misc" ]] && cp -R "$SRC_ROOT"/misc "$SHARED/" 2>/dev/null || true
 cp "$HERE/shims/unit/Test.hx" "$SHARED/unit/Test.hx"
 cp "$HERE/shims/unit/ConfCheck.hx" "$SHARED/unit/ConfCheck.hx"
 cp "$HERE/shims/utest/Assert.hx" "$SHARED/utest/Assert.hx"
