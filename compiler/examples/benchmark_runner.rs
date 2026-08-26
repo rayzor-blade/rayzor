@@ -399,7 +399,7 @@ fn setup_precompiled_tiered_benchmark(
         .entry_function_id()
         .ok_or("No entry function ID in bundle")?;
 
-    // Use Benchmark preset - fast tier promotion, immediate bailout
+    // Use Benchmark preset - fast automatic tier promotion, immediate bailout
     let mut config = TierPreset::Benchmark.to_config();
     apply_threshold_override(&mut config);
 
@@ -675,9 +675,10 @@ fn setup_tiered_benchmark(
     }
 
     // Use Benchmark preset - optimized for performance testing
-    // - Request asynchronous Maximum promotion on the second entry
+    // - Beadie's heat broker requests asynchronous Maximum promotion on the
+    //   second entry; the runner never upgrades a function directly
     // - Immediate bailout from interpreter hot loops
-    // - Synchronous optimization for deterministic results
+    // - Observe asynchronous promotion before collecting measured iterations
     // Maximum is reached automatically through Beadie + OSR. Promoting by
     // hand would measure a different path than the runtime uses on its own.
     // Suppress beadie/tier-transition chatter — bench output should
@@ -1927,7 +1928,7 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
         <ul>
             <li><strong>rayzor-cranelift</strong> &mdash; Source &rarr; MIR (O2) &rarr; Cranelift JIT. Compile includes parsing, type-checking, MIR lowering, optimization, and JIT compilation.</li>
             <li><strong>rayzor-llvm</strong> &mdash; Source &rarr; MIR (O2) &rarr; LLVM MCJIT. Same frontend pipeline, LLVM backend for peak throughput.</li>
-            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. The <em>Benchmark</em> preset requests asynchronous Maximum promotion on the second entry so LLVM becomes ready inside the existing warmup budget. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
+            <li><strong>rayzor-tiered</strong> &mdash; Source &rarr; interpreter &rarr; Cranelift JIT &rarr; per-function LLVM through Beadie + OSR. Beadie's heat broker automatically requests Maximum promotion at the <em>Benchmark</em> preset threshold; the runner only executes warmups and observes the resulting tier. Compile includes parsing + module loading; execution includes interpreter startup and automatic tier-up.</li>
             <li><strong>rayzor-precompiled</strong> &mdash; Pre-bundled .rzb (MIR already O2-optimized) &rarr; Cranelift JIT. Compile is bundle load + JIT only (no parsing/lowering).</li>
             <li><strong>rayzor-precompiled-tiered</strong> &mdash; Pre-bundled .rzb &rarr; automatic tiered execution through per-function LLVM promotion.</li>
         </ul>

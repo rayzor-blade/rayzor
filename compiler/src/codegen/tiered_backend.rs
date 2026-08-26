@@ -589,7 +589,7 @@ pub enum TierPreset {
 
     /// For benchmarks and performance testing
     /// - Immediate bailout from interpreter
-    /// - Explicit LLVM upgrade after warmup
+    /// - Automatic LLVM promotion from the heat broker
     /// - Maximum optimization at all tiers
     /// - Verbose tier transition logging
     Benchmark,
