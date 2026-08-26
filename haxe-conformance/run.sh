@@ -19,6 +19,7 @@ TIMEOUT="${TIMEOUT:-60}"
 OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
 JOBS="${JOBS:-0}"
+PRESET="${PRESET:-application}"
 
 # Keep enough parallelism to use the machine without letting a corpus run
 # launch hundreds of compiler processes at once. JOBS=1 retains the old
@@ -47,8 +48,17 @@ done
 RUN_ROOT="$WORK/run"
 SHARED="$WORK/shared-$$"
 RESULTS="$WORK/results-$$"
-mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS"
-printf 'issue\tstatus\tdetail\n' > "$OUT"
+# A previous complete run must not authorize this run when WORK is reused for
+# a pilot, a changed preset, or an interrupted retry.
+rm -f "$WORK/COMPLETE"
+mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS" "$(dirname "$OUT")" || {
+  echo "cannot create conformance work/report directories" >&2
+  exit 2
+}
+if ! printf 'issue\tstatus\tdetail\n' > "$OUT"; then
+  echo "cannot write conformance report: $OUT" >&2
+  exit 2
+fi
 
 # These files are identical for every issue. Keeping one class-path tree avoids
 # copying ~74 sibling fixtures per test (roughly 76k copies for a full run).
@@ -228,7 +238,9 @@ PYGEN
   # limit one of those stalls the whole corpus -- in CI, until the job is
   # killed hours later. `timeout` is not on every platform we run this on, so
   # the watchdog is python3, which the harness already needs.
-  out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache 2>&1 )
+  # Make the execution mode explicit. Application preserves the production
+  # measurement by default; the preset remains overridable for backend probes.
+  out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
   code=$?
 
   # A test that reported a failed assertion and THEN died computed a wrong
@@ -284,7 +296,9 @@ PYGEN
   elif printf '%s' "$out" | grep -q '^CONFORMANCE_OK'; then
     emit_result "$result" "$base" PASS "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')"
   elif printf '%s' "$out" | grep -q 'FAILCHECK\|CONFORMANCE_BAD'; then
-    emit_result "$result" "$base" WRONG_ANSWER "$(printf '%s' "$out" | grep -m1 'FAILCHECK' | cut -c1-90)"
+    det=$(printf '%s' "$out" | grep -m1 '^FAILVALUES' | cut -c1-90)
+    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -m1 '^FAILCHECK' | cut -c1-90)
+    emit_result "$result" "$base" WRONG_ANSWER "$det"
   else
     emit_result "$result" "$base" NO_OUTPUT "$(printf '%s' "$out" | tail -1 | cut -c1-90)"
   fi
@@ -345,8 +359,9 @@ scored=$((c_PASS + c_WRONG_ANSWER + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_T
 echo "scored $scored  pass $c_PASS  fail $((scored - c_PASS))  (skipped $c_SKIP)"
 echo "report: $OUT"
 
-# Written only after every test has been recorded. A run that dies partway
-# leaves a report that looks ordinary but is short, and a score taken from it
-# reads as a large regression that never happened.
-: > "$WORK/COMPLETE"
+# Written only after every test in a full corpus run has been recorded. A pilot
+# is complete for its limit, but must not authorize a partial report as a score.
+if [[ "$LIMIT" == 0 ]]; then
+  : > "$WORK/COMPLETE"
+fi
 exit 0

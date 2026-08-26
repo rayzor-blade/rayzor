@@ -6,8 +6,9 @@ rayzor and reports what fraction of standard Haxe actually runs.
 ## Corpus
 
 `tests/unit/src/unit/issues/` — 1165 files, one per upstream GitHub issue, each
-a small self-contained regression test. 451 of them extend `unit.Test` and are
-runnable; the rest are macro-only or type-declaration-only.
+a small regression test extending `unit.Test` (qualified or unqualified).
+The harness scores 1030 on the current pin; 59 target-specific tests and 76
+files with no test method live for this target are reported as skips.
 
 The corpus is **not vendored**. Haxe's LICENSE says a file carrying no license
 header outside `std/` and `libs/` is GPL-2.0-or-later, and none of the 1165
@@ -22,7 +23,9 @@ the revision in `corpus.pin`, into a gitignored `corpus/`.
 ./run.sh                   # whole corpus
 LIMIT=25 ./run.sh          # pilot
 JOBS=1 ./run.sh            # force serial execution (default: up to 8 workers)
+PRESET=application ./run.sh # use the production conformance preset (default)
 SRC=<path> ./run.sh        # score a clone you already have
+OUT=<path> ./run.sh        # keep the TSV report at a specific path
 ```
 
 The harness builds each issue in its own work directory and schedules bounded
@@ -80,23 +83,28 @@ corpus/             fetched, gitignored
 Minimal repros distilled from conformance failures, kept out of the main Haxe
 suite so they do not turn it red. Each documents one blocker.
 
-## Verified baseline (2026-08-21)
+## Verified baseline (2026-08-26)
 
-Oracle is `haxe 4.3.6 --interp` on the same source. rayzor `--llvm --release
---no-cache`.
+Rayzor `--release --no-cache --preset application`, corpus revision from
+`corpus.pin`, eight workers:
 
-| probe | rayzor | haxe 4.3.6 |
-|---|---|---|
-| expression-bodied fn `static function sh() return 8;` | *empty* | `shorthand=8` |
-| loop-allocated objects retained in an Array | `0 1 2 3 4` | `0 1 2 3 4` |
-| `case Bx(i) if (i > 10)` on `Bx(99)` | `small99` | `big99` |
-| `Std.string({x:1})` | `null` | `{x: 1}` |
+| outcome | count |
+|---|---:|
+| PASS | 348 |
+| WRONG_ANSWER | 179 |
+| COMPILE_FAIL | 306 |
+| CRASH | 189 |
+| TIMEOUT | 8 |
+| NO_OUTPUT | 0 |
+| SKIP | 135 |
 
-Three of four are WRONG and every one of them **exits 0**.
-
-On the official issue corpus, 40 tests: 0 pass, and 29 of them fail on a single
-defect -- an unqualified call to a method inherited from a superclass in
-another module does not resolve.
+That is 348/1030 scored tests, or 33.8%. The durable report has 1165 rows plus
+its header; the completion marker is written only after every worker in a full
+corpus run has been reaped. The largest actionable failure families are parser
+fallback losing the injected `main`, unresolved class/member metadata, and
+named functions left uncompiled. Wrong answers retain their first `FAILVALUES`
+line so distinct semantic failures are no longer collapsed into a generic
+`FAILCHECK eq`.
 
 ## Why the existing suite could not see any of this
 
