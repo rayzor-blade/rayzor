@@ -595,6 +595,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     span: Span::new(start, end),
                 })
             }
+            // `static var` / `static final` / `static function` in statement
+            // position declares a function-static local in Haxe. The `static`
+            // keyword does not change the declaration's shape, so consume it
+            // and parse the declaration that follows as an ordinary local.
+            TokenKind::KwStatic => self.parse_static_local(start),
             TokenKind::KwDo => self.parse_do_while_expr(),
             TokenKind::KwSwitch => self.parse_switch_expr(),
             TokenKind::KwTry => self.parse_try_expr(),
@@ -1145,6 +1150,54 @@ impl<'a, 'b> RdParser<'a, 'b> {
         Ok(params)
     }
 
+    /// Parse the declaration that follows a function-local `static`.
+    fn parse_static_local(&mut self, start: usize) -> Result<Expr, ParseError> {
+        self.stream.advance(); // consume `static`
+        match self.stream.peek().kind {
+            TokenKind::KwVar | TokenKind::KwFinal => {
+                let is_final = matches!(self.stream.peek().kind, TokenKind::KwFinal);
+                self.stream.advance();
+                let name = self.stream.current_text().to_string();
+                self.stream.advance();
+                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                let end = expr
+                    .as_ref()
+                    .map(|e| e.span.end)
+                    .unwrap_or(self.stream.current_offset());
+                Ok(Expr {
+                    kind: if is_final {
+                        ExprKind::Final {
+                            name,
+                            type_hint,
+                            expr,
+                        }
+                    } else {
+                        ExprKind::Var {
+                            name,
+                            type_hint,
+                            expr,
+                        }
+                    },
+                    span: Span::new(start, end),
+                })
+            }
+            TokenKind::KwFunction => self.parse_function_literal(),
+            _ => Err(ParseError::new(
+                "expected var, final, or function after static",
+                self.stream.peek().span,
+            )),
+        }
+    }
+
     /// Parse string interpolation parts from single-quoted string content.
     /// Handles `$ident` and `${expr}` interpolation.
     fn parse_string_interpolation_parts(
@@ -1309,6 +1362,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 // Negative number literal: -42
                 let expr = self.parse_unary()?;
                 Ok(Pattern::Const(expr))
+            }
+            // Variable pattern: `case var notNull:` — binds a fresh name
+            // without a type annotation.
+            TokenKind::KwVar => {
+                self.stream.advance();
+                let name = self.stream.current_text().to_string();
+                self.stream.advance();
+                Ok(Pattern::Var(name))
             }
             // Array pattern: [a, b, c]
             TokenKind::LBracket => {

@@ -87,3 +87,33 @@ fn test_metadata_without_params() {
         Err(e) => panic!("Failed to parse: {:?}", e),
     }
 }
+
+#[test]
+fn test_dotted_metadata_name() {
+    let source = r#"
+        class Main {
+            @:haxe.warning("-WGenerator")
+            static function f():Int return 1;
+        }
+    "#;
+
+    match parse_haxe_file("test.hx", source, false) {
+        Ok(file) => {
+            let class = match &file.declarations[0] {
+                TypeDeclaration::Class(c) => c,
+                other => panic!("Expected class, got: {:?}", other),
+            };
+            let func = class
+                .fields
+                .iter()
+                .find_map(|f| match &f.kind {
+                    ClassFieldKind::Function(_) => Some(f),
+                    _ => None,
+                })
+                .expect("expected a function field");
+            assert_eq!(func.meta.len(), 1);
+            assert_eq!(func.meta[0].name, "haxe.warning");
+        }
+        Err(e) => panic!("Dotted metadata name should parse, got: {}", e),
+    }
+}

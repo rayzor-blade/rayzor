@@ -377,10 +377,21 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         self.stream.advance(); // skip @ or @:
 
-        // Name (can be keyword like "native", "forward", etc.)
-        let name = self.stream.current_text().to_string();
-        let name_end = self.stream.peek().span.end;
+        // Name (can be keyword like "native", "forward", etc.) and may be
+        // dotted for namespaced metadata: `@:haxe.warning("-WGenerator")`.
+        let mut name = self.stream.current_text().to_string();
+        let mut name_end = self.stream.peek().span.end;
         self.stream.advance();
+        while self.stream.at(TokenKind::Dot)
+            && (self.stream.peek_at(1).kind == TokenKind::Ident
+                || self.stream.peek_at(1).kind.is_keyword())
+        {
+            self.stream.advance(); // skip .
+            name.push('.');
+            name.push_str(&self.stream.current_text().to_string());
+            name_end = self.stream.peek().span.end;
+            self.stream.advance();
+        }
 
         // Optional parameters
         let params_adjacent = self.stream.peek().span.start == name_end;

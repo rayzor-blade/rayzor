@@ -215,6 +215,25 @@ class Test {
 }
 
 #[test]
+fn test_function_local_static_var() {
+    let input = r#"
+class Test {
+    function test() {
+        static var c = 10;
+        static var d = c + 1;
+        static var f = value -> value + 1;
+        static final g = 7;
+    }
+}
+"#;
+
+    match parse_haxe_file("test.hx", input, false) {
+        Ok(_) => {}
+        Err(e) => panic!("Function-local static var should parse, got: {}", e),
+    }
+}
+
+#[test]
 fn test_complex_expressions() {
     test_expression_parsing("a.method().field[index] += value");
     test_expression_parsing("obj?.optionalField?.optionalMethod()");
