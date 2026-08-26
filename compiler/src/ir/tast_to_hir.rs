@@ -5487,6 +5487,96 @@ impl<'a> TastToHirContext<'a> {
                 )
             }
 
+            // A static call inside an inlined abstract method can reference
+            // one of that method's parameters, for example:
+            //
+            //     static function make(f:Float) return Std.int(f);
+            //
+            // Falling through to `lower_expression` here lowers the original
+            // `f` in the caller's scope, where the abstract method parameter
+            // does not exist. The missing value then becomes the type default
+            // (`0.0` in this example). Recursively lower the arguments through
+            // this inliner so parameter substitutions survive nested calls.
+            TypedExpressionKind::StaticMethodCall {
+                class_symbol,
+                method_symbol,
+                type_arguments,
+                arguments,
+            } => {
+                let lowered_args: Vec<HirExpr> = arguments
+                    .iter()
+                    .map(|arg| {
+                        self.inline_expression_deep(arg, this_replacement, param_map, arg.expr_type)
+                    })
+                    .collect();
+
+                let class_name = self
+                    .symbol_table
+                    .get_symbol(*class_symbol)
+                    .and_then(|s| self.string_interner.get(s.name));
+                let method_name = self
+                    .symbol_table
+                    .get_symbol(*method_symbol)
+                    .and_then(|s| self.string_interner.get(s.name));
+                if matches!(class_name, Some("Std"))
+                    && matches!(method_name, Some("is") | Some("isOfType"))
+                    && arguments.len() == 2
+                {
+                    return HirExpr::new(
+                        HirExprKind::TypeCheck {
+                            expr: Box::new(lowered_args[0].clone()),
+                            expected: arguments[1].expr_type,
+                        },
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                }
+
+                let class_type = self
+                    .symbol_table
+                    .get_symbol(*class_symbol)
+                    .map(|s| s.type_id)
+                    .unwrap_or_else(|| self.get_dynamic_type());
+                let method_type = self
+                    .symbol_table
+                    .get_symbol(*method_symbol)
+                    .map(|s| s.type_id)
+                    .unwrap_or(expr.expr_type);
+
+                HirExpr::new(
+                    HirExprKind::Call {
+                        target: CallTarget::Static {
+                            class: *class_symbol,
+                            method: *method_symbol,
+                        },
+                        callee: Box::new(HirExpr::new(
+                            HirExprKind::Field {
+                                object: Box::new(HirExpr::new(
+                                    HirExprKind::Variable {
+                                        symbol: *class_symbol,
+                                        capture_mode: None,
+                                    },
+                                    class_type,
+                                    self.current_lifetime,
+                                    expr.source_location,
+                                )),
+                                field: *method_symbol,
+                            },
+                            method_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        )),
+                        type_args: type_arguments.clone(),
+                        args: lowered_args,
+                        is_method: false,
+                    },
+                    expr.expr_type,
+                    self.current_lifetime,
+                    expr.source_location,
+                )
+            }
+
             // For field access on parameters (e.g., `rhs.toInt()`),
             // recursively inline the object expression
             TypedExpressionKind::FieldAccess {
