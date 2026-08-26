@@ -81,6 +81,24 @@ class MyClass {
 }
 
 #[test]
+fn test_overload_between_function_modifiers() {
+    let input = r#"
+class Main {
+    extern inline overload static function make(value:Int):Int {
+        return value;
+    }
+}
+"#;
+
+    let result = parse_haxe_file("test.hx", input, true);
+    assert!(
+        result.is_ok(),
+        "Failed to parse overload between modifiers: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_class_with_properties() {
     let input = r#"
 class MyClass {

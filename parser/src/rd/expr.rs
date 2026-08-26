@@ -88,6 +88,35 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_unary()?;
 
+        // Haxe permits the single-parameter shorthand `value -> expr` in
+        // addition to the parenthesised `(value) -> expr` form handled below.
+        // Parse it at the operand boundary so `fallback ?? value -> expr`
+        // becomes `fallback ?? (value -> expr)` rather than treating the
+        // already-combined null-coalescing expression as the arrow parameter.
+        if self.stream.eat(TokenKind::Arrow).is_some() {
+            let name = match left.kind {
+                ExprKind::Ident(name) => name,
+                _ => {
+                    return Err(ParseError::new(
+                        "expected identifier before arrow",
+                        self.stream.peek().span,
+                    ));
+                }
+            };
+            let body = self.parse_expression()?;
+            let span = Span::new(left.span.start, body.span.end);
+            return Ok(Expr {
+                kind: ExprKind::Arrow {
+                    params: vec![ArrowParam {
+                        name,
+                        type_hint: None,
+                    }],
+                    expr: Box::new(body),
+                },
+                span,
+            });
+        }
+
         loop {
             let (op, prec, right_assoc) = match self.stream.peek().kind {
                 TokenKind::QuestionQuestion => (BinaryOp::NullCoal, 2, true),

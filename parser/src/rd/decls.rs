@@ -470,7 +470,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 saw_field_keyword = true;
             }
         }
-        let (access, modifiers) = self.parse_access_and_modifiers();
+        let (access, mut modifiers) = self.parse_access_and_modifiers();
+        // `overload` is an identifier in Haxe and may appear between ordinary
+        // modifiers, e.g. `extern inline overload static function f(...)`.
+        // Consume it here, then continue collecting modifiers after it.
+        while self.stream.peek().kind == TokenKind::Ident
+            && self.stream.current_text() == "overload"
+        {
+            self.stream.advance();
+            let (_, more_modifiers) = self.parse_access_and_modifiers();
+            modifiers.extend(more_modifiers);
+        }
         // Either order: `abstract public function` and `public abstract function`.
         while self.stream.eat(TokenKind::KwAbstract).is_some() {}
 

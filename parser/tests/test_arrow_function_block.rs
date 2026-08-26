@@ -86,6 +86,43 @@ class Main {
 }
 
 #[test]
+fn test_unparenthesized_single_parameter_arrow() {
+    let source = r#"
+class Main {
+    static function main() {
+        var f = value -> value + 1;
+        trace(f(1));
+    }
+}
+"#;
+
+    let result = parse_haxe_file("test.hx", source, true);
+    assert!(
+        result.is_ok(),
+        "Failed to parse unparenthesized arrow function: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_unparenthesized_arrow_in_null_coalesce() {
+    let source = r#"
+class Main {
+    static function make(?f:Int->Int) {
+        return f ?? value -> value + 1;
+    }
+}
+"#;
+
+    let result = parse_haxe_file("test.hx", source, true);
+    assert!(
+        result.is_ok(),
+        "Failed to parse arrow on a null-coalesce RHS: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_arrow_exact_test_combined_pattern() {
     let source = r#"package test;
 
