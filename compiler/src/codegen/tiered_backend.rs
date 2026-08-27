@@ -2165,8 +2165,23 @@ impl TieredBackend {
             debug!("[TieredBackend] Upgrading all functions to LLVM...");
         }
 
+        // CI conformance runs retain this output per issue. Keep the markers
+        // on the two sides of every unsafe/JIT boundary so a signal that kills
+        // the process still leaves the last completed promotion phase behind.
+        let trace_upgrade = std::env::var_os("RAYZOR_PROFILE_LOAD").is_some()
+            || std::env::var_os("RAYZOR_TIER_TRACE_STARTUP").is_some();
+        if trace_upgrade {
+            eprintln!("[tier-upgrade] compiling LLVM functions");
+        }
+
         match self.compile_all_with_llvm() {
             Ok(all_pointers) => {
+                if trace_upgrade {
+                    eprintln!(
+                        "[tier-upgrade] LLVM compilation complete; resolved {} pointers",
+                        all_pointers.len()
+                    );
+                }
                 // Re-register source info at new LLVM addresses
                 self.register_source_info_for_pointers(&all_pointers);
 
@@ -2240,7 +2255,13 @@ impl TieredBackend {
                 if self.config.verbosity >= 1 {
                     debug!("[TieredBackend] Upgraded {} functions to LLVM", count);
                 }
+                if trace_upgrade {
+                    eprintln!("[tier-upgrade] replaying startup hooks with LLVM pointers");
+                }
                 self.rerun_loaded_modules_startup_jit()?;
+                if trace_upgrade {
+                    eprintln!("[tier-upgrade] LLVM startup replay complete");
+                }
                 Ok(())
             }
             Err(e) => {

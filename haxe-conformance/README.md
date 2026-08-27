@@ -85,21 +85,26 @@ suite so they do not turn it red. Each documents one blocker.
 
 ## Verified Linux CI baseline (2026-08-27)
 
-Rayzor `--release --no-cache --preset application`, corpus revision from
-`corpus.pin`, eight workers. This records the CI result; a higher result from a
-local macOS or quiet-machine probe does not replace the published baseline.
+Rayzor `989ba894`, `--release --no-cache --preset application`, corpus revision
+from `corpus.pin`, four workers and a 25-second per-issue timeout. This is the
+artifact from CI run `33068321652`; local probes do not replace the published
+baseline.
 
 | outcome | count |
 |---|---:|
-| PASS | 369 |
-| WRONG_ANSWER | 194 |
+| PASS | 370 |
+| WRONG_ANSWER | 191 |
 | COMPILE_FAIL | 269 |
-| CRASH | 191 |
-| TIMEOUT | 7 |
+| CRASH | 160 |
+| TIMEOUT | 40 |
 | NO_OUTPUT | 0 |
 | SKIP | 135 |
 
-That is 369/1030 scored tests, or 35.8%. The durable report has 1165 rows plus
+That is 370/1030 scored tests, or 35.9%. The same revision and timeout produced
+372/1030 on macOS and on the quiet Linux NUC. The remaining two-result CI gap
+is under diagnosis as nondeterministic pre-promotion crashes; raw output and
+the LLVM/startup phase markers are retained in the CI artifact rather than
+being folded into the baseline. The durable report has 1165 rows plus
 its header; the completion marker is written only after every worker in a full
 corpus run has been reaped. The largest actionable failure families are parser
 fallback losing the injected `main`, unresolved class/member metadata, and

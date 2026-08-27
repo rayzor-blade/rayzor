@@ -106,6 +106,10 @@ jobs:
           TIMEOUT: 25
           # Include successful/failed LLVM promotion in each retained raw log.
           RAYZOR_PROFILE_LOAD: 1
+          # A signal cannot return a Rust error. Record the last startup hook
+          # entered/completed so CI-only promotion crashes still identify the
+          # exact function and whether it was baseline or LLVM replay.
+          RAYZOR_TIER_TRACE_STARTUP: 1
         # The score is a measurement. Letting the step's exit status fail the
         # job skipped the summary and the upload with it, so a run that died
         # partway produced no number AND no evidence of why.
