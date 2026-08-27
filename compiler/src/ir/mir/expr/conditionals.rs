@@ -172,6 +172,62 @@ impl<'a> HirToMirContext<'a> {
             me.builder.build_call_direct(f, vec![v], boxed_ptr)
         };
 
+        // Dynamic vs Optional<prim>: coerce the Dynamic side to the Optional's
+        // inner primitive and compare tag-aware against the box. `classify`
+        // returns (None, None) for Dynamic, so this shape is otherwise
+        // invisible to the match below and would fall through to a raw
+        // pointer compare.
+        let lhs_is_dyn = matches!(
+            self.type_table.get(lhs.ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        let rhs_is_dyn = matches!(
+            self.type_table.get(rhs.ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        if lhs_is_dyn != rhs_is_dyn {
+            if let Some(inner) = if rhs_is_dyn { lhs_opt } else { rhs_opt } {
+                let opt_first = rhs_is_dyn; // Optional is on the left iff rhs is Dynamic
+                let opt_expr = if opt_first { lhs } else { rhs };
+                let dyn_expr = if opt_first { rhs } else { lhs };
+                let opt_reg = self.lower_expression(opt_expr)?;
+                let opt_reg = box_if_raw(self, opt_reg, inner)?;
+                let dyn_reg = self.lower_expression(dyn_expr)?;
+                let use_float = inner == Prim::Float;
+                let (coerce_name, coerce_ret) = if use_float {
+                    ("haxe_coerce_dynamic_to_float", IrType::F64)
+                } else {
+                    ("haxe_coerce_dynamic_to_int", IrType::I64)
+                };
+                let cf = self.get_or_register_extern_function(
+                    coerce_name,
+                    vec![ptr_u8.clone()],
+                    coerce_ret.clone(),
+                );
+                let coerced =
+                    self.builder
+                        .build_call_direct(cf, vec![dyn_reg], coerce_ret.clone())?;
+                let eq_name = if use_float {
+                    "haxe_null_float_eq"
+                } else {
+                    "haxe_null_int_eq"
+                };
+                let f = self.get_or_register_extern_function(
+                    eq_name,
+                    vec![ptr_u8, coerce_ret],
+                    IrType::Bool,
+                );
+                let eq = self
+                    .builder
+                    .build_call_direct(f, vec![opt_reg, coerced], IrType::Bool)?;
+                if matches!(op, HirBinaryOp::Ne) {
+                    let ffalse = self.builder.build_bool(false)?;
+                    return self.builder.build_cmp(CompareOp::Eq, eq, ffalse);
+                }
+                return Some(eq);
+            }
+        }
+
         let eq_result = match (lhs_opt, lhs_bare, rhs_opt, rhs_bare) {
             // Optional<prim> vs bare prim (either order)
             (Some(inner), _, None, Some(bare)) | (None, Some(bare), Some(inner), _) => {

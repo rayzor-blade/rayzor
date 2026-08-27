@@ -90,15 +90,15 @@ Rayzor `--release --no-cache --preset application`, corpus revision from
 
 | outcome | count |
 |---|---:|
-| PASS | 356 |
-| WRONG_ANSWER | 186 |
+| PASS | 357 |
+| WRONG_ANSWER | 185 |
 | COMPILE_FAIL | 287 |
 | CRASH | 193 |
 | TIMEOUT | 8 |
 | NO_OUTPUT | 0 |
 | SKIP | 135 |
 
-That is 356/1030 scored tests, or 34.6%. The durable report has 1165 rows plus
+That is 357/1030 scored tests, or 34.7%. The durable report has 1165 rows plus
 its header; the completion marker is written only after every worker in a full
 corpus run has been reaped. The largest actionable failure families are parser
 fallback losing the injected `main`, unresolved class/member metadata, and

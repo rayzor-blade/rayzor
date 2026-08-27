@@ -852,13 +852,36 @@ impl<'a> HirToMirContext<'a> {
                     let mut rhs_reg = self.lower_expression(rhs)?;
 
                     let concrete_ty = if lhs_is_dyn {
-                        self.builder
-                            .get_register_type(rhs_reg)
-                            .unwrap_or(IrType::I32)
+                        // A Null<prim> right operand is a box; unbox it and
+                        // coerce the Dynamic side to the inner primitive, not
+                        // the box pointer.
+                        let inner = self.optional_inner_type(rhs.ty);
+                        if let Some(inner_ty) = inner {
+                            if let Some(unboxed) =
+                                self.maybe_unbox_optional(rhs_reg, rhs.ty, inner_ty)
+                            {
+                                rhs_reg = unboxed;
+                            }
+                            self.convert_type(inner_ty)
+                        } else {
+                            self.builder
+                                .get_register_type(rhs_reg)
+                                .unwrap_or(IrType::I32)
+                        }
                     } else {
-                        self.builder
-                            .get_register_type(lhs_reg)
-                            .unwrap_or(IrType::I32)
+                        let inner = self.optional_inner_type(lhs.ty);
+                        if let Some(inner_ty) = inner {
+                            if let Some(unboxed) =
+                                self.maybe_unbox_optional(lhs_reg, lhs.ty, inner_ty)
+                            {
+                                lhs_reg = unboxed;
+                            }
+                            self.convert_type(inner_ty)
+                        } else {
+                            self.builder
+                                .get_register_type(lhs_reg)
+                                .unwrap_or(IrType::I32)
+                        }
                     };
 
                     let is_float = matches!(concrete_ty, IrType::F32 | IrType::F64);
