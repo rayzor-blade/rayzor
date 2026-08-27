@@ -1721,16 +1721,33 @@ impl TieredBackend {
         // rebuild in a pure-interpreter run remain a known gap, not a new
         // regression from this fix.
         if !self.start_interpreted {
-            if self.function_pointers.read().unwrap().is_empty() {
+            let compiled_now = self.function_pointers.read().unwrap().is_empty();
+            if compiled_now {
                 self.compile_all_modules_jit()?;
+            } else {
+                // A fresh baseline compile replays startup for every loaded
+                // module once it has installed native pointers. Only run the
+                // newly loaded slice here when native code already existed;
+                // doing both executed each static initializer twice.
+                self.run_startup_hooks_native(&modules_to_init, true)?;
             }
-            self.run_startup_hooks_native(&modules_to_init)?;
         } else {
             self.run_startup_hooks_interpreter(&modules_to_init)?;
         }
 
         *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
         Ok(())
+    }
+
+    /// Initialize all modules loaded since the previous call exactly once in
+    /// the active execution tier.
+    ///
+    /// Top-level runners use this before an eager LLVM upgrade. Calling each
+    /// generated `__init__` manually duplicated the work already performed by
+    /// [`Self::ensure_loaded_modules_initialized`], so observable static
+    /// initializer side effects ran three times at the baseline tier.
+    pub fn initialize_loaded_modules(&mut self) -> Result<(), String> {
+        self.ensure_loaded_modules_initialized()
     }
 
     fn run_startup_hooks_interpreter(&self, modules: &[IrModule]) -> Result<(), String> {
@@ -1770,10 +1787,19 @@ impl TieredBackend {
         Ok(())
     }
 
-    fn run_startup_hooks_native(&self, modules: &[IrModule]) -> Result<(), String> {
+    fn run_startup_hooks_native(
+        &self,
+        modules: &[IrModule],
+        include_static_initializers: bool,
+    ) -> Result<(), String> {
         let function_pointers = self.function_pointers.read().unwrap();
         let trace_startup = std::env::var_os("RAYZOR_LLVM_TRACE_STARTUP").is_some()
             || std::env::var_os("RAYZOR_TIER_TRACE_STARTUP").is_some();
+        let init_names: &[&str] = if include_static_initializers {
+            &["__vtable_init__", "__init__"]
+        } else {
+            &["__vtable_init__"]
+        };
 
         for module in modules {
             // Every contributing file leaves its own `__vtable_init__` /
@@ -1789,7 +1815,7 @@ impl TieredBackend {
             // startup would SIGILL before user code begins. The
             // missing entries from a single skipped init are
             // recoverable, but a SIGILL is not.
-            for init_name in ["__vtable_init__", "__init__"] {
+            for &init_name in init_names {
                 let init_ids: Vec<_> = module
                     .functions
                     .values()
@@ -1833,9 +1859,12 @@ impl TieredBackend {
         Ok(())
     }
 
-    fn rerun_loaded_modules_startup_native(&self) -> Result<(), String> {
+    fn rerun_loaded_modules_startup_native(
+        &self,
+        include_static_initializers: bool,
+    ) -> Result<(), String> {
         let modules = self.modules.read().unwrap();
-        self.run_startup_hooks_native(&modules)
+        self.run_startup_hooks_native(&modules, include_static_initializers)
     }
 
     /// Reset loaded module startup state for the next top-level program run.
@@ -1853,18 +1882,22 @@ impl TieredBackend {
         if self.function_pointers.read().unwrap().is_empty() {
             self.run_startup_hooks_interpreter(&modules)
         } else {
-            self.run_startup_hooks_native(&modules)
+            self.run_startup_hooks_native(&modules, true)
         }
     }
 
     /// Re-run startup hooks after compiling to native code.
     ///
-    /// The interpreter maintains its own global state, while native tiers read/write
-    /// backend storage and runtime registries. After switching execution tiers, we
-    /// must replay startup so globals, vtables, and constructor thunks point at the
-    /// newly active backend representation.
-    fn rerun_loaded_modules_startup_jit(&self) -> Result<(), String> {
-        self.rerun_loaded_modules_startup_native()?;
+    /// The interpreter maintains its own global state, while native tiers use
+    /// runtime-backed global slots. The first native tier must initialize those
+    /// slots. LLVM shares the same slots with Cranelift, so promotion only needs
+    /// to refresh vtable function pointers; replaying `__init__` would repeat
+    /// user-visible static side effects.
+    fn rerun_loaded_modules_startup_jit(
+        &self,
+        include_static_initializers: bool,
+    ) -> Result<(), String> {
+        self.rerun_loaded_modules_startup_native(include_static_initializers)?;
         Ok(())
     }
 
@@ -2258,7 +2291,7 @@ impl TieredBackend {
                 if trace_upgrade {
                     eprintln!("[tier-upgrade] replaying startup hooks with LLVM pointers");
                 }
-                self.rerun_loaded_modules_startup_jit()?;
+                self.rerun_loaded_modules_startup_jit(false)?;
                 if trace_upgrade {
                     eprintln!("[tier-upgrade] LLVM startup replay complete");
                 }
@@ -2566,7 +2599,7 @@ impl TieredBackend {
         *self.baseline_backend.lock().unwrap() = backend;
 
         // Refresh backend-dependent startup state now that compiled function pointers exist.
-        self.rerun_loaded_modules_startup_jit()?;
+        self.rerun_loaded_modules_startup_jit(true)?;
 
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT compilation complete");

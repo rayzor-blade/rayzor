@@ -1273,39 +1273,13 @@ fn run_bundle(
     // reachable set — including the hot decode path reached through vtables —
     // to materialize, so the upgrade actually promotes it. Without this the
     // bundle stayed 100% Cranelift baseline (0 LLVM in --stats) and decoded
-    // ~3x slower than the source-JIT path. Collect EVERY same-named copy
-    // (per-file initializers merged into one module); registration is
-    // idempotent, matching run_file.
-    let vtable_init_ids: Vec<compiler::ir::IrFunctionId> = bundle
-        .modules()
-        .iter()
-        .flat_map(|m| {
-            m.functions
-                .iter()
-                .filter(|(_, f)| f.name == "__vtable_init__")
-                .map(|(id, _)| *id)
-        })
-        .collect();
-    let module_init_ids: Vec<compiler::ir::IrFunctionId> = bundle
-        .modules()
-        .iter()
-        .flat_map(|m| {
-            m.functions
-                .iter()
-                .filter(|(_, f)| f.name == "__init__")
-                .map(|(id, _)| *id)
-        })
-        .collect();
-    for id in &vtable_init_ids {
-        backend
-            .execute_function(*id, vec![])
-            .map_err(|e| format!("vtable init failed: {}", e))?;
-    }
-    for id in &module_init_ids {
-        backend
-            .execute_function(*id, vec![])
-            .map_err(|e| format!("module init failed: {}", e))?;
-    }
+    // ~3x slower than the source-JIT path. The backend owns the exactly-once
+    // traversal of every same-named per-file hook; manually executing the
+    // collected IDs here repeated the startup replay performed during native
+    // baseline materialization.
+    backend
+        .initialize_loaded_modules()
+        .map_err(|e| format!("module initialization failed: {}", e))?;
 
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
@@ -2130,43 +2104,6 @@ fn run_file(
         .map(|(id, _)| *id)
         .ok_or("No main function found")?;
 
-    // Find __vtable_init__ and __init__ functions (if present).
-    //
-    // Each COMPILED FILE emits its OWN `__vtable_init__`/`__init__` (a
-    // per-module bootstrap, not a single program-wide symbol) — after the
-    // stdlib/import merge, `mir_module.functions` can hold dozens of
-    // same-named copies (e.g. one per file that declares an
-    // interface-implementing class or a static field initializer).
-    // `.find()` only grabs the FIRST one (lowest IrFunctionId, i.e.
-    // whichever file happened to compile earliest) and silently drops the
-    // rest. For `__vtable_init__` specifically this meant a class's
-    // (class, interface) vtable-slot registrations from any file OTHER
-    // than the first-found one never ran, leaving `IFACE_VTABLE_REGISTRY`
-    // (runtime/src/type_system.rs) without that entry — an interface-to-
-    // interface cast that needs to rebuild a fat pointer via
-    // `haxe_iface_fat_ptr_build` then finds no registry entry and returns
-    // null, which the caller dereferences → SIGSEGV. Root-caused via
-    // lldb + RAYZOR_IFACE_DEBUG showing `haxe_iface_vtable_set_slot` was
-    // reached for some classes but nue's `LlamaModel` never registered a
-    // `CausalLanguageModel` vtable at all despite `__vtable_init__`
-    // containing that exact registration code (confirmed present in the
-    // MIR dump). Collect and run EVERY same-named copy — registration
-    // (vtable slots, static-once initializers) is idempotent/order-
-    // independent per (class, iface) or per (global) key, so running all
-    // copies is safe and matches the actual multi-file program shape.
-    let vtable_init_func_ids: Vec<_> = mir_module
-        .functions
-        .iter()
-        .filter(|(_, f)| f.name == "__vtable_init__")
-        .map(|(id, _)| *id)
-        .collect();
-    let module_init_func_ids: Vec<_> = mir_module
-        .functions
-        .iter()
-        .filter(|(_, f)| f.name == "__init__")
-        .map(|(id, _)| *id)
-        .collect();
-
     // Get runtime symbols
     let plugin = rayzor_runtime::get_plugin();
     let mut symbols = plugin.runtime_symbols();
@@ -2217,20 +2154,13 @@ fn run_file(
         tui.report_plain();
     }
 
-    // Execute init functions before main. Run EVERY per-file copy (see the
-    // comment where these lists are built) — vtable-slot registration and
-    // static initializers must all run regardless of which file wins the
-    // deduped name in Cranelift's symbol table.
-    for vtable_init_id in &vtable_init_func_ids {
-        backend
-            .execute_function(*vtable_init_id, vec![])
-            .map_err(|e| format!("vtable init failed: {}", e))?;
-    }
-    for init_id in &module_init_func_ids {
-        backend
-            .execute_function(*init_id, vec![])
-            .map_err(|e| format!("module init failed: {}", e))?;
-    }
+    // Initialize every per-file vtable/static hook exactly once at baseline.
+    // LLVM shares the runtime-backed global slots and refreshes only vtable
+    // addresses after promotion; repeating static initialization corrupts
+    // observable side effects and made startup crashes process-layout-dependent.
+    backend
+        .initialize_loaded_modules()
+        .map_err(|e| format!("module initialization failed: {}", e))?;
 
     // Optional manifest-driven auto-upgrade: once module init has
     // populated globals/vtables, force every reachable function up to
