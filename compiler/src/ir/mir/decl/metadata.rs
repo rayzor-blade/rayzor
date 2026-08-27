@@ -46,6 +46,7 @@ impl<'a> HirToMirContext<'a> {
             offset: None,
         });
         let mut field_index = 1u32; // User fields start at index 1
+        let mut own_instance_fields = Vec::new();
 
         let mut walk = vec![class.symbol_id];
         self.collect_inherited_fields(
@@ -139,6 +140,7 @@ impl<'a> HirToMirContext<'a> {
             }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
+            own_instance_fields.push((field.symbol_id, field.ty, field_index));
             // Publish (class name, field name) -> field_index to the global
             // name-keyed registry that the fallback path consumes: the same
             // field carries different SymbolIds per lowering context, so the
@@ -218,6 +220,14 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or("<unknown>");
         self.class_alloc_sizes_by_name
             .insert(class_name_for_alloc.to_string(), alloc_size);
+        // Struct-init object literals need the concrete storage layout even
+        // when the class has no derive metadata. This map used to be populated
+        // only for derived classes, so `{ field: value }` targeting an ordinary
+        // `@:structInit` class fell back to anonymous-object allocation and was
+        // later read through class-field GEPs -- two incompatible layouts.
+        self.class_instance_fields
+            .entry(class.symbol_id)
+            .or_insert(own_instance_fields);
 
         // Build interface vtables for each implemented interface AND their
         // transitive parent interfaces. For each interface method, find the

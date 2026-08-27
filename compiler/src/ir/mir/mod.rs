@@ -594,9 +594,9 @@ pub struct HirToMirContext<'a> {
     /// Classes that derive Default — enables synthetic static default() method
     derive_default_classes: BTreeSet<SymbolId>,
 
-    /// Instance fields for classes with derive traits.
+    /// Instance storage fields for classes in this lowering context.
     /// Maps class SymbolId → list of (field_symbol, field_type, gep_index) for non-static fields.
-    /// Used by PartialEq/PartialOrd/Hash codegen to iterate fields in order.
+    /// Used by struct-init allocation and derive codegen to iterate fields in layout order.
     class_instance_fields: BTreeMap<SymbolId, Vec<(SymbolId, TypeId, u32)>>,
     /// Debug-only: how many times register_type_metadata ran in THIS context.
     /// Distinguishes "registration never ran here" from "ran but saw no classes"

@@ -579,6 +579,85 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    fn lower_struct_init_class_literal(
+        &mut self,
+        fields: &[(InternedString, HirExpr)],
+        class_type: TypeId,
+        class_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let storage_fields = self.class_instance_fields.get(&class_symbol)?.clone();
+        let class_name = self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|symbol| {
+                symbol
+                    .qualified_name
+                    .and_then(|name| self.string_interner.get(name))
+                    .or_else(|| self.string_interner.get(symbol.name))
+            });
+        let layout_size = storage_fields
+            .iter()
+            .map(|(_, _, index)| (*index as u64 + 1) * 8)
+            .max()
+            .unwrap_or(16)
+            .max(16);
+        let object_size = self
+            .class_alloc_sizes
+            .get(&class_symbol)
+            .copied()
+            .or_else(|| {
+                class_name.and_then(|name| self.class_alloc_sizes_by_name.get(name).copied())
+            })
+            .unwrap_or(layout_size)
+            .max(layout_size);
+
+        let raw_type_id = self.runtime_type_id(class_type);
+        let runtime_type_id = if raw_type_id != 0 {
+            raw_type_id
+        } else {
+            self.deterministic_class_type_id(class_symbol)
+                .unwrap_or(raw_type_id)
+        } as i64;
+        let header = self.builder.build_const(IrValue::I64(runtime_type_id));
+        let object = self.build_heap_alloc_with_header(object_size, header)?;
+
+        // malloc leaves every field after the header uninitialized. Initialize
+        // the complete storage shape before applying the literal so omitted
+        // optional/default fields have deterministic Haxe defaults.
+        for &(_, field_type, index) in &storage_fields {
+            let value = self.build_type_default(field_type)?;
+            let index = self.builder.build_const(IrValue::I64(index as i64))?;
+            let field_ir_type = self.convert_type(field_type);
+            let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
+            self.builder.build_store(field_ptr, value);
+        }
+
+        for (literal_name, expression) in fields {
+            let literal_name = self
+                .string_interner
+                .get(*literal_name)
+                .unwrap_or("<unknown>");
+            let (field_type, index) =
+                storage_fields
+                    .iter()
+                    .find_map(|(field_symbol, field_type, index)| {
+                        let field_name = self
+                            .symbol_table
+                            .get_symbol(*field_symbol)
+                            .and_then(|symbol| self.string_interner.get(symbol.name))?;
+                        (field_name == literal_name).then_some((*field_type, *index))
+                    })?;
+            let value = self.lower_expression(expression)?;
+            let (value, _) = self.maybe_wrap_for_interface(value, expression.ty, field_type);
+            let index = self.builder.build_const(IrValue::I64(index as i64))?;
+            let field_ir_type = self.convert_type(field_type);
+            let field_ptr = self.builder.build_gep(object, vec![index], field_ir_type)?;
+            self.builder.build_store(field_ptr, value);
+        }
+
+        Some(object)
+    }
+
     pub(crate) fn lower_object_literal(
         &mut self,
         fields: &[(InternedString, HirExpr)],
@@ -605,6 +684,23 @@ impl<'a> HirToMirContext<'a> {
         // from the slot layout and reader/writer slot indices diverge.
         let effective_ty = self.object_literal_target_ty.unwrap_or(expr_type);
         let resolved_ty = self.resolve_through_aliases(effective_ty);
+        let class_symbol = self
+            .type_table
+            .get(resolved_ty)
+            .and_then(|ty| match &ty.kind {
+                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                TypeKind::GenericInstance { base_type, .. } => self
+                    .type_table
+                    .get(*base_type)
+                    .and_then(|base| match &base.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+        if let Some(class_symbol) = class_symbol {
+            return self.lower_struct_init_class_literal(fields, resolved_ty, class_symbol);
+        }
         let mut optional_defaults: Vec<String> = Vec::new();
         {
             let type_table = self.type_table;
