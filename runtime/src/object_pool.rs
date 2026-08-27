@@ -351,6 +351,9 @@ static TEST_SCRIBBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 mod tests {
     use super::*;
 
+    // The pool currently reserves its backing region with mmap. Non-Unix
+    // targets deliberately fall back to libc instead.
+    #[cfg(unix)]
     #[test]
     fn reuses_a_freed_block() {
         let _g = pooled();
@@ -362,6 +365,7 @@ mod tests {
         rayzor_object_free(b);
     }
 
+    #[cfg(unix)]
     #[test]
     fn separates_size_classes() {
         let _g = pooled();
@@ -397,6 +401,7 @@ mod tests {
         g
     }
 
+    #[cfg(unix)]
     #[test]
     fn poisons_a_released_block_when_asked() {
         let _g = pooled();
@@ -414,6 +419,7 @@ mod tests {
         TEST_SCRIBBLE.store(false, Ordering::Relaxed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn fills_a_fresh_block_when_asked() {
         let _g = pooled();
@@ -429,6 +435,7 @@ mod tests {
         TEST_SCRIBBLE.store(false, Ordering::Relaxed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn counts_only_what_it_actually_serves() {
         let _g = pooled();
@@ -450,6 +457,7 @@ mod tests {
         TEST_SCRIBBLE.store(false, Ordering::Relaxed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn free_still_reclaims_pool_blocks_when_the_switch_is_off() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -473,5 +481,21 @@ mod tests {
         let fresh = rayzor_object_alloc(64);
         assert_ne!(fresh, foreign);
         rayzor_object_free(fresh);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_falls_back_to_libc_when_pool_is_requested() {
+        let _g = pooled();
+        let before = rayzor_pool_served();
+        let ptr = rayzor_object_alloc(32);
+
+        assert!(!ptr.is_null());
+        assert!(!in_region(ptr as usize));
+        assert_eq!(rayzor_pool_served(), before);
+
+        unsafe { *ptr = 0x27 };
+        assert_eq!(unsafe { *ptr }, 0x27);
+        rayzor_object_free(ptr);
     }
 }
