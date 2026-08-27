@@ -106,10 +106,7 @@ fn test_dotted_metadata_name() {
             let func = class
                 .fields
                 .iter()
-                .find_map(|f| match &f.kind {
-                    ClassFieldKind::Function(_) => Some(f),
-                    _ => None,
-                })
+                .find(|f| matches!(&f.kind, ClassFieldKind::Function(_)))
                 .expect("expected a function field");
             assert_eq!(func.meta.len(), 1);
             assert_eq!(func.meta[0].name, "haxe.warning");

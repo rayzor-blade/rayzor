@@ -851,11 +851,7 @@ impl<'a> TypeCheckingPhase<'a> {
         let compatibility = self
             .type_checker
             .check_compatibility(class_method.return_type, interface_method.return_type);
-        if matches!(compatibility, TypeCompatibility::Incompatible) {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(!matches!(compatibility, TypeCompatibility::Incompatible))
     }
 
     /// Format a method signature for display

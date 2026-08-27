@@ -55,6 +55,7 @@ mod wasm_rt {
     // extern block). The wasm-linker aliases `malloc`->`rayzor_malloc`, so
     // this allocator shares the merged module's single dlmalloc heap — there
     // is no separate plugin heap to collide with the runtime's.
+    #[allow(suspicious_runtime_symbol_definitions)]
     extern "C" {
         fn malloc(size: usize) -> *mut u8;
         fn free(ptr: *mut u8);
@@ -307,6 +308,7 @@ struct RayzorKvCacheQ8 {
     head_dim_bytes: usize,
 }
 
+#[allow(suspicious_runtime_symbol_definitions)]
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);

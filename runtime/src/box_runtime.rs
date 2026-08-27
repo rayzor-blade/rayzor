@@ -10,6 +10,9 @@
 //! All parameters and return values use i64 to match the MIR/LLVM type system
 //! where Box is represented as an opaque i64 (pointer-sized integer).
 
+// Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
+// pointer ABI and is the representation used by the box runtime.
+#[allow(suspicious_runtime_symbol_definitions)]
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);

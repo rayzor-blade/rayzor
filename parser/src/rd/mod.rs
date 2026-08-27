@@ -388,7 +388,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         {
             self.stream.advance(); // skip .
             name.push('.');
-            name.push_str(&self.stream.current_text().to_string());
+            name.push_str(self.stream.current_text());
             name_end = self.stream.peek().span.end;
             self.stream.advance();
         }

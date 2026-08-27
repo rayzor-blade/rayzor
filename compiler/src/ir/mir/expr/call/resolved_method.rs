@@ -34,6 +34,7 @@ impl<'a> HirToMirContext<'a> {
             callee,
             args,
             is_method,
+            target,
             ..
         } = &expr.kind
         else {
@@ -45,6 +46,27 @@ impl<'a> HirToMirContext<'a> {
         };
         let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
         let method_name = method_name_interned.and_then(|name| self.string_interner.get(name));
+        // TAST already resolved the call form and HIR preserves it. Treat that
+        // answer as authoritative: re-deriving it solely from SymbolKind breaks
+        // when imported stdlib symbols are viewed through a later type context.
+        let is_static_class_call = matches!(target, CallTarget::Static { .. })
+            || if let HirExprKind::Variable {
+                symbol: obj_sym, ..
+            } = &object.kind
+            {
+                let kind = self.symbol_table.get_symbol(*obj_sym).map(|s| s.kind);
+                kind.map(|k| {
+                    matches!(
+                        k,
+                        crate::tast::symbols::SymbolKind::Class
+                            | crate::tast::symbols::SymbolKind::Abstract
+                            | crate::tast::symbols::SymbolKind::TypeAlias
+                    )
+                })
+                .unwrap_or(false)
+            } else {
+                false
+            };
         if let Some(func_id) = maybe_func_id {
             // Route through the runtime mapping for extern class methods.
             // get_stdlib_runtime_info's internal guard returns None for
@@ -55,7 +77,43 @@ impl<'a> HirToMirContext<'a> {
                     .get_symbol(*field)
                     .and_then(|s| self.string_interner.get(s.name));
 
-                if let Some(mn) = method_name_str {
+                if let (CallTarget::Static { class, .. }, Some(mn)) = (target, method_name_str) {
+                    // A static call carries its declaring class explicitly. Use it
+                    // before receiver-TypeId lookup, whose context can drift across
+                    // imported stdlib lowerings (Int64.toInt was misidentified as an
+                    // instance method and its class symbol failed to lower as a value).
+                    let class_name = self
+                        .builder
+                        .module
+                        .functions
+                        .get(&func_id)
+                        .and_then(|func| func.qualified_name.as_deref())
+                        .and_then(|qualified| qualified.rsplit_once('.').map(|(owner, _)| owner))
+                        .or_else(|| {
+                            self.symbol_table
+                                .get_symbol(*field)
+                                .and_then(|sym| sym.qualified_name)
+                                .and_then(|name| self.string_interner.get(name))
+                                .and_then(|qualified| {
+                                    qualified.rsplit_once('.').map(|(owner, _)| owner)
+                                })
+                        })
+                        .or_else(|| {
+                            self.symbol_table.get_symbol(*class).and_then(|sym| {
+                                sym.qualified_name
+                                    .and_then(|name| self.string_interner.get(name))
+                                    .or_else(|| self.string_interner.get(sym.name))
+                            })
+                        });
+                    class_name
+                        .and_then(|name| self.stdlib_mapping.class_key(name))
+                        .and_then(|key| {
+                            self.stdlib_mapping
+                                .find_by_name_and_params(key, mn, args.len())
+                                .or_else(|| self.stdlib_mapping.find_by_name(key, mn))
+                        })
+                        .map(|(sig, mapping)| (sig.class, sig.method, mapping))
+                } else if let Some(mn) = method_name_str {
                     if mn == "indexOf" || mn == "lastIndexOf" || mn == "substr" {
                         // Overloaded String methods register each arity as a separate
                         // mapping, so a name-only lookup matches the wrong one.
@@ -366,26 +424,6 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
             }
-
-            // A class/abstract symbol as receiver means a static call: the object
-            // must not be passed as 'this'.
-            let is_static_class_call = if let HirExprKind::Variable {
-                symbol: obj_sym, ..
-            } = &object.kind
-            {
-                let kind = self.symbol_table.get_symbol(*obj_sym).map(|s| s.kind);
-                kind.map(|k| {
-                    matches!(
-                        k,
-                        crate::tast::symbols::SymbolKind::Class
-                            | crate::tast::symbols::SymbolKind::Abstract
-                            | crate::tast::symbols::SymbolKind::TypeAlias
-                    )
-                })
-                .unwrap_or(false)
-            } else {
-                false
-            };
 
             // @:derive(Default) synthetic static createDefault() — zero-initialized instance
             if is_static_class_call && method_name == Some("createDefault") && args.is_empty() {

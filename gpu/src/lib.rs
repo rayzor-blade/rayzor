@@ -10,6 +10,7 @@
 //! to auto-register method mappings and extern declarations — **no compiler core
 //! changes required**.
 
+#![recursion_limit = "256"]
 // All extern "C" functions in this crate are FFI entry points called by the JIT runtime.
 #![allow(clippy::missing_safety_doc)]
 // Doc comments use prose with shape-indexing (`[b,m,n]`) and Haxe-side

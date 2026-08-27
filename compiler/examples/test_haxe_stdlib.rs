@@ -345,6 +345,18 @@ class Main {
 }
 "#,
         ),
+        // Loading Int64 must produce valued returns for its mixed division/modulus
+        // helpers; a context-drifted static mapping used to leave trap stubs.
+        (
+            "int64_mixed_div_mod",
+            r#"
+import haxe.Int64;
+
+class Main {
+    static function main() {}
+}
+"#,
+        ),
         // Date tests
         (
             "date_now",
@@ -436,7 +448,7 @@ class Main {
         use std::io::Write;
         std::io::stdout().flush().unwrap();
 
-        match run_functional_test(code) {
+        match run_functional_test(test_name, code) {
             Ok(_output) => {
                 println!("OK");
                 func_pass += 1;
@@ -496,9 +508,15 @@ class Main {
     }
 }
 
-fn run_functional_test(code: &str) -> Result<String, String> {
+fn run_functional_test(test_name: &str, code: &str) -> Result<String, String> {
     // Create compilation unit with fast (lazy) config to ensure proper dependency ordering
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    let mut config = CompilationConfig::fast();
+    // This regression verifies stdlib lowering itself. It must not inherit an
+    // Int64 BLADE artifact produced by an earlier functional case.
+    if test_name == "int64_mixed_div_mod" {
+        config.enable_cache = false;
+    }
+    let mut unit = CompilationUnit::new(config);
 
     // Load stdlib
     unit.load_stdlib()
@@ -516,6 +534,29 @@ fn run_functional_test(code: &str) -> Result<String, String> {
     let mir_modules = unit.get_mir_modules();
     if mir_modules.is_empty() {
         return Err("No MIR modules generated".to_string());
+    }
+
+    if test_name == "int64_mixed_div_mod" {
+        use compiler::ir::IrTerminator;
+
+        for qualified_name in [
+            "haxe.Int64.intDiv",
+            "haxe.Int64.modInt",
+            "haxe.Int64.intMod",
+        ] {
+            let function = mir_modules
+                .iter()
+                .flat_map(|module| module.functions.values())
+                .find(|function| function.qualified_name.as_deref() == Some(qualified_name))
+                .ok_or_else(|| format!("Missing MIR function {qualified_name}"))?;
+            let has_valued_return =
+                function.cfg.blocks.values().any(|block| {
+                    matches!(block.terminator, IrTerminator::Return { value: Some(_) })
+                });
+            if !has_valued_return {
+                return Err(format!("{qualified_name} lowered without a return value"));
+            }
+        }
     }
 
     // Create Cranelift backend with runtime symbols

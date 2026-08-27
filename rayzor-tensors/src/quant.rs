@@ -80,6 +80,9 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::same_item_push)]
 
+// Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
+// pointer ABI and is the byte-oriented type used throughout these kernels.
+#[allow(suspicious_runtime_symbol_definitions)]
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);

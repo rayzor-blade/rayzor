@@ -12,6 +12,9 @@
 //! At MIR/Haxe level, a Tensor is an opaque i64 (pointer).
 //! All extern functions take/return i64 to match the type system.
 
+// Rust 1.98 expects c_void spelling for these libc symbols; u8 has the same
+// pointer ABI and avoids casts at every byte-buffer allocation site.
+#[allow(suspicious_runtime_symbol_definitions)]
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
