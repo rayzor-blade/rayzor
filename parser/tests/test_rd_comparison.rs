@@ -346,6 +346,23 @@ abstract Color(Int) {
 }
 
 #[test]
+fn test_rd_enum_abstract_conversions() {
+    let source = r#"
+enum abstract Number(Int) from Int to Int {
+    var Zero;
+}
+"#;
+    let file = rd_parse(source, "test.hx").expect("failed to parse enum abstract conversions");
+    let parser::TypeDeclaration::Abstract(decl) = &file.declarations[0] else {
+        panic!("expected an enum abstract");
+    };
+
+    assert!(decl.is_enum_abstract);
+    assert_eq!(decl.from.len(), 1);
+    assert_eq!(decl.to.len(), 1);
+}
+
+#[test]
 fn test_rd_try_catch() {
     let source = r#"
 class Main {

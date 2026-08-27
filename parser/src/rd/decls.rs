@@ -291,6 +291,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             None
         };
 
+        let (from, to) = self.parse_abstract_conversions()?;
         let fields = self.parse_class_body()?;
 
         Ok(AbstractDecl {
@@ -300,8 +301,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
             name,
             type_params: Vec::new(),
             underlying,
-            from: Vec::new(),
-            to: Vec::new(),
+            from,
+            to,
             fields,
             is_enum_abstract: true,
             span: self.stream.span_from(start),
@@ -351,20 +352,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             None
         };
 
-        // Parse from/to clauses
-        let mut from = Vec::new();
-        let mut to = Vec::new();
-        loop {
-            if self.stream.current_text() == "from" {
-                self.stream.advance();
-                from.push(self.parse_type()?);
-            } else if self.stream.current_text() == "to" {
-                self.stream.advance();
-                to.push(self.parse_type()?);
-            } else {
-                break;
-            }
-        }
+        let (from, to) = self.parse_abstract_conversions()?;
 
         let fields = if self.stream.at(TokenKind::LBrace) {
             self.parse_class_body()?
@@ -385,6 +373,29 @@ impl<'a, 'b> RdParser<'a, 'b> {
             is_enum_abstract: false,
             span: self.stream.span_from(start),
         })
+    }
+
+    /// Parse the contextual `from Type` / `to Type` clauses shared by
+    /// regular abstracts and enum abstracts.
+    fn parse_abstract_conversions(&mut self) -> Result<(Vec<Type>, Vec<Type>), ParseError> {
+        let mut from = Vec::new();
+        let mut to = Vec::new();
+
+        loop {
+            match self.stream.current_text() {
+                "from" => {
+                    self.stream.advance();
+                    from.push(self.parse_type()?);
+                }
+                "to" => {
+                    self.stream.advance();
+                    to.push(self.parse_type()?);
+                }
+                _ => break,
+            }
+        }
+
+        Ok((from, to))
     }
 
     /// Parse class body: `{ field1; field2; ... }`
