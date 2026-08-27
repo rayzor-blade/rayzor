@@ -3,6 +3,7 @@
 // invisible to its parent and writes in the parent were invisible to a closure.
 class test_mutable_closure_capture {
     static var failures = 0;
+    static var sharedStatic = 1;
 
     static function check(actual:Int, expected:Int, label:String) {
         if (actual != expected) {
@@ -48,6 +49,20 @@ class test_mutable_closure_capture {
         var nested = makeNested();
         check(nested(), 1, "nested closure first write");
         check(nestedCapture, 1, "nested write visible to root");
+
+        // The inner parameter belongs to the inner closure. Capture analysis
+        // must not make the outer closure capture it from main's scope.
+        var bindPair = function(f:Int->Int->Int, base:Int) {
+            return function(value:Int) return f(base, value);
+        };
+        var add = bindPair(function(a:Int, b:Int) return a + b, 4);
+        check(add(3), 7, "nested closure captures outer parameters only");
+
+        // Statics are resolved through global storage when the closure runs;
+        // they are not lexical values copied into its environment.
+        var readStatic = function() return sharedStatic;
+        sharedStatic = 9;
+        check(readStatic(), 9, "static is not a lexical capture");
 
         if (failures == 0) {
             Sys.println("PASS mutable closure captures");

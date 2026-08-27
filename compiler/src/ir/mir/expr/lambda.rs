@@ -139,8 +139,16 @@ impl<'a> HirToMirContext<'a> {
                 for (sym, reg) in &self.symbol_map {
                     debug!("    {:?} -> {:?}", sym, reg);
                 }
+                let capture_name = self
+                    .symbol_table
+                    .get_symbol(capture.symbol)
+                    .and_then(|symbol| self.string_interner.get(symbol.name))
+                    .unwrap_or("<unknown>");
                 self.errors.push(LoweringError {
-                    message: format!("Captured variable {:?} not found in scope", capture.symbol),
+                    message: format!(
+                        "Captured variable {:?} (`{}`) not found in scope",
+                        capture.symbol, capture_name
+                    ),
                     location: body.source_location.clone(),
                 });
                 return None;

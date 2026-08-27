@@ -5804,10 +5804,47 @@ impl<'a> TastToHirContext<'a> {
             self.collect_local_defs_stmt(stmt, &mut locally_defined);
         }
 
+        // A parameter's symbol records the lexical scope owned by this
+        // closure. Syntax-specific definition collectors are useful for
+        // parameterless closures, but they cannot be the authority: switch
+        // binders, catches and comprehensions have accumulated several TAST
+        // representations over time. Any non-`this` binding declared in this
+        // scope or one created beneath it is local by construction.
+        let closure_scope = param_symbols
+            .iter()
+            .find_map(|symbol| self.symbol_table.get_symbol(*symbol).map(|s| s.scope_id));
+
         // Free variables are those referenced but not locally defined
         let captures: Vec<_> = referenced_vars
             .into_iter()
-            .filter(|(sym, _)| !locally_defined.contains(sym))
+            .filter(|(sym, _)| {
+                if locally_defined.contains(sym) {
+                    return false;
+                }
+
+                // Only lexical bindings live in a closure environment. Enum
+                // constructors, fields and named functions can all appear as
+                // `Variable` expressions in TAST, but MIR resolves those from
+                // their declaration maps rather than the enclosing SSA scope.
+                // Treating one as a capture makes closure construction look for
+                // a register that cannot exist (for example `() -> Some(1)`).
+                self.symbol_table.get_symbol(*sym).map_or(true, |symbol| {
+                    let is_this = self
+                        .string_interner
+                        .get(symbol.name)
+                        .map(|name| name == "this")
+                        .unwrap_or(false);
+                    let declared_inside = closure_scope
+                        .map(|scope| symbol.scope_id >= scope && !is_this)
+                        .unwrap_or(false);
+                    !declared_inside
+                        && !symbol.is_static()
+                        && matches!(
+                            symbol.kind,
+                            crate::tast::SymbolKind::Variable | crate::tast::SymbolKind::Parameter
+                        )
+                })
+            })
             .map(|(symbol, ty)| {
                 // Haxe captures mutable local bindings by reference. Capturing
                 // the current SSA value loses assignments made on either side
@@ -6158,12 +6195,18 @@ impl<'a> TastToHirContext<'a> {
                 self.collect_var_refs_expr(key_expr, refs);
                 self.collect_var_refs_expr(value_expr, refs);
             }
-            // Nested closure: its body may reference variables that are also
-            // free in this closure. compute_captures removes this closure's
-            // own locals (incl. nested-closure params via collect_local_defs).
-            TypedExpressionKind::FunctionLiteral { body, .. } => {
-                for stmt in body {
-                    self.collect_var_refs_stmt(stmt, refs);
+            // Only a nested closure's own free variables are references from
+            // the current closure. Walking its body directly leaks its params
+            // and locals into the current capture list: while building
+            // `(f, x) -> y -> f(x, y)`, the outer closure would then try to
+            // capture `y` from its parent even though `y` belongs to the inner
+            // closure. Propagate the inner capture set instead.
+            TypedExpressionKind::FunctionLiteral {
+                parameters, body, ..
+            } => {
+                let nested_params = parameters.iter().map(|p| p.symbol_id).collect();
+                for capture in self.compute_captures(body, &nested_params) {
+                    refs.entry(capture.symbol).or_insert(capture.ty);
                 }
             }
             TypedExpressionKind::Try {
@@ -6207,8 +6250,27 @@ impl<'a> TastToHirContext<'a> {
                 // FIX: Expression statements can contain Block expressions with local definitions
                 self.collect_local_defs_expr(expression, defs);
             }
-            TypedStatement::VarDeclaration { symbol_id, .. } => {
+            TypedStatement::VarDeclaration {
+                symbol_id,
+                initializer,
+                ..
+            } => {
                 defs.insert(*symbol_id);
+                if let Some(initializer) = initializer {
+                    self.collect_local_defs_expr(initializer, defs);
+                }
+            }
+            TypedStatement::Return { value, .. } => {
+                if let Some(value) = value {
+                    self.collect_local_defs_expr(value, defs);
+                }
+            }
+            TypedStatement::Assignment { target, value, .. } => {
+                self.collect_local_defs_expr(target, defs);
+                self.collect_local_defs_expr(value, defs);
+            }
+            TypedStatement::Throw { exception, .. } => {
+                self.collect_local_defs_expr(exception, defs);
             }
             TypedStatement::Block { statements, .. } => {
                 // Recursively collect from all statements in the block
@@ -6249,6 +6311,51 @@ impl<'a> TastToHirContext<'a> {
                 }
                 self.collect_local_defs_stmt(body, defs);
             }
+            TypedStatement::Try {
+                body,
+                catch_clauses,
+                finally_block,
+                ..
+            } => {
+                self.collect_local_defs_stmt(body, defs);
+                for clause in catch_clauses {
+                    defs.insert(clause.exception_variable);
+                    self.collect_local_defs_stmt(&clause.body, defs);
+                }
+                if let Some(finally) = finally_block {
+                    self.collect_local_defs_stmt(finally, defs);
+                }
+            }
+            TypedStatement::Switch {
+                cases,
+                default_case,
+                ..
+            } => {
+                for case in cases {
+                    self.collect_switch_pattern_defs(&case.case_value, defs);
+                    for extra in &case.extra_case_values {
+                        self.collect_switch_pattern_defs(extra, defs);
+                    }
+                    self.collect_local_defs_stmt(&case.body, defs);
+                }
+                if let Some(default) = default_case {
+                    self.collect_local_defs_stmt(default, defs);
+                }
+            }
+            TypedStatement::PatternMatch { patterns, .. } => {
+                for arm in patterns {
+                    defs.extend(arm.bound_variables.iter().copied());
+                    self.collect_local_defs_stmt(&arm.body, defs);
+                }
+            }
+            TypedStatement::MacroExpansion {
+                expanded_statements,
+                ..
+            } => {
+                for statement in expanded_statements {
+                    self.collect_local_defs_stmt(statement, defs);
+                }
+            }
             _ => {} // Other statement types
         }
     }
@@ -6260,6 +6367,19 @@ impl<'a> TastToHirContext<'a> {
         defs: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match &expr.kind {
+            TypedExpressionKind::VarDeclarationExpr { symbol_id, .. }
+            | TypedExpressionKind::FinalDeclarationExpr { symbol_id, .. } => {
+                defs.insert(*symbol_id);
+            }
+            // Expression-bodied local functions represent `return switch ...`
+            // as an expression node, not a TypedStatement::Return. Recurse or
+            // pattern variables declared by that switch are mistaken for
+            // values captured from the local function's parent.
+            TypedExpressionKind::Return { value, .. } => {
+                if let Some(value) = value {
+                    self.collect_local_defs_expr(value, defs);
+                }
+            }
             TypedExpressionKind::Block { statements, .. } => {
                 for stmt in statements {
                     self.collect_local_defs_stmt(stmt, defs);
@@ -6296,7 +6416,79 @@ impl<'a> TastToHirContext<'a> {
                     self.collect_local_defs_expr(else_e, defs);
                 }
             }
+            TypedExpressionKind::ArrayComprehension {
+                for_parts,
+                expression,
+                ..
+            } => {
+                for part in for_parts {
+                    defs.insert(part.var_symbol);
+                    if let Some(key) = part.key_var_symbol {
+                        defs.insert(key);
+                    }
+                    self.collect_local_defs_expr(&part.iterator, defs);
+                }
+                self.collect_local_defs_expr(expression, defs);
+            }
+            TypedExpressionKind::MapComprehension {
+                for_parts,
+                key_expr,
+                value_expr,
+                ..
+            } => {
+                for part in for_parts {
+                    defs.insert(part.var_symbol);
+                    if let Some(key) = part.key_var_symbol {
+                        defs.insert(key);
+                    }
+                    self.collect_local_defs_expr(&part.iterator, defs);
+                }
+                self.collect_local_defs_expr(key_expr, defs);
+                self.collect_local_defs_expr(value_expr, defs);
+            }
+            TypedExpressionKind::Switch {
+                cases,
+                default_case,
+                ..
+            } => {
+                for case in cases {
+                    self.collect_switch_pattern_defs(&case.case_value, defs);
+                    for extra in &case.extra_case_values {
+                        self.collect_switch_pattern_defs(extra, defs);
+                    }
+                    self.collect_local_defs_stmt(&case.body, defs);
+                }
+                if let Some(default) = default_case {
+                    self.collect_local_defs_expr(default, defs);
+                }
+            }
+            TypedExpressionKind::Try {
+                catch_clauses,
+                finally_block,
+                ..
+            } => {
+                for clause in catch_clauses {
+                    defs.insert(clause.exception_variable);
+                    self.collect_local_defs_stmt(&clause.body, defs);
+                }
+                if let Some(finally) = finally_block {
+                    self.collect_local_defs_expr(finally, defs);
+                }
+            }
             _ => {} // Other expression types don't define local variables
+        }
+    }
+
+    fn collect_switch_pattern_defs(
+        &self,
+        pattern: &TypedExpression,
+        defs: &mut std::collections::BTreeSet<SymbolId>,
+    ) {
+        if let TypedExpressionKind::PatternPlaceholder {
+            variable_bindings, ..
+        } = &pattern.kind
+        {
+            defs.extend(variable_bindings.iter().map(|(_, symbol)| *symbol));
         }
     }
 
