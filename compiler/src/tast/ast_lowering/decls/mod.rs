@@ -124,15 +124,25 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        // Pass 1.5: Pre-register class fields for ALL classes before method bodies are lowered.
-        // This enables forward references (e.g., NBody referencing Body fields when Body is
-        // declared later in the file). Without this, field resolution falls back to placeholders
-        // with Dynamic type, causing incorrect code generation.
+        // Pass 1.5: Pre-register fields for ALL classes and enum abstracts before
+        // method bodies are lowered. This enables forward references (e.g., NBody
+        // referencing Body fields when Body is declared later in the file) and
+        // bare enum-abstract constants used by a class declared above the abstract.
+        // Without this, field resolution falls back to placeholders or reports an
+        // unresolved constant purely because of declaration order.
         for declaration in &file.declarations {
-            if let TypeDeclaration::Class(class_decl) = declaration {
-                if let Err(e) = self.pre_register_class_fields(class_decl) {
-                    self.collected_errors.push(e);
+            match declaration {
+                TypeDeclaration::Class(class_decl) => {
+                    if let Err(e) = self.pre_register_class_fields(class_decl) {
+                        self.collected_errors.push(e);
+                    }
                 }
+                TypeDeclaration::Abstract(abstract_decl) if abstract_decl.is_enum_abstract => {
+                    if let Err(e) = self.pre_register_enum_abstract_fields(abstract_decl) {
+                        self.collected_errors.push(e);
+                    }
+                }
+                _ => {}
             }
         }
 

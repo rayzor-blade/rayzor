@@ -83,22 +83,22 @@ corpus/             fetched, gitignored
 Minimal repros distilled from conformance failures, kept out of the main Haxe
 suite so they do not turn it red. Each documents one blocker.
 
-## Verified baseline (2026-08-26)
+## Verified baseline (2026-08-27)
 
 Rayzor `--release --no-cache --preset application`, corpus revision from
 `corpus.pin`, eight workers:
 
 | outcome | count |
 |---|---:|
-| PASS | 358 |
-| WRONG_ANSWER | 184 |
-| COMPILE_FAIL | 287 |
-| CRASH | 193 |
-| TIMEOUT | 8 |
+| PASS | 370 |
+| WRONG_ANSWER | 189 |
+| COMPILE_FAIL | 279 |
+| CRASH | 185 |
+| TIMEOUT | 7 |
 | NO_OUTPUT | 0 |
 | SKIP | 135 |
 
-That is 358/1030 scored tests, or 34.8%. The durable report has 1165 rows plus
+That is 370/1030 scored tests, or 35.9%. The durable report has 1165 rows plus
 its header; the completion marker is written only after every worker in a full
 corpus run has been reaped. The largest actionable failure families are parser
 fallback losing the injected `main`, unresolved class/member metadata, and

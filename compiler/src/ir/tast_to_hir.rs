@@ -377,12 +377,18 @@ impl<'a> TastToHirContext<'a> {
                     LiteralValue::Int(i) => Some(HirLiteral::Int(*i)),
                     LiteralValue::Float(f) => Some(HirLiteral::Float(*f)),
                     LiteralValue::Bool(b) => Some(HirLiteral::Bool(*b)),
-                    _ => None, // Strings and other literals not supported in const eval
+                    LiteralValue::String(s) => Some(HirLiteral::String(self.intern_str(s))),
+                    _ => None, // Regex and other literals not supported in const eval
                 }
             }
             TypedExpressionKind::Variable { symbol_id, .. } => {
                 // Check if this is an already-evaluated inline variable
                 self.inline_var_values.get(symbol_id).cloned()
+            }
+            TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                // Qualified enum-abstract constants (`Enum1.AA`) participate
+                // in the same constant-expression fixpoint as bare constants.
+                self.inline_var_values.get(field_symbol).cloned()
             }
             TypedExpressionKind::BinaryOp {
                 operator,
@@ -447,6 +453,10 @@ impl<'a> TastToHirContext<'a> {
                     UnaryOperator::Neg => match val {
                         HirLiteral::Float(f) => Some(HirLiteral::Float(-f)),
                         HirLiteral::Int(i) => Some(HirLiteral::Int(-i)),
+                        _ => None,
+                    },
+                    UnaryOperator::BitNot => match val {
+                        HirLiteral::Int(i) => Some(HirLiteral::Int(!i)),
                         _ => None,
                     },
                     _ => None,

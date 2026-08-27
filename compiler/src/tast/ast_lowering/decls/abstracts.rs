@@ -22,10 +22,20 @@ impl<'a> AstLowering<'a> {
     ) -> LoweringResult<TypedDeclaration> {
         let abstract_name = self.context.intern_string(&abstract_decl.name);
 
+        // Reuse the symbol created by the declaration pre-pass. Creating a
+        // second abstract symbol here disconnects qualified field lookups from
+        // the field initializers lowered below.
         let abstract_symbol = self
             .context
             .symbol_table
-            .create_abstract_in_scope(abstract_name, ScopeId::first());
+            .lookup_symbol(ScopeId::first(), abstract_name)
+            .filter(|entry| entry.kind == crate::tast::SymbolKind::Abstract)
+            .map(|entry| entry.id)
+            .unwrap_or_else(|| {
+                self.context
+                    .symbol_table
+                    .create_abstract_in_scope(abstract_name, ScopeId::first())
+            });
 
         // Update qualified name (full path including class hierarchy)
         self.context.update_symbol_qualified_name(abstract_symbol);
@@ -81,9 +91,30 @@ impl<'a> AstLowering<'a> {
             .add_symbol(abstract_symbol, abstract_name);
 
         // Enter abstract scope with name
-        let abstract_scope = self
+        let existing_scope = self
             .context
-            .enter_named_scope(ScopeKind::Class, abstract_name);
+            .symbol_table
+            .get_symbol(abstract_symbol)
+            .map(|symbol| symbol.scope_id)
+            .filter(|scope_id| {
+                *scope_id != ScopeId::first()
+                    && *scope_id != ScopeId::invalid()
+                    && self
+                        .context
+                        .scope_tree
+                        .get_scope(*scope_id)
+                        .is_some_and(|scope| scope.kind == ScopeKind::Class)
+            });
+        let abstract_scope = if let Some(scope_id) = existing_scope {
+            self.context.current_scope = scope_id;
+            scope_id
+        } else {
+            self.context
+                .enter_named_scope(ScopeKind::Class, abstract_name)
+        };
+        if let Some(symbol) = self.context.symbol_table.get_symbol_mut(abstract_symbol) {
+            symbol.scope_id = abstract_scope;
+        }
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&abstract_decl.type_params)?;
@@ -170,14 +201,12 @@ impl<'a> AstLowering<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Initialize class_fields for this abstract so field tracking works (needed for enum abstract)
-        self.class_fields.insert(abstract_symbol, Vec::new());
+        self.class_fields.entry(abstract_symbol).or_default();
         // Initialize class_methods so the pre-pass-typed abstract methods are
         // reachable by resolve_class_method_symbol Strategy 1 at call sites.
-        // The abstract symbol's scope_id stays at root (ScopeId::first()), so
-        // the scope-based Strategy 3 cannot find methods registered in the
-        // abstract's inner scope; the class_methods map is the same mechanism
-        // regular classes use and keeps `@:coreType` static calls (Atomic.of,
-        // Box.init) bound to their typed method instead of a Dynamic placeholder.
+        // The class_methods map is the same mechanism regular classes use and
+        // keeps `@:coreType` static calls (Atomic.of, Box.init) bound to their
+        // typed method instead of a Dynamic placeholder.
         self.class_methods
             .entry(abstract_symbol)
             .or_insert_with(Vec::new);
@@ -285,20 +314,58 @@ impl<'a> AstLowering<'a> {
                     } else {
                         self.context.type_table.borrow().dynamic_type()
                     };
-                    let sym = self.context.symbol_table.create_variable(member_name);
+                    let tracked_symbol =
+                        self.class_fields.get(&abstract_symbol).and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|(name, _, _)| *name == member_name)
+                                .map(|(_, symbol, _)| *symbol)
+                        });
+                    let sym = tracked_symbol
+                        .unwrap_or_else(|| self.context.symbol_table.create_variable(member_name));
                     self.context
                         .symbol_table
                         .update_symbol_type(sym, member_type);
                     if let Some(s) = self.context.symbol_table.get_symbol_mut(sym) {
                         s.kind = crate::tast::SymbolKind::Field;
                     }
-                    if is_static {
+                    let effective_static = is_static || abstract_decl.is_enum_abstract;
+                    if effective_static {
                         self.context
                             .symbol_table
                             .add_symbol_flags(sym, crate::tast::symbols::SymbolFlags::STATIC);
                     }
+                    if tracked_symbol.is_none() {
+                        self.class_fields
+                            .get_mut(&abstract_symbol)
+                            .expect("abstract field map was initialized")
+                            .push((member_name, sym, effective_static));
+                    }
+                    let qualified = format!("{}.{}", abstract_decl.name, name);
+                    if let Some(symbol) = self.context.symbol_table.get_symbol_mut(sym) {
+                        symbol.qualified_name =
+                            Some(self.context.string_interner.intern(&qualified));
+                    }
                     if let Some(scope) = self.context.scope_tree.get_scope_mut(abstract_scope) {
                         scope.add_symbol(sym, member_name);
+                    }
+                    // Enum-abstract constants are reachable bare (`eq(1, Red)`)
+                    // as well as qualified (`Color.Red`), so also alias them into
+                    // the module scope for bare-name resolution.
+                    if abstract_decl.is_enum_abstract {
+                        self.context.symbol_table.add_symbol_alias(
+                            sym,
+                            ScopeId::first(),
+                            member_name,
+                        );
+                        let root = self
+                            .context
+                            .scope_tree
+                            .get_scope_mut(ScopeId::first())
+                            .expect("Root scope should exist");
+                        if !root.has_symbol(member_name) {
+                            root.add_symbol(sym, member_name);
+                        }
                     }
                 }
             }
@@ -308,6 +375,29 @@ impl<'a> AstLowering<'a> {
         let mut fields = Vec::with_capacity(abstract_decl.fields.len());
         let mut methods = Vec::with_capacity(abstract_decl.fields.len());
         let mut constructors = Vec::with_capacity(2); // Most abstracts have 0-2 constructors
+
+        // Enum-abstract constants without an explicit initializer get an auto
+        // value derived from the underlying type: Int/Float increment, String
+        // uses the field name, Bool alternates false/true.
+        let underlying_kind = underlying_type.and_then(|mut type_id| {
+            let type_table = self.context.type_table.borrow();
+            for _ in 0..16 {
+                let kind = type_table.get(type_id)?.kind.clone();
+                match kind {
+                    crate::tast::TypeKind::Abstract {
+                        underlying: Some(next),
+                        ..
+                    }
+                    | crate::tast::TypeKind::TypeAlias {
+                        target_type: next, ..
+                    } => type_id = next,
+                    other => return Some(other),
+                }
+            }
+            None
+        });
+        let mut next_int: i64 = 0;
+        let mut next_bool = false;
 
         for field in &abstract_decl.fields {
             match &field.kind {
@@ -332,11 +422,31 @@ impl<'a> AstLowering<'a> {
                 }
                 _ => {
                     // Handle regular fields (var, final, property)
-                    match self.lower_field(field) {
+                    let member_name = match &field.kind {
+                        ClassFieldKind::Var { name, .. }
+                        | ClassFieldKind::Final { name, .. }
+                        | ClassFieldKind::Property { name, .. } => {
+                            Some(self.context.intern_string(name))
+                        }
+                        ClassFieldKind::Function(_) => None,
+                    };
+                    let pre_registered_symbol = member_name.and_then(|name| {
+                        self.class_fields.get(&abstract_symbol).and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|(field_name, _, _)| *field_name == name)
+                                .map(|(_, symbol, _)| *symbol)
+                        })
+                    });
+                    match self.lower_field_with_symbol(field, pre_registered_symbol) {
                         Ok(mut typed_field) => {
                             // For enum abstracts, all var fields are implicitly static
                             if abstract_decl.is_enum_abstract && !typed_field.is_static {
                                 typed_field.is_static = true;
+                                self.context.symbol_table.add_symbol_flags(
+                                    typed_field.symbol_id,
+                                    crate::tast::symbols::SymbolFlags::STATIC,
+                                );
                                 // Also update class_fields tracking
                                 if let Some(field_list) =
                                     self.class_fields.get_mut(&abstract_symbol)
@@ -346,6 +456,53 @@ impl<'a> AstLowering<'a> {
                                         .find(|(_, sym, _)| *sym == typed_field.symbol_id)
                                     {
                                         entry.2 = true;
+                                    }
+                                }
+                            }
+                            if abstract_decl.is_enum_abstract {
+                                if let Some(ref init) = typed_field.initializer {
+                                    // Track an explicit Int constant so the next
+                                    // auto-valued constant continues from it.
+                                    if let TypedExpressionKind::Literal {
+                                        value: LiteralValue::Int(i),
+                                    } = &init.kind
+                                    {
+                                        next_int = i + 1;
+                                    }
+                                } else if let Some(auto_kind) = match &underlying_kind {
+                                    Some(crate::tast::TypeKind::Int) => {
+                                        let v = next_int;
+                                        next_int += 1;
+                                        Some(ExprKind::Int(v))
+                                    }
+                                    Some(crate::tast::TypeKind::Float) => {
+                                        let v = next_int as f64;
+                                        next_int += 1;
+                                        Some(ExprKind::Float(v))
+                                    }
+                                    Some(crate::tast::TypeKind::String) => {
+                                        let name = self
+                                            .context
+                                            .string_interner
+                                            .get(typed_field.name)
+                                            .unwrap_or("")
+                                            .to_string();
+                                        Some(ExprKind::String(name))
+                                    }
+                                    Some(crate::tast::TypeKind::Bool) => {
+                                        let v = next_bool;
+                                        next_bool = !next_bool;
+                                        Some(ExprKind::Bool(v))
+                                    }
+                                    _ => None,
+                                } {
+                                    let auto_expr = Expr {
+                                        kind: auto_kind,
+                                        span: field.span,
+                                    };
+                                    match self.lower_expression(&auto_expr) {
+                                        Ok(t) => typed_field.initializer = Some(t),
+                                        Err(e) => self.context.add_error(e),
                                     }
                                 }
                             }

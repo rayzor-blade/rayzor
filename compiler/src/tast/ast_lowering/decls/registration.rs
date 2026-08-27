@@ -652,4 +652,88 @@ impl<'a> AstLowering<'a> {
 
         Ok(())
     }
+
+    /// Pre-register enum-abstract constants before any declaration body is
+    /// lowered. Haxe exposes these fields both as `Color.Red` and, within the
+    /// declaring module, as bare `Red`. A class may precede the enum abstract
+    /// in the source, so registering the aliases from `lower_abstract_declaration`
+    /// is too late for that class's methods.
+    pub(crate) fn pre_register_enum_abstract_fields(
+        &mut self,
+        abstract_decl: &parser::AbstractDecl,
+    ) -> LoweringResult<()> {
+        let abstract_name = self.context.intern_string(&abstract_decl.name);
+        let Some(abstract_symbol) = self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), abstract_name)
+            .map(|entry| entry.id)
+        else {
+            return Ok(());
+        };
+
+        let underlying_type = abstract_decl
+            .underlying
+            .as_ref()
+            .and_then(|ty| self.lower_type(ty).ok())
+            .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+
+        self.class_fields.entry(abstract_symbol).or_default();
+        for field in &abstract_decl.fields {
+            let (name, type_hint) = match &field.kind {
+                parser::ClassFieldKind::Var {
+                    name, type_hint, ..
+                }
+                | parser::ClassFieldKind::Final {
+                    name, type_hint, ..
+                }
+                | parser::ClassFieldKind::Property {
+                    name, type_hint, ..
+                } => (name, type_hint.as_ref()),
+                parser::ClassFieldKind::Function(_) => continue,
+            };
+            let member_name = self.context.intern_string(name);
+            if self
+                .class_fields
+                .get(&abstract_symbol)
+                .is_some_and(|fields| fields.iter().any(|(n, _, _)| *n == member_name))
+            {
+                continue;
+            }
+
+            let field_type = type_hint
+                .and_then(|ty| self.lower_type(ty).ok())
+                .unwrap_or(underlying_type);
+            let field_symbol = self.context.symbol_table.create_variable(member_name);
+            self.context
+                .symbol_table
+                .update_symbol_type(field_symbol, field_type);
+            if let Some(symbol) = self.context.symbol_table.get_symbol_mut(field_symbol) {
+                symbol.kind = crate::tast::SymbolKind::Field;
+                symbol.flags = symbol
+                    .flags
+                    .union(crate::tast::symbols::SymbolFlags::STATIC);
+                let qualified = format!("{}.{}", abstract_decl.name, name);
+                symbol.qualified_name = Some(self.context.string_interner.intern(&qualified));
+            }
+            self.class_fields
+                .get_mut(&abstract_symbol)
+                .expect("enum abstract field map was initialized")
+                .push((member_name, field_symbol, true));
+
+            self.context
+                .symbol_table
+                .add_symbol_alias(field_symbol, ScopeId::first(), member_name);
+            let root = self
+                .context
+                .scope_tree
+                .get_scope_mut(ScopeId::first())
+                .expect("Root scope should exist");
+            if !root.has_symbol(member_name) {
+                root.add_symbol(field_symbol, member_name);
+            }
+        }
+
+        Ok(())
+    }
 }

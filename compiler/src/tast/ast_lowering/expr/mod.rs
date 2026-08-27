@@ -85,9 +85,38 @@ impl<'a> AstLowering<'a> {
             },
             ExprKind::Ident(name) => {
                 let id_name = self.context.intern_string(name);
-
+                let prefer = self
+                    .expected_arg_type_stack
+                    .last()
+                    .copied()
+                    .flatten()
+                    .or(self.context.expected_return_type);
+                let preferred_abstract_field = prefer.and_then(|expected_ty| {
+                    let expected_abstract = {
+                        let type_table = self.context.type_table.borrow();
+                        type_table.get(expected_ty).and_then(|ty| match &ty.kind {
+                            crate::tast::core::TypeKind::Abstract { symbol_id, .. } => {
+                                Some(*symbol_id)
+                            }
+                            _ => None,
+                        })
+                    }?;
+                    self.class_fields
+                        .get(&expected_abstract)
+                        .and_then(|fields| {
+                            fields
+                                .iter()
+                                .find(|(field_name, _, is_static)| {
+                                    *field_name == id_name && *is_static
+                                })
+                                .map(|(_, field_symbol, _)| *field_symbol)
+                        })
+                });
                 // Need to resolve symbol by walking up the scope hierarchy
-                let mut symbol_id = match self.resolve_symbol_in_scope_hierarchy(id_name) {
+                let mut symbol_id = match self
+                    .resolve_symbol_in_scope_hierarchy(id_name)
+                    .or(preferred_abstract_field)
+                {
                     Some(s) => s,
                     None => {
                         // Abstract-method implicit `this`: in an abstract, `this` IS the
@@ -127,6 +156,35 @@ impl<'a> AstLowering<'a> {
                     }
                 };
 
+                // Enum-abstract constants share the module namespace with
+                // ordinary types. If an unrelated class already owns the bare
+                // name (for example `unit.Bar` versus `Foo.Bar`), the root
+                // scope cannot represent Haxe's expected-type disambiguation.
+                // Redirect to the expected abstract's field before applying
+                // ordinary enum-variant disambiguation below.
+                if let Some(expected_abstract) = prefer.and_then(|expected_ty| {
+                    let type_table = self.context.type_table.borrow();
+                    type_table.get(expected_ty).and_then(|ty| match &ty.kind {
+                        crate::tast::core::TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+                }) {
+                    if let Some(field_symbol) =
+                        self.class_fields
+                            .get(&expected_abstract)
+                            .and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find(|(field_name, _, is_static)| {
+                                        *field_name == id_name && *is_static
+                                    })
+                                    .map(|(_, field_symbol, _)| *field_symbol)
+                            })
+                    {
+                        symbol_id = field_symbol;
+                    }
+                }
+
                 // Enum-variant disambiguation. If the scope-walk found an enum
                 // variant but the expected arg type is a *different* enum,
                 // re-resolve to that enum's variant of the same name when one
@@ -143,12 +201,6 @@ impl<'a> AstLowering<'a> {
                 // collision (confirmed: `nue`'s `inferDType():DType` with
                 // `return F32;` resolved to `MetaValue.F32`, a boxed variant
                 // from an unrelated 13-variant enum, instead of `DType.F32`).
-                let prefer = self
-                    .expected_arg_type_stack
-                    .last()
-                    .copied()
-                    .flatten()
-                    .or(self.context.expected_return_type);
                 if let Some(expected_ty) = prefer {
                     let needs_reresolve = {
                         let sym = self.context.symbol_table.get_symbol(symbol_id);

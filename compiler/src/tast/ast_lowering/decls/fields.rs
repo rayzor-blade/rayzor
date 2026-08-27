@@ -79,6 +79,18 @@ impl<'a> AstLowering<'a> {
 
     /// Lower a field
     pub(crate) fn lower_field(&mut self, field: &ClassField) -> LoweringResult<TypedField> {
+        self.lower_field_with_symbol(field, None)
+    }
+
+    /// Lower a field while optionally reusing a symbol created by a declaration
+    /// pre-pass. Enum-abstract constants need stable SymbolIds: a method above
+    /// the abstract resolves the pre-registered symbol, and the initializer
+    /// lowered later must publish its value under that same symbol.
+    pub(crate) fn lower_field_with_symbol(
+        &mut self,
+        field: &ClassField,
+        pre_registered_symbol: Option<SymbolId>,
+    ) -> LoweringResult<TypedField> {
         let (field_name, field_type, initializer, mutability, is_static, property_access) =
             match &field.kind {
                 ClassFieldKind::Var {
@@ -215,10 +227,11 @@ impl<'a> AstLowering<'a> {
             };
 
         let interned_field_name = self.context.intern_string(&field_name);
-        let field_symbol = self
-            .context
-            .symbol_table
-            .create_variable(interned_field_name);
+        let field_symbol = pre_registered_symbol.unwrap_or_else(|| {
+            self.context
+                .symbol_table
+                .create_variable(interned_field_name)
+        });
 
         // Update the field symbol with its type
         self.context
@@ -256,7 +269,14 @@ impl<'a> AstLowering<'a> {
         // Track field in the current class for implicit this resolution
         if let Some(class_symbol) = self.context.class_context_stack.last() {
             if let Some(field_list) = self.class_fields.get_mut(class_symbol) {
-                field_list.push((interned_field_name, field_symbol, is_static));
+                if let Some(entry) = field_list
+                    .iter_mut()
+                    .find(|(_, symbol, _)| *symbol == field_symbol)
+                {
+                    *entry = (interned_field_name, field_symbol, is_static);
+                } else {
+                    field_list.push((interned_field_name, field_symbol, is_static));
+                }
             }
         }
 
