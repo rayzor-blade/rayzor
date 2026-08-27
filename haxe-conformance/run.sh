@@ -20,6 +20,7 @@ OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
 JOBS="${JOBS:-0}"
 PRESET="${PRESET:-application}"
+LOGS="${LOGS:-$WORK/logs}"
 
 # Keep enough parallelism to use the machine without letting a corpus run
 # launch hundreds of compiler processes at once. JOBS=1 retains the old
@@ -51,10 +52,13 @@ RESULTS="$WORK/results-$$"
 # A previous complete run must not authorize this run when WORK is reused for
 # a pilot, a changed preset, or an interrupted retry.
 rm -f "$WORK/COMPLETE"
-mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS" "$(dirname "$OUT")" || {
+mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS" "$(dirname "$OUT")" "$LOGS" || {
   echo "cannot create conformance work/report directories" >&2
   exit 2
 }
+# WORK is reusable locally. Do not let raw output from an earlier run masquerade
+# as evidence for this one when a test now takes a different path.
+find "$LOGS" -maxdepth 1 -type f -name '*.log' -delete 2>/dev/null || true
 if ! printf 'issue\tstatus\tdetail\n' > "$OUT"; then
   echo "cannot write conformance report: $OUT" >&2
   exit 2
@@ -253,6 +257,10 @@ PYGEN
   # measurement by default; the preset remains overridable for backend probes.
   out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
   code=$?
+  # The compact TSV is for scoring, not diagnosis. Preserve the complete output
+  # for every issue so a CI-only crash/no-output result includes its tier event,
+  # verifier error, and runner banner instead of only a truncated final line.
+  printf '%s\n' "$out" > "$LOGS/$base.log"
 
   # A test that reported a failed assertion and THEN died computed a wrong
   # answer; the crash is downstream of it, usually while rendering the very

@@ -71,6 +71,18 @@ jobs:
       - name: Build rayzor CLI
         run: cargo build --release --features llvm-backend
 
+      - name: Record runner and LLVM environment
+        run: |
+          mkdir -p conformance-out
+          {
+            uname -a
+            lscpu
+            free -h
+            llvm-config-21 --version
+            llvm-config-21 --libdir
+            ldd ./target/release/rayzor
+          } > conformance-out/environment.txt
+
       # Keyed on the pin, so a corpus bump is what invalidates it.
       - name: Cache the Haxe corpus
         uses: actions/cache@v4
@@ -92,6 +104,8 @@ jobs:
           # in this long is stuck, and paying a minute each for those is what
           # turns a five-minute corpus into an overrun.
           TIMEOUT: 25
+          # Include successful/failed LLVM promotion in each retained raw log.
+          RAYZOR_PROFILE_LOAD: 1
         # The score is a measurement. Letting the step's exit status fail the
         # job skipped the summary and the upload with it, so a run that died
         # partway produced no number AND no evidence of why.
@@ -111,6 +125,9 @@ jobs:
             exit 1
           fi
           cp "$REPORT" conformance-out/
+          if [ -d "$WORK/logs" ]; then
+            cp -R "$WORK/logs" conformance-out/
+          fi
           # Only a complete run may publish a score. The website takes its
           # badge from the newest SUCCESSFUL run, so summarising a truncated
           # report would publish a drop that reflects where the corpus stopped
