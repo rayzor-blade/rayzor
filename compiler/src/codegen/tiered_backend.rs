@@ -657,13 +657,11 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
-                // A monolithic `main` never returns to the dispatcher, so its
-                // inner functions were once unreachable by invocation counting
-                // and the tier had to be installed before it ran. Resume points
-                // now carry a running loop into freshly compiled code, so this
-                // is a choice about paying the compile up front rather than the
-                // only way to arrive.
-                auto_upgrade_to_llvm_after_main_entry: true,
+                // Hot functions reach LLVM through Beadie and OSR. Eagerly
+                // compiling the whole program here defeats per-function
+                // tiering, stalls startup, and exposes cold/unreachable bodies
+                // to MCJIT failures before the application runs.
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Server => TieredConfig {
@@ -679,7 +677,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
-                auto_upgrade_to_llvm_after_main_entry: true,
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -3886,6 +3884,16 @@ mod tests {
         assert_eq!(config.profile_config.blazing_threshold, 2);
         assert!(config.enable_tier_promotion);
         assert!(!config.auto_upgrade_to_llvm_after_main_entry);
+    }
+
+    #[test]
+    fn long_running_presets_do_not_force_whole_program_llvm() {
+        for preset in [TierPreset::Application, TierPreset::Server] {
+            let config = preset.to_config_without_env();
+            assert!(config.enable_tier_promotion);
+            assert_ne!(config.profile_config.blazing_threshold, u64::MAX);
+            assert!(!config.auto_upgrade_to_llvm_after_main_entry);
+        }
     }
 
     fn build_add_module() -> (IrModule, IrFunctionId) {
