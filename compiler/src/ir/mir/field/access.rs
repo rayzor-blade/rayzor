@@ -1418,6 +1418,20 @@ impl<'a> HirToMirContext<'a> {
             let raw_value =
                 self.builder
                     .build_call_direct(get_fn, vec![obj_reg, key_reg], IrType::I64)?;
+            // Strings are stored as a `*mut HaxeString` pointer in map slots,
+            // not as the StringPtr struct convert_type yields — mirror
+            // lower_index_access so trace/string-concat see a String, not an Int.
+            let is_string = matches!(
+                self.type_table.get(value_type_id).map(|t| &t.kind),
+                Some(crate::tast::TypeKind::String)
+            );
+            if is_string {
+                let ptr_string = IrType::Ptr(Box::new(IrType::String));
+                return self
+                    .builder
+                    .build_bitcast(raw_value, ptr_string)
+                    .or(Some(raw_value));
+            }
             let value_ir_type = self.convert_type(value_type_id);
             return match &value_ir_type {
                 IrType::Ptr(_) | IrType::F64 => self

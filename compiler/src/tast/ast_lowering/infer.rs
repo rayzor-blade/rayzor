@@ -519,10 +519,43 @@ impl<'a> AstLowering<'a> {
                         Some(crate::tast::core::TypeKind::Array { element_type }) => {
                             return Ok(*element_type);
                         }
-                        Some(
-                            crate::tast::core::TypeKind::Class { symbol_id, .. }
-                            | crate::tast::core::TypeKind::Abstract { symbol_id, .. },
-                        ) => Some(*symbol_id),
+                        Some(crate::tast::core::TypeKind::Map { value_type, .. }) => {
+                            // `m[k]` on a Map literal resolves to the value type.
+                            return Ok(*value_type);
+                        }
+                        Some(crate::tast::core::TypeKind::Class {
+                            symbol_id,
+                            type_args,
+                            ..
+                        }) => {
+                            // haxe.ds.IntMap/StringMap/ObjectMap are extern classes
+                            // whose `get` yields the value type argument. Match on the
+                            // qualified name so a user class named `IntMap` cannot collide.
+                            let class_name = self
+                                .context
+                                .symbol_table
+                                .get_symbol(*symbol_id)
+                                .and_then(|s| s.qualified_name)
+                                .and_then(|n| self.context.string_interner.get(n));
+                            match class_name {
+                                Some("haxe.ds.IntMap") | Some("haxe.ds.StringMap") => {
+                                    return Ok(type_args
+                                        .first()
+                                        .copied()
+                                        .unwrap_or_else(|| type_table.dynamic_type()));
+                                }
+                                Some("haxe.ds.ObjectMap") => {
+                                    return Ok(type_args
+                                        .get(1)
+                                        .copied()
+                                        .unwrap_or_else(|| type_table.dynamic_type()));
+                                }
+                                _ => Some(*symbol_id),
+                            }
+                        }
+                        Some(crate::tast::core::TypeKind::Abstract { symbol_id, .. }) => {
+                            Some(*symbol_id)
+                        }
                         _ => None,
                     }
                 };
