@@ -85,32 +85,40 @@ suite so they do not turn it red. Each documents one blocker.
 
 ## Verified Linux CI baseline (2026-08-27)
 
-Rayzor `989ba894`, `--release --no-cache --preset application`, corpus revision
+Rayzor `7268d4a0`, `--release --no-cache --preset application`, corpus revision
 from `corpus.pin`, four workers and a 25-second per-issue timeout. This is the
-artifact from CI run `33068321652`; local probes do not replace the published
-baseline.
+artifact from CI run `33071480723`; local probes do not replace the published
+baseline. The binary dynamically links `libLLVM.so.21.1`.
 
 | outcome | count |
 |---|---:|
-| PASS | 370 |
-| WRONG_ANSWER | 191 |
-| COMPILE_FAIL | 269 |
-| CRASH | 160 |
+| PASS | 360 |
+| WRONG_ANSWER | 176 |
+| COMPILE_FAIL | 265 |
+| CRASH | 189 |
 | TIMEOUT | 40 |
 | NO_OUTPUT | 0 |
 | SKIP | 135 |
 
-That is 370/1030 scored tests, or 35.9%. The same revision and timeout produced
-372/1030 on macOS and on the quiet Linux NUC. The remaining two-result CI gap
-is under diagnosis as nondeterministic pre-promotion crashes; raw output and
-the LLVM/startup phase markers are retained in the CI artifact rather than
-being folded into the baseline. The durable report has 1165 rows plus
-its header; the completion marker is written only after every worker in a full
-corpus run has been reaped. The largest actionable failure families are parser
-fallback losing the injected `main`, unresolved class/member metadata, and
-named functions left uncompiled. Wrong answers retain their first `FAILVALUES`
-line so distinct semantic failures are no longer collapsed into a generic
-`FAILCHECK eq`.
+That is 360/1030 scored tests, or 35.0%. The quiet Linux NUC produced the same
+360 score with an explicit `llvm-dynamic` build. Its pass set has one stable
+two-test swap against the hosted AMD runner: the NUC passes `Issue11535` while
+CI passes `Issue9394`. Two independent macOS runs produced the same 361 pass
+set and every status classification matched between repeats.
+
+Application and Server no longer force a blocking whole-program LLVM compile
+before `main`. Hot functions promote individually through Beadie/OSR, which is
+the production tiering path; explicit `--llvm` still requests the monolithic
+mode. This removed the nondeterministic pre-main MCJIT crashes that made CI
+fluctuate between 368 and 370. It also cut the CI corpus step from roughly 24
+minutes on the immediately preceding eager-LLVM run to 7 minutes 30 seconds.
+
+The durable report has 1165 rows plus its header; the completion marker is
+written only after every worker in a full corpus run has been reaped. The
+largest actionable failure families are parser fallback losing the injected
+`main`, unresolved class/member metadata, and named functions left uncompiled.
+Wrong answers retain their first `FAILVALUES` line so distinct semantic
+failures are no longer collapsed into a generic `FAILCHECK eq`.
 
 ## Why the existing suite could not see any of this
 
