@@ -290,19 +290,29 @@ impl<'a> HirToMirContext<'a> {
                     _ => None,
                 }
             };
-            if let Some(tp_name) = type_param_of(lhs.ty).or_else(|| type_param_of(rhs.ty)) {
+            // The tag describes BOTH slots. Taking it from whichever side is a
+            // type parameter is a lie about the other one: `a == someDynamic`
+            // inside `f<T>(a:T, b:Dynamic)` compares T's value against a box
+            // ADDRESS, and for T = String dereferences that box header as a
+            // HaxeString and segfaults. Only a pair that shares the parameter
+            // qualifies -- against a literal null the tag is still honest,
+            // since 0 is null in every representation.
+            let lhs_tp = type_param_of(lhs.ty);
+            let rhs_tp = type_param_of(rhs.ty);
+            let shared_tp = match (&lhs_tp, &rhs_tp) {
+                (Some(l), Some(r)) if l == r => lhs_tp.clone(),
+                (Some(_), None) if matches!(&rhs.kind, HirExprKind::Null) => lhs_tp.clone(),
+                (None, Some(_)) if matches!(&lhs.kind, HirExprKind::Null) => rhs_tp.clone(),
+                _ => None,
+            };
+            if let Some(tp_name) = shared_tp {
                 let lhs_reg = self.lower_expression(lhs)?;
                 let rhs_reg = self.lower_expression(rhs)?;
-                let as_i64 = |this: &mut Self, reg| {
-                    let ty = this.builder.get_register_type(reg).unwrap_or(IrType::I64);
-                    if ty == IrType::I64 {
-                        Some(reg)
-                    } else {
-                        this.builder.build_cast(reg, ty, IrType::I64).or(Some(reg))
-                    }
-                };
-                let lhs_i64 = as_i64(self, lhs_reg)?;
-                let rhs_i64 = as_i64(self, rhs_reg)?;
+                // Floats must reach the i64 slot by BITCAST: tag 4 reads the
+                // bits back as an f64, and a numeric conversion would have
+                // turned 1.5 into 1 on the way in.
+                let lhs_i64 = self.erase_reflect_compare_arg(lhs_reg);
+                let rhs_i64 = self.erase_reflect_compare_arg(rhs_reg);
 
                 let tag = self.builder.build_const(IrValue::I32(0))?;
                 if let Some(func) = self.builder.current_function_mut() {
@@ -326,6 +336,53 @@ impl<'a> HirToMirContext<'a> {
                     CompareOp::Ne
                 };
                 return self.builder.build_cmp(cmp_op, ordering, zero);
+            }
+
+            // One side is the parameter, the other is Dynamic. One tag cannot
+            // describe both, so hand the runtime each side's own provenance:
+            // the erased slot with its tag, and the box as a box.
+            let is_dyn = |me: &Self, ty: crate::tast::TypeId| {
+                matches!(
+                    me.type_table.get(ty).map(|t| &t.kind),
+                    Some(crate::tast::core::TypeKind::Dynamic)
+                )
+            };
+            let tp_vs_dyn = match (&lhs_tp, &rhs_tp) {
+                (Some(n), None) if is_dyn(self, rhs.ty) => Some((n.clone(), true)),
+                (None, Some(n)) if is_dyn(self, lhs.ty) => Some((n.clone(), false)),
+                _ => None,
+            };
+            if let Some((tp_name, tp_is_lhs)) = tp_vs_dyn {
+                let lhs_reg = self.lower_expression(lhs)?;
+                let rhs_reg = self.lower_expression(rhs)?;
+                let (tp_reg, dyn_reg) = if tp_is_lhs {
+                    (lhs_reg, rhs_reg)
+                } else {
+                    (rhs_reg, lhs_reg)
+                };
+                let tp_i64 = self.erase_reflect_compare_arg(tp_reg);
+
+                let tag = self.builder.build_const(IrValue::I32(0))?;
+                if let Some(func) = self.builder.current_function_mut() {
+                    func.type_param_tag_fixups.push((tag, tp_name));
+                }
+
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let eq_func = self.get_or_register_extern_function(
+                    "haxe_dynamic_equals_typed",
+                    vec![IrType::I64, IrType::I32, ptr_void],
+                    IrType::Bool,
+                );
+                let eq = self.builder.build_call_direct(
+                    eq_func,
+                    vec![tp_i64, tag, dyn_reg],
+                    IrType::Bool,
+                )?;
+                if matches!(op, HirBinaryOp::Eq) {
+                    return Some(eq);
+                }
+                let ffalse = self.builder.build_const(IrValue::Bool(false))?;
+                return self.builder.build_cmp(CompareOp::Eq, eq, ffalse);
             }
         }
 

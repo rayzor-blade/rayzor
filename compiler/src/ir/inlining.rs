@@ -967,6 +967,13 @@ fn concrete_arg_type(caller: &IrFunction, reg: IrId) -> Option<IrType> {
     })
 }
 
+/// Map an IrType to a runtime type tag for the by-tag runtime helpers.
+/// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic.
+///
+/// A string is `String` or `Ptr(String)`; `Ptr(U8)` is the boxed DynamicValue,
+/// which is what a `Null<Int>` type argument lowers to. Calling either of those
+/// the other's tag makes the runtime read a box header as a HaxeString, or two
+/// string addresses as raw integers.
 fn ir_type_to_type_tag(ty: &IrType) -> i32 {
     match ty {
         IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1,
@@ -974,7 +981,7 @@ fn ir_type_to_type_tag(ty: &IrType) -> i32 {
         IrType::Bool => 2,
         IrType::F32 | IrType::F64 => 4,
         IrType::String => 5,
-        IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 5,
+        IrType::Ptr(inner) if matches!(**inner, IrType::String) => 5,
         IrType::Ptr(_) => 6,
         _ => 1,
     }

@@ -576,7 +576,12 @@ impl Monomorphizer {
     }
 
     /// Map an IrType to a runtime type tag for Reflect.compare_typed.
-    /// Tags: 1=Int, 2=Bool, 4=Float, 5=String
+    /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic
+    ///
+    /// A string is `String` or `Ptr(String)`; `Ptr(U8)` is the boxed
+    /// DynamicValue, which is what a `Null<Int>` type argument lowers to.
+    /// Calling either of those the other's tag makes the runtime read a box
+    /// header as a HaxeString, or two string addresses as raw integers.
     fn ir_type_to_type_tag(ty: &IrType) -> i32 {
         match ty {
             IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1, // TYPE_INT
@@ -584,8 +589,8 @@ impl Monomorphizer {
             IrType::Bool => 2,                                         // TYPE_BOOL
             IrType::F32 | IrType::F64 => 4,                            // TYPE_FLOAT
             IrType::String => 5,                                       // TYPE_STRING
-            IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 5,  // Ptr(U8) = String
-            IrType::Ptr(_) => 6,                                       // Reference/Object
+            IrType::Ptr(inner) if matches!(**inner, IrType::String) => 5, // TYPE_STRING
+            IrType::Ptr(_) => 6,                                       // Reference/Dynamic
             _ => 1,                                                    // Default: Int
         }
     }

@@ -2740,6 +2740,31 @@ pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
     }
 }
 
+/// Read a pointer-shaped slot as a boxed DynamicValue, if it plausibly is one.
+///
+/// A caller cannot always tell a boxed DynamicValue from a raw i64 that merely
+/// has Dynamic type -- an untyped lambda parameter holds the latter, and both
+/// arrive as a pointer-shaped register. Validate before dereferencing: a real
+/// box is aligned, above the first page, and carries a known type tag. Anything
+/// else is `None`, and the caller must treat the slot as the raw value it is.
+pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
+    let addr = p as usize;
+    if addr < 0x1000 || (addr & 7) != 0 {
+        return None;
+    }
+    let d = unsafe { *(p as *const DynamicValue) };
+    let tid = d.type_id.0;
+    // Tag-plausibility window: the builtin scalars at the bottom, then
+    // everything above 100 for user/object types and the function tag at
+    // the very top. The gap between is not a valid tag.
+    let known = tid <= TYPE_ARRAY.0 || tid > 100;
+    if known {
+        Some(d)
+    } else {
+        None
+    }
+}
+
 /// Structural equality for two boxed Dynamic values.
 ///
 /// `Dynamic == Dynamic` used to compile to a comparison of the BOX ADDRESSES,
@@ -2759,30 +2784,7 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
         return false;
     }
 
-    // The caller cannot always tell a boxed DynamicValue from a raw i64 that
-    // merely has Dynamic type -- an untyped lambda parameter holds the latter,
-    // and both arrive here as a pointer-shaped register. Validate before
-    // dereferencing: a real box is aligned, above the first page, and carries a
-    // known type tag. Anything else is compared as the raw value it is.
-    let looks_boxed = |p: *mut u8| -> Option<DynamicValue> {
-        let addr = p as usize;
-        if addr < 0x1000 || (addr & 7) != 0 {
-            return None;
-        }
-        let d = unsafe { *(p as *const DynamicValue) };
-        let tid = d.type_id.0;
-        // Tag-plausibility window: the builtin scalars at the bottom, then
-        // everything above 100 for user/object types and the function tag at
-        // the very top. The gap between is not a valid tag.
-        let known = tid <= TYPE_ARRAY.0 || tid > 100;
-        if known {
-            Some(d)
-        } else {
-            None
-        }
-    };
-
-    let (da, db) = match (looks_boxed(a), looks_boxed(b)) {
+    let (da, db) = match (dynamic_value_if_boxed(a), dynamic_value_if_boxed(b)) {
         (Some(x), Some(y)) => (x, y),
         // At least one side is a raw value: pointer identity is the only
         // meaningful answer, and it was already checked above.
@@ -2817,6 +2819,64 @@ pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
 
     // Objects, arrays, enums, functions: reference identity.
     da.value_ptr == db.value_ptr
+}
+
+/// Equality between a tag-described raw slot and a Dynamic operand.
+///
+/// A generic body erases its type parameter to one i64 whose meaning only the
+/// type tag knows, while the other operand is a boxed DynamicValue. Comparing
+/// the two registers directly compares a value against a box ADDRESS, and
+/// describing the box with the parameter's tag reads its header as an Int or a
+/// HaxeString. Each side is read the way its own provenance says.
+///
+/// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic, 0=unresolved.
+#[no_mangle]
+pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut u8) -> bool {
+    // Reference/Dynamic, and the placeholder a monomorphisation never filled
+    // in, both leave `raw` pointer-shaped: neither side is a described value.
+    if type_tag == 6 || type_tag == 0 {
+        return haxe_dynamic_equals(raw as *mut u8, other);
+    }
+
+    let Some(d) = dynamic_value_if_boxed(other) else {
+        // Not a box after all: the slot holds the raw value it looks like.
+        return raw == other as i64;
+    };
+    if d.type_id == TYPE_NULL || d.value_ptr.is_null() {
+        return raw == 0;
+    }
+
+    unsafe {
+        match type_tag {
+            1 | 3 => match d.type_id {
+                TYPE_INT => *(d.value_ptr as *const i64) == raw,
+                TYPE_FLOAT => *(d.value_ptr as *const f64) == raw as f64,
+                _ => false,
+            },
+            2 => d.type_id == TYPE_BOOL && *(d.value_ptr as *const bool) == (raw != 0),
+            4 => {
+                let f = f64::from_bits(raw as u64);
+                match d.type_id {
+                    TYPE_FLOAT => *(d.value_ptr as *const f64) == f,
+                    TYPE_INT => *(d.value_ptr as *const i64) as f64 == f,
+                    _ => false,
+                }
+            }
+            5 => {
+                if d.type_id != TYPE_STRING {
+                    return false;
+                }
+                if raw == 0 {
+                    return d.value_ptr.is_null();
+                }
+                crate::haxe_string::haxe_string_compare(
+                    raw as *const crate::haxe_string::HaxeString,
+                    d.value_ptr as *const crate::haxe_string::HaxeString,
+                ) == 0
+            }
+            _ => raw == other as i64,
+        }
+    }
 }
 
 /// Unbox a Bool from Dynamic (takes opaque pointer to DynamicValue)

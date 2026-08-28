@@ -341,47 +341,23 @@ impl<'a> HirToMirContext<'a> {
 
                         // Reflect.compare → haxe_reflect_compare_typed: detect the
                         // argument type and append a type_tag param to avoid boxing.
-                        if runtime_func_name == "haxe_reflect_compare" {
+                        if runtime_func_name == "haxe_reflect_compare" && static_args.len() >= 2 {
+                            // One tag describes both slots, so it is only usable
+                            // when both operands agree on it.
                             let mut known_type_tag: Option<i32> = None;
                             let mut type_param_name: Option<String> = None;
                             let mut use_typed = false;
 
-                            if let Some(first_arg) = static_args.first() {
-                                let type_table = self.type_table;
-                                if let Some(ti) = type_table.get(first_arg.ty) {
-                                    use crate::tast::core::TypeKind;
-                                    match &ti.kind {
-                                        TypeKind::TypeParameter { symbol_id, .. } => {
-                                            use_typed = true;
-                                            if let Some(sym) =
-                                                self.symbol_table.get_symbol(*symbol_id)
-                                            {
-                                                if let Some(name_str) =
-                                                    self.string_interner.get(sym.name)
-                                                {
-                                                    type_param_name = Some(name_str.to_string());
-                                                }
-                                            }
-                                        }
-                                        TypeKind::Int => {
-                                            use_typed = true;
-                                            known_type_tag = Some(1);
-                                        }
-                                        TypeKind::Float => {
-                                            use_typed = true;
-                                            known_type_tag = Some(4);
-                                        }
-                                        TypeKind::Bool => {
-                                            use_typed = true;
-                                            known_type_tag = Some(2);
-                                        }
-                                        TypeKind::String => {
-                                            use_typed = true;
-                                            known_type_tag = Some(5);
-                                        }
-                                        _ => {}
-                                    }
+                            match self.infer_reflect_compare_type_info(static_args) {
+                                Some(Ok(tag)) => {
+                                    use_typed = true;
+                                    known_type_tag = Some(tag);
                                 }
+                                Some(Err(name)) => {
+                                    use_typed = true;
+                                    type_param_name = Some(name);
+                                }
+                                None => {}
                             }
 
                             if use_typed {

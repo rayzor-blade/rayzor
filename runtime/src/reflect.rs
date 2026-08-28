@@ -12,7 +12,7 @@ use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
     box_class_field_as_dynamic, get_type_info, is_class_type, lookup_class_field, DynamicValue,
-    ParamType, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
+    ParamType, TypeId, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
 };
 
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
@@ -478,7 +478,7 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
 /// This is used for generic code where values are type-erased to i64 and boxing
 /// would require knowing the concrete type at compile time.
 ///
-/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String
+/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic
 #[no_mangle]
 pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
     match type_tag {
@@ -527,10 +527,69 @@ pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i
                 }
             }
         }
+        // Reference or Dynamic. The compiler emits this tag for every operand
+        // that lowers to a pointer, and cannot tell a boxed DynamicValue from a
+        // class instance -- both are Ptr in MIR.
+        6 => compare_reference_slot(a, b),
         _ => {
             // Unknown type: compare as raw i64
             (a - b).signum()
         }
+    }
+}
+
+/// Order two pointer-shaped slots of unknown provenance.
+///
+/// Subtracting the two addresses is the right answer for objects, which Haxe
+/// compares by reference, and the wrong one for boxes: two separate boxes hold
+/// the same value and would report unequal.
+///
+/// The two cases are not distinguishable from the tag, so the box reading has
+/// to earn its keep. A class or enum instance can easily start with a small
+/// integer field, which alone reads as a plausible box header -- an enum whose
+/// constructor index is 1 would be mistaken for a boxed null and every such
+/// value would compare EQUAL to every other. So only a header naming one of
+/// the four scalar payload types, and pointing at a payload that is itself a
+/// plausible address, is read as a box. Everything else keeps the reference
+/// identity it had before.
+fn compare_reference_slot(a: i64, b: i64) -> i64 {
+    if a == b {
+        return 0;
+    }
+    if a == 0 {
+        return -1;
+    }
+    if b == 0 {
+        return 1;
+    }
+    let scalar_box = |v: i64| -> Option<DynamicValue> {
+        let d = crate::type_system::dynamic_value_if_boxed(v as *mut u8)?;
+        let scalar = d.type_id == TYPE_BOOL
+            || d.type_id == TYPE_INT
+            || d.type_id == TYPE_FLOAT
+            || d.type_id == TYPE_STRING;
+        let payload = d.value_ptr as usize;
+        if scalar && payload >= 0x1000 && (payload & 7) == 0 {
+            Some(d)
+        } else {
+            None
+        }
+    };
+    if let (Some(da), Some(db)) = (scalar_box(a), scalar_box(b)) {
+        // Delegate only the pairs haxe_reflect_compare actually decides. It
+        // answers 0 for everything else, and calling two distinct values
+        // equal is the wrong answer this function exists to avoid.
+        let numeric = |t: TypeId| t == TYPE_INT || t == TYPE_FLOAT;
+        let decided = (numeric(da.type_id) && numeric(db.type_id))
+            || (da.type_id == db.type_id && (da.type_id == TYPE_STRING || da.type_id == TYPE_BOOL));
+        if decided {
+            return haxe_reflect_compare(a as *mut u8, b as *mut u8);
+        }
+    }
+    if a < b {
+        -1
+    } else {
+        1
     }
 }
 

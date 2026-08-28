@@ -962,6 +962,10 @@ register_symbol!(
     crate::type_system::haxe_dynamic_equals
 );
 register_symbol!(
+    "haxe_dynamic_equals_typed",
+    crate::type_system::haxe_dynamic_equals_typed
+);
+register_symbol!(
     "haxe_unbox_float_ptr",
     crate::type_system::haxe_unbox_float_ptr
 );

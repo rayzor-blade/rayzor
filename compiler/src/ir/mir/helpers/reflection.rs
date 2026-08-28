@@ -255,15 +255,34 @@ impl<'a> HirToMirContext<'a> {
     /// - `Some(Ok(tag))` for concrete types (Int=1, Bool=2, Float=4, String=5)
     /// - `Some(Err(type_param_name))` for generic type parameters (needs fixup)
     /// - `None` for Dynamic/unknown (fall through to boxing path)
+    ///
+    /// One tag describes BOTH slots: `haxe_reflect_compare_typed` reads `a` and
+    /// `b` the same way. Reading the tag off the first argument alone is a lie
+    /// whenever the second has another representation -- `compare(5, aDynamic)`
+    /// then compares 5 against a box ADDRESS, and `compare("s", aDynamic)`
+    /// dereferences the box header as a HaxeString and segfaults. When the two
+    /// operands disagree, answer `None` so the caller boxes both and uses
+    /// `haxe_reflect_compare`, which carries each side's own type.
     pub(crate) fn infer_reflect_compare_type_info(
         &self,
         args: &[HirExpr],
     ) -> Option<Result<i32, String>> {
+        let first = self.reflect_compare_operand_tag(&args[0])?;
+        if let Some(second) = args.get(1) {
+            if self.reflect_compare_operand_tag(second) != Some(first.clone()) {
+                return None;
+            }
+        }
+        Some(first)
+    }
+
+    /// The tag one Reflect.compare operand asks for, or `None` when its own
+    /// representation is not known here.
+    fn reflect_compare_operand_tag(&self, first: &HirExpr) -> Option<Result<i32, String>> {
         use crate::tast::core::TypeKind;
-        let first = &args[0];
         let type_table = self.type_table;
         debug!(
-            "[REFLECT_COMPARE_TYPE] first arg ty={:?}, type_info={:?}",
+            "[REFLECT_COMPARE_TYPE] arg ty={:?}, type_info={:?}",
             first.ty,
             type_table.get(first.ty).map(|ti| format!("{:?}", ti.kind))
         );
