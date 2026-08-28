@@ -51,13 +51,41 @@ pub fn rayzor_stdout_write(head: &[u8], tail: &[u8], force: bool) {
 /// lock is released between them, and a second thread printing at that moment
 /// appends its own line in the gap — the two lines merge into one, so output
 /// that was never lost reads as output that went missing.
+static STDOUT_BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+/// Flush whatever is queued, whatever the interval says.
+///
+/// Registered with `atexit` the first time anything is buffered, because the
+/// buffer is not otherwise drained on the way out: a program whose last write
+/// carried no newline -- `Sys.print("done")` with nothing after it -- reached
+/// exit with its only output still in the buffer and emitted nothing at all.
+/// Exiting is the one moment the interval must not get a say.
+pub extern "C" fn rayzor_stdout_flush() {
+    let Some(lock) = STDOUT_BUFFER.get() else {
+        return;
+    };
+    let Ok(mut buffer) = lock.lock() else {
+        return;
+    };
+    if buffer.is_empty() {
+        return;
+    }
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(&buffer);
+    let _ = stdout.flush();
+    buffer.clear();
+}
+
 fn write_stdout_parts(head: &[u8], tail: &[u8], force: bool) {
-    static BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-    static LAST_FLUSH: OnceLock<Mutex<Instant>> = OnceLock::new();
     let interval = stdout_flush_interval();
 
-    let Ok(mut buffer) = BUFFER
-        .get_or_init(|| Mutex::new(Vec::with_capacity(4096)))
+    let Ok(mut buffer) = STDOUT_BUFFER
+        .get_or_init(|| {
+            // Once, on the first buffered byte, so no call site has to remember.
+            unsafe { libc::atexit(rayzor_stdout_flush) };
+            Mutex::new(Vec::with_capacity(4096))
+        })
         .lock()
     else {
         return;
