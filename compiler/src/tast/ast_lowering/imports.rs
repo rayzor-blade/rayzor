@@ -36,15 +36,23 @@ impl<'a> AstLowering<'a> {
     /// Process import.hx files in the directory hierarchy
     pub(crate) fn process_import_hx_files(
         &mut self,
-        _current_file: &HaxeFile,
+        current_file: &HaxeFile,
     ) -> LoweringResult<()> {
         use crate::tast::stdlib_loader::{StdLibConfig, StdLibLoader};
         use std::path::PathBuf;
 
-        // Determine the current file's directory
-        // In a real implementation, we'd get this from the compilation context
-        // For now, we'll use a simple approach
-        let current_dir = PathBuf::from("/Users/amaterasu/Vibranium/rayzor/compiler/examples");
+        // The directory of the file being lowered. This used to be a hardcoded
+        // absolute path into one checkout, so import.hx was looked for in a
+        // directory that exists on one machine and is not where the file lives
+        // even there -- the feature was wired up and could never fire.
+        // Absolute, because the rest of the search walks parents: a bare
+        // "." has no ancestors to walk, so a file named without a directory
+        // would only ever look in one place.
+        let current_dir = match PathBuf::from(&current_file.filename).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let current_dir = std::fs::canonicalize(&current_dir).unwrap_or(current_dir);
 
         // Create a loader for import.hx files
         let mut config = StdLibConfig::default();
@@ -58,20 +66,22 @@ impl<'a> AstLowering<'a> {
         let mut search_dir = current_dir.clone();
         let mut import_files = Vec::new();
 
-        loop {
-            let import_hx_files = loader.load_import_hx(&search_dir);
-            import_files.extend(import_hx_files);
-
-            // Move to parent directory
-            match search_dir.parent() {
-                Some(parent) => search_dir = parent.to_path_buf(),
-                None => break,
+        let probe = crate::debug_flags::wildcard_log();
+        let dirs = Self::import_hx_search_dirs(current_file, &search_dir);
+        if probe {
+            eprintln!(
+                "[import.hx] file={} dir={} searching {:?}",
+                current_file.filename,
+                search_dir.display(),
+                dirs
+            );
+        }
+        for dir in dirs {
+            let found = loader.load_import_hx(&dir);
+            if probe && !found.is_empty() {
+                eprintln!("[import.hx] loaded {} from {}", found.len(), dir.display());
             }
-
-            // Stop at project root (avoid going too far up)
-            if search_dir.ends_with("rayzor") {
-                break;
-            }
+            import_files.extend(found);
         }
 
         // Process import.hx files in reverse order (parent directories first)
@@ -106,62 +116,100 @@ impl<'a> AstLowering<'a> {
 
     /// Process an import from import.hx file
     fn process_import_from_import_hx(&mut self, import: &Import) -> LoweringResult<()> {
-        // Similar to lower_import, but adds to global scope
-        let imported_symbols = match &import.mode {
-            parser::ImportMode::Normal => import.path.last().map(|s| vec![s.as_str()]),
-            parser::ImportMode::Alias(alias) => Some(vec![alias.as_str()]),
-            parser::ImportMode::Field(field) => Some(vec![field.as_str()]),
-            parser::ImportMode::Wildcard => None,
-            parser::ImportMode::WildcardWithExclusions(_) => None,
+        // An import.hx entry is an ordinary import that happens to be written
+        // in another file, so it goes through the ordinary path. Handling it
+        // separately is what silently dropped every wildcard: this only ever
+        // registered concrete symbols and never built an ImportEntry, so
+        // `import utest.Assert.*` in an import.hx bound nothing whatsoever.
+        //
+        // Registered against the root scope, because an import.hx applies to
+        // every module beneath it and not only to the file being lowered when
+        // it happened to be found.
+        let saved = self.context.current_scope;
+        self.context.current_scope = ScopeId::first();
+        let result = self.lower_import(import).map(|_| ());
+        self.context.current_scope = saved;
+        result
+    }
+
+    /// Directories an `import.hx` is honoured in, outermost first.
+    ///
+    /// Haxe applies an import.hx to every module at or below it, so three
+    /// roots matter, and each is processed before the ones nearer the file so
+    /// that a nearer import.hx is applied last:
+    ///
+    ///   1. the compiler's own stdlib, so rayzor can ship defaults with it;
+    ///   2. the project root -- the nearest ancestor holding a rayzor.toml,
+    ///      falling back to the working directory;
+    ///   3. the module's class-path root down to the file's own directory.
+    ///
+    /// The package declaration bounds (3) exactly: a file in `package cases`
+    /// sits one directory below its class-path root, so there are
+    /// package-depth + 1 directories in that chain. Walking past the root
+    /// would pick up an import.hx belonging to an unrelated tree.
+    fn import_hx_search_dirs(
+        file: &HaxeFile,
+        file_dir: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut push = |d: std::path::PathBuf, dirs: &mut Vec<std::path::PathBuf>| {
+            if d.is_dir() && !dirs.contains(&d) {
+                dirs.push(d);
+            }
         };
 
-        // Register imported symbols in the symbol table for type resolution
-        if let Some(ref symbols) = imported_symbols {
-            for symbol_name in symbols {
-                let interned_name = self.context.intern_string(symbol_name);
+        // 1. The compiler's own stdlib.
+        let std_roots = crate::compilation::CompilationConfig::discover_stdlib_paths();
+        for p in std_roots.iter() {
+            push(p.clone(), &mut dirs);
+        }
 
-                // Build qualified path for namespace resolver lookup
-                let qualified_path = super::namespace::QualifiedPath {
-                    package: import.path[..import.path.len() - 1]
-                        .iter()
-                        .map(|s| self.context.intern_string(s))
-                        .collect(),
-                    name: interned_name,
-                };
+        // A stdlib module gets the compiler's own import.hx and nothing else.
+        // The project root below is found by walking up from the file, and for
+        // a stdlib file that walk leaves the project entirely and lands on the
+        // working directory -- which would inject whatever the user happens to
+        // have in scope into every stdlib module.
+        let in_stdlib = std_roots.iter().any(|root| file_dir.starts_with(root));
+        if in_stdlib {
+            return dirs;
+        }
 
-                // Check if symbol already exists in namespace resolver (from compiled dependencies)
-                // This is preferred over scope hierarchy because namespace has the real types
-                let imported_symbol = if let Some(existing) = self
-                    .context
-                    .namespace_resolver
-                    .lookup_symbol(&qualified_path)
-                {
-                    existing
-                } else if let Some(existing) = self.resolve_symbol_in_scope_hierarchy(interned_name)
-                {
-                    existing
-                } else {
-                    // Create a placeholder symbol for the imported type
-                    let new_sym = self
-                        .context
-                        .symbol_table
-                        .create_class_in_scope(interned_name, ScopeId::first());
-
-                    // Update qualified name
-                    self.context.update_symbol_qualified_name(new_sym);
-                    new_sym
-                };
-
-                // Add to root scope so it can be resolved globally
-                self.context
-                    .scope_tree
-                    .get_scope_mut(ScopeId::first())
-                    .expect("Root scope should exist")
-                    .add_symbol(imported_symbol, interned_name);
+        // 2. The project root: the nearest ancestor with a manifest.
+        let mut probe = Some(file_dir.to_path_buf());
+        let mut project_root: Option<std::path::PathBuf> = None;
+        while let Some(dir) = probe {
+            if dir.join("rayzor.toml").is_file() {
+                project_root = Some(dir.clone());
+                break;
+            }
+            probe = dir.parent().map(|p| p.to_path_buf());
+        }
+        match project_root {
+            Some(root) => push(root, &mut dirs),
+            None => {
+                if let Ok(cwd) = std::env::current_dir() {
+                    push(cwd, &mut dirs);
+                }
             }
         }
 
-        Ok(())
+        // 3. The class-path root down to the file's own directory.
+        let depth = file.package.as_ref().map(|p| p.path.len()).unwrap_or(0);
+        let mut chain = Vec::new();
+        let mut dir = file_dir.to_path_buf();
+        for _ in 0..=depth {
+            chain.push(dir.clone());
+            match dir.parent() {
+                Some(parent) => dir = parent.to_path_buf(),
+                None => break,
+            }
+        }
+        chain.reverse();
+        for d in chain {
+            push(d, &mut dirs);
+        }
+
+        dirs
     }
 
     /// Process a using statement from import.hx file

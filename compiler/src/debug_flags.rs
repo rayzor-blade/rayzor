@@ -17,6 +17,11 @@ macro_rules! cached_flag {
 }
 
 cached_flag!(
+    /// `RAYZOR_WILDCARD_LOG`: trace wildcard static-import resolution.
+    wildcard_log,
+    "RAYZOR_WILDCARD_LOG"
+);
+cached_flag!(
     /// `RAYZOR_GLOBALS_DEBUG`: trace global/variable resolution.
     globals_debug,
     "RAYZOR_GLOBALS_DEBUG"

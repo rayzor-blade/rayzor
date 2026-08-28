@@ -15,6 +15,87 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// A wildcard import naming a TYPE brings that type's statics into scope.
+    ///
+    /// Haxe spells two different things the same way. When the last segment of
+    /// `import a.b.*` is a package, the wildcard imports the types in it; when
+    /// it is a type, it imports that type's static fields. Only the package
+    /// reading was implemented, so `import utest.Assert.*` was resolved as the
+    /// package `utest` and a bare `isTrue(...)` became a search for the type
+    /// `utest.isTrue`, which does not exist -- the call then failed as an
+    /// unknown name. This adds the field reading; the package one is unchanged
+    /// and still handled by the namespace resolver.
+    ///
+    /// Both the enclosing scope and the module scope are searched, because an
+    /// import written at the top of a file belongs to the latter.
+    fn resolve_wildcard_static_import(&self, name: InternedString) -> Option<SymbolId> {
+        let probe = crate::debug_flags::wildcard_log();
+        // The whole chain, not just the innermost and outermost: an import
+        // written at the top of a file is registered on that file's scope,
+        // which is neither the body's scope nor the root.
+        let mut scope = self.context.current_scope;
+        loop {
+            for import in self.context.import_resolver.get_imports(scope) {
+                if !import.is_wildcard || import.exclusions.contains(&name) {
+                    continue;
+                }
+                // A root-package owner has an empty package path, which the
+                // namespace resolver does not key on -- `import Helper.*` for a
+                // class in no package resolves to nothing there. Fall back to
+                // the scope chain, which is where such a type is registered.
+                let owner = self
+                    .context
+                    .namespace_resolver
+                    .lookup_symbol(&import.package_path)
+                    .or_else(|| {
+                        if import.package_path.package.is_empty() {
+                            self.resolve_symbol_in_scope_hierarchy(import.package_path.name)
+                        } else {
+                            None
+                        }
+                    });
+                if probe {
+                    let owner_name = self
+                        .context
+                        .string_interner
+                        .get(import.package_path.name)
+                        .unwrap_or("<?>")
+                        .to_string();
+                    eprintln!(
+                        "[wildcard] scope={:?} owner_name={} pkg_len={} resolved={:?} fields={:?}",
+                        scope,
+                        owner_name,
+                        import.package_path.package.len(),
+                        owner,
+                        owner.and_then(|o| self.class_fields.get(&o).map(|f| f.len())),
+                    );
+                }
+                let Some(owner) = owner else { continue };
+                if let Some(fields) = self.class_fields.get(&owner) {
+                    if let Some((_, field_symbol, _)) = fields
+                        .iter()
+                        .find(|(field_name, _, is_static)| *field_name == name && *is_static)
+                    {
+                        return Some(*field_symbol);
+                    }
+                }
+            }
+            match self
+                .context
+                .scope_tree
+                .get_scope(scope)
+                .and_then(|sc| sc.parent_id)
+            {
+                Some(parent) => scope = parent,
+                None => break,
+            }
+        }
+        if probe {
+            eprintln!("[wildcard] no static import matched {:?}", name);
+        }
+        None
+    }
+
     /// Peek a simple AST expression's type WITHOUT lowering it — for binding an
     /// inferred empty-array element type from the first push/index-assign before
     /// that statement is lowered. Handles literals, in-scope identifiers, and
@@ -116,6 +197,8 @@ impl<'a> AstLowering<'a> {
                 let mut symbol_id = match self
                     .resolve_symbol_in_scope_hierarchy(id_name)
                     .or(preferred_abstract_field)
+                    // Last, so a local, a parameter or a field still shadows it.
+                    .or_else(|| self.resolve_wildcard_static_import(id_name))
                 {
                     Some(s) => s,
                     None => {
