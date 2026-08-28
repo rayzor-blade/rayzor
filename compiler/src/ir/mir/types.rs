@@ -83,6 +83,32 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The type argument standing in for a generic abstract's underlying.
+    ///
+    /// `abstract Val<T>(T)` writes its underlying as its own type parameter, so
+    /// converting that directly reports the erased representation rather than
+    /// the instantiation's. `Val<Float>` carries Float in its type_args; this
+    /// hands it back so the conversion sees an f64.
+    ///
+    /// Deliberately narrow: only a bare type parameter as the whole underlying,
+    /// and only when the instantiation supplies exactly one argument. With more
+    /// than one, matching a parameter to its argument needs the declaration's
+    /// parameter ORDER, which is not recorded on the type. Returning None then
+    /// keeps the previous behaviour rather than guessing a position.
+    fn substitute_abstract_type_arg(
+        &self,
+        underlying: TypeId,
+        type_args: &[TypeId],
+    ) -> Option<TypeId> {
+        if type_args.len() != 1 {
+            return None;
+        }
+        match self.type_table.get(underlying).map(|t| &t.kind) {
+            Some(TypeKind::TypeParameter { .. }) => Some(type_args[0]),
+            _ => None,
+        }
+    }
+
     pub(crate) fn convert_type(&self, type_id: TypeId) -> IrType {
         use crate::tast::TypeKind;
 
@@ -136,7 +162,7 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Abstract {
                 underlying,
                 symbol_id,
-                ..
+                type_args,
             }) => {
                 // Pointer-sized abstracts (Usize, Ptr, Ref, Box) are I64 regardless
                 // of their declared underlying type: they carry machine addresses
@@ -216,7 +242,16 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 if let Some(underlying_type) = underlying {
-                    self.convert_type(*underlying_type)
+                    // A generic abstract's underlying is written in terms of its
+                    // own type parameter -- `abstract Val<T>(T)` -- so converting
+                    // it directly asks what representation `T` has, and gets the
+                    // erased one. The instantiation already carries the answer in
+                    // type_args: substitute before converting, or `Val<Float>`
+                    // reports the erasure rather than an f64.
+                    let resolved = self
+                        .substitute_abstract_type_arg(*underlying_type, type_args)
+                        .unwrap_or(*underlying_type);
+                    self.convert_type(resolved)
                 } else {
                     // Systems types (Ptr, Ref, Box, Usize) are pointer-sized abstracts.
                     let is_systems_type = self

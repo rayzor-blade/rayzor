@@ -515,6 +515,52 @@ impl<'a> AstLowering<'a> {
             TypeDeclaration::Abstract(abstract_decl) => {
                 let abstract_name = self.context.intern_string(&abstract_decl.name);
 
+                // The underlying type, recorded now rather than when the
+                // abstract's own declaration is reached. A class declared ABOVE
+                // the abstract resolves against whatever the type table holds at
+                // that moment, and an abstract with no underlying recorded falls
+                // back to a 32-bit slot: a Float loses its fraction and a String
+                // is truncated to half a pointer, silently.
+                //
+                // Best effort. An underlying naming a type not yet registered --
+                // or a type parameter, which is not in scope this early -- stays
+                // None, exactly as before.
+                // The abstract's own type parameters have to be in scope for
+                // this: a generic abstract writes its underlying AS one of them
+                // (`abstract Val<T>(T)`), so without them `T` does not resolve,
+                // the underlying stays None, and every instantiation is a 32-bit
+                // slot again. Type resolution runs before the abstract's own
+                // declaration is lowered, so recording it there is too late.
+                let mut tp_map: std::collections::BTreeMap<InternedString, TypeId> =
+                    std::collections::BTreeMap::new();
+                for tp in &abstract_decl.type_params {
+                    let tp_name = self.context.intern_string(&tp.name);
+                    let tp_symbol = self
+                        .context
+                        .symbol_table
+                        .create_type_parameter(tp_name, Vec::new());
+                    // No constraints here: this exists only so the underlying's
+                    // reference to the parameter RESOLVES. The constrained form is
+                    // built properly when the declaration itself is lowered.
+                    let tp_type = self.context.type_table.borrow_mut().create_type_parameter(
+                        tp_symbol,
+                        Vec::new(),
+                        tp.variance.into(),
+                    );
+                    tp_map.insert(tp_name, tp_type);
+                }
+                let has_tps = !tp_map.is_empty();
+                if has_tps {
+                    self.context.push_type_parameters(tp_map);
+                }
+                let pre_underlying = abstract_decl
+                    .underlying
+                    .as_ref()
+                    .and_then(|u| self.lower_type(u).ok());
+                if has_tps {
+                    self.context.pop_type_parameters();
+                }
+
                 // Check if this abstract already exists in the root scope
                 if let Some(existing) = self
                     .context
@@ -542,7 +588,7 @@ impl<'a> AstLowering<'a> {
                             .context
                             .type_table
                             .borrow_mut()
-                            .create_abstract_type(existing_id, None, Vec::new());
+                            .create_abstract_type(existing_id, pre_underlying, Vec::new());
                         self.context
                             .symbol_table
                             .update_symbol_type(existing_id, abstract_type);
@@ -557,6 +603,20 @@ impl<'a> AstLowering<'a> {
                     .context
                     .symbol_table
                     .create_abstract_in_scope(abstract_name, ScopeId::first());
+
+                // create_abstract_in_scope leaves the symbol's type invalid, so
+                // give it one here with the underlying already attached.
+                let abstract_type = self.context.type_table.borrow_mut().create_abstract_type(
+                    abstract_symbol,
+                    pre_underlying,
+                    Vec::new(),
+                );
+                self.context
+                    .symbol_table
+                    .update_symbol_type(abstract_symbol, abstract_type);
+                self.context
+                    .symbol_table
+                    .register_type_symbol_mapping(abstract_type, abstract_symbol);
 
                 // Register symbol with package information (also sets qualified name)
                 self.register_symbol_with_package(abstract_symbol, &abstract_decl.name);

@@ -857,10 +857,27 @@ impl<'a> TypeResolver<'a> {
                                         .type_table
                                         .borrow_mut()
                                         .create_enum_type(symbol.id, type_args),
-                                    SymbolKind::Abstract => self
-                                        .type_table
-                                        .borrow_mut()
-                                        .create_abstract_type(symbol.id, None, type_args),
+                                    SymbolKind::Abstract => {
+                                        // Carry the declaration's underlying into
+                                        // the instantiation. Passing None left every
+                                        // generic abstract instance underlying-less,
+                                        // and an abstract with no underlying is
+                                        // represented as a 32-bit integer -- so
+                                        // `Val<Float>` truncated its own value.
+                                        let declared =
+                                            self.type_table.borrow().get(symbol.type_id).and_then(
+                                                |t| match &t.kind {
+                                                    crate::tast::core::TypeKind::Abstract {
+                                                        underlying,
+                                                        ..
+                                                    } => *underlying,
+                                                    _ => None,
+                                                },
+                                            );
+                                        self.type_table
+                                            .borrow_mut()
+                                            .create_abstract_type(symbol.id, declared, type_args)
+                                    }
                                     // See the forward_references branch above for
                                     // why a TypeAlias must reuse its own resolved
                                     // type_id instead of falling into create_class_type.
