@@ -145,20 +145,32 @@ fn process_inline_conditionals(line: &str, config: &PreprocessorConfig) -> Strin
 
             // Condition can include: identifiers, !, ||, &&, ()
             // Find where the condition ends (first whitespace that ends the condition)
+            // Where the condition ends. Whitespace only ends it OUTSIDE
+            // parentheses and only when neither side of the space is an
+            // operator: `#if (!js || analyzer) inline #end` used to stop at the
+            // space AFTER `||`, leaving the condition as `(!js ||` and
+            // `analyzer)` as content, because the scan looked only forward for
+            // an operator and never tracked parens.
             let mut cond_end = cond_start;
+            let mut depth = 0i32;
             for (i, ch) in line[cond_start..].char_indices() {
-                // Condition can contain: alphanumeric, _, !, |, &, (, ), and spaces within operators
-                if ch.is_whitespace() {
-                    // Check if this whitespace is followed by more condition tokens
-                    let remaining = &line[cond_start + i..];
-                    let trimmed = remaining.trim_start();
-                    if !trimmed.starts_with("||")
-                        && !trimmed.starts_with("&&")
-                        && !trimmed.starts_with("!")
-                    {
-                        cond_end = cond_start + i;
-                        break;
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    c if c.is_whitespace() && depth <= 0 => {
+                        let before = line[cond_start..cond_start + i].trim_end();
+                        let after = line[cond_start + i..].trim_start();
+                        let joins =
+                            |t: &str| t.ends_with("||") || t.ends_with("&&") || t.ends_with('!');
+                        let opens = |t: &str| {
+                            t.starts_with("||") || t.starts_with("&&") || t.starts_with('!')
+                        };
+                        if !joins(before) && !opens(after) {
+                            cond_end = cond_start + i;
+                            break;
+                        }
                     }
+                    _ => {}
                 }
             }
             if cond_end == cond_start {
