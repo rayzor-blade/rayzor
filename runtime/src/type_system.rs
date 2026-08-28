@@ -3268,13 +3268,21 @@ static IFACE_VTABLE_REGISTRY: RwLock<Option<IfaceVtableMap>> = RwLock::new(None)
 /// per (class, iface, method) tuple during program startup from
 /// `__vtable_init__`.
 #[no_mangle]
+/// Whether `RAYZOR_IFACE_DEBUG` is set, read once. Both callers sit on the
+/// interface dispatch path, where a `getenv` per call is pure overhead.
+fn iface_debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_IFACE_DEBUG").is_some())
+}
+
 pub extern "C" fn haxe_iface_vtable_set_slot(
     class_type_id: i32,
     iface_type_id: i32,
     slot_index: i32,
     closure_ptr: i64,
 ) {
-    if std::env::var_os("RAYZOR_IFACE_DEBUG").is_some() {
+    if iface_debug_enabled() {
         // Slot values are FunctionRef closures {fn_ptr, env}; symbolize the
         // inner fn_ptr, which is the dispatch thunk (or the method itself).
         // dladdr is Unix-only; on Windows the address itself is the best this
@@ -3332,7 +3340,7 @@ pub extern "C" fn haxe_iface_vtable_set_slot(
 /// interface (no registry entry).
 #[no_mangle]
 pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32) -> *mut u8 {
-    let debug = std::env::var_os("RAYZOR_IFACE_DEBUG").is_some();
+    let debug = iface_debug_enabled();
     if obj_ptr.is_null() || (obj_ptr as usize) < 0x1000 {
         if debug {
             eprintln!(

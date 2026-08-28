@@ -416,6 +416,16 @@ pub extern "C" fn haxe_array_get_ptr(arr: *const HaxeArray, index: usize) -> *mu
 
 /// Push element onto array
 #[no_mangle]
+/// Whether `RAYZOR_ARRAY_GUARD` is set, read once.
+///
+/// `haxe_array_push` is on the hot path of any array-building program, and a
+/// `getenv` there is a scan of the environment block per element appended.
+fn array_guard_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_ARRAY_GUARD").is_some())
+}
+
 pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
     debug!(
         "[haxe_array_push] Called with arr={:?}, data={:?}",
@@ -429,7 +439,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
     // RAYZOR_ARRAY_GUARD=1: trap on an uninitialized header (MallocScribble
     // fills fresh allocations with 0xAA) so a debugger stops with the array
     // address in hand for malloc_history.
-    if std::env::var_os("RAYZOR_ARRAY_GUARD").is_some() {
+    if array_guard_enabled() {
         unsafe {
             let a = &*arr;
             if (a.ptr as usize) & 0xFFFF_FFFF == 0xAAAA_AAAA
