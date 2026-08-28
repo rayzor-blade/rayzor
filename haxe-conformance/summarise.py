@@ -17,7 +17,10 @@ def read(path):
     for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()[1:]:
         parts = line.split("\t")
         if len(parts) >= 3:
-            rows.append((parts[0], parts[1], parts[2]))
+            # The suite column is newer than the report format; a report
+            # written before it exists still reads, as one unnamed suite.
+            rows.append((parts[0], parts[1], parts[2],
+                         parts[3] if len(parts) >= 4 else "unit"))
     return rows
 
 
@@ -37,7 +40,7 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     rows = read(report)
-    counts = collections.Counter(status for _, status, _ in rows)
+    counts = collections.Counter(status for _, status, _, _ in rows)
     # Skipped tests are out of scope, not failures: counting them would let the
     # score rise by skipping more.
     scored = sum(c for s, c in counts.items() if s != "SKIP")
@@ -53,6 +56,22 @@ def main():
     (outdir / "badge.json").write_text(json.dumps(badge) + "\n", encoding="utf-8")
 
     lines = [f"## Haxe conformance — {passed}/{scored} ({pct:.1f}%)", ""]
+    # Per suite as well as overall. The language suite is two orders of
+    # magnitude larger than sys and threads, so a combined figure moves only
+    # with it and the other two can go to zero unnoticed.
+    per = {}
+    for _, status, _, suite in rows:
+        per.setdefault(suite, collections.Counter())[status] += 1
+    if len(per) > 1:
+        lines += ["| suite | scored | passed | % | skipped |", "|---|---:|---:|---:|---:|"]
+        for suite in sorted(per):
+            c = per[suite]
+            sc = sum(n for st, n in c.items() if st != "SKIP")
+            pa = c.get("PASS", 0)
+            pp = (100.0 * pa / sc) if sc else 0.0
+            lines.append(f"| {suite} | {sc} | {pa} | {pp:.1f}% | {c.get('SKIP', 0)} |")
+        lines.append("")
+
     lines += ["| outcome | count |", "|---|---:|"]
     for status in ORDER + sorted(set(counts) - set(ORDER)):
         if counts.get(status):
@@ -62,7 +81,7 @@ def main():
     # that turns a failure count into a work list.
     stubs = collections.Counter(
         detail.split("uncompiled ", 1)[1].strip()
-        for _, _, detail in rows if detail.startswith("uncompiled ")
+        for _, _, detail, _ in rows if detail.startswith("uncompiled ")
     )
     if stubs:
         shapes = collections.Counter(name.rsplit(".", 1)[-1] for name in stubs)

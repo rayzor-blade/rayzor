@@ -13,6 +13,30 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/.." && pwd)}"
 SRC="${SRC:-$HERE/corpus/tests/unit/src/unit/issues}"
+# The issue files are regressions for individual upstream bugs. The feature
+# suites one directory up -- TestBasetypes, TestCasts, TestGeneric, TestMatch,
+# TestOps, TestReflect, TestType, ... -- are the systematic coverage, and
+# scoring only the issues left every one of them unmeasured. Same base class,
+# same shape, so they go through the identical path. FEATURES=0 to exclude.
+FEATURE_SRC="${FEATURE_SRC:-$HERE/corpus/tests/unit/src/unit}"
+FEATURES="${FEATURES:-1}"
+# Not cases: Test is the base class we shim, and the two Main files are the
+# upstream runner's entry points.
+NOT_A_CASE=" Test TestMain TestMainNow Main ThreadTestBase "
+
+# The other two suites a Haxe VM is normally held to. They are written against
+# utest rather than unit.Test -- different base class, same idea -- and their
+# cases are found and scored the same way.
+SYS_SRC="${SYS_SRC:-$HERE/corpus/tests/sys/src}"
+THREADS_SRC="${THREADS_SRC:-$HERE/corpus/tests/threads/src}"
+SUITES="${SUITES:-unit,sys,threads}"
+
+# What declares a case, in one place. unit.Test is the language suite's base;
+# utest.Test is sys and threads'; TestCommandBase and ThreadTestBase are
+# intermediate bases that cases inherit from without naming utest directly.
+CASE_RE="extends[[:space:]]+(unit\\.)?Test\\b|extends[[:space:]]+utest\\.Test\\b|extends[[:space:]]+(TestCommandBase|ThreadTestBase)\\b"
+
+suite_on() { case ",$SUITES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 WORK="${WORK:-${TMPDIR:-/tmp}/rayzor_conformance}"
 LIMIT="${LIMIT:-0}"
 TIMEOUT="${TIMEOUT:-60}"
@@ -71,7 +95,7 @@ mkdir -p "$RUN_ROOT" "$SHARED/unit/issues/misc" "$SHARED/utest" "$RESULTS" "$(di
 # WORK is reusable locally. Do not let raw output from an earlier run masquerade
 # as evidence for this one when a test now takes a different path.
 find "$LOGS" -maxdepth 1 -type f -name '*.log' -delete 2>/dev/null || true
-if ! printf 'issue\tstatus\tdetail\n' > "$OUT"; then
+if ! printf 'issue\tstatus\tdetail\tsuite\n' > "$OUT"; then
   echo "cannot write conformance report: $OUT" >&2
   exit 2
 fi
@@ -94,16 +118,54 @@ fi
 cp "$SRC_ROOT"/*.hx "$SHARED/" 2>/dev/null || true
 [[ -d "$SRC_ROOT/scripthost" ]] && cp -R "$SRC_ROOT"/scripthost "$SHARED/" 2>/dev/null || true
 [[ -d "$SRC_ROOT/misc" ]] && cp -R "$SRC_ROOT"/misc "$SHARED/" 2>/dev/null || true
+# sys cases call into sibling helpers that upstream ships beside them --
+# ExitCode, FileNames, UnicodeSequences, UtilityProcess -- and threads cases
+# all extend ThreadTestBase. Main is excluded from both: it is upstream's own
+# entry point, and a second main on the class path competes with the injected
+# one.
+if [[ -d "$SYS_SRC" ]]; then
+  find "$SYS_SRC" -maxdepth 1 -name '*.hx' ! -name 'Main.hx' \
+    -exec cp {} "$SHARED/" \; 2>/dev/null || true
+fi
+if [[ -d "$THREADS_SRC" ]]; then
+  cp "$THREADS_SRC/ThreadTestBase.hx" "$SHARED/" 2>/dev/null || true
+fi
 cp "$HERE/shims/unit/Test.hx" "$SHARED/unit/Test.hx"
 cp "$HERE/shims/unit/ConfCheck.hx" "$SHARED/unit/ConfCheck.hx"
 cp "$HERE/shims/utest/Assert.hx" "$SHARED/utest/Assert.hx"
+cp "$HERE/shims/utest/Test.hx" "$SHARED/utest/Test.hx"
 
 # How many files are candidates, so progress has a denominator.
 # Both spellings. A file in `package unit.issues` may name the base class
 # `Test` or `unit.Test`, and matching only the qualified form dropped 714 of
 # the 1165 issue files before they were ever compiled -- not skipped, not
 # reported, just absent from the denominator.
-total=$(grep -lE "extends[[:space:]]+(unit\.)?Test\b" "$SRC"/*.hx 2>/dev/null | wc -l | tr -d ' ')
+# One definition of what counts as a case, used by both the denominator and
+# the dispatch loop -- computing them separately is how a run ends up scoring
+# a different set than it counted.
+list_cases() {
+  local p b
+  {
+    if suite_on unit; then
+      ls "$SRC"/*.hx 2>/dev/null
+      if [[ "$FEATURES" != 0 && -d "$FEATURE_SRC" ]]; then
+        ls "$FEATURE_SRC"/*.hx 2>/dev/null
+      fi
+    fi
+    if suite_on sys && [[ -d "$SYS_SRC" ]]; then
+      find "$SYS_SRC" -name '*.hx' 2>/dev/null | sort
+    fi
+    if suite_on threads && [[ -d "$THREADS_SRC" ]]; then
+      find "$THREADS_SRC" -name '*.hx' 2>/dev/null | sort
+    fi
+  } | while IFS= read -r p; do
+    b="$(basename "$p" .hx)"
+    case "$NOT_A_CASE" in *" $b "*) continue ;; esac
+    grep -qE "$CASE_RE" "$p" && printf '%s\n' "$p"
+  done
+}
+
+total=$(list_cases | wc -l | tr -d ' ')
 [[ "$LIMIT" != 0 && $LIMIT -lt $total ]] && total=$LIMIT
 
 seen=0
@@ -120,9 +182,9 @@ tally() {
     "$c_COMPILE_FAIL" "$c_CRASH" "$c_TIMEOUT" "$c_SKIP" >&2
 }
 
-record() {  # record <test> <status> <detail>
-  local t="$1" st="$2" det="$3"
-  printf '%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" >> "$OUT"
+record() {  # record <test> <status> <detail> <suite>
+  local t="$1" st="$2" det="$3" sui="${4:-unit}"
+  printf '%s\t%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" "$sui" >> "$OUT"
   case "$st" in
     PASS)         c_PASS=$((c_PASS+1)) ;;
     WRONG_ANSWER) c_WRONG_ANSWER=$((c_WRONG_ANSWER+1)) ;;
@@ -140,13 +202,23 @@ record() {  # record <test> <status> <detail>
 
 emit_result() { # emit_result <path> <test> <status> <detail>
   local result="$1" t="$2" st="$3" det="$4"
-  printf '%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" > "$result"
+  # Which suite the case came from. Without it the sys and threads results
+  # disappear into a 1200-row aggregate and nobody can see they score zero.
+  printf '%s\t%s\t%s\t%s\n' "$t" "$st" "${det//$'\t'/ }" "${suite:-unit}" > "$result"
 }
 
 process_one() { # process_one <source> <result-file>
   local f="$1" result="$2"
-  local base pkg d gen out code det status
+  local base pkg d gen out code det status suite
   base="$(basename "$f" .hx)"
+  # Classified before anything can emit a row: the target-package skip below
+  # returns early, and a result written without a suite lands in a phantom one.
+  case "$f" in
+    "$SYS_SRC"/*)     suite=sys ;;
+    "$THREADS_SRC"/*) suite=threads ;;
+    "$SRC"/*)         suite=issues ;;
+    *)                suite=features ;;
+  esac
 
   # A test that names a target-language package is asserting about that
   # target's semantics, not about Haxe. Out of scope: rayzor is its own
@@ -166,7 +238,24 @@ process_one() { # process_one <source> <result-file>
     return
   fi
 
-  d="$RUN_ROOT/$base"; rm -rf "$d"; mkdir -p "$d/unit/issues"
+  # Stage under the package the file declares rather than a fixed one: the
+  # issue files are `package unit.issues`, the feature suites beside them are
+  # `package unit`, and a class staged in the wrong directory does not resolve.
+  local rel
+  rel="$(grep -m1 -oE '^[[:space:]]*package[[:space:]]+[A-Za-z0-9_.]+' "$f" \
+          | awk '{print $2}' | tr '.' '/')"
+  # The sys suite declares no package at all, so an empty `rel` is the root of
+  # the staging directory -- not a missing value to default away.
+  d="$RUN_ROOT/$base"; rm -rf "$d"; mkdir -p "$d${rel:+/$rel}"
+  # Haxe applies an `import.hx` at a class-path root to every module beneath
+  # it. The threads suite puts its utest imports there, which is why its cases
+  # call isTrue/same/pass unqualified. Staged per-test rather than into SHARED:
+  # a wildcard static import visible to the whole corpus would change name
+  # resolution for the other 1200 cases.
+  case "$f" in
+    "$THREADS_SRC"/*) cp "$THREADS_SRC/import.hx" "$d/" 2>/dev/null || true ;;
+    "$SYS_SRC"/*)     cp "$SYS_SRC/import.hx" "$d/" 2>/dev/null || true ;;
+  esac
   # The corpus is not self-contained: tests reference siblings that upstream
   # ships beside them -- HelperMacros, MyClass, MyEnum, and the macros under
   # issues/misc. Without them a test fails on a missing type, which reads as
@@ -175,7 +264,7 @@ process_one() { # process_one <source> <result-file>
 
   # Inject main() as the last member of the class; awk -v cannot carry newlines.
   # Exits 3 when the class declares no test method that is live for us.
-  python3 - "$f" "$d/unit/issues/$base.hx" "$base" "$TARGET_PKGS" <<'PYGEN'
+  python3 - "$f" "$d${rel:+/$rel}/$base.hx" "$base" "$TARGET_PKGS" <<'PYGEN'
 import sys
 src, dst, cls, target_pkgs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 text = open(src, encoding='utf-8', errors='replace').read()
@@ -259,8 +348,8 @@ PYGEN
   # declare a forward reference and never compiled, so the reference becomes a
   # trap stub and the test dies on SIGTRAP with nothing said. A manifest with a
   # class path compiles the siblings too.
-  printf '[project]\nname = "conformance"\nentry = "unit/issues/%s.hx"\n\n[build]\nclass-paths = [".", "%s"]\n' \
-    "$base" "$SHARED" > "$d/rayzor.toml"
+  printf '[project]\nname = "conformance"\nentry = "%s%s.hx"\n\n[build]\nclass-paths = [".", "%s"]\n' \
+    "${rel:+$rel/}" "$base" "$SHARED" > "$d/rayzor.toml"
   # Bounded. A test that now compiles can also loop forever, and without a
   # limit one of those stalls the whole corpus -- in CI, until the job is
   # killed hours later. `timeout` is not on every platform we run this on, so
@@ -324,7 +413,7 @@ PYGEN
     # body. Calling that a skip charges our own gaps to the harness and hides
     # them from the score.
     if [[ "$det" == *"No main function found"* ]] \
-       && ! grep -q "static function main" "$d/unit/issues/$base.hx"; then
+       && ! grep -q "static function main" "$d${rel:+/$rel}/$base.hx"; then
       emit_result "$result" "$base" SKIP "harness could not inject main"
     elif [[ "$det" == *"'utest'"* ]]; then
       emit_result "$result" "$base" SKIP "uses utest directly"
@@ -349,7 +438,7 @@ worker_pids=()
 worker_results=()
 
 reap_one() {
-  local i pid result t st det
+  local i pid result t st det sui
   while true; do
     for i in "${!worker_pids[@]}"; do
       pid="${worker_pids[$i]}"
@@ -360,8 +449,8 @@ reap_one() {
           echo "conformance worker $pid exited without a result" >&2
           exit 2
         fi
-        IFS=$'\t' read -r t st det < "$result"
-        record "$t" "$st" "$det"
+        IFS=$'\t' read -r t st det sui < "$result"
+        record "$t" "$st" "$det" "$sui"
         unset 'worker_pids[$i]' 'worker_results[$i]'
         return
       fi
@@ -370,8 +459,7 @@ reap_one() {
   done
 }
 
-for f in "$SRC"/*.hx; do
-  grep -qE "extends[[:space:]]+(unit\.)?Test\b" "$f" || continue
+while IFS= read -r f; do
   [[ "$LIMIT" != 0 && $queued -ge $LIMIT ]] && break
   base="$(basename "$f" .hx)"
   result="$RESULTS/$(printf '%05d' "$queued")-$base.tsv"
@@ -380,7 +468,7 @@ for f in "$SRC"/*.hx; do
   worker_results+=("$result")
   queued=$((queued+1))
   [[ ${#worker_pids[@]} -ge $JOBS ]] && reap_one
-done
+done < <(list_cases)
 while [[ ${#worker_pids[@]} -gt 0 ]]; do
   reap_one
 done
@@ -389,7 +477,7 @@ done
 # stable so two runs can be diffed directly. Result names carry the source
 # index, and shell glob order restores that order without serialising workers.
 ordered_out="$OUT.ordered.$$"
-printf 'issue\tstatus\tdetail\n' > "$ordered_out"
+printf 'issue\tstatus\tdetail\tsuite\n' > "$ordered_out"
 for result in "$RESULTS"/*.tsv; do
   cat "$result" >> "$ordered_out"
 done
