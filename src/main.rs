@@ -2162,17 +2162,26 @@ fn run_file(
         .initialize_loaded_modules()
         .map_err(|e| format!("module initialization failed: {}", e))?;
 
-    // Optional manifest-driven auto-upgrade: once module init has
-    // populated globals/vtables, force every reachable function up to
-    // LLVM (Maximum tier) before main runs. Failures here are
-    // non-fatal — we keep the Cranelift-tier function pointers and
-    // continue.
+    // Once module init has populated globals/vtables, force every reachable
+    // function up to LLVM (Maximum tier) before main runs.
+    //
+    // A failure is fatal when the user asked for `--llvm`. Continuing on
+    // Cranelift there reports success for a run that never used the tier that
+    // was requested: the program still works, so nothing looks wrong, and every
+    // measurement taken from it is a Cranelift measurement wearing another
+    // name. A preset that merely prefers LLVM keeps the old behaviour, since
+    // nobody asked for the tier by name.
     if auto_upgrade_to_llvm {
         #[cfg(feature = "llvm-backend")]
         {
             let profile_load = verbose || std::env::var_os("RAYZOR_PROFILE_LOAD").is_some();
             let up_t = profile_load.then(std::time::Instant::now);
             if let Err(e) = backend.upgrade_to_llvm() {
+                if llvm {
+                    return Err(format!(
+                        "--llvm was requested but the LLVM tier could not compile this program: {e}"
+                    ));
+                }
                 eprintln!(
                     "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
                     e
