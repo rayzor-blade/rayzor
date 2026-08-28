@@ -26,6 +26,12 @@ PRESET="${PRESET:-application}"
 # upgrade_to_llvm at all -- the score is a Cranelift score. LLVM is not opt-in
 # in production, so it should be measurable here.
 LLVM="${LLVM:-0}"
+# CRANELIFT=1 pins the corpus to Cranelift: start compiled at Baseline (P1) and
+# never promote. The default run starts interpreted and climbs, so a test short
+# enough never to get hot is scored mostly on the interpreter -- which is a
+# third behaviour again, not "Cranelift". Tiers 0-3 are interpreter/Cranelift
+# levels; LLVM is the separate upgrade, so this and LLVM=1 are disjoint.
+CRANELIFT="${CRANELIFT:-0}"
 LOGS="${LOGS:-$WORK/logs}"
 
 # Keep enough parallelism to use the machine without letting a corpus run
@@ -266,6 +272,9 @@ PYGEN
   # invocation and scores the whole corpus COMPILE_FAIL.
   if [[ "$LLVM" != 0 ]]; then
     out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" --llvm 2>&1 )
+  elif [[ "$CRANELIFT" != 0 ]]; then
+    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" \
+             --tier 1 --tier-start-interpreted false --tier-promotion false 2>&1 )
   else
     out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
   fi
