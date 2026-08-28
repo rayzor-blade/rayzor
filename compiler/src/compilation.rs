@@ -5962,6 +5962,98 @@ impl CompilationUnit {
         Ok(())
     }
 
+    /// Every `import.hx` that applies to this compilation, outermost first.
+    ///
+    /// Haxe honours an import.hx at a class-path root and applies it to every
+    /// module at or below it. Three roots matter here:
+    ///
+    ///   1. the compiler's own stdlib, so rayzor can ship defaults with it;
+    ///   2. the project root, the working directory the build was invoked from;
+    ///   3. each user file's class-path root down to its own directory.
+    ///
+    /// The package declaration bounds (3) exactly: a file in `package cases`
+    /// sits one directory below its class-path root, so that chain is
+    /// package-depth + 1 long. Walking past the root would adopt an import.hx
+    /// belonging to an unrelated tree.
+    pub fn discover_import_hx_files(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut push = |d: PathBuf, dirs: &mut Vec<PathBuf>| {
+            if d.is_dir() && !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        };
+
+        for p in CompilationConfig::discover_stdlib_paths() {
+            push(p, &mut dirs);
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            push(cwd, &mut dirs);
+        }
+        for file in &self.user_files {
+            let Some(parent) = PathBuf::from(&file.filename)
+                .parent()
+                .map(|p| p.to_path_buf())
+            else {
+                continue;
+            };
+            let dir = std::fs::canonicalize(&parent).unwrap_or(parent);
+            let depth = file.package.as_ref().map(|p| p.path.len()).unwrap_or(0);
+            let mut chain = Vec::new();
+            let mut d = dir;
+            for _ in 0..=depth {
+                chain.push(d.clone());
+                match d.parent() {
+                    Some(up) => d = up.to_path_buf(),
+                    None => break,
+                }
+            }
+            chain.reverse();
+            for c in chain {
+                push(c, &mut dirs);
+            }
+        }
+
+        dirs.into_iter()
+            .map(|d| d.join("import.hx"))
+            .filter(|p| p.is_file())
+            .collect()
+    }
+
+    /// The types an `import.hx` names, so they can be loaded.
+    ///
+    /// An import.hx exists to name types nothing else in the program mentions,
+    /// so those types are invisible to the ordinary import scan and never get
+    /// compiled -- which is why a name an import.hx provides resolved to
+    /// nothing even once the import itself was registered.
+    ///
+    /// The file is parsed for its import paths and NOTHING else. Compiling it
+    /// as a user module instead installs a trap stub over the real `main` of
+    /// whatever module sits beside it: it declares no types, and putting an
+    /// empty module through the shared-state path renumbers the functions
+    /// around it.
+    fn import_hx_type_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for path in self.discover_import_hx_files() {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(file) = self.parse_file(path.to_str().unwrap_or("import.hx"), &source) else {
+                continue;
+            };
+            for import in &file.imports {
+                if !import.path.is_empty() {
+                    names.push(import.path.join("."));
+                }
+            }
+            for using in &file.using {
+                if !using.path.is_empty() {
+                    names.push(using.path.join("."));
+                }
+            }
+        }
+        names
+    }
+
     /// Load global import.hx files
     /// These are processed AFTER stdlib but BEFORE user files
     /// They provide global imports available to all user code
@@ -7753,6 +7845,7 @@ impl CompilationUnit {
         // Pre-load imports using efficient topological loading (avoids retry loops)
         let mut all_imports = imports_to_load;
         all_imports.extend(usings_to_load);
+        all_imports.extend(self.import_hx_type_names());
         let t_import_load = profile_timer(self.config.profile_typecheck);
         let _ = self.load_imports_efficiently(&all_imports);
         add_profile_ms(&mut self.typecheck_timings.import_load_ms, t_import_load);
