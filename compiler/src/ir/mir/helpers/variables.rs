@@ -184,13 +184,64 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirStatement::While {
-                condition, body, ..
+                condition,
+                body,
+                continue_update,
+                ..
+            } => {
+                self.collect_referenced_variables_in_expr(condition, vars);
+                self.collect_referenced_variables_in_block(body, vars);
+                if let Some(upd) = continue_update {
+                    self.collect_referenced_variables_in_block(upd, vars);
+                }
             }
-            | HirStatement::DoWhile {
+            HirStatement::DoWhile {
                 condition, body, ..
             } => {
                 self.collect_referenced_variables_in_expr(condition, vars);
                 self.collect_referenced_variables_in_block(body, vars);
+            }
+            // A variable written inside a `switch` nested in a loop body needs
+            // the enclosing loop's header phi just as much as one written in an
+            // `if`. Without this arm the loop builds no phi for it, the switch's
+            // own continuation phi becomes the symbol's SSA value, and code
+            // after the loop reads a register defined *inside* the loop body —
+            // which does not dominate the exit block. Cranelift translates in
+            // reverse post-order, so the exit block is reached before the
+            // continuation and the read fails with
+            // "not found in value_map". `for`/`try`/labelled blocks have the
+            // same hole.
+            HirStatement::Switch { scrutinee, cases } => {
+                self.collect_referenced_variables_in_expr(scrutinee, vars);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.collect_referenced_variables_in_expr(guard, vars);
+                    }
+                    self.collect_referenced_variables_in_block(&case.body, vars);
+                }
+            }
+            HirStatement::ForIn { iterator, body, .. } => {
+                self.collect_referenced_variables_in_expr(iterator, vars);
+                self.collect_referenced_variables_in_block(body, vars);
+            }
+            HirStatement::TryCatch {
+                try_block,
+                catches,
+                finally_block,
+            } => {
+                self.collect_referenced_variables_in_block(try_block, vars);
+                for catch in catches {
+                    self.collect_referenced_variables_in_block(&catch.body, vars);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.collect_referenced_variables_in_block(finally_block, vars);
+                }
+            }
+            HirStatement::Label { block, .. } => {
+                self.collect_referenced_variables_in_block(block, vars);
+            }
+            HirStatement::Throw(expr) => {
+                self.collect_referenced_variables_in_expr(expr, vars);
             }
             _ => {}
         }

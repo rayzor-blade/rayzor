@@ -1273,9 +1273,24 @@ impl OptimizationPass for LICMPass {
                 // Collect ALL indices to remove (regular hoists + alloc hoists + free removals)
                 let mut indices_to_remove: BTreeMap<IrBlockId, Vec<usize>> = BTreeMap::new();
 
-                // Sort hoisted instructions by original position to maintain order
-                to_hoist.sort_by_key(|(block_id, idx, _)| (block_id.as_u32(), *idx));
-
+                // Keep `to_hoist` in DISCOVERY order — do not sort it by
+                // (block id, index). The preheader is straight-line code, so
+                // the only order that matters there is def-before-use, and the
+                // fixpoint above already produces exactly that: an instruction
+                // is accepted only once every in-loop value it reads is already
+                // in `invariant_defs`, i.e. already pushed. Block ids carry no
+                // such guarantee. Sorting by them reordered
+                //
+                //   bb5: $4 = cmp eq $382, $3      (uses $382)
+                //   bb10: $382 = const 0
+                //
+                // into `$4` before `$382` in the preheader — a use before its
+                // definition, which the Cranelift backend reports as
+                // "Left operand IrId(N) not found in value_map" and answers
+                // with a trap stub for the whole function.
+                //
+                // Removal indices are collected per block and sorted
+                // independently below, so they do not depend on this order.
                 for (block_id, idx, _) in &to_hoist {
                     indices_to_remove.entry(*block_id).or_default().push(*idx);
                 }

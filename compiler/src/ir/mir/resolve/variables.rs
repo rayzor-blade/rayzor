@@ -94,6 +94,40 @@ impl<'a> HirToMirContext<'a> {
                     self.find_modified_variables_in_statement(stmt, modified);
                 }
             }
+            // Same hole as in collect_referenced_variables_in_stmt: an
+            // assignment inside a nested `switch` or `try` is a write the
+            // enclosing if/switch has to phi-merge at its continuation, or the
+            // symbol keeps pointing at a register defined on one arm only.
+            HirStatement::Switch { scrutinee, cases } => {
+                self.find_modified_variables_in_expression(scrutinee, modified);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.find_modified_variables_in_expression(guard, modified);
+                    }
+                    for stmt in &case.body.statements {
+                        self.find_modified_variables_in_statement(stmt, modified);
+                    }
+                }
+            }
+            HirStatement::TryCatch {
+                try_block,
+                catches,
+                finally_block,
+            } => {
+                for stmt in &try_block.statements {
+                    self.find_modified_variables_in_statement(stmt, modified);
+                }
+                for catch in catches {
+                    for stmt in &catch.body.statements {
+                        self.find_modified_variables_in_statement(stmt, modified);
+                    }
+                }
+                if let Some(finally_block) = finally_block {
+                    for stmt in &finally_block.statements {
+                        self.find_modified_variables_in_statement(stmt, modified);
+                    }
+                }
+            }
             _ => {}
         }
     }
