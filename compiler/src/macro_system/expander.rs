@@ -933,10 +933,17 @@ impl MacroExpander {
         // Enter expansion tracking (depth + circular dep checks)
         self.registry.enter_expansion(name)?;
 
-        // Get the macro definition
+        // Get the macro definition.
+        //
+        // By NAME, not by exact key: the gate that got us here is `is_macro`,
+        // which accepts a macro's simple name as well as its qualified one, so
+        // a bare call to a macro declared in the same class passes the gate and
+        // then failed this lookup. The field has already been stripped from the
+        // class by then, so the call reached type checking as an ordinary
+        // identifier and reported an unknown name.
         let macro_def = self
             .registry
-            .get_macro(name)
+            .find_macro_by_name(name)
             .ok_or_else(|| MacroError::UndefinedMacro {
                 name: name.to_string(),
                 location,
