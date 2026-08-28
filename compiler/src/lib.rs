@@ -103,6 +103,7 @@
 pub mod codegen;
 pub mod compilation;
 pub mod compiler_plugin; // Compiler-level plugin system for stdlib method mappings
+pub mod debug_flags;
 pub mod dependency_graph;
 pub mod error_codes;
 pub mod hxml;

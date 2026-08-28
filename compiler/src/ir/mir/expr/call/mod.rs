@@ -75,7 +75,7 @@ impl<'a> HirToMirContext<'a> {
             unreachable!("lower_call on a non-Call expression")
         };
         // RAYZOR_PROBE_CALLTARGET=1 tabulates (target, callee shape).
-        if std::env::var_os("RAYZOR_PROBE_CALLTARGET").is_some() {
+        if crate::debug_flags::probe_calltarget() {
             let t = match _resolved_target {
                 crate::ir::hir::CallTarget::Function => "Function",
                 crate::ir::hir::CallTarget::Method { .. } => "Method",

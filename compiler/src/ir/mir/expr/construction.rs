@@ -347,7 +347,7 @@ impl<'a> HirToMirContext<'a> {
                         constructor_type_id = type_id_from_symbol;
                         has_constructor = true;
                         ctor_path = "SYMBOL-PUN";
-                    } else if std::env::var("RAYZOR_CTOR_DEBUG").is_ok() {
+                    } else if crate::debug_flags::ctor_debug() {
                         eprintln!(
                             "[CTOR] class={:?} REFUSED pun candidate {:?} (owner={:?})",
                             debug_class_name,
@@ -586,7 +586,7 @@ impl<'a> HirToMirContext<'a> {
         // (including accumulated cross-context TypeId→SymbolId maps) must
         // never be consulted: a shifted id resolves to another class's
         // size and silently under-allocates.
-        let alloc_dbg = std::env::var_os("RAYZOR_ALLOC_DEBUG").is_some();
+        let alloc_dbg = crate::debug_flags::alloc_debug();
         let stage = std::cell::Cell::new("sym");
         let class_sym_for_name = actual_symbol_id.or_else(|| {
             self.type_table
@@ -710,7 +710,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
-        if std::env::var("RAYZOR_CTOR_DEBUG").is_ok() {
+        if crate::debug_flags::ctor_debug() {
             let cname = debug_class_name.unwrap_or("?");
             eprintln!(
                 "[CTOR] class={} path={} class_type={:?} resolved_type={:?} fid={:?}",

@@ -395,7 +395,7 @@ impl IrBuilder {
         // PROBE (RAYZOR_VECCALL_DIAG=1): any direct call taking a VECTOR-typed
         // argument. `vacc.add(...)` on a loop-carried SIMD4f phi becomes a plain
         // call to an unrelated function; this names the callee actually chosen.
-        if std::env::var_os("RAYZOR_VECCALL_DIAG").is_some() {
+        if crate::debug_flags::veccall_diag() {
             let vec_args: Vec<(usize, IrId, IrType)> = args
                 .iter()
                 .enumerate()

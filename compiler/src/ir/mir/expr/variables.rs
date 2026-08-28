@@ -48,7 +48,7 @@ impl<'a> HirToMirContext<'a> {
         let HirExprKind::Variable { symbol, .. } = &expr.kind else {
             unreachable!("lower_variable_expr on a non-Variable expression")
         };
-        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+        if crate::debug_flags::globals_debug() {
             if let Some(n) = self
                 .symbol_table
                 .get_symbol(*symbol)
@@ -349,7 +349,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+            if crate::debug_flags::globals_debug() {
                 if let Some(n) = self
                     .symbol_table
                     .get_symbol(*symbol)
@@ -369,7 +369,7 @@ impl<'a> HirToMirContext<'a> {
                 // Reports the global id this READ targets; it must match the id
                 // the owning module's __init__ STORES to, or read and
                 // initialiser are addressing different slots.
-                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                if crate::debug_flags::globals_debug() {
                     let nm = self
                         .symbol_table
                         .get_symbol(*symbol)
@@ -413,7 +413,7 @@ impl<'a> HirToMirContext<'a> {
             if let Some(qn) = qual {
                 for global in self.builder.module.globals.values() {
                     if global.name == qn {
-                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        if crate::debug_flags::globals_debug() {
                             debug!("[globals] RESOLVED-FQN {} -> @g{}", qn, global.id.0);
                         }
                         return self.builder.build_load_global(global.id, global.ty.clone());
@@ -424,7 +424,7 @@ impl<'a> HirToMirContext<'a> {
                     // Type comes from the DEFINING module: this module's table
                     // has no entry, so a local lookup would yield IrType::Any
                     // and load e.g. a String as an untyped slot.
-                    if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                    if crate::debug_flags::globals_debug() {
                         debug!(
                             "[globals] RESOLVED-EXTERNAL {} -> @g{} : {:?}",
                             qn, gid.0, gty
@@ -432,7 +432,7 @@ impl<'a> HirToMirContext<'a> {
                     }
                     return self.builder.build_load_global(gid, gty);
                 }
-                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                if crate::debug_flags::globals_debug() {
                     let have: Vec<String> = self
                         .builder
                         .module
@@ -454,7 +454,7 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
                         if let Some(gname) = self.string_interner.get(gsym_info.name) {
                             if gname == name_str {
-                                if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                                if crate::debug_flags::globals_debug() {
                                     debug!(
                                         "[globals] RESOLVED-BARENAME {} -> @g{}",
                                         name_str, gid.0
@@ -478,7 +478,7 @@ impl<'a> HirToMirContext<'a> {
                 // unavailable and the result is a guess.
                 for global in self.builder.module.globals.values() {
                     if global.name.ends_with(&format!(".{}", name_str)) || global.name == name_str {
-                        if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+                        if crate::debug_flags::globals_debug() {
                             debug!(
                                 "[globals] RESOLVED-SUFFIX {} -> @g{} ({})",
                                 name_str, global.id.0, global.name
@@ -492,7 +492,7 @@ impl<'a> HirToMirContext<'a> {
             // cross-module static that resolves to nothing reads as "" or 0.
             // Gated because benign stdlib internals (`i64`, `base`, ...) also
             // land here and are resolved by other means downstream.
-            if std::env::var_os("RAYZOR_GLOBALS_DEBUG").is_some() {
+            if crate::debug_flags::globals_debug() {
                 debug!(
                     "[globals] unresolved variable {:?} (name={:?}, qualified={:?}) \
                      — this read will produce an empty/zero value. If it names a \
