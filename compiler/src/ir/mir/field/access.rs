@@ -429,17 +429,28 @@ impl<'a> HirToMirContext<'a> {
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
                 crate::tast::PropertyAccessor::Method(getter_method_name) => {
+                    // The receiver's own class first. The scans below match on the
+                    // BARE method name across every module in the session, and
+                    // `get_length` is declared by several stdlib classes — the
+                    // first one iteration reaches wins and is called with this
+                    // receiver, reading another class's layout (`StringBuf.length`
+                    // came back as `haxe.io.BytesBuffer`'s buffer capacity). Only
+                    // fall back to the bare-name scan when the receiver's class is
+                    // unresolvable, which is where those scans earn their keep.
                     let getter_func_id = self
-                        .function_map
-                        .iter()
-                        .find(|(sym_id, _)| {
-                            if let Some(symbol) = self.symbol_table.get_symbol(**sym_id) {
-                                symbol.name == *getter_method_name
-                            } else {
-                                false
-                            }
+                        .resolve_method_function_id(receiver_ty, *getter_method_name)
+                        .or_else(|| {
+                            self.function_map
+                                .iter()
+                                .find(|(sym_id, _)| {
+                                    if let Some(symbol) = self.symbol_table.get_symbol(**sym_id) {
+                                        symbol.name == *getter_method_name
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .map(|(_, func_id)| *func_id)
                         })
-                        .map(|(_, func_id)| *func_id)
                         .or_else(|| {
                             self.external_function_map
                                 .iter()

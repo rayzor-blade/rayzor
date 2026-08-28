@@ -1587,9 +1587,15 @@ impl<'a> HirToMirContext<'a> {
         // generic returns (`Arc<T>::get()` yields a receiver_ty matching no
         // concrete class). So: None for known stdlib receivers, where the caller
         // reaches stdlib runtime dispatch; first match otherwise.
+        //
+        // Test the receiver's UNDERLYING type, not its spelling: a `TypeAlias` or
+        // `GenericInstance` over `Array` (`typedef BytesData = Array<Int>`) reads as
+        // neither Array nor String here, so the built-in receiver would fall through
+        // to the bare-name guess below. Same reasoning as the extern check that
+        // follows, where the missing unwrap was the observed defect.
         let receiver_is_stdlib_property_target = self
             .type_table
-            .get(receiver_ty)
+            .get(self.resolve_receiver_base_type(receiver_ty))
             .map(|ti| {
                 matches!(
                     ti.kind,
@@ -1605,9 +1611,14 @@ impl<'a> HirToMirContext<'a> {
         // None so the caller falls through to stdlib runtime dispatch rather than
         // taking a same-named user-class field — e.g. `StringBuf.length` standing
         // in for `String.length`.
+        //
+        // Again on the UNDERLYING type: `haxe.io.Bytes` resolves to a `TypeAlias`
+        // over the extern `rayzor.Bytes`, so testing the alias itself finds no
+        // class at all and lets `Bytes.length` fall through to a bare-name guess
+        // between `Array.length` and `haxe.ds.List.length`.
         let receiver_is_extern_class = self
             .type_table
-            .get(receiver_ty)
+            .get(self.resolve_receiver_base_type(receiver_ty))
             .and_then(|ti| match &ti.kind {
                 TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                 _ => None,
@@ -1729,6 +1740,32 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         (fallback, None)
+    }
+
+    /// Unwrap a receiver `TypeId` down to the type that actually owns fields:
+    /// through `TypeAlias`/`Placeholder` (via [`Self::resolve_through_aliases`])
+    /// and then through `GenericInstance` to its base, repeating because a
+    /// generic's base can itself be an alias.
+    ///
+    /// Field resolution must ask about the underlying type: a typedef of a
+    /// built-in (`typedef BytesData = Array<Int>`) is not a class and can never
+    /// own a `field_index_map` entry, but its `TypeAlias` spelling matches none
+    /// of the built-in `TypeKind`s.
+    pub(crate) fn resolve_receiver_base_type(&self, receiver_ty: TypeId) -> TypeId {
+        let type_table = self.type_table;
+        let mut resolved = self.resolve_through_aliases(receiver_ty);
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(resolved) {
+                break;
+            }
+            match type_table.get(resolved).map(|ti| &ti.kind) {
+                Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
+                _ => break,
+            }
+        }
+        resolved
     }
 
     pub(crate) fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
