@@ -20,6 +20,12 @@ OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
 JOBS="${JOBS:-0}"
 PRESET="${PRESET:-application}"
+# LLVM=1 scores the corpus through the LLVM tier instead of letting Beadie/OSR
+# promote only what a short test makes hot. Every preset sets
+# auto_upgrade_to_llvm_after_main_entry:false, so a default run never calls
+# upgrade_to_llvm at all -- the score is a Cranelift score. LLVM is not opt-in
+# in production, so it should be measurable here.
+LLVM="${LLVM:-0}"
 LOGS="${LOGS:-$WORK/logs}"
 
 # Keep enough parallelism to use the machine without letting a corpus run
@@ -255,7 +261,14 @@ PYGEN
   # the watchdog is python3, which the harness already needs.
   # Make the execution mode explicit. Application preserves the production
   # measurement by default; the preset remains overridable for backend probes.
-  out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
+  # Written without an array: `set -u` is on and bash 3.2, which is what macOS
+  # ships, treats "${empty[@]}" as an unbound variable -- which fails EVERY
+  # invocation and scores the whole corpus COMPILE_FAIL.
+  if [[ "$LLVM" != 0 ]]; then
+    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" --llvm 2>&1 )
+  else
+    out=$( cd "$d" && python3 "$HERE/runwith.py" "$TIMEOUT" "$RAYZOR" run --release --no-cache --preset "$PRESET" 2>&1 )
+  fi
   code=$?
   # The compact TSV is for scoring, not diagnosis. Preserve the complete output
   # for every issue so a CI-only crash/no-output result includes its tier event,
