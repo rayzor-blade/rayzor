@@ -1087,6 +1087,33 @@ impl<'a> HirToMirContext<'a> {
                 .build_cast(rhs_reg, rhs_type.clone(), IrType::F64)?;
         }
 
+        // Two floats of differing width. A binary op's operands must share a
+        // type, and nothing downstream reconciles them: Cranelift's x86-64
+        // lowering asserts on the mismatch, while aarch64 silently drops the
+        // operation and yields the untouched left operand. Settle it at the
+        // expression's own float type, so `s + 1.0` on a Single is f32
+        // arithmetic -- which is what Single means -- rather than an f64 add
+        // rounded once at the store.
+        if lhs_is_float && rhs_is_float && lhs_type != rhs_type {
+            let target = match self.convert_type(expr.ty) {
+                t @ (IrType::F32 | IrType::F64) => t,
+                // A comparison yields Bool and a Dynamic result says nothing
+                // about width; f64 is the one that cannot lose what either
+                // side already carries.
+                _ => IrType::F64,
+            };
+            if lhs_type != target {
+                lhs_reg = self
+                    .builder
+                    .build_cast(lhs_reg, lhs_type.clone(), target.clone())?;
+            }
+            if rhs_type != target {
+                rhs_reg = self
+                    .builder
+                    .build_cast(rhs_reg, rhs_type.clone(), target.clone())?;
+            }
+        }
+
         // Vector-ness is decided from the operand register types rather than
         // convert_type(expr.ty): @:coreType abstracts may not resolve through it.
         let lhs_actual_type = self
