@@ -1242,6 +1242,18 @@ impl<'a> TastToHirContext<'a> {
                 source_location,
                 ..
             } => {
+                // An abstract method that writes `this` has to write through to
+                // the receiver. `this` lowers to HirLValue::Variable(SymbolId(0)),
+                // which MIR answers with an SSA rebind that dies when the method
+                // returns, so `a.incr()` computed the new value and dropped it.
+                //
+                // Expanded at the STATEMENT because HIR has no expression that
+                // sequences statements, and at THIS layer because the receiver is
+                // still an lvalue here -- by the time the MIR inliner runs it is an
+                // SSA register with no address to store through.
+                if let Some(stmt) = self.try_expand_abstract_mutation(expression) {
+                    return stmt;
+                }
                 let mut hir_expr = self.lower_expression(expression);
                 // Propagate statement source_location to the HIR expression when the
                 // expression itself has no valid location (e.g., calls inside try blocks).
@@ -5069,6 +5081,163 @@ impl<'a> TastToHirContext<'a> {
 
     /// Try to inline an abstract type method call
     /// Returns Some(inlined_expr) if successful, None otherwise
+    /// A call to a mutating abstract method, rewritten as an assignment to the
+    /// receiver.
+    ///
+    /// Only a body that is a single write to `this` is expanded; anything else
+    /// returns None and takes the ordinary call path, exactly as before. That
+    /// covers the shape the language actually uses for these -- `this = x`,
+    /// `this++`, `this = this + 1` -- without pulling control flow into the
+    /// caller.
+    ///
+    /// Non-inline methods are rejected earlier, at the declaration, so reaching
+    /// here means the method is inline and the expansion is what Haxe specifies.
+    fn try_expand_abstract_mutation(&mut self, expr: &TypedExpression) -> Option<HirStatement> {
+        let TypedExpressionKind::MethodCall {
+            receiver,
+            method_symbol,
+            arguments,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let current_file = self.current_file?;
+        let method_name = self.symbol_table.get_symbol(*method_symbol)?.name;
+
+        let mut found: Option<&crate::tast::node::TypedFunction> = None;
+        for abstract_def in &current_file.abstracts {
+            if let Some(m) = abstract_def
+                .methods
+                .iter()
+                .find(|m| m.symbol_id == *method_symbol)
+            {
+                found = Some(m);
+                break;
+            }
+            if let Some(m) = abstract_def.methods.iter().find(|m| m.name == method_name) {
+                found = Some(m);
+                break;
+            }
+        }
+        let method = found?;
+
+        // The single write, through one level of Block wrapping -- the parser
+        // wraps a braced body, and `function f() this++;` does not.
+        let mut body: &[TypedStatement] = &method.body;
+        if body.len() == 1 {
+            if let TypedStatement::Expression { expression, .. } = &body[0] {
+                if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                    body = statements;
+                }
+            }
+        }
+        if body.len() != 1 {
+            return None;
+        }
+        let is_this = |e: &TypedExpression| matches!(&e.kind, TypedExpressionKind::This { .. });
+
+        enum Write<'a> {
+            Set(&'a TypedExpression),
+            Step(HirBinaryOp),
+        }
+        let write = match &body[0] {
+            TypedStatement::Assignment { target, value, .. } if is_this(target) => {
+                Write::Set(value)
+            }
+            TypedStatement::Expression { expression, .. } => match &expression.kind {
+                // `this = x` reaches TAST as a binary Assign, not as the
+                // Assignment statement -- that one is for ordinary targets.
+                TypedExpressionKind::BinaryOp {
+                    left,
+                    operator: crate::tast::node::BinaryOperator::Assign,
+                    right,
+                } if is_this(left) => Write::Set(right),
+                TypedExpressionKind::UnaryOp { operator, operand } if is_this(operand) => {
+                    match operator {
+                        crate::tast::node::UnaryOperator::PreInc
+                        | crate::tast::node::UnaryOperator::PostInc => {
+                            Write::Step(HirBinaryOp::Add)
+                        }
+                        crate::tast::node::UnaryOperator::PreDec
+                        | crate::tast::node::UnaryOperator::PostDec => {
+                            Write::Step(HirBinaryOp::Sub)
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        // The receiver serves twice: as the destination, and as the value of
+        // `this` anywhere the body reads it.
+        let recv_hir = self.lower_expression(receiver);
+        let lhs = self.lower_lvalue(receiver);
+
+        let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
+        if method.parameters.len() == arguments.len() {
+            for (param, arg) in method.parameters.iter().zip(arguments.iter()) {
+                let lowered = self.lower_expression(arg);
+                param_map.insert(param.symbol_id, lowered);
+            }
+        }
+
+        // Through the abstract to what it actually wraps: the receiver's own type
+        // is the abstract, so testing it directly never sees the Float and the
+        // step literal comes out as an integer 1 laid over an f64.
+        let recv_is_float = {
+            use crate::tast::core::TypeKind;
+            let table = self.type_table.borrow();
+            let mut ty = recv_hir.ty;
+            let mut is_float = false;
+            for _ in 0..8 {
+                match table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Float) => {
+                        is_float = true;
+                        break;
+                    }
+                    Some(TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => ty = *u,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
+                    _ => break,
+                }
+            }
+            is_float
+        };
+        let rhs = match write {
+            Write::Set(value) => {
+                self.inline_expression_deep(value, &recv_hir, &param_map, recv_hir.ty)
+            }
+            Write::Step(op) => HirExpr {
+                kind: HirExprKind::Binary {
+                    op,
+                    lhs: Box::new(recv_hir.clone()),
+                    rhs: Box::new(HirExpr {
+                        // Typed to match the receiver: an Int 1 added to an f64
+                        // is read back as a bit pattern, not as one.
+                        kind: HirExprKind::Literal(if recv_is_float {
+                            HirLiteral::Float(1.0)
+                        } else {
+                            HirLiteral::Int(1)
+                        }),
+                        ty: recv_hir.ty,
+                        lifetime: recv_hir.lifetime,
+                        source_location: expr.source_location,
+                    }),
+                },
+                ty: recv_hir.ty,
+                lifetime: recv_hir.lifetime,
+                source_location: expr.source_location,
+            },
+        };
+
+        Some(HirStatement::Assign { lhs, rhs, op: None })
+    }
+
     fn try_inline_abstract_method(
         &mut self,
         receiver: &TypedExpression,
