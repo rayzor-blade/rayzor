@@ -1632,6 +1632,71 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // An empty `[]` declared as a Map is Haxe's empty-map literal, not an
+                // empty array. Built as an array it produced a HaxeArray whose static
+                // type said Map, so the two disagreed: `m[k] = v` dispatched on the
+                // static type to the map setter while the object underneath was an
+                // array, and the value went nowhere.
+                //
+                // `Map<K,V>` resolves to the CONCRETE map class for its key --
+                // StringMap, IntMap, ObjectMap, EnumValueMap -- so the check is on
+                // those names, not on "Map", and the constructed class is whichever
+                // one the type already picked.
+                //
+                // Only the EMPTY literal is redirected: a non-empty `[a, b]` is an
+                // array whatever the hint says, and `[k => v]` is a Map node already.
+                if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
+                    if matches!(&init_expr.kind, ExprKind::Array(e) if e.is_empty()) {
+                        use crate::tast::core::TypeKind;
+                        let map_class = {
+                            let tt = self.context.type_table.borrow();
+                            match tt.get(target_ty).map(|t| &t.kind) {
+                                Some(TypeKind::Class { symbol_id, .. })
+                                | Some(TypeKind::Abstract { symbol_id, .. }) => self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(*symbol_id)
+                                    .and_then(|sy| self.context.string_interner.get(sy.name))
+                                    .filter(|n| {
+                                        matches!(
+                                            *n,
+                                            "Map"
+                                                | "StringMap"
+                                                | "IntMap"
+                                                | "ObjectMap"
+                                                | "EnumValueMap"
+                                        )
+                                    })
+                                    .map(|n| n.to_string()),
+                                _ => None,
+                            }
+                        };
+                        if let Some(class_name) = map_class {
+                            let ctor = parser::Expr {
+                                kind: ExprKind::New {
+                                    type_path: parser::TypePath {
+                                        package: Vec::new(),
+                                        name: class_name,
+                                        sub: None,
+                                    },
+                                    params: Vec::new(),
+                                    args: Vec::new(),
+                                },
+                                span: init_expr.span,
+                            };
+                            let rebuilt = parser::Expr {
+                                kind: ExprKind::Var {
+                                    name: name.clone(),
+                                    type_hint: type_hint.clone(),
+                                    expr: Some(Box::new(ctor)),
+                                },
+                                span: expression.span,
+                            };
+                            return self.lower_expression(&rebuilt);
+                        }
+                    }
+                }
+
                 // Check for implicit @:from conversion (e.g., array literal → abstract type)
                 // Array/object literals assigned to abstract types need an explicit Cast node
                 // so the MIR Cast handler can look up and call the @:from conversion function.
