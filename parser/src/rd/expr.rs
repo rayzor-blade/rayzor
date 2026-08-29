@@ -1319,7 +1319,56 @@ impl<'a, 'b> RdParser<'a, 'b> {
     /// `A(id)`, saw `|`, errored or recovered, and the second alternative
     /// was lost — the supposed multi-variant `case` only matched the
     /// first variant and the others fell through to `default` / no-match).
+    /// Whether the pattern starting here is an extractor, `expr => pattern`.
+    ///
+    /// Scans for a `=>` at the current nesting depth, stopping at the tokens
+    /// that end a pattern: `:` starts the case body, `,` and `)` separate
+    /// constructor arguments, `|` starts an or-pattern. A `=>` nested deeper
+    /// belongs to something else and does not count.
+    fn case_pattern_is_extractor(&self) -> bool {
+        let mut depth: i32 = 0;
+        for i in 0..256usize {
+            match self.stream.peek_at(i).kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::FatArrow if depth == 0 => return true,
+                TokenKind::Colon | TokenKind::Comma | TokenKind::Pipe if depth == 0 => {
+                    return false
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn parse_case_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // Extractor pattern: Haxe runs the subject through an expression before
+        // matching -- `twice(_) => 42`, `_.get() => {pack: [], name: "Null"}`.
+        // The LEFT side is an EXPRESSION, not a pattern, so it has to be taken
+        // before the atom parser reads `_` and then trips over the `.` that
+        // follows. That failure is what dropped the corpus's own HelperMacros
+        // into the legacy parser, and with it every macro it defines.
+        if self.case_pattern_is_extractor() {
+            let start = self.stream.save();
+            if let Ok(expr) = self.parse_expression() {
+                if self.stream.eat(TokenKind::FatArrow).is_some() {
+                    let value = self.parse_expression()?;
+                    return Ok(Pattern::Extractor {
+                        expr: Box::new(expr),
+                        value: Box::new(value),
+                    });
+                }
+            }
+            // Not actually an extractor after all -- put the tokens back and
+            // let the ordinary pattern parser have them.
+            self.stream.restore(start);
+        }
         let first = self.parse_case_pattern_atom()?;
         if !self.stream.at(TokenKind::Pipe) {
             return Ok(first);
