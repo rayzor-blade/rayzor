@@ -85,6 +85,18 @@ done
 RUN_ROOT="$WORK/run"
 SHARED="$WORK/shared-$$"
 RESULTS="$WORK/results-$$"
+# Hundreds of these tests crash, and a crash that writes a core costs far more
+# than the crash itself: the kernel streams the whole image -- ~93 MB resident
+# here -- and on a runner whose core_pattern pipes to a collector (apport, and
+# GitHub's images ship it) that is paid per crash, on a 4-vCPU box, with four
+# tests running at once. That is the difference between a crash reported in a
+# second and one the 25s watchdog kills first.
+#
+# It shows up as a run where CRASH is exactly 0 and TIMEOUT is ~240 instead of
+# ~35 -- the same tests, reclassified, and roughly an hour of extra wall clock.
+# Observed on both AMD and Intel runners, so it is not the CPU.
+ulimit -c 0 2>/dev/null || true
+
 # A previous complete run must not authorize this run when WORK is reused for
 # a pilot, a changed preset, or an interrupted retry.
 rm -f "$WORK/COMPLETE"

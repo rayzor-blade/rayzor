@@ -78,6 +78,10 @@ jobs:
             uname -a
             lscpu
             free -h
+            # Whether a crash on this runner writes a core, and to where. A run
+            # that reports CRASH=0 and ~240 TIMEOUTs is one where it did.
+            echo "core_pattern: $(cat /proc/sys/kernel/core_pattern 2>/dev/null)"
+            echo "core limit:   $(ulimit -c)"
             llvm-config-21 --version
             llvm-config-21 --libdir
             ldd ./target/release/rayzor
