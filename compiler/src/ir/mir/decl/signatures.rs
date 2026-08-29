@@ -174,7 +174,34 @@ impl<'a> HirToMirContext<'a> {
                 self.current_hir_types.get(&type_id),
                 Some(HirTypeDecl::Class(_))
             );
-            let is_abstract_value_type = is_abstract_value_type && !hir_says_class;
+            // The receiver of an abstract method is registered with the
+            // abstract's UNDERLYING type rather than the abstract itself
+            // (decl/module.rs), so the match above -- which requires a
+            // TypeKind::Abstract -- never fires for `abstract Val(Float)` and the
+            // receiver was declared Ptr(Void) while the call site passed an f64.
+            // The two disagree at the ABI: a float travels in the float bank and
+            // the callee reads the integer one. A constant receiver survived that
+            // by accident; a computed one came back as a bit pattern.
+            //
+            // So also accept a receiver whose type is ALREADY a scalar. The
+            // hir_says_class veto still applies and is what keeps a class TypeId
+            // that happens to collide with a scalar from being passed by value.
+            let this_is_scalar = matches!(
+                self.convert_type(type_id),
+                IrType::I8
+                    | IrType::I16
+                    | IrType::I32
+                    | IrType::I64
+                    | IrType::U8
+                    | IrType::U16
+                    | IrType::U32
+                    | IrType::U64
+                    | IrType::F32
+                    | IrType::F64
+                    | IrType::Bool
+            );
+            let is_abstract_value_type =
+                (is_abstract_value_type || this_is_scalar) && !hir_says_class;
             let this_ir_type = if is_abstract_value_type {
                 self.convert_type(type_id) // Raw value type for abstract underlying types
             } else {
