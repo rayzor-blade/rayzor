@@ -15,6 +15,61 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// The span of a write to `this`, if the expression contains one.
+    ///
+    /// Deliberately conservative: it walks the shapes a method body actually
+    /// uses, and an expression form it does not recognise yields None. A missed
+    /// write means no diagnostic, which is exactly the behaviour without this
+    /// check -- whereas a false positive would reject a legal program.
+    fn find_this_write(expr: &parser::Expr) -> Option<parser::Span> {
+        use parser::ExprKind as E;
+        let is_this = |e: &parser::Expr| matches!(&e.kind, E::This);
+        match &expr.kind {
+            E::Assign { left, .. } if is_this(left) => Some(expr.span),
+            E::Unary { op, expr: inner }
+                if is_this(inner)
+                    && matches!(
+                        op,
+                        parser::UnaryOp::PreIncr
+                            | parser::UnaryOp::PostIncr
+                            | parser::UnaryOp::PreDecr
+                            | parser::UnaryOp::PostDecr
+                    ) =>
+            {
+                Some(expr.span)
+            }
+            E::Assign { left, right, .. } => {
+                Self::find_this_write(left).or_else(|| Self::find_this_write(right))
+            }
+            E::Unary { expr: inner, .. } => Self::find_this_write(inner),
+            E::Block(stmts) => stmts.iter().find_map(|el| match el {
+                parser::BlockElement::Expr(e) => Self::find_this_write(e),
+                _ => None,
+            }),
+            E::Binary { left, right, .. } => {
+                Self::find_this_write(left).or_else(|| Self::find_this_write(right))
+            }
+            E::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => Self::find_this_write(cond)
+                .or_else(|| Self::find_this_write(then_branch))
+                .or_else(|| else_branch.as_ref().and_then(|e| Self::find_this_write(e))),
+            E::While { cond, body } => {
+                Self::find_this_write(cond).or_else(|| Self::find_this_write(body))
+            }
+            E::For { iter, body, .. } => {
+                Self::find_this_write(iter).or_else(|| Self::find_this_write(body))
+            }
+            E::Return(Some(inner)) => Self::find_this_write(inner),
+            E::Paren(inner) => Self::find_this_write(inner),
+            E::Call { expr: callee, args } => Self::find_this_write(callee)
+                .or_else(|| args.iter().find_map(|e| Self::find_this_write(e))),
+            _ => None,
+        }
+    }
+
     /// Lower an abstract declaration
     pub(crate) fn lower_abstract_declaration(
         &mut self,
@@ -411,6 +466,33 @@ impl<'a> AstLowering<'a> {
                             Err(e) => self.context.add_error(e),
                         }
                     } else {
+                        // Haxe permits writing to an abstract's `this` only from an
+                        // inline function -- constructors excepted, which may assign
+                        // it whether or not they are inline. Verified against Haxe
+                        // 4.3.6, which rejects the non-inline method form with the
+                        // message reproduced below and accepts `public function
+                        // new(i) this = i;` unchanged.
+                        //
+                        // Without this the write is simply discarded: the receiver is
+                        // passed by value, the body mutates a copy, and the caller
+                        // sees its original value with no diagnostic at all.
+                        let is_inline = field
+                            .modifiers
+                            .iter()
+                            .any(|m| matches!(m, parser::Modifier::Inline));
+                        if !is_inline {
+                            if let Some(body) = &func.body {
+                                if let Some(span) = Self::find_this_write(body) {
+                                    self.context.add_error(LoweringError::SemanticError {
+                                        message: "Abstract 'this' value can only \
+                                                      be modified inside an inline \
+                                                      function"
+                                            .to_string(),
+                                        location: self.context.create_location_from_span(span),
+                                    });
+                                }
+                            }
+                        }
                         // Regular method
                         match self.lower_function_from_field(field, func) {
                             Ok(typed_function) => {

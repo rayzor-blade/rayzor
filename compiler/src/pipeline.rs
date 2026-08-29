@@ -1730,6 +1730,9 @@ impl HaxeCompilationPipeline {
                 ),
             ),
 
+            LoweringError::SemanticError { message, .. } => {
+                ("E0100".to_string(), Some(message.clone()))
+            }
             LoweringError::InvalidModifiers { modifiers, .. } => (
                 format!("Invalid modifier combination: {}", modifiers.join(", ")),
                 Some("Remove the conflicting modifiers".to_string()),
@@ -1789,6 +1792,7 @@ impl HaxeCompilationPipeline {
             | LoweringError::GenericParameterError { .. }
             | LoweringError::TypeInferenceError { .. } => ErrorCategory::TypeError,
 
+            LoweringError::SemanticError { .. } => ErrorCategory::TypeError,
             LoweringError::LifetimeError { .. } => ErrorCategory::LifetimeError,
 
             LoweringError::OwnershipError { .. } => ErrorCategory::OwnershipError,
@@ -1813,6 +1817,7 @@ impl HaxeCompilationPipeline {
             LoweringError::DuplicateSymbol {
                 duplicate_location, ..
             } => duplicate_location.clone(),
+            LoweringError::SemanticError { location, .. } => location.clone(),
             LoweringError::InvalidModifiers { location, .. } => location.clone(),
             LoweringError::InternalError { location, .. } => location.clone(),
             LoweringError::GenericParameterError { location, .. } => location.clone(),

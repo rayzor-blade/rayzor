@@ -193,6 +193,12 @@ pub enum LoweringError {
         modifiers: Vec<String>,
         location: SourceLocation,
     },
+    /// A construct the language rejects outright, reported in the language's own
+    /// words rather than shoehorned into a nearby variant.
+    SemanticError {
+        message: String,
+        location: SourceLocation,
+    },
     /// Generic type parameter error
     GenericParameterError {
         message: String,
@@ -266,6 +272,13 @@ impl fmt::Display for LoweringError {
                     duplicate_location.file_id,
                     duplicate_location.line,
                     duplicate_location.column
+                )
+            }
+            LoweringError::SemanticError { message, location } => {
+                write!(
+                    f,
+                    "{} at {}:{}:{}",
+                    message, location.file_id, location.line, location.column
                 )
             }
             LoweringError::InvalidModifiers {
@@ -373,6 +386,13 @@ impl LoweringError {
                     "First defined at {}:{}",
                     original_location.line, original_location.column
                 )],
+            },
+            LoweringError::SemanticError { message, location } => CompilationError {
+                message: message.clone(),
+                location: location.clone(),
+                category: ErrorCategory::TypeError,
+                suggestion: None,
+                related_errors: vec![],
             },
             LoweringError::InvalidModifiers {
                 modifiers,
