@@ -443,6 +443,19 @@ pub struct TypeParam {
     pub name: String,
     pub constraints: Vec<Type>,
     pub variance: Variance,
+    /// Metadata on the parameter itself: `class Foo<@:foo T>`.
+    ///
+    /// Carried rather than dropped: it is observable. Reflection and the macro
+    /// Printer both render it, and a test that asserts
+    /// `"class Foo<@:foo T> {}"` round-trips cannot pass if the parser throws
+    /// it away.
+    pub meta: Vec<Metadata>,
+    /// Default type argument: `class Foo<T = String>`.
+    ///
+    /// Semantic, not decoration -- `new Foo()` with no explicit argument
+    /// resolves T to this. Dropping it does not fail loudly; it silently
+    /// leaves the parameter unbound.
+    pub default_type: Option<Type>,
     pub span: Span,
 }
 

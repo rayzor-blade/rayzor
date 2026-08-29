@@ -694,6 +694,13 @@ pub struct TypedTypeParameter {
     /// Variance annotation (covariant +, contravariant -, invariant)
     pub variance: TypeVariance,
 
+    /// Default type argument: `class Foo<T = String>`.
+    ///
+    /// `new Foo()` with no explicit argument resolves T to this, so it has to
+    /// reach the point where type arguments are inferred. HirTypeParam has
+    /// carried a `default` field all along with nothing to put in it.
+    pub default_type: Option<TypeId>,
+
     /// Source location
     pub source_location: SourceLocation,
 }

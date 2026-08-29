@@ -610,6 +610,10 @@ pub struct SymbolTable {
     /// when the user file later does `new Arc(value)`. Required by
     /// `infer_type_args_from_constructor` to substitute T → concrete arg.
     class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
+
+    /// Declared default type arguments per class, positionally aligned with
+    /// `class_type_params`. `None` where a parameter has no default.
+    class_type_param_defaults: BTreeMap<SymbolId, Vec<Option<TypeId>>>,
     /// Class symbol → constructor `SymbolId`. Same lifecycle reasoning as
     /// `class_type_params`: needed cross-file by `new Arc(value)` to
     /// recover the constructor signature for arg-type inference.
@@ -635,6 +639,7 @@ impl SymbolTable {
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             class_type_params: BTreeMap::new(),
+            class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
@@ -656,6 +661,7 @@ impl SymbolTable {
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(), // Estimate fewer enums
             class_type_params: BTreeMap::new(),
+            class_type_param_defaults: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
@@ -1376,6 +1382,29 @@ impl SymbolTable {
     /// Look up a class's ordered TypeParameter TypeIds (e.g. `[T_id]` for `Arc<T>`).
     pub fn get_class_type_params(&self, class_symbol: SymbolId) -> Option<&Vec<TypeId>> {
         self.class_type_params.get(&class_symbol)
+    }
+
+    /// Record a class's declared DEFAULT type arguments, positionally.
+    ///
+    /// `class Foo<T = String>` -> `[Some(String)]`. Needed so `new Foo()` with
+    /// no explicit argument can bind T; without it the parameter stays
+    /// unresolved and the value prints as `<unknown type N>` instead of
+    /// behaving as its default.
+    pub fn set_class_type_param_defaults(
+        &mut self,
+        class_symbol: SymbolId,
+        defaults: Vec<Option<TypeId>>,
+    ) {
+        self.class_type_param_defaults
+            .insert(class_symbol, defaults);
+    }
+
+    /// A class's declared default type arguments, positionally.
+    pub fn get_class_type_param_defaults(
+        &self,
+        class_symbol: SymbolId,
+    ) -> Option<&Vec<Option<TypeId>>> {
+        self.class_type_param_defaults.get(&class_symbol)
     }
 
     /// Record the constructor SymbolId for a class.

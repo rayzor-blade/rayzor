@@ -339,6 +339,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let mut params = Vec::new();
         while !self.stream.at_closing_gt() && !self.stream.is_eof() {
             let param_start = self.stream.current_offset();
+
+            // Metadata on a type parameter: `class Foo<@:foo T>`.
+            let meta = self.parse_metadata_list();
+
             let name = self.stream.current_text().to_string();
             self.stream.advance();
 
@@ -347,10 +351,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 constraints.push(self.parse_type()?);
             }
 
+            // Default type argument: `class Foo<T = String>`.
+            let default_type = if self.stream.eat(TokenKind::Assign).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+
             params.push(TypeParam {
                 name,
                 constraints,
                 variance: Variance::Invariant,
+                meta,
+                default_type,
                 span: self.stream.span_from(param_start),
             });
 

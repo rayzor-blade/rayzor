@@ -94,11 +94,19 @@ impl<'a> AstLowering<'a> {
             Variance::Invariant,
         );
 
+        // The declared default, lowered here so inference can reach it.
+        // The declared default, lowered here so inference can reach it.
+        let default_type = match &type_param.default_type {
+            Some(ty) => self.lower_type(ty).ok(),
+            None => None,
+        };
+
         Ok(TypedTypeParameter {
             symbol_id,
             name,
             constraints,
             variance: TypeVariance::Invariant, // Default variance
+            default_type,
             source_location: self.context.create_location(), // TODO: Get span from type_param
         })
     }

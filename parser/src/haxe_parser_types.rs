@@ -80,6 +80,13 @@ fn type_param<'a>(full: &'a str, input: &'a str) -> PResult<'a, TypeParam> {
             name,
             constraints,
             variance: variance.unwrap_or(Variance::Invariant),
+            // Empty because this path does not recover them yet, not because
+            // that is correct. The legacy parser is a fallback on its way out,
+            // kept for the constructs the RD parser cannot read; anything it
+            // drops is a gap, and a file that reaches here loses this
+            // information silently.
+            meta: Vec::new(),
+            default_type: None,
             span: Span::new(start, end),
         },
     ))

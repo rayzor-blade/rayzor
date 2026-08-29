@@ -857,6 +857,35 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // Fill in any argument the call site left out from the class's
+                // declared default: `class Foo<T = String>` means `new Foo()`
+                // binds T to String. Without it the parameter stays unresolved
+                // and its values render as `<unknown type N>` -- wrong, and
+                // silent.
+                if let Some(base_sym) = {
+                    let tt = self.context.type_table.borrow();
+                    tt.get(base_class_type_id).and_then(|t| match &t.kind {
+                        crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+                } {
+                    if let Some(defaults) = self
+                        .context
+                        .symbol_table
+                        .get_class_type_param_defaults(base_sym)
+                        .cloned()
+                    {
+                        // Only trailing positions can default, which is also the
+                        // only place Haxe allows one.
+                        for d in defaults.iter().skip(type_args.len()) {
+                            match d {
+                                Some(ty) => type_args.push(*ty),
+                                None => break,
+                            }
+                        }
+                    }
+                }
+
                 // If type arguments are provided, create an instantiated type
                 // e.g., new Array<Thread<Int>>() should have type Array<Thread<Int>>, not just Array
                 let actual_class_type = if !type_args.is_empty() {

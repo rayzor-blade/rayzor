@@ -3545,12 +3545,10 @@ impl<'a> TastToHirContext<'a> {
     fn lower_type_params(&mut self, params: &[TypedTypeParameter]) -> Vec<HirTypeParam> {
         params
             .iter()
-            .map(|param| {
-                HirTypeParam {
-                    name: param.name.clone(),
-                    bounds: param.constraints.clone(),
-                    default: None, // TODO: Add default type support if needed
-                }
+            .map(|param| HirTypeParam {
+                name: param.name.clone(),
+                bounds: param.constraints.clone(),
+                default: param.default_type,
             })
             .collect()
     }

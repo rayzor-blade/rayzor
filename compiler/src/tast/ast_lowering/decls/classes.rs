@@ -194,6 +194,15 @@ impl<'a> AstLowering<'a> {
             self.context
                 .symbol_table
                 .set_class_type_params(class_symbol, ordered_tp_ids.clone());
+            // Declared defaults, positionally aligned, so `new Foo()` can bind
+            // a parameter the call site left out.
+            let defaults: Vec<Option<TypeId>> =
+                type_params.iter().map(|tp| tp.default_type).collect();
+            if defaults.iter().any(|d| d.is_some()) {
+                self.context
+                    .symbol_table
+                    .set_class_type_param_defaults(class_symbol, defaults);
+            }
             self.class_type_params.insert(class_symbol, ordered_tp_ids);
         }
 
