@@ -712,6 +712,59 @@ impl<'a> HirToMirContext<'a> {
                 // haxe_box_*_ptr would store the DynamicValue tag, not the value.
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
+                        // `m[k] = v` on a Map is Map.set, not an array store --
+                        // the mirror of the get path in field/access.rs. Falling
+                        // through to the array setter passed the KEY as an INDEX,
+                        // and a string or enum key is a pointer: the array grew to
+                        // cover it and zero-filled, which is gigabytes for one
+                        // insert. With a real Map behind it the write simply went
+                        // nowhere and the value was silently lost.
+                        if let Some((set_fn_name, key_ir_type)) = self.map_index_set_info(object.ty)
+                        {
+                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                            let key_reg = if key_ir_type == IrType::I64 {
+                                let kt = self
+                                    .builder
+                                    .get_register_type(idx_reg)
+                                    .unwrap_or(IrType::I64);
+                                if kt != IrType::I64 {
+                                    self.builder
+                                        .build_cast(idx_reg, kt, IrType::I64)
+                                        .unwrap_or(idx_reg)
+                                } else {
+                                    idx_reg
+                                }
+                            } else {
+                                idx_reg
+                            };
+                            // The setter takes the value as a 64-bit slot, so a
+                            // float or pointer is reinterpreted rather than
+                            // converted -- the get side bitcasts it back.
+                            let value_i64 = match self.builder.get_register_type(value) {
+                                Some(IrType::I64) => value,
+                                Some(IrType::F64) | Some(IrType::F32) | Some(IrType::Ptr(_)) => {
+                                    self.builder
+                                        .build_bitcast(value, IrType::I64)
+                                        .unwrap_or(value)
+                                }
+                                Some(other) => self
+                                    .builder
+                                    .build_cast(value, other, IrType::I64)
+                                    .unwrap_or(value),
+                                None => value,
+                            };
+                            let set_fn = self.get_or_register_extern_function(
+                                set_fn_name,
+                                vec![ptr_void, key_ir_type, IrType::I64],
+                                IrType::Void,
+                            );
+                            self.builder.build_call_direct(
+                                set_fn,
+                                vec![obj_reg, key_reg, value_i64],
+                                IrType::Void,
+                            );
+                            return;
+                        }
                         let idx_i64 = {
                             let idx_ty = self.builder.get_register_type(idx_reg);
                             match idx_ty {

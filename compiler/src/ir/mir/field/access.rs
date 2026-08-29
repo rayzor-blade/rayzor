@@ -1456,9 +1456,27 @@ impl<'a> HirToMirContext<'a> {
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
     }
 
+    /// For a Map-typed assignment target, return `(set_fn_name, key IrType)`.
+    ///
+    /// The write counterpart of `map_index_info`. Without it `m[k] = v` fell
+    /// through to the array setter, which takes the key as an INDEX: a string or
+    /// enum key is a pointer, so `haxe_array_set_i64` grew the backing store to
+    /// cover that index and zero-filled it. `None` for arrays and strings, which
+    /// really are indexed.
+    pub(crate) fn map_index_set_info(&self, obj_ty: TypeId) -> Option<(&'static str, IrType)> {
+        let (get_fn, key_ir, _) = self.map_index_info(obj_ty)?;
+        let set_fn = match get_fn {
+            "haxe_intmap_get" => "haxe_intmap_set",
+            "haxe_stringmap_get" => "haxe_stringmap_set",
+            "haxe_objectmap_get" => "haxe_objectmap_set",
+            _ => return None,
+        };
+        Some((set_fn, key_ir))
+    }
+
     /// For a Map-typed index target, return `(get_fn_name, key IrType, value TypeId)`.
     /// `None` when the object is an array/string, which use array-style indexing.
-    fn map_index_info(&self, obj_ty: TypeId) -> Option<(&'static str, IrType, TypeId)> {
+    pub(crate) fn map_index_info(&self, obj_ty: TypeId) -> Option<(&'static str, IrType, TypeId)> {
         let (key_type, value_type) = match self.type_table.get(obj_ty).map(|t| &t.kind) {
             Some(crate::tast::TypeKind::Map {
                 key_type,
