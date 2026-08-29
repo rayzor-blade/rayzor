@@ -45,7 +45,7 @@ SLACK_MB="${SLACK_MB:-8}"
 # and take the machine down with it, so cap rather than trust the fixture.
 CAP_MB="${CAP_MB:-2048}"
 
-KNOWN_FAIL="param_accumulator"
+KNOWN_FAIL="local_accumulator param_accumulator static_accumulator ternary_rhs array_push capture_cell shapes_guarded_while_nested"
 
 pass=0; known=0; regressed=0; fixed=0
 
@@ -86,18 +86,27 @@ answer_case() {  # name expected
     [ "$got" = "$want" ] && report "$name" yes || report "$name" no "got[$got] want[$want]"
 }
 
-peak_mb() {  # dir n  -> integer MB
-    ( cd "$WORK/$1" && /usr/bin/time -l timeout 180 "$RAYZOR" run --release --no-cache Main.hx -- "$2" 2>&1 >/dev/null ) \
+# /usr/bin/time reports its DIRECT child, so it must exec rayzor itself: wrapping
+# the run in `timeout` measures the wrapper (~1MB) and hides everything.
+peak_mb() {  # dir -> integer MB
+    ( cd "$WORK/$1" && /usr/bin/time -l "$RAYZOR" run --release --no-cache Main.hx 2>&1 >/dev/null ) \
         | awk '/peak memory footprint/{printf "%d", $1/1048576}'
 }
 
-memory_case() {  # name
-    local name="$1" a b
-    a=$(peak_mb "$name" "$SMALL")
-    b=$(peak_mb "$name" "$LARGE")
+memory_case() {  # name -- compares the ${name}_small and ${name}_large fixtures
+    local name="$1" a b sa sb
+    # A fixture whose loop did not run proves nothing, so require the answer first.
+    sa=$(capped_run "$WORK/${name}_small" | grep -c .)
+    sb=$(capped_run "$WORK/${name}_large" | grep -c .)
+    if [ "$sa" -eq 0 ] || [ "$sb" -eq 0 ]; then
+        report "$name" no "fixture produced no output -- its loop did not run"
+        return
+    fi
+    a=$(peak_mb "${name}_small")
+    b=$(peak_mb "${name}_large")
     if [ -z "$a" ] || [ -z "$b" ]; then report "$name" no "no footprint reading"; return; fi
     if [ $((b - a)) -le "$SLACK_MB" ]; then report "$name" yes
-    else report "$name" no "footprint ${a}MB -> ${b}MB across ${SMALL}..${LARGE} iterations"; fi
+    else report "$name" no "footprint ${a}MB -> ${b}MB from ${SMALL} to ${LARGE} iterations"; fi
 }
 
 new_case() { mkdir -p "$WORK/$1"; cat > "$WORK/$1/Main.hx"; }
@@ -233,31 +242,58 @@ answer_case shapes_guarded_while_nested "3 4 6"
 # The move happens on SOME iterations only. A fix that untracks the object when
 # it lowers the assignment -- rather than when the branch is taken -- loses the
 # free on every path, including the one that did not move anything.
-new_case mem_conditional_move <<'HX'
+#
+# Bounds are literal on purpose. A bound read from Sys.args() makes the program
+# print nothing and run no loop at all, which reads as a perfectly flat
+# footprint and hides exactly the leak these cases exist to catch.
+for pair in "small:$SMALL" "large:$LARGE"; do
+    tag=${pair%%:*}; n=${pair##*:}
+
+    new_case "mem_conditional_move_$tag" <<HX
 class Cell { public var v:Int; public function new(v:Int) { this.v = v; } }
 class Main { static function main() {
     var best = new Cell(0);
-    var n = Std.parseInt(Sys.args()[0]);
-    for (i in 1...n) { var cand = new Cell(i % 7); if (cand.v > best.v) best = cand; }
-    Sys.println(best.v);
+    for (i in 1...$n) { var cand = new Cell(i % 7); if (cand.v > best.v) best = cand; }
+    Sys.println("cond best=" + best.v);
 } }
 HX
 
-# Nothing escapes here at all. This is the one that catches a fix that buys
-# correctness by simply freeing less.
-new_case mem_unconditional_temp <<'HX'
+    # Nothing escapes here at all. This is the one that catches a fix buying
+    # correctness by simply freeing less.
+    new_case "mem_unconditional_temp_$tag" <<HX
 class Cell { public var v:Int; public function new(v:Int) { this.v = v; } }
 class Main { static function main() {
-    var n = Std.parseInt(Sys.args()[0]);
     var acc = 0;
-    for (i in 1...n) { var t = new Cell(i); acc += t.v & 1; }
-    Sys.println(acc);
+    for (i in 1...$n) { var t = new Cell(i); acc += t.v & 1; }
+    Sys.println("temp acc=" + acc);
 } }
 HX
+
+    # A list built per call and dead on return. If nothing reclaims it the
+    # footprint tracks the call count.
+    new_case "mem_accumulator_dies_$tag" <<HX
+class Node { public var v:Int; public var next:Node; public function new(v:Int) { this.v = v; } }
+class Main {
+    static function build():Int {
+        var head:Node = null;
+        for (i in 0...50) { var x = new Node(i); x.next = head; head = x; }
+        var c = 0; var p = head;
+        while (p != null) { c++; p = p.next; }
+        return c;
+    }
+    static function main() {
+        var t = 0;
+        for (r in 0...$((n / 50))) t += build();
+        Sys.println("acc total=" + t);
+    }
+}
+HX
+done
 
 echo "footprint (must not track iteration count):"
 memory_case mem_conditional_move
 memory_case mem_unconditional_temp
+memory_case mem_accumulator_dies
 
 # ---------------------------------------------------------------- double free
 
