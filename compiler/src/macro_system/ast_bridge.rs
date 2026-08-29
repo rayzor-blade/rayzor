@@ -143,6 +143,103 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                 span,
             }
         }
+        // A macro that RETURNS an Expr it built by hand hands back
+        // `{pos: ..., expr: <ExprDef>}` -- the shape haxe.macro.Expr has. Without
+        // this it became an object LITERAL in the expansion, so the macro's
+        // result was a struct rather than the expression it denotes.
+        MacroValue::Object(fields)
+            if fields.len() <= 3
+                && matches!(fields.get("expr"), Some(MacroValue::Enum(e, _, _)) if &**e == "ExprDef") =>
+        {
+            match fields.get("expr") {
+                Some(v) => value_to_expr(v),
+                None => Expr {
+                    kind: ExprKind::Null,
+                    span,
+                },
+            }
+        }
+        // The inverse of `expr_kind_to_value`: an ExprDef built by a macro turned
+        // back into the expression it stands for. The generic Enum arm below
+        // would instead emit `ExprDef.EConst(...)` as a CONSTRUCTOR CALL, which
+        // is the value, not the expression.
+        MacroValue::Enum(enum_name, variant, args) if &**enum_name == "ExprDef" => {
+            match (&**variant, args.as_slice()) {
+                ("EConst", [c]) => value_to_expr(c),
+                ("ECall", [callee, cargs]) => {
+                    let arg_exprs = match cargs {
+                        MacroValue::Array(items) => items.iter().map(value_to_expr).collect(),
+                        other => vec![value_to_expr(other)],
+                    };
+                    Expr {
+                        kind: ExprKind::Call {
+                            expr: Box::new(value_to_expr(callee)),
+                            args: arg_exprs,
+                        },
+                        span,
+                    }
+                }
+                ("EField", [obj, name]) => Expr {
+                    kind: ExprKind::Field {
+                        expr: Box::new(value_to_expr(obj)),
+                        field: match name {
+                            MacroValue::String(s) => s.to_string(),
+                            other => format!("{:?}", other),
+                        },
+                        is_optional: false,
+                    },
+                    span,
+                },
+                _ => Expr {
+                    kind: ExprKind::Null,
+                    span,
+                },
+            }
+        }
+        // A Constant carries the literal itself.
+        MacroValue::Enum(enum_name, variant, args) if &**enum_name == "Constant" => {
+            match (&**variant, args.first()) {
+                ("CInt", Some(MacroValue::String(s))) => Expr {
+                    kind: ExprKind::Int(s.parse::<i64>().unwrap_or(0)),
+                    span,
+                },
+                ("CInt", Some(MacroValue::Int(i))) => Expr {
+                    kind: ExprKind::Int(*i),
+                    span,
+                },
+                ("CFloat", Some(MacroValue::String(s))) => Expr {
+                    kind: ExprKind::Float(s.parse::<f64>().unwrap_or(0.0)),
+                    span,
+                },
+                ("CFloat", Some(MacroValue::Float(f))) => Expr {
+                    kind: ExprKind::Float(*f),
+                    span,
+                },
+                ("CString", Some(MacroValue::String(s))) => Expr {
+                    kind: ExprKind::String(s.to_string()),
+                    span,
+                },
+                // An identifier, not a string: `CIdent("true")` is the
+                // expression `true`, which is the whole point of the shape
+                // HelperMacros.typeError returns. Haxe spells the boolean and
+                // null literals as identifiers; this AST has separate nodes for
+                // them, so they are translated rather than left as names that
+                // resolve to nothing.
+                ("CIdent", Some(MacroValue::String(s))) => Expr {
+                    kind: match &**s {
+                        "true" => ExprKind::Bool(true),
+                        "false" => ExprKind::Bool(false),
+                        "null" => ExprKind::Null,
+                        other => ExprKind::Ident(other.to_string()),
+                    },
+                    span,
+                },
+                _ => Expr {
+                    kind: ExprKind::Null,
+                    span,
+                },
+            }
+        }
         MacroValue::Object(fields) => {
             let obj_fields: Vec<parser::ObjectField> = fields
                 .iter()

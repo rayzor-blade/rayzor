@@ -976,6 +976,18 @@ impl MacroInterpreter {
                 // `{kind: "FFun", args:[], ret:..., expr:...}` so the
                 // build-macro consumer (`value_to_class_field`) can read
                 // the variant tag through the nested `kind` field.
+                // haxe.macro.Expr's own enums -- ExprDef and Constant -- are
+                // built as MacroValue::Enum, matching what expr_kind_to_value
+                // produces when a macro DESTRUCTURES an Expr. Only the object
+                // form above existed, which is the shape build macros read, so a
+                // macro could take an Expr apart and not put one back together.
+                if let Some((enum_name, variant)) = expr_enum_ctor(name) {
+                    return Ok(MacroValue::Enum(
+                        Arc::from(enum_name),
+                        Arc::from(variant),
+                        Arc::new(arg_vals),
+                    ));
+                }
                 if let Some(tag) = enum_ctor_tag(name) {
                     return Ok(build_enum_ctor_value(tag, &arg_vals));
                 }
@@ -983,6 +995,22 @@ impl MacroInterpreter {
                     name: name.clone(),
                     location,
                 })
+            }
+            ExprKind::Field {
+                expr: base, field, ..
+            } if expr_enum_ctor(field).is_some() && path_ends_with_expr_enum(base) => {
+                // `ExprDef.EConst(...)` and `Constant.CIdent(...)`: the same
+                // constructors as above, written qualified.
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_vals.push(self.eval_expr(a)?);
+                }
+                let (enum_name, variant) = expr_enum_ctor(field).unwrap();
+                Ok(MacroValue::Enum(
+                    Arc::from(enum_name),
+                    Arc::from(variant),
+                    Arc::new(arg_vals),
+                ))
             }
             ExprKind::Field {
                 expr: base, field, ..
@@ -2354,6 +2382,37 @@ impl MacroInterpreter {
 /// to surface as the `kind` field of the resulting object. None means
 /// the identifier isn't an enum constructor and should fall through to
 /// the normal undefined-variable error.
+/// The haxe.macro.Expr constructors a macro can BUILD, as (enum, variant).
+///
+/// Mirrors what `ast_bridge::expr_kind_to_value` produces in the other
+/// direction, so an Expr taken apart by a macro can be put back together.
+/// Deliberately limited to the variants that mapping covers -- adding a name
+/// here without the matching arm in `value_to_expr` would build a value nothing
+/// can turn back into an Expr.
+/// Whether a callee's base names the ExprDef or Constant enum, however it is
+/// spelled -- bare, or through the full `haxe.macro.Expr.ExprDef` path the
+/// corpus uses.
+fn path_ends_with_expr_enum(base: &Expr) -> bool {
+    match &base.kind {
+        ExprKind::Ident(b) => b == "ExprDef" || b == "Constant",
+        ExprKind::Field { field, .. } => field == "ExprDef" || field == "Constant",
+        _ => false,
+    }
+}
+
+fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "EConst" => Some(("ExprDef", "EConst")),
+        "ECall" => Some(("ExprDef", "ECall")),
+        "EField" => Some(("ExprDef", "EField")),
+        "CInt" => Some(("Constant", "CInt")),
+        "CFloat" => Some(("Constant", "CFloat")),
+        "CString" => Some(("Constant", "CString")),
+        "CIdent" => Some(("Constant", "CIdent")),
+        _ => None,
+    }
+}
+
 fn enum_ctor_tag(name: &str) -> Option<&'static str> {
     match name {
         // haxe.macro.Expr.FieldType
