@@ -846,7 +846,21 @@ class Context {
 	@:allow(haxe.macro.TypedExprTools)
 	@:allow(haxe.macro.PositionTools)
 	static function load(f:String, nargs:Int):Dynamic {
-		#if neko
+		#if rayzor
+		// rayzor implements the macro API in the compiler itself
+		// (macro_system/context_api.rs intercepts Context.typeof, parse,
+		// currentPos, getType, ...), so nothing here is ever executed -- this
+		// body only has to COMPILE.
+		//
+		// It has to be checked before the `eval` branch because rayzor defines
+		// `eval` deliberately, to make the stdlib pick its native extern
+		// branches. That masquerade sent every one of the 67 Context entry
+		// points through `eval.vm.Context.callMacroApi`, a class that exists
+		// only on Haxe's eval target. The unresolved field failed the whole
+		// module, and haxe.macro.Context failing takes unit.HelperMacros with
+		// it -- which 88 corpus tests depend on.
+		return Reflect.makeVarArgs(function(_) return throw "Can't be called outside of macro");
+		#elseif neko
 		return neko.Lib.load("macro", f, nargs);
 		#elseif eval
 		return eval.vm.Context.callMacroApi(f);
