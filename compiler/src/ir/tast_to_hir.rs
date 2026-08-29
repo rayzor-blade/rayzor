@@ -2205,6 +2205,14 @@ impl<'a> TastToHirContext<'a> {
                         })
                 });
 
+                // An abstract's constructor computes its value; MIR otherwise
+                // discards the body and hands back the first argument unchanged.
+                if let Some(value) =
+                    self.try_expand_abstract_constructor(*class_type, arguments, expr.expr_type)
+                {
+                    return value;
+                }
+
                 HirExprKind::New {
                     class_type: *class_type,
                     type_args: type_arguments.clone(),
@@ -5081,6 +5089,102 @@ impl<'a> TastToHirContext<'a> {
 
     /// Try to inline an abstract type method call
     /// Returns Some(inlined_expr) if successful, None otherwise
+    /// `new SomeAbstract(args)` replaced by the value its constructor computes.
+    ///
+    /// An abstract constructor exists to assign `this`, and MIR lowers the whole
+    /// construction as a "value wrap" that returns args[0] without running the
+    /// body at all. That is right for the canonical `new(f) this = f;` and wrong
+    /// for every constructor that does work: `new(f) this = f * 2` silently
+    /// yielded f, so validation, normalisation and unit conversion were all
+    /// skipped without a word.
+    ///
+    /// Only a body that is a single assignment to `this` is expanded. A body
+    /// with control flow -- `if (x < 0) this = 0 else this = x` -- cannot be
+    /// expressed here, because HIR has no conditional EXPRESSION to hold it, and
+    /// falls through to the old behaviour rather than being half-translated.
+    fn try_expand_abstract_constructor(
+        &mut self,
+        class_type: TypeId,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+    ) -> Option<HirExpr> {
+        let current_file = self.current_file?;
+        let symbol_id = {
+            let table = self.type_table.borrow();
+            match table.get(class_type).map(|t| &t.kind) {
+                Some(crate::tast::core::TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
+                _ => return None,
+            }
+        };
+
+        let abstract_def = current_file
+            .abstracts
+            .iter()
+            .find(|a| a.symbol_id == symbol_id)?;
+        let ctor = abstract_def.constructors.first()?;
+
+        // Through one level of Block wrapping, as with method bodies.
+        let mut body: &[TypedStatement] = &ctor.body;
+        if body.len() == 1 {
+            if let TypedStatement::Expression { expression, .. } = &body[0] {
+                if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                    body = statements;
+                }
+            }
+        }
+        if body.len() != 1 {
+            return None;
+        }
+        let is_this = |e: &TypedExpression| matches!(&e.kind, TypedExpressionKind::This { .. });
+        let value = match &body[0] {
+            TypedStatement::Assignment { target, value, .. } if is_this(target) => value,
+            TypedStatement::Expression { expression, .. } => match &expression.kind {
+                TypedExpressionKind::BinaryOp {
+                    left,
+                    operator: crate::tast::node::BinaryOperator::Assign,
+                    right,
+                } if is_this(left) => right,
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        if ctor.parameters.len() != arguments.len() {
+            return None;
+        }
+        let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
+        for (param, arg) in ctor.parameters.iter().zip(arguments.iter()) {
+            let lowered = self.lower_expression(arg);
+            param_map.insert(param.symbol_id, lowered);
+        }
+
+        // The body computes the UNDERLYING value, not the abstract: `this = f * 2`
+        // is float arithmetic. Handing the abstract's own TypeId down as the
+        // expected type retypes the multiply as the abstract and the result reads
+        // back as a bit pattern.
+        let underlying = {
+            use crate::tast::core::TypeKind;
+            let table = self.type_table.borrow();
+            match table.get(class_type).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    underlying: Some(u),
+                    ..
+                }) => *u,
+                _ => result_type,
+            }
+        };
+
+        // `this` has no value yet inside a constructor -- it is what the body is
+        // computing -- so a body that READS it is not something to expand.
+        let placeholder = HirExpr {
+            kind: HirExprKind::Literal(HirLiteral::Int(0)),
+            ty: underlying,
+            lifetime: crate::tast::LifetimeId::invalid(),
+            source_location: SourceLocation::unknown(),
+        };
+        Some(self.inline_expression_deep(value, &placeholder, &param_map, underlying))
+    }
+
     /// A call to a mutating abstract method, rewritten as an assignment to the
     /// receiver.
     ///
