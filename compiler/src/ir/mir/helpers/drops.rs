@@ -73,6 +73,17 @@ impl<'a> HirToMirContext<'a> {
                     continue;
                 }
 
+                // Inside a loop body, lowering cannot tell whether this allocation
+                // outlives the iteration. The assignment that carries it out may be
+                // conditional, and the route out may be a global, a call the callee
+                // retains, or a cast -- none of which this walk sees. InsertFreePass
+                // has the CFG and the escape analysis, so leave the decision to it
+                // rather than guess here.
+                if !self.loop_carried_symbols.is_empty() {
+                    self.owned_heap_values.remove(&symbol);
+                    continue;
+                }
+
                 self.emit_tracked_free(current_ir_id, true);
                 self.owned_heap_values.remove(&symbol);
             }

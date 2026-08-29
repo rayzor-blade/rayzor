@@ -23,9 +23,13 @@
 #   ./check_ownership_gate.sh
 #   RAYZOR=/path/to/rayzor ./check_ownership_gate.sh
 #
-# Cases listed in KNOWN_FAIL are the open bugs this gate was written to track.
-# Exit is non-zero only when something OUTSIDE that list fails, so the script
-# is a regression gate today and a progress report as the list shrinks.
+# Cases listed in KNOWN_FAIL are the open bugs this gate still tracks. Exit is
+# non-zero only when something OUTSIDE that list fails, so the script is a
+# regression gate today and a progress report as the list shrinks.
+#
+# The one left does not miscompile -- it fails to BUILD. The parameter-accumulator
+# shape installs a trap stub (W0020, "Return value IrId not found", "GEP ptr not
+# found in value_map"), which is a codegen defect upstream of free insertion.
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -41,7 +45,7 @@ SLACK_MB="${SLACK_MB:-8}"
 # and take the machine down with it, so cap rather than trust the fixture.
 CAP_MB="${CAP_MB:-2048}"
 
-KNOWN_FAIL="local_accumulator param_accumulator static_accumulator ternary_rhs array_push capture_cell shapes_guarded_while_nested"
+KNOWN_FAIL="param_accumulator"
 
 pass=0; known=0; regressed=0; fixed=0
 
