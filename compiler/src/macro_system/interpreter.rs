@@ -991,6 +991,19 @@ impl MacroInterpreter {
                 if let Some(tag) = enum_ctor_tag(name) {
                     return Ok(build_enum_ctor_value(tag, &arg_vals));
                 }
+                // An unqualified call may be a static brought in by
+                // `import Some.Class.*`. Tried last, so a local, a parameter or
+                // a builtin still wins, and in import order.
+                if let Some(owners) = self.import_map.get(WILDCARD_OWNERS_KEY) {
+                    let owners: Vec<String> = owners.lines().map(|s| s.to_string()).collect();
+                    for owner in owners {
+                        if let Some(result) =
+                            self.try_static_call(&owner, name, &arg_vals, location)?
+                        {
+                            return Ok(result);
+                        }
+                    }
+                }
                 Err(MacroError::UndefinedVariable {
                     name: name.clone(),
                     location,
@@ -1266,6 +1279,16 @@ impl MacroInterpreter {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Take the current import map out, leaving an empty one.
+    pub fn take_import_map(&mut self) -> BTreeMap<String, String> {
+        std::mem::take(&mut self.import_map)
+    }
+
+    /// Install an import map for the duration of a macro body.
+    pub fn set_import_map(&mut self, map: BTreeMap<String, String>) {
+        self.import_map = map;
     }
 
     /// Resolve a class name through imports.
@@ -2714,6 +2737,11 @@ fn extract_qualified_call<'a>(base: &'a Expr, method: &'a str) -> Option<(String
 /// - `import haxe.macro.Context;` → "Context" → "haxe.macro.Context"
 /// - `import haxe.macro.Context as Ctx;` → "Ctx" → "haxe.macro.Context"
 /// - `import haxe.macro.*;` → not resolved here (wildcard)
+/// Key under which `build_import_map` records the classes brought in by a
+/// wildcard import. `*` is not a legal Haxe identifier, so it cannot collide
+/// with a real short name.
+pub const WILDCARD_OWNERS_KEY: &str = "*";
+
 pub fn build_import_map(imports: &[parser::Import]) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for import in imports {
@@ -2730,10 +2758,28 @@ pub fn build_import_map(imports: &[parser::Import]) -> BTreeMap<String, String> 
                 let qualified = import.path.join(".");
                 map.insert(alias.clone(), qualified);
             }
-            parser::ImportMode::Field(_)
-            | parser::ImportMode::Wildcard
-            | parser::ImportMode::WildcardWithExclusions(_) => {
-                // Wildcard and field imports not tracked for class resolution
+            parser::ImportMode::Wildcard | parser::ImportMode::WildcardWithExclusions(_) => {
+                // `import haxe.macro.Context.*` puts that class's statics in
+                // scope UNQUALIFIED, which is how the corpus's own HelperMacros
+                // calls typeof/typeExpr/currentPos. Untracked, every one of
+                // those was an undefined variable and the macro never
+                // registered -- the call then fell through to a method that
+                // does not exist ("Cannot access field 'typeError'").
+                //
+                // The owners are collected under a key no Haxe identifier can
+                // spell, so the map keeps its shape for every existing reader.
+                let qualified = import.path.join(".");
+                if let Some(last) = import.path.last() {
+                    map.entry(last.clone()).or_insert_with(|| qualified.clone());
+                }
+                let slot = map.entry(WILDCARD_OWNERS_KEY.to_string()).or_default();
+                if !slot.is_empty() {
+                    slot.push('\n');
+                }
+                slot.push_str(&qualified);
+            }
+            parser::ImportMode::Field(_) => {
+                // Field imports are not class resolution.
             }
         }
     }

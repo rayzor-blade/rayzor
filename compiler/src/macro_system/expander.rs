@@ -1006,8 +1006,14 @@ impl MacroExpander {
             interp.push_macro_class(cls.clone());
         }
 
-        // Execute the macro body
+        // Execute the macro body under the imports of the file that DEFINED it,
+        // not the file that called it. Haxe resolves a macro body against its
+        // own module; using the call site's imports made a macro's meaning
+        // depend on who invoked it.
+        let caller_imports = interp.take_import_map();
+        interp.set_import_map((*macro_def.imports).clone());
         let result = interp.eval_expr(&macro_def.body);
+        interp.set_import_map(caller_imports);
 
         if class_context.is_some() {
             interp.pop_macro_class();

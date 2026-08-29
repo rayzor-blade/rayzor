@@ -65,6 +65,15 @@ pub struct MacroDefinition {
     pub is_build_macro: bool,
     /// Source file where defined
     pub source_file: String,
+    /// The DEFINING file's imports, resolved once here.
+    ///
+    /// A macro body must see its own file's imports, not the caller's. Resolving
+    /// them again at expansion time meant a macro in `unit/HelperMacros.hx`
+    /// calling `typeof(...)` -- brought in by its own
+    /// `import haxe.macro.Context.*` -- was evaluated with the imports of
+    /// whichever issue file happened to call it, where that name means nothing.
+    /// Shared by Arc: every macro in a file gets the same map, built once.
+    pub imports: std::sync::Arc<std::collections::BTreeMap<String, String>>,
     /// Source location of the definition
     pub location: SourceLocation,
 }
@@ -130,6 +139,8 @@ impl MacroRegistry {
         file: &HaxeFile,
         source_file: &str,
     ) -> Result<(), MacroError> {
+        // Resolved once for the whole file and shared by every macro in it.
+        let file_imports = std::sync::Arc::new(super::interpreter::build_import_map(&file.imports));
         let package_prefix = file
             .package
             .as_ref()
@@ -139,7 +150,7 @@ impl MacroRegistry {
         for decl in &file.declarations {
             match decl {
                 TypeDeclaration::Class(class) => {
-                    self.scan_class(class, &package_prefix, source_file)?;
+                    self.scan_class(class, &package_prefix, source_file, &file_imports)?;
                 }
                 TypeDeclaration::Interface(_) => {
                     // Interfaces can't have macro functions
@@ -168,6 +179,7 @@ impl MacroRegistry {
         class: &ClassDecl,
         package_prefix: &str,
         source_file: &str,
+        file_imports: &std::sync::Arc<std::collections::BTreeMap<String, String>>,
     ) -> Result<(), MacroError> {
         let class_qualified = if package_prefix.is_empty() {
             class.name.clone()
@@ -190,7 +202,7 @@ impl MacroRegistry {
         // Scan fields for macro functions
         for field in &class.fields {
             if field.modifiers.contains(&Modifier::Macro) {
-                self.register_macro_field(field, &class_qualified, source_file)?;
+                self.register_macro_field(field, &class_qualified, source_file, &file_imports)?;
             }
         }
 
@@ -203,6 +215,7 @@ impl MacroRegistry {
         field: &ClassField,
         class_qualified: &str,
         source_file: &str,
+        file_imports: &std::sync::Arc<std::collections::BTreeMap<String, String>>,
     ) -> Result<(), MacroError> {
         if let ClassFieldKind::Function(func) = &field.kind {
             let qualified_name = format!("{}.{}", class_qualified, func.name);
@@ -230,6 +243,7 @@ impl MacroRegistry {
                 body,
                 is_build_macro: false,
                 source_file: source_file.to_string(),
+                imports: file_imports.clone(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),
             };
 
