@@ -454,7 +454,80 @@ function tagNavigation(tokens) {
   }
 }
 
+const DISCORD_URL = "https://discord.gg/NYdr8eWxF4";
+// Tabler's "brand-discord" glyph, on a 24-unit grid rather than GitHub's 16.
+const DISCORD_PATH =
+  "M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z";
+
+function setAttr(token, name, value) {
+  const want = name.toLowerCase();
+  const found = token.attrs.find(([k]) => k.toLowerCase() === want);
+  if (found) found[1] = value;
+  else token.attrs.push([name, value]);
+}
+
+/** Adds the Discord link beside the header's outbound link.
+ *
+ * The design files are vendored, so the invite cannot be authored in them. The
+ * link is cloned from the outbound one already in the bar rather than written
+ * out here, so it inherits that anchor's styling -- including the hover class
+ * this build generates -- and the two stay identical if the design moves. Only
+ * the destination, the glyph and the label differ; the icon sits on a 24-unit
+ * grid where GitHub's is 16, so the viewBox travels with the path.
+ */
+function injectDiscordLink(tokens) {
+  const header = tokens.findIndex((t) => t.t === "open" && t.name === "header");
+  if (header < 0) throw new Error("no <header> to hang the Discord link on");
+  const headerEnd = tokens.findIndex((t, i) => i > header && t.t === "close" && t.name === "header");
+
+  let start = -1;
+  for (let i = header; i < headerEnd; i++) {
+    const t = tokens[i];
+    if (t.t === "open" && t.name === "a" && /^https?:/.test(attr(t, "href") || "")) { start = i; break; }
+  }
+  if (start < 0) throw new Error("no outbound link in <header> to model the Discord link on");
+
+  let depth = 0;
+  let end = -1;
+  for (let i = start; i < headerEnd; i++) {
+    if (tokens[i].t === "open" && tokens[i].name === "a" && !tokens[i].selfClose) depth++;
+    if (tokens[i].t === "close" && tokens[i].name === "a") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) throw new Error("the header's outbound link is never closed");
+
+  const clone = tokens.slice(start, end + 1).map((t) => ({
+    ...t,
+    attrs: t.attrs ? t.attrs.map(([k, v]) => [k, v]) : t.attrs,
+  }));
+
+  let labelled = false;
+  for (const t of clone) {
+    if (t.t === "open" && t.name === "a") setAttr(t, "href", DISCORD_URL);
+    if (t.t === "open" && t.name === "svg") {
+      setAttr(t, "viewBox", "0 0 24 24");
+      setAttr(t, "fill", "currentColor");
+      setAttr(t, "stroke", "none");
+    }
+    if (t.t === "open" && t.name === "path") setAttr(t, "d", DISCORD_PATH);
+    if (t.t === "text" && t.v.trim()) {
+      // Pages whose header links read "GitHub \u2197" keep that marker, so the new
+      // link sits in the row as a sibling rather than as the odd one out.
+      t.v = labelled
+        ? ""
+        : t.v.replace(/\S[\s\S]*\S|\S/, (m) => (m.includes("\u2197") ? "Discord \u2197" : "Discord"));
+      labelled = true;
+    }
+  }
+  if (!labelled) throw new Error("the header's outbound link carries no label to rename");
+
+  tokens.splice(end + 1, 0, ...clone);
+}
+
 function injectMobileMenu(tokens) {
+  injectDiscordLink(tokens);
   const header = tokens.findIndex((t) => t.t === "open" && t.name === "header");
   if (header < 0) throw new Error("no <header> to hang the navigation toggle on");
   const headerEnd = tokens.findIndex((t, i) => i > header && t.t === "close" && t.name === "header");
