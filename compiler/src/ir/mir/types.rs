@@ -241,6 +241,33 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
+                // A pre-registered abstract's TypeId can predate its declaration
+                // lowering and carry no underlying (`abstract Lazy<T>(()->T)`
+                // reached signatures as underlying-less, fell through to the
+                // i32 default below, and every Lazy VALUE -- a closure pointer
+                // -- was truncated to 32 bits and later jumped through). The
+                // symbol's own type is updated when the declaration lowers, so
+                // when THIS id is the stale view, defer to the symbol's.
+                if underlying.is_none() {
+                    if let Some(sym_ty) = self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .map(|sym| sym.type_id)
+                        .filter(|t| t.is_valid() && *t != type_id)
+                    {
+                        let has_underlying = matches!(
+                            self.type_table.get(sym_ty).map(|ti| &ti.kind),
+                            Some(TypeKind::Abstract {
+                                underlying: Some(_),
+                                ..
+                            })
+                        );
+                        if has_underlying {
+                            return self.convert_type(sym_ty);
+                        }
+                    }
+                }
+
                 if let Some(underlying_type) = underlying {
                     // A generic abstract's underlying is written in terms of its
                     // own type parameter -- `abstract Val<T>(T)` -- so converting
@@ -274,6 +301,12 @@ impl<'a> HirToMirContext<'a> {
                             })
                         })
                         .is_some();
+                    if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                        eprintln!(
+                            "[RESOLVE_TRACE] abstract-underlying-NONE type={:?} name='{}' systems={}",
+                            type_id, name_str, is_systems_type
+                        );
+                    }
                     if is_systems_type {
                         IrType::I64
                     } else {
