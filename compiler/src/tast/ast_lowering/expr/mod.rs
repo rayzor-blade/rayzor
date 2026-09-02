@@ -232,6 +232,23 @@ impl<'a> AstLowering<'a> {
                             };
                             return self.lower_expression(&field_expr);
                         }
+                        if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                            eprintln!(
+                                "[RESOLVE_TRACE] unresolved '{}' in scope {:?}; table-wide same-name symbols:",
+                                name, self.context.current_scope
+                            );
+                            for sym in self.context.symbol_table.find_symbols(|s| {
+                                self.context
+                                    .string_interner
+                                    .get(s.name)
+                                    .is_some_and(|n| n == name.as_str())
+                            }) {
+                                eprintln!(
+                                    "[RESOLVE_TRACE]   id={:?} kind={:?} scope={:?} type={:?}",
+                                    sym.id, sym.kind, sym.scope_id, sym.type_id
+                                );
+                            }
+                        }
                         return Err(LoweringError::UnresolvedSymbol {
                             name: name.clone(),
                             location: self.context.create_location_from_span(expression.span),

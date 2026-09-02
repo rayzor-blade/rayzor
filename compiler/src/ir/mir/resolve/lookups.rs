@@ -1423,6 +1423,17 @@ impl<'a> HirToMirContext<'a> {
                     a.is_some() && a == b
                 };
                 if id_match || str_match {
+                    if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                        eprintln!(
+                            "[RESOLVE_TRACE] E0803-candidate field='{}' sym={:?} class_ty={:?} slot={} owner={:?} receiver={:?}",
+                            target_name_str,
+                            _sym,
+                            class_ty,
+                            idx,
+                            self.field_class_names.get(_sym),
+                            receiver_ty
+                        );
+                    }
                     all_matches.push((class_ty, idx));
                     match_owners.push(self.field_class_names.get(_sym).map(|s| s.as_str()));
                 }
