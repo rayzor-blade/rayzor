@@ -631,8 +631,32 @@ impl<'a> AstLowering<'a> {
                 else_expr,
                 ..
             } => {
-                // Type unification handled by type checker
-                Ok(then_expr.expr_type)
+                let then_t = then_expr.expr_type;
+                let Some(else_e) = else_expr else {
+                    return Ok(then_t);
+                };
+                let else_t = else_e.expr_type;
+                if then_t == else_t {
+                    return Ok(then_t);
+                }
+                // `cond ? 2 : v` with v:Null<Int> is Null<Int>: a branch pair
+                // of T and Null<T> unifies UP to the nullable side, the way
+                // haxe types it. Anything else keeps the then-branch type —
+                // notably Int/Float stays put on purpose; harmonising scalar
+                // conditionals is its own minefield (boxing) and is not this
+                // rule's business.
+                let type_table = self.context.type_table.borrow();
+                let nullable_inner = |id: TypeId| match type_table.get(id).map(|t| &t.kind) {
+                    Some(crate::tast::core::TypeKind::Optional { inner_type }) => Some(*inner_type),
+                    _ => None,
+                };
+                if nullable_inner(then_t) == Some(else_t) {
+                    return Ok(then_t);
+                }
+                if nullable_inner(else_t) == Some(then_t) {
+                    return Ok(else_t);
+                }
+                Ok(then_t)
             }
             TypedExpressionKind::While { .. }
             | TypedExpressionKind::For { .. }
