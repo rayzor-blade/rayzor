@@ -718,6 +718,62 @@ impl<'a> AstLowering<'a> {
     /// declaring module, as bare `Red`. A class may precede the enum abstract
     /// in the source, so registering the aliases from `lower_abstract_declaration`
     /// is too late for that class's methods.
+    /// Record an abstract's implicit casts before any body in the file
+    /// lowers. `Context.unify` consults `abstract_casts` during deferred
+    /// macro re-expansion, which happens while some EARLIER declaration's
+    /// body is being lowered — waiting for the abstract's own declaration to
+    /// lower leaves a later-in-file abstract castless at that moment
+    /// (Issue10728's private-types-after-class layout). Best effort: an
+    /// annotation that does not lower yet is skipped, and the full
+    /// declaration lowering re-records the entry authoritatively.
+    pub(crate) fn pre_register_abstract_casts(&mut self, abstract_decl: &parser::AbstractDecl) {
+        let abstract_name = self.context.intern_string(&abstract_decl.name);
+        let Some(abstract_symbol) = self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), abstract_name)
+            .map(|entry| entry.id)
+        else {
+            return;
+        };
+        let mut from_types: Vec<TypeId> = Vec::new();
+        let mut to_types: Vec<TypeId> = Vec::new();
+        for ty in &abstract_decl.from {
+            if let Ok(id) = self.lower_type(ty) {
+                from_types.push(id);
+            }
+        }
+        for ty in &abstract_decl.to {
+            if let Ok(id) = self.lower_type(ty) {
+                to_types.push(id);
+            }
+        }
+        for field in &abstract_decl.fields {
+            let parser::ClassFieldKind::Function(func) = &field.kind else {
+                continue;
+            };
+            let has = |tag: &str| field.meta.iter().any(|m| m.name == tag);
+            if has(":from") || has("from") {
+                if let Some(param) = func.params.first() {
+                    if let Some(annotation) = &param.type_hint {
+                        if let Ok(id) = self.lower_type(annotation) {
+                            from_types.push(id);
+                        }
+                    }
+                }
+            }
+            if has(":to") || has("to") {
+                if let Some(annotation) = &func.return_type {
+                    if let Ok(id) = self.lower_type(annotation) {
+                        to_types.push(id);
+                    }
+                }
+            }
+        }
+        self.abstract_casts
+            .insert(abstract_symbol, (from_types, to_types));
+    }
+
     pub(crate) fn pre_register_enum_abstract_fields(
         &mut self,
         abstract_decl: &parser::AbstractDecl,

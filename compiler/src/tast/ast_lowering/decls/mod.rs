@@ -137,10 +137,13 @@ impl<'a> AstLowering<'a> {
                         self.collected_errors.push(e);
                     }
                 }
-                TypeDeclaration::Abstract(abstract_decl) if abstract_decl.is_enum_abstract => {
-                    if let Err(e) = self.pre_register_enum_abstract_fields(abstract_decl) {
-                        self.collected_errors.push(e);
+                TypeDeclaration::Abstract(abstract_decl) => {
+                    if abstract_decl.is_enum_abstract {
+                        if let Err(e) = self.pre_register_enum_abstract_fields(abstract_decl) {
+                            self.collected_errors.push(e);
+                        }
                     }
+                    self.pre_register_abstract_casts(abstract_decl);
                 }
                 _ => {}
             }
