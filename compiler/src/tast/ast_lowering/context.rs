@@ -60,6 +60,7 @@ impl<'a> AstLowering<'a> {
             deferred_macro_expander: None,
             deferred_macro_calls: BTreeMap::new(),
             abstract_casts: BTreeMap::new(),
+            abstract_from_methods: BTreeMap::new(),
         }
     }
 

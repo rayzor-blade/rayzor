@@ -654,6 +654,117 @@ impl<'a> AstLowering<'a> {
     /// a raw String is consumed directly by `trace` and similar `Dynamic` sinks.
     /// (Correct String→Dynamic for `Std.string` needs a tagged representation
     /// that those sinks also accept; out of scope here.)
+    /// Wrap an argument in the abstract's `@:from` conversion when the formal
+    /// parameter is that abstract and the argument is not already one.
+    /// `lazy(2)` with `lazy(l:Lazy<A>)` and `@:from static ofConst<T>(c:T)`
+    /// must lower as `lazy(ofConst(2))` — without the call, the raw argument
+    /// flows into the abstract's representation and whatever consumes it
+    /// (`this()` on an abstract over a function type jumps through the
+    /// integer 2). The clause form (`from Y`) is representation-compatible
+    /// and correctly stays uncoerced.
+    fn coerce_arg_via_abstract_from(
+        &mut self,
+        arg: TypedExpression,
+        formal: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(formal_ty) = formal else {
+            return arg;
+        };
+        // The formal's abstract symbol, through generic instantiation.
+        let abstract_symbol = {
+            let tt = self.context.type_table.borrow();
+            let mut resolved = formal_ty;
+            let mut hops = 0;
+            loop {
+                hops += 1;
+                if hops > 8 {
+                    break None;
+                }
+                match tt.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                    Some(TypeKind::Abstract { symbol_id, .. }) => break Some(*symbol_id),
+                    _ => break None,
+                }
+            }
+        };
+        let Some(abstract_symbol) = abstract_symbol else {
+            return arg;
+        };
+        // Already that abstract? No conversion.
+        let arg_is_same_abstract = {
+            let tt = self.context.type_table.borrow();
+            let mut resolved = arg.expr_type;
+            let mut hops = 0;
+            loop {
+                hops += 1;
+                if hops > 8 {
+                    break false;
+                }
+                match tt.get(resolved).map(|ti| &ti.kind) {
+                    Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                    Some(TypeKind::Abstract { symbol_id, .. }) => {
+                        break *symbol_id == abstract_symbol
+                    }
+                    _ => break false,
+                }
+            }
+        };
+        if arg_is_same_abstract {
+            return arg;
+        }
+        let Some(candidates) = self.abstract_from_methods.get(&abstract_symbol) else {
+            return arg;
+        };
+        // First method whose parameter accepts the argument's type: an exact
+        // type, a matching primitive kind, or the abstract's own type
+        // parameter (which accepts anything).
+        let pick = {
+            let tt = self.context.type_table.borrow();
+            let arg_kind = tt.get(arg.expr_type).map(|ti| ti.kind.clone());
+            candidates
+                .iter()
+                .find(|(_, param_ty)| {
+                    if *param_ty == arg.expr_type {
+                        return true;
+                    }
+                    match (tt.get(*param_ty).map(|ti| &ti.kind), arg_kind.as_ref()) {
+                        (Some(TypeKind::TypeParameter { .. }), _) => true,
+                        (Some(TypeKind::Dynamic), _) => true,
+                        (Some(a), Some(b)) => {
+                            std::mem::discriminant(a) == std::mem::discriminant(b)
+                                && matches!(
+                                    a,
+                                    TypeKind::Int
+                                        | TypeKind::Float
+                                        | TypeKind::Bool
+                                        | TypeKind::String
+                                )
+                        }
+                        _ => false,
+                    }
+                })
+                .map(|&(method_symbol, _)| method_symbol)
+        };
+        let Some(method_symbol) = pick else {
+            return arg;
+        };
+        let location = arg.source_location.clone();
+        TypedExpression {
+            expr_type: formal_ty,
+            kind: crate::tast::node::TypedExpressionKind::StaticMethodCall {
+                class_symbol: abstract_symbol,
+                method_symbol,
+                arguments: vec![arg],
+                type_arguments: Vec::new(),
+            },
+            usage: crate::tast::node::VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::first(),
+            source_location: location,
+            metadata: crate::tast::node::ExpressionMetadata::default(),
+        }
+    }
+
     fn coerce_arg_to_dynamic_param(
         &mut self,
         arg: TypedExpression,
@@ -816,6 +927,7 @@ impl<'a> AstLowering<'a> {
                         .as_ref()
                         .and_then(|f| f.get(i).copied())
                         .or_else(|| expected_arg_types.as_ref().and_then(|f| f.get(i).copied()));
+                    let a = self.coerce_arg_via_abstract_from(a, formal);
                     coerced.push(self.coerce_arg_to_dynamic_param(a, formal));
                 }
                 coerced

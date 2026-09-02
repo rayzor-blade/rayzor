@@ -376,6 +376,28 @@ impl<'a> AstLowering<'a> {
                     if let Some(methods) = self.class_methods.get_mut(&abstract_symbol) {
                         methods.push((method_name, sym, is_static));
                     }
+                    // A static `@:from` method IS the implicit conversion: a
+                    // call site whose argument matches its parameter must wrap
+                    // the argument in a call to it. Record symbol + parameter
+                    // type here, where both exist.
+                    if is_static
+                        && field
+                            .meta
+                            .iter()
+                            .any(|m| m.name == ":from" || m.name == "from")
+                    {
+                        if let Some(param_ty) = func
+                            .params
+                            .first()
+                            .and_then(|prm| prm.type_hint.as_ref())
+                            .and_then(|annotation| self.lower_type(annotation).ok())
+                        {
+                            self.abstract_from_methods
+                                .entry(abstract_symbol)
+                                .or_default()
+                                .push((sym, param_ty));
+                        }
+                    }
                 }
                 ClassFieldKind::Var {
                     name, type_hint, ..

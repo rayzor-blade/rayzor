@@ -855,6 +855,10 @@ pub struct AstLowering<'a> {
     /// `Context.unify` consults these; nothing else records them anywhere
     /// queryable.
     pub(crate) abstract_casts: BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>)>,
+    /// Each abstract's `@:from` METHODS: (method symbol, its parameter type).
+    /// The clause form (`from Y`) is representation compatibility and needs no
+    /// call; the method form is a real conversion the call site must invoke.
+    pub(crate) abstract_from_methods: BTreeMap<SymbolId, Vec<(SymbolId, TypeId)>>,
 }
 
 /// Result of type parameter substitution for generic method return types
