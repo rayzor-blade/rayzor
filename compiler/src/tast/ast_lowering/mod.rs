@@ -851,6 +851,10 @@ pub struct AstLowering<'a> {
     /// Deferred call sites by (span.start, span.end), mapped to the registry
     /// name the expander resolved at expansion time.
     deferred_macro_calls: BTreeMap<(usize, usize), String>,
+    /// Each abstract's declared implicit casts, `(from types, to types)`.
+    /// `Context.unify` consults these; nothing else records them anywhere
+    /// queryable.
+    pub(crate) abstract_casts: BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>)>,
 }
 
 /// Result of type parameter substitution for generic method return types

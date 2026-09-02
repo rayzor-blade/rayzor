@@ -37,6 +37,35 @@ pub trait MacroTyper {
     /// Only self-consistency is load-bearing (tests compare two of these), so
     /// it may share an implementation with `type_display`.
     fn type_std_string(&mut self, id: TypeId) -> String;
+
+    /// `Context.getType` — resolve a dotted or bare type name in the scope of
+    /// the module being lowered (private module types included).
+    fn resolve_type_by_name(&mut self, name: &str) -> Result<TypeId, String>;
+
+    /// `Context.makeMonomorph` — a fresh, unbound type variable. Each call
+    /// must return a DISTINCT id; bindings are the context's to keep.
+    fn fresh_monomorph(&mut self) -> TypeId;
+
+    /// `Context.unify` — may bind monomorphs from `monomorphs` into
+    /// `bindings`. True when the two types unify under those bindings.
+    fn unify_types(
+        &mut self,
+        a: TypeId,
+        b: TypeId,
+        monomorphs: &std::collections::BTreeSet<TypeId>,
+        bindings: &mut BTreeMap<TypeId, TypeId>,
+    ) -> bool;
+
+    /// The `haxe.macro.Type` constructor a type value presents as when a
+    /// macro pattern-matches it: the variant name plus its positional
+    /// payload. The def-shaped payload slot carries the type's own id as the
+    /// handle — enough for the round trip `case TType(td, _)` then
+    /// `TType(td, [args])`.
+    fn type_adt_view(&mut self, id: TypeId) -> Option<(String, Vec<super::value::MacroValue>)>;
+
+    /// Rebuild a typedef instance from its handle and fresh arguments —
+    /// the reconstruction half of the round trip above.
+    fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId>;
 }
 
 /// A scoped, non-owning handle to the live typer.
@@ -72,6 +101,10 @@ impl TyperRef {
 pub struct MacroContext {
     /// Live typer, installed only for the span of a deferred re-expansion.
     typer: Option<TyperRef>,
+    /// Monomorphs handed out by `makeMonomorph` during the current deferred
+    /// call, and what `unify` bound them to. Cleared with the typer.
+    monomorphs: std::collections::BTreeSet<TypeId>,
+    mono_bindings: BTreeMap<TypeId, TypeId>,
     // --- Compiler state references ---
     /// Symbol table for resolving names and looking up symbols
     symbol_table: Option<SymbolTableRef>,
@@ -250,6 +283,8 @@ impl MacroContext {
             current_class: None,
             defines: BTreeMap::new(),
             typer: None,
+            monomorphs: std::collections::BTreeSet::new(),
+            mono_bindings: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -274,6 +309,8 @@ impl MacroContext {
             current_class: None,
             defines: BTreeMap::new(),
             typer: None,
+            monomorphs: std::collections::BTreeSet::new(),
+            mono_bindings: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -294,9 +331,51 @@ impl MacroContext {
         self.typer = Some(TyperRef::new(typer));
     }
 
-    /// Remove the installed typer. Idempotent.
+    /// Remove the installed typer and the call-scoped monomorph state.
+    /// Idempotent.
     pub fn clear_typer(&mut self) {
         self.typer = None;
+        self.monomorphs.clear();
+        self.mono_bindings.clear();
+    }
+
+    /// The ADT constructor view of a Type value, for pattern matching.
+    pub fn project_type(&mut self, id: TypeId) -> Option<(String, Vec<MacroValue>)> {
+        let t = self.typer.as_mut()?;
+        t.get().type_adt_view(id)
+    }
+
+    /// A `haxe.macro.Type` value in whatever shape a macro produced it,
+    /// resolved back to a TypeId: an opaque handle as-is, a constructed
+    /// `TType(def, [args])` re-instantiated, any other constructor by its
+    /// def-handle payload slot.
+    pub fn coerce_type_value(&mut self, value: &MacroValue) -> Option<TypeId> {
+        match value {
+            MacroValue::Type(id) => Some(*id),
+            MacroValue::Enum(_, variant, payload) => {
+                let def = match payload.first() {
+                    Some(MacroValue::Type(id)) => *id,
+                    _ => return None,
+                };
+                if &**variant == "TType" {
+                    if let Some(MacroValue::Array(items)) = payload.get(1) {
+                        let args: Option<Vec<TypeId>> = items
+                            .iter()
+                            .map(|v| match v {
+                                MacroValue::Type(id) => Some(*id),
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(args) = args {
+                            let t = self.typer.as_mut()?;
+                            return t.get().instantiate_alias(def, args);
+                        }
+                    }
+                }
+                Some(def)
+            }
+            _ => None,
+        }
     }
 
     /// Copy another context's installed typer into this one. The interpreter
@@ -315,6 +394,16 @@ impl MacroContext {
     /// `TypeTools.toString` / `Std.string` rendering for a `Type` value, when
     /// the live typer is installed.
     pub fn format_type(&mut self, id: TypeId, constructor_form: bool) -> Option<String> {
+        // A bound monomorph prints as what it was bound to.
+        let mut id = id;
+        let mut hops = 0;
+        while let Some(&bound) = self.mono_bindings.get(&id) {
+            id = bound;
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+        }
         let t = self.typer.as_mut()?;
         Some(if constructor_form {
             t.get().type_std_string(id)
@@ -446,43 +535,22 @@ impl MacroContext {
     /// `Context.getType(name)` — Resolve a type by its qualified name
     ///
     /// Returns a MacroValue::Type(TypeId) or an error if not found.
-    pub fn get_type(&self, name: &str, location: SourceLocation) -> Result<MacroValue, MacroError> {
-        let Some(ref sym_table_ref) = self.symbol_table else {
-            return Err(MacroError::ContextError {
-                method: "getType".to_string(),
-                message: "compiler state not available".to_string(),
-                location,
-            });
+    pub fn get_type(
+        &mut self,
+        name: &str,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let Some(typer) = self.typer.as_mut() else {
+            return Err(MacroError::NeedsTyper { location });
         };
-
-        let sym_table = sym_table_ref.get();
-
-        // Try to find the type by searching all symbols of type-defining kinds
-        for kind in &[
-            crate::tast::symbols::SymbolKind::Class,
-            crate::tast::symbols::SymbolKind::Interface,
-            crate::tast::symbols::SymbolKind::Enum,
-            crate::tast::symbols::SymbolKind::Abstract,
-            crate::tast::symbols::SymbolKind::TypeAlias,
-        ] {
-            for symbol in sym_table.symbols_of_kind(*kind) {
-                // Compare the symbol's interned name string representation
-                // We check both simple name and qualified name patterns
-                let sym_name = format!("{:?}", symbol.name);
-                if sym_name == name || symbol.id.0.to_string() == name {
-                    let type_id = symbol.type_id;
-                    if type_id.is_valid() {
-                        return Ok(MacroValue::Type(type_id));
-                    }
-                }
-            }
+        match typer.get().resolve_type_by_name(name) {
+            Ok(id) => Ok(MacroValue::Type(id)),
+            Err(message) => Err(MacroError::ContextError {
+                method: "getType".to_string(),
+                message,
+                location,
+            }),
         }
-
-        Err(MacroError::ContextError {
-            method: "getType".to_string(),
-            message: format!("type '{}' not found", name),
-            location,
-        })
     }
 
     /// `Context.typeof(expr)` — Get the type of an expression.
@@ -736,6 +804,44 @@ impl MacroContext {
                         location,
                     })
                 }
+            }
+            "makeMonomorph" => {
+                let Some(typer) = self.typer.as_mut() else {
+                    return Err(MacroError::NeedsTyper { location });
+                };
+                let id = typer.get().fresh_monomorph();
+                self.monomorphs.insert(id);
+                Ok(MacroValue::Type(id))
+            }
+            "unify" => {
+                if self.typer.is_none() {
+                    return Err(MacroError::NeedsTyper { location });
+                }
+                let (Some(first), Some(second)) = (args.first().cloned(), args.get(1).cloned())
+                else {
+                    return Err(MacroError::ContextError {
+                        method: "unify".to_string(),
+                        message: "unify expects two Type arguments".to_string(),
+                        location,
+                    });
+                };
+                let (Some(a), Some(b)) = (
+                    self.coerce_type_value(&first),
+                    self.coerce_type_value(&second),
+                ) else {
+                    return Err(MacroError::ContextError {
+                        method: "unify".to_string(),
+                        message: "unify expects two Type arguments".to_string(),
+                        location,
+                    });
+                };
+                let Some(typer) = self.typer.as_mut() else {
+                    return Err(MacroError::NeedsTyper { location });
+                };
+                let ok = typer
+                    .get()
+                    .unify_types(a, b, &self.monomorphs, &mut self.mono_bindings);
+                Ok(MacroValue::Bool(ok))
             }
             "parse" => {
                 let code = arg_as_string(args, 0, "parse", location)?;

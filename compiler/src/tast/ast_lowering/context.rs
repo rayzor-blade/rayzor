@@ -59,6 +59,7 @@ impl<'a> AstLowering<'a> {
             suppress_callee_hint: false,
             deferred_macro_expander: None,
             deferred_macro_calls: BTreeMap::new(),
+            abstract_casts: BTreeMap::new(),
         }
     }
 

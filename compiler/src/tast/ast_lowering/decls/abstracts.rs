@@ -255,6 +255,38 @@ impl<'a> AstLowering<'a> {
             .map(|t| self.lower_type(t))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Recorded for `Context.unify`: the TypedAbstract node these land on
+        // is not queryable by symbol at expression time. The clause forms
+        // (`from Y` / `to Y`) are joined by the method forms — an
+        // `@:from static function ofX(v:Y)` admits Y, an `@:to function
+        // toY():Y` offers Y — since both spell the same implicit cast.
+        let mut recorded_from = from_types.clone();
+        let mut recorded_to = to_types.clone();
+        for field in &abstract_decl.fields {
+            let parser::ClassFieldKind::Function(func) = &field.kind else {
+                continue;
+            };
+            let has = |tag: &str| field.meta.iter().any(|m| m.name == tag);
+            if has(":from") || has("from") {
+                if let Some(param) = func.params.first() {
+                    if let Some(annotation) = &param.type_hint {
+                        if let Ok(id) = self.lower_type(annotation) {
+                            recorded_from.push(id);
+                        }
+                    }
+                }
+            }
+            if has(":to") || has("to") {
+                if let Some(annotation) = &func.return_type {
+                    if let Ok(id) = self.lower_type(annotation) {
+                        recorded_to.push(id);
+                    }
+                }
+            }
+        }
+        self.abstract_casts
+            .insert(abstract_symbol, (recorded_from, recorded_to));
+
         // Initialize class_fields for this abstract so field tracking works (needed for enum abstract)
         self.class_fields.entry(abstract_symbol).or_default();
         // Initialize class_methods so the pre-pass-typed abstract methods are

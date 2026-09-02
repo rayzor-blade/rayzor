@@ -741,13 +741,15 @@ impl MacroInterpreter {
             ExprKind::Macro(inner) => {
                 // macro expr — reify the expression, resolving dollar-idents from the environment
                 // e.g., `macro trace($e{msg})` resolves $e{msg} using the current env
-                ReificationEngine::reify_expr(inner, &self.env)
+                let prepared = self.pre_eval_dollar_args((**inner).clone())?;
+                ReificationEngine::reify_expr(&prepared, &self.env)
             }
 
             // --- Reification block ---
             ExprKind::Reify(inner) => {
                 // macro { ... } — reify the expression
-                ReificationEngine::reify_expr(inner, &self.env)
+                let prepared = self.pre_eval_dollar_args((**inner).clone())?;
+                ReificationEngine::reify_expr(&prepared, &self.env)
             }
 
             // --- Dollar identifier ---
@@ -2351,6 +2353,101 @@ impl MacroInterpreter {
     }
 
     /// Match a value against a pattern (for switch cases)
+    /// Reification's own evaluator handles only simple shapes inside
+    /// `$v{...}` / `$e{...}` — an identifier, a literal, `Std.string(x)`. A
+    /// full expression (`$v{TypeTools.toString(mono)}`) needs the real
+    /// evaluator, which reification cannot reach. So before reifying, walk
+    /// the quoted AST: any dollar-brace whose payload is not already simple
+    /// is evaluated HERE, bound to a synthetic name, and the payload becomes
+    /// that identifier — reification then sees only what it can handle.
+    fn pre_eval_dollar_args(&mut self, expr: Expr) -> Result<Expr, MacroError> {
+        fn is_simple(e: &Expr) -> bool {
+            matches!(
+                e.kind,
+                ExprKind::Ident(_)
+                    | ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::String(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::Null
+            )
+        }
+        fn walk(
+            interp: &mut MacroInterpreter,
+            mut e: Expr,
+            counter: &mut usize,
+        ) -> Result<Expr, MacroError> {
+            if let ExprKind::DollarIdent {
+                arg: Some(arg_expr),
+                ..
+            } = &mut e.kind
+            {
+                if !is_simple(arg_expr) {
+                    let value = interp.eval_expr(arg_expr)?;
+                    *counter += 1;
+                    let name = format!("__dollar_val_{}", counter);
+                    interp.env.define(&name, value);
+                    let span = arg_expr.span;
+                    **arg_expr = Expr {
+                        kind: ExprKind::Ident(name),
+                        span,
+                    };
+                }
+                return Ok(e);
+            }
+            // Nested `macro` quotes keep their own dollar scopes; do not
+            // reach inside them.
+            if matches!(e.kind, ExprKind::Macro(_) | ExprKind::Reify(_)) {
+                return Ok(e);
+            }
+            e.kind = match e.kind {
+                ExprKind::Call { expr, args } => ExprKind::Call {
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                    args: args
+                        .into_iter()
+                        .map(|a| walk(interp, a, counter))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                ExprKind::Field {
+                    expr,
+                    field,
+                    is_optional,
+                } => ExprKind::Field {
+                    expr: Box::new(walk(interp, *expr, counter)?),
+                    field,
+                    is_optional,
+                },
+                ExprKind::Binary { left, op, right } => ExprKind::Binary {
+                    left: Box::new(walk(interp, *left, counter)?),
+                    op,
+                    right: Box::new(walk(interp, *right, counter)?),
+                },
+                ExprKind::Paren(inner) => ExprKind::Paren(Box::new(walk(interp, *inner, counter)?)),
+                ExprKind::Block(elements) => ExprKind::Block(
+                    elements
+                        .into_iter()
+                        .map(|el| match el {
+                            parser::BlockElement::Expr(ex) => {
+                                walk(interp, ex, counter).map(parser::BlockElement::Expr)
+                            }
+                            other => Ok(other),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                ExprKind::Array(items) => ExprKind::Array(
+                    items
+                        .into_iter()
+                        .map(|a| walk(interp, a, counter))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                other => other,
+            };
+            Ok(e)
+        }
+        let mut counter = 0usize;
+        walk(self, expr, &mut counter)
+    }
+
     fn match_pattern(
         &mut self,
         value: &MacroValue,
@@ -2374,6 +2471,30 @@ impl MacroInterpreter {
                 // tag and bind each pattern param against the same-index
                 // entry of `__args__`.
                 let ctor_name = &path.name;
+                // A typed Type value presents as its haxe.macro.Type
+                // constructor: project on demand and match structurally, the
+                // same way the Enum arm below does.
+                if let MacroValue::Type(id) = value {
+                    let projected = self
+                        .macro_context
+                        .as_mut()
+                        .and_then(|ctx| ctx.project_type(*id));
+                    let Some((variant, payload)) = projected else {
+                        return Ok(false);
+                    };
+                    if variant != ctor_name.as_str() {
+                        return Ok(false);
+                    }
+                    if params.len() > payload.len() {
+                        return Ok(false);
+                    }
+                    for (sub_pat, sub_val) in params.iter().zip(payload.iter()) {
+                        if !self.match_pattern(sub_val, sub_pat)? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
                 let obj = match value {
                     MacroValue::Object(map) => map,
                     MacroValue::Enum(_, variant, payload) => {
@@ -2459,8 +2580,10 @@ impl MacroInterpreter {
 /// corpus uses.
 fn path_ends_with_expr_enum(base: &Expr) -> bool {
     match &base.kind {
-        ExprKind::Ident(b) => b == "ExprDef" || b == "Constant",
-        ExprKind::Field { field, .. } => field == "ExprDef" || field == "Constant",
+        ExprKind::Ident(b) => b == "ExprDef" || b == "Constant" || b == "Type",
+        ExprKind::Field { field, .. } => {
+            field == "ExprDef" || field == "Constant" || field == "Type"
+        }
         _ => false,
     }
 }
@@ -2474,6 +2597,16 @@ fn expr_enum_ctor(name: &str) -> Option<(&'static str, &'static str)> {
         "CFloat" => Some(("Constant", "CFloat")),
         "CString" => Some(("Constant", "CString")),
         "CIdent" => Some(("Constant", "CIdent")),
+        // haxe.macro.Type — constructed when a macro rebuilds a type value it
+        // took apart (`TType(td, [mono])`). Matching projects the same shape,
+        // and Context.unify coerces it back to a TypeId.
+        "TInst" => Some(("Type", "TInst")),
+        "TEnum" => Some(("Type", "TEnum")),
+        "TType" => Some(("Type", "TType")),
+        "TFun" => Some(("Type", "TFun")),
+        "TMono" => Some(("Type", "TMono")),
+        "TDynamic" => Some(("Type", "TDynamic")),
+        "TLazy" => Some(("Type", "TLazy")),
         _ => None,
     }
 }
