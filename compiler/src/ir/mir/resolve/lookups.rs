@@ -1475,7 +1475,7 @@ impl<'a> HirToMirContext<'a> {
         // Positive selection only: zero or several owner matches fall through,
         // since inherited fields carry the parent's owner name and must keep
         // resolving through the type chain.
-        let recv_bare = {
+        let recv_symbol_for_walk = {
             let type_table = self.type_table;
             let mut resolved = self.resolve_through_aliases(receiver_ty);
             let mut visited = BTreeSet::new();
@@ -1485,18 +1485,36 @@ impl<'a> HirToMirContext<'a> {
                 }
                 match type_table.get(resolved).map(|ti| &ti.kind) {
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                    // An abstract's field access reads its underlying value
+                    // (`this.value` under @:forward), so the walk continues
+                    // through it; a typedef stands for its target.
+                    Some(TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => resolved = *u,
+                    Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                     _ => break,
                 }
             }
-            type_table
-                .get(resolved)
-                .and_then(|ti| match &ti.kind {
-                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                    _ => None,
-                })
-                .and_then(|sym| self.symbol_table.get_symbol(sym))
-                .and_then(|si| self.string_interner.get(si.name))
+            type_table.get(resolved).and_then(|ti| match &ti.kind {
+                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                _ => None,
+            })
         };
+        let recv_bare = recv_symbol_for_walk
+            .and_then(|sym| self.symbol_table.get_symbol(sym))
+            .and_then(|si| self.string_interner.get(si.name));
+        if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+            let kind_desc = self
+                .type_table
+                .get(receiver_ty)
+                .map(|ti| format!("{:?}", std::mem::discriminant(&ti.kind)))
+                .unwrap_or_else(|| "<no entry>".to_string());
+            eprintln!(
+                "[RESOLVE_TRACE] E0803-receiver field='{}' receiver={:?} kind={} recv_bare={:?}",
+                target_name_str, receiver_ty, kind_desc, recv_bare
+            );
+        }
         {
             if let Some(recv_bare) = recv_bare {
                 let mut owned: Vec<(TypeId, u32)> = all_matches
@@ -1512,6 +1530,68 @@ impl<'a> HirToMirContext<'a> {
                 if owned.len() == 1 {
                     return FieldIndexResolution::Unique(owned[0].0, owned[0].1);
                 }
+            }
+        }
+
+        // Strategy 0.5: inherited fields, by ancestry NAME. A receiver class
+        // that inherits the field never matches a candidate's owner directly
+        // (`new C().value` against candidates owned by `unit.issues.B`), so
+        // walk the receiver's superclass chain and match each ancestor's name
+        // against the owners. Names are session-stable where TypeIds and
+        // SymbolIds are context-local, so this cannot be perturbed by id
+        // layout -- which is the property the E0803 family keeps tripping on.
+        if let Some(start_sym) = recv_symbol_for_walk {
+            let trace = std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some();
+            let mut walk_sym = start_sym;
+            for _ in 0..16 {
+                // The parent edge, by the most local knowledge first: the
+                // class_parent_map this lowering populated from the HIR it is
+                // compiling, then the symbol table's hierarchy info. Both are
+                // symbol-to-symbol; names do the matching, so nothing here
+                // depends on context-local id layout.
+                let parent_sym = self.class_parent_map.get(&walk_sym).copied().or_else(|| {
+                    self.symbol_table
+                        .class_hierarchies
+                        .get(&walk_sym)
+                        .and_then(|h| h.superclass)
+                        .and_then(|ty| self.symbol_table.get_symbol_from_type(ty))
+                });
+                let Some(super_sym) = parent_sym else {
+                    if trace {
+                        eprintln!(
+                            "[RESOLVE_TRACE] ancestry-walk stop: no parent edge for {:?}",
+                            walk_sym
+                        );
+                    }
+                    break;
+                };
+                let Some(super_name) = self
+                    .symbol_table
+                    .get_symbol(super_sym)
+                    .and_then(|si| self.string_interner.get(si.name))
+                else {
+                    break;
+                };
+                let mut owned: Vec<(TypeId, u32)> = all_matches
+                    .iter()
+                    .zip(match_owners.iter())
+                    .filter(|(_, owner)| {
+                        owner.is_some_and(|o| Self::class_names_match(o, super_name))
+                    })
+                    .map(|(&m, _)| m)
+                    .collect();
+                owned.sort_unstable_by_key(|&(t, i)| (t.as_raw(), i));
+                owned.dedup();
+                if owned.len() == 1 {
+                    if trace {
+                        eprintln!(
+                            "[RESOLVE_TRACE] E0803-resolved-by-ancestry field='{}' ancestor='{}' -> slot {}",
+                            target_name_str, super_name, owned[0].1
+                        );
+                    }
+                    return FieldIndexResolution::Unique(owned[0].0, owned[0].1);
+                }
+                walk_sym = super_sym;
             }
         }
 
@@ -1653,6 +1733,12 @@ impl<'a> HirToMirContext<'a> {
         distinct_indexes.sort_unstable();
         distinct_indexes.dedup();
         if distinct_indexes.len() > 1 {
+            if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                eprintln!(
+                    "[RESOLVE_TRACE] E0803-AMBIGUOUS field='{}' receiver={:?} matches={:?} owners={:?}",
+                    target_name_str, receiver_ty, all_matches, match_owners
+                );
+            }
             return FieldIndexResolution::Ambiguous(all_matches);
         }
 
