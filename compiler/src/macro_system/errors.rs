@@ -58,6 +58,13 @@ pub enum MacroError {
         location: SourceLocation,
     },
 
+    /// The macro body asked a question only the live typer can answer
+    /// (`Context.typeof` before typing exists). Not a failure and not
+    /// catchable by the macro's own try/catch — it is the signal that the
+    /// whole call must be re-run during lowering, and letting a catch arm
+    /// swallow it would expand the macro to a wrong constant instead.
+    NeedsTyper { location: SourceLocation },
+
     /// Circular macro dependency detected
     CircularDependency {
         chain: Vec<String>,
@@ -123,6 +130,7 @@ impl MacroError {
             MacroError::ReificationError { location, .. } => *location,
             MacroError::InvalidDefinition { location, .. } => *location,
             MacroError::ContextError { location, .. } => *location,
+            MacroError::NeedsTyper { location } => *location,
             MacroError::UndefinedVariable { location, .. } => *location,
             MacroError::UnsupportedOperation { location, .. } => *location,
             MacroError::DivisionByZero { location } => *location,
@@ -167,6 +175,7 @@ impl MacroError {
             MacroError::ReificationError { .. } => "E0707",
             MacroError::InvalidDefinition { .. } => "E0708",
             MacroError::ContextError { .. } => "E0709",
+            MacroError::NeedsTyper { .. } => "E0709",
             MacroError::UndefinedVariable { .. } => "E0710",
             MacroError::UnsupportedOperation { .. } => "E0711",
             MacroError::DivisionByZero { .. } => "E0712",
@@ -225,6 +234,9 @@ impl fmt::Display for MacroError {
         match self {
             MacroError::UndefinedMacro { name, .. } => {
                 write!(f, "undefined macro: '{}'", name)
+            }
+            MacroError::NeedsTyper { .. } => {
+                write!(f, "needs the live typer; deferred to lowering")
             }
             MacroError::ArgumentCountMismatch {
                 macro_name,

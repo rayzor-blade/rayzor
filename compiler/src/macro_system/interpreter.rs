@@ -489,6 +489,16 @@ impl MacroInterpreter {
                         }
                         Ok(val)
                     }
+                    // NOTE: the deferral signal (NeedsTyper) is deliberately
+                    // catchable here. A macro that wraps `typeof` in try/catch
+                    // (HelperMacros.typeError) then answers from the catch arm
+                    // during phase-A expansion, exactly as it always has.
+                    // Letting it defer instead would hand the probe to a
+                    // typechecker more permissive than haxe's, and flip every
+                    // `typeError(x = y)` assertion in the corpus from its
+                    // (accidentally correct) "true" to a wrong "false". The
+                    // right ending is a stricter typechecker, then this
+                    // becomes uncatchable so the probe answers for real.
                     Err(e) if !e.is_control_flow() => {
                         // Try to match a catch block (use first matching catch)
                         let err_val = MacroValue::String(Arc::from(e.to_string().as_str()));
@@ -1340,6 +1350,18 @@ impl MacroInterpreter {
             "Std" => match method {
                 "string" => {
                     let val = args.first().unwrap_or(&MacroValue::Null);
+                    // A Type value has no printable form of its own — its
+                    // rendering lives in the type table, reachable only
+                    // through the live typer during a deferred re-expansion.
+                    if let MacroValue::Type(id) = val {
+                        if let Some(rendered) = self
+                            .macro_context
+                            .as_mut()
+                            .and_then(|ctx| ctx.format_type(*id, true))
+                        {
+                            return Ok(Some(MacroValue::String(Arc::from(rendered.as_str()))));
+                        }
+                    }
                     Ok(Some(MacroValue::String(Arc::from(
                         val.to_display_string().as_str(),
                     ))))
@@ -1472,6 +1494,26 @@ impl MacroInterpreter {
                         s.replace(from, to).as_str(),
                     ))))
                 }
+                _ => Ok(None),
+            },
+            "haxe.macro.TypeTools" | "TypeTools" => match method {
+                // `TypeTools.toString(t)` — the source-level spelling of a
+                // typed Type ("Null<Int>", "String"). Answerable only while
+                // the live typer is installed; its absence surfaces as the
+                // deferral signal, same as Context.typeof.
+                "toString" => match args.first() {
+                    Some(MacroValue::Type(id)) => {
+                        let rendered = self
+                            .macro_context
+                            .as_mut()
+                            .and_then(|ctx| ctx.format_type(*id, false));
+                        match rendered {
+                            Some(text) => Ok(Some(MacroValue::String(Arc::from(text.as_str())))),
+                            None => Err(MacroError::NeedsTyper { location }),
+                        }
+                    }
+                    _ => Ok(Some(MacroValue::Null)),
+                },
                 _ => Ok(None),
             },
             "haxe.macro.ComplexTypeTools" | "ComplexTypeTools" => match method {

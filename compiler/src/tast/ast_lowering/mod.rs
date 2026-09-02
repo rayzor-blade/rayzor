@@ -845,6 +845,12 @@ pub struct AstLowering<'a> {
     /// the hint at every level. The real per-call hint is still computed when
     /// that nested call is lowered for real, outside this guard.
     suppress_callee_hint: bool,
+    /// The expander kept alive from expansion, for re-running the macro calls
+    /// it deferred (typer-dependent bodies). See `macro_defer`.
+    deferred_macro_expander: Option<&'a std::cell::RefCell<crate::macro_system::MacroExpander>>,
+    /// Deferred call sites by (span.start, span.end), mapped to the registry
+    /// name the expander resolved at expansion time.
+    deferred_macro_calls: BTreeMap<(usize, usize), String>,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -879,6 +885,7 @@ mod decls;
 mod expr;
 mod imports;
 mod infer;
+mod macro_defer;
 mod metadata;
 mod resolve;
 mod stdlib;

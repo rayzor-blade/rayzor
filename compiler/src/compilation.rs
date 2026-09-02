@@ -6370,6 +6370,13 @@ impl CompilationUnit {
         let t_macro = profile_timer(self.config.profile_typecheck);
         let macro_expansion_needed = self.config.pipeline_config.enable_macro_expansion
             && self.macro_expansion_may_apply(ast_file);
+        // Typer-dependent macro calls parked by expansion; lowering re-expands
+        // them at their sites. The expander must outlive `lowering` below.
+        let mut deferred_macro_calls: Vec<crate::macro_system::expander::DeferredMacroCall> =
+            Vec::new();
+        let mut deferred_macro_expander: Option<
+            std::cell::RefCell<crate::macro_system::MacroExpander>,
+        > = None;
         let ast_file_owned;
         let ast_file = if macro_expansion_needed {
             let mut class_registry = crate::macro_system::ClassRegistry::new();
@@ -6385,11 +6392,16 @@ impl CompilationUnit {
             let mut dep_files: Vec<HaxeFile> = Vec::new();
             dep_files.extend(self.user_files.iter().cloned());
             dep_files.extend(self.loaded_import_haxe_files.iter().cloned());
-            let expansion = crate::macro_system::expand_macros_with_dependencies(
-                ast_file.clone(),
-                class_registry,
-                &dep_files,
-            );
+            let (expansion, kept_expander) =
+                crate::macro_system::expander::expand_macros_with_dependencies_keep(
+                    ast_file.clone(),
+                    class_registry,
+                    &dep_files,
+                );
+            deferred_macro_calls = expansion.deferred.clone();
+            if !deferred_macro_calls.is_empty() {
+                deferred_macro_expander = Some(std::cell::RefCell::new(kept_expander));
+            }
             // Surface macro expansion diagnostics to the user, not just to
             // debug logs. A silent fallthrough is much worse than a loud
             // error — a failed macro call otherwise routes to a regular
@@ -6487,6 +6499,14 @@ impl CompilationUnit {
         // Declared-static-signature index: lets call sites type statics whose
         // declaring file lowers later (no untyped-placeholder decay).
         lowering.set_static_sig_index(Rc::clone(&self.static_sig_index));
+
+        // Re-expansion of typer-dependent macro calls at their sites.
+        if let Some(ref expander_cell) = deferred_macro_expander {
+            if !deferred_macro_calls.is_empty() {
+                lowering
+                    .set_deferred_macros(expander_cell, std::mem::take(&mut deferred_macro_calls));
+            }
+        }
 
         // Seed class_fields from previously compiled files.
         // Only seed classes that have actual fields — empty entries interfere with

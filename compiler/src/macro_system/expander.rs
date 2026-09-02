@@ -46,6 +46,17 @@ pub struct ExpansionOrigin {
     pub expanded_text: Option<String>,
 }
 
+/// A macro call whose body asked the typer a question expansion cannot answer
+/// (`Context.typeof`, `typeExpr`, …). The call site was left in the AST
+/// verbatim; lowering re-expands it with the live typer installed.
+#[derive(Debug, Clone)]
+pub struct DeferredMacroCall {
+    /// Registry name the call resolved to.
+    pub name: String,
+    /// Span of the whole call expression, the key lowering matches on.
+    pub span: parser::Span,
+}
+
 /// Result of expanding macros in a file
 pub struct ExpansionResult {
     /// The modified AST file (with macros expanded)
@@ -56,6 +67,8 @@ pub struct ExpansionResult {
     pub expansions_count: usize,
     /// Origins of each expansion (for error tracing)
     pub expansion_origins: Vec<ExpansionOrigin>,
+    /// Call sites deferred to lowering, where the typer is live.
+    pub deferred: Vec<DeferredMacroCall>,
 }
 
 /// Top-level macro expansion orchestrator.
@@ -75,6 +88,8 @@ pub struct MacroExpander {
     expansion_origins: Vec<ExpansionOrigin>,
     /// Memoization cache: (macro_name, args_hash) -> expanded Expr
     call_cache: BTreeMap<(String, u64), Expr>,
+    /// Call sites deferred to lowering (typer-dependent macro bodies).
+    deferred: Vec<DeferredMacroCall>,
     /// Import map for the current file: short name → qualified name
     import_map: BTreeMap<String, String>,
     /// Class registry for macro interpreter fallback dispatch
@@ -91,6 +106,7 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            deferred: Vec::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
@@ -105,6 +121,7 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            deferred: Vec::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
@@ -119,6 +136,7 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: BTreeMap::new(),
+            deferred: Vec::new(),
             import_map: BTreeMap::new(),
             class_registry: Arc::new(class_registry),
         }
@@ -210,6 +228,7 @@ impl MacroExpander {
                 diagnostics,
                 expansions_count: 0,
                 expansion_origins: Vec::new(),
+                deferred: Vec::new(),
             };
         }
 
@@ -263,6 +282,7 @@ impl MacroExpander {
             diagnostics,
             expansions_count: self.expansions_count,
             expansion_origins,
+            deferred: std::mem::take(&mut self.deferred),
         }
     }
 
@@ -431,9 +451,23 @@ impl MacroExpander {
             ExprKind::Call { expr: callee, args } => {
                 if let Some(macro_name) = extract_macro_call_name(callee) {
                     if self.registry.is_macro(&macro_name) {
-                        let expanded = self.expand_macro_call(&macro_name, args, &expr)?;
-                        self.expansions_count += 1;
-                        return Ok((expanded, true));
+                        match self.expand_macro_call(&macro_name, args, &expr) {
+                            Ok(expanded) => {
+                                self.expansions_count += 1;
+                                return Ok((expanded, true));
+                            }
+                            // The body asked the typer a question. Not an
+                            // error: park the call site untouched and let
+                            // lowering re-expand it with the typer live.
+                            Err(e) if is_typer_dependent(&e) => {
+                                self.deferred.push(DeferredMacroCall {
+                                    name: macro_name,
+                                    span: expr.span,
+                                });
+                                return Ok((expr, false));
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 // Not a macro call — recursively walk children
@@ -980,6 +1014,16 @@ impl MacroExpander {
             self.class_registry.clone(),
         );
 
+        // During a deferred re-expansion the live typer is installed on THIS
+        // context; the interpreter builds its own, so hand the typer across
+        // (and the call position with it, for currentPos()).
+        if self.context.has_typer() {
+            let mut ctx = super::context_api::MacroContext::new();
+            ctx.adopt_typer_from(&self.context);
+            ctx.set_call_position(location);
+            interp.macro_context = Some(ctx);
+        }
+
         // Bind parameters in the interpreter environment
         for (i, param) in macro_def.params.iter().enumerate() {
             let value = if param.rest {
@@ -1211,6 +1255,53 @@ fn extract_build_macro_name(meta: &Metadata) -> String {
 /// parsing and TAST lowering.
 ///
 /// Returns the expanded file and any diagnostics generated.
+/// The Context methods only the live typer can answer. A macro body failing
+/// on one of these is deferred rather than reported; anything else is a real
+/// error.
+fn is_typer_dependent(err: &MacroError) -> bool {
+    match err {
+        MacroError::NeedsTyper { .. } => true,
+        MacroError::ContextError { method, .. } => matches!(
+            method.as_str(),
+            "typeof"
+                | "typeExpr"
+                | "getType"
+                | "unify"
+                | "makeMonomorph"
+                | "follow"
+                | "resolveType"
+                | "getExpectedType"
+        ),
+        _ => false,
+    }
+}
+
+impl MacroExpander {
+    /// Re-expand one deferred call with the live typer installed.
+    ///
+    /// `call` is the exact call expression parked at expansion time; lowering
+    /// matched it by span. The typer is installed on the context only for the
+    /// span of this call — the guard clears it even on the error path.
+    pub fn expand_deferred_call(
+        &mut self,
+        name: &str,
+        call: &parser::Expr,
+        typer: &mut dyn super::context_api::MacroTyper,
+    ) -> Result<parser::Expr, MacroError> {
+        let parser::ExprKind::Call { args, .. } = &call.kind else {
+            return Err(MacroError::RuntimeError {
+                message: "deferred macro site is not a call expression".to_string(),
+                location: crate::tast::SourceLocation::unknown(),
+            });
+        };
+        // SAFETY: cleared before this function returns, on every path.
+        unsafe { self.context.set_typer(typer) };
+        let result = self.expand_macro_call(name, args, call);
+        self.context.clear_typer();
+        result
+    }
+}
+
 pub fn expand_macros(file: HaxeFile) -> ExpansionResult {
     let mut expander = MacroExpander::new();
     expander.expand_file(file)
@@ -1253,6 +1344,26 @@ pub fn expand_macros_with_dependencies(
     }
 
     expander.expand_file(file)
+}
+
+/// As `expand_macros_with_dependencies`, but hands the expander back so
+/// lowering can re-expand the calls the result marks as deferred. The
+/// expander keeps the registry (macro bodies survive the stripping of their
+/// definitions from the AST) and the import maps the bodies resolve against.
+pub fn expand_macros_with_dependencies_keep(
+    file: HaxeFile,
+    class_registry: ClassRegistry,
+    dependency_files: &[HaxeFile],
+) -> (ExpansionResult, MacroExpander) {
+    let mut expander = MacroExpander::with_class_registry(class_registry);
+    for dep in dependency_files {
+        if dep.filename == file.filename {
+            continue;
+        }
+        let _ = expander.registry.scan_and_register(dep, &dep.filename);
+    }
+    let result = expander.expand_file(file);
+    (result, expander)
 }
 
 /// Expand macros with a class registry for extended class dispatch.

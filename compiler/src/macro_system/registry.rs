@@ -283,8 +283,20 @@ impl MacroRegistry {
         if let Some(def) = self.macros.get(name) {
             return Some(def);
         }
-        // Then try matching by simple name suffix
-        self.macros.values().find(|def| def.name == name)
+        // Then by simple name
+        if let Some(def) = self.macros.values().find(|def| def.name == name) {
+            return Some(def);
+        }
+        // Then as a `Class.method` suffix of a qualified key (see is_macro)
+        if name.contains('.') {
+            let suffix_key = format!(".{}", name);
+            return self
+                .macros
+                .iter()
+                .find(|(k, _)| k.ends_with(&suffix_key))
+                .map(|(_, def)| def);
+        }
+        None
     }
 
     /// Get all pending build macros
@@ -347,7 +359,21 @@ impl MacroRegistry {
 
     /// Check if a name refers to a registered macro
     pub fn is_macro(&self, name: &str) -> bool {
-        self.macros.contains_key(name) || self.macros.values().any(|def| def.name == name)
+        self.macros.contains_key(name)
+            || self.macros.values().any(|def| def.name == name)
+            || self.matches_class_method_suffix(name)
+    }
+
+    /// `HelperMacros.typeString` names `unit.HelperMacros.typeString` when the
+    /// class arrived through an import (import.hx included) rather than by its
+    /// dotted path. The registry is FQN-keyed, so accept a `Class.method` form
+    /// by suffix — the class simple name plus the method is unambiguous in
+    /// practice, and mirrors what simple-name lookup above already allows.
+    fn matches_class_method_suffix(&self, name: &str) -> bool {
+        name.contains('.') && {
+            let suffix_key = format!(".{}", name);
+            self.macros.keys().any(|k| k.ends_with(&suffix_key))
+        }
     }
 
     /// Compile class constructors/methods from a ClassRegistry for VM dispatch.

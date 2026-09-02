@@ -703,6 +703,34 @@ impl<'a> AstLowering<'a> {
         expr: &Expr,
         args: &[Expr],
     ) -> LoweringResult<TypedExpression> {
+        // A call the expander deferred (its macro body asks the typer a
+        // question) is re-expanded HERE, where locals upstream of this site
+        // are typed and this lowering can answer as the MacroTyper. The
+        // result replaces the call and lowers in its place.
+        if !self.deferred_macro_calls.is_empty() {
+            let key = (expression.span.start, expression.span.end);
+            if let Some(name) = self.deferred_macro_calls.get(&key).cloned() {
+                let cell = self
+                    .deferred_macro_expander
+                    .expect("deferred call recorded without its expander");
+                let expanded = {
+                    let mut typer =
+                        super::super::macro_defer::DeferredMacroTyper { lowering: self };
+                    cell.borrow_mut()
+                        .expand_deferred_call(&name, expression, &mut typer)
+                };
+                match expanded {
+                    Ok(result) => return self.lower_expression(&result),
+                    Err(e) => {
+                        return Err(LoweringError::SemanticError {
+                            message: format!("macro '{}' failed during typing: {}", name, e),
+                            location: self.context.create_location_from_span(expression.span),
+                        });
+                    }
+                }
+            }
+        }
+
         // Intercept f.bind(args...) before lowering args (args may contain `_` placeholder)
         if let ExprKind::Field {
             expr: receiver_expr,

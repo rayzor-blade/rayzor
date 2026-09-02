@@ -19,7 +19,59 @@ use std::sync::Arc;
 ///
 /// Holds references to compiler state and tracks the current expansion
 /// point (which class, which method, what position, etc.).
+/// Typing services a macro body may call, answered by the live typer.
+///
+/// Macro expansion runs on the raw AST, before any typing exists, so a macro
+/// that asks for a type (`Context.typeof`, `typeExpr`, …) cannot be answered
+/// there. Such calls are DEFERRED: the call site is left in the AST and
+/// re-expanded during lowering, where `AstLowering` implements this trait and
+/// can type an expression in the scope the call sits in.
+pub trait MacroTyper {
+    /// Type `expr` in the scope enclosing the macro call. The typed result is
+    /// discarded; only the type survives. An failure returns the message the
+    /// typer would have reported.
+    fn type_expr_in_scope(&mut self, expr: &parser::Expr) -> Result<TypeId, String>;
+    /// `haxe.macro.TypeTools.toString` — the source-level spelling ("Null<Int>").
+    fn type_display(&mut self, id: TypeId) -> String;
+    /// `Std.string` on a `haxe.macro.Type` value — the constructor-shaped form.
+    /// Only self-consistency is load-bearing (tests compare two of these), so
+    /// it may share an implementation with `type_display`.
+    fn type_std_string(&mut self, id: TypeId) -> String;
+}
+
+/// A scoped, non-owning handle to the live typer.
+///
+/// The interpreter owns its `MacroContext`, so the borrowed typer cannot be a
+/// reference field. `expand_deferred_call` installs the pointer for exactly
+/// one call and clears it before returning; the same discipline
+/// `SymbolTableRef` above relies on.
+#[derive(Clone, Copy)]
+pub struct TyperRef {
+    ptr: *mut (dyn MacroTyper + 'static),
+}
+
+impl TyperRef {
+    /// # Safety
+    /// The typer must outlive every dispatch made while this ref is installed.
+    /// The lifetime is erased here for storage; the install/clear pairing in
+    /// `expand_deferred_call` is what makes that sound.
+    pub unsafe fn new(typer: &mut (dyn MacroTyper + '_)) -> Self {
+        let ptr: *mut (dyn MacroTyper + '_) = typer;
+        Self {
+            ptr: std::mem::transmute::<*mut (dyn MacroTyper + '_), *mut (dyn MacroTyper + 'static)>(
+                ptr,
+            ),
+        }
+    }
+
+    fn get(&mut self) -> &mut dyn MacroTyper {
+        unsafe { &mut *self.ptr }
+    }
+}
+
 pub struct MacroContext {
+    /// Live typer, installed only for the span of a deferred re-expansion.
+    typer: Option<TyperRef>,
     // --- Compiler state references ---
     /// Symbol table for resolving names and looking up symbols
     symbol_table: Option<SymbolTableRef>,
@@ -197,6 +249,7 @@ impl MacroContext {
             current_method: None,
             current_class: None,
             defines: BTreeMap::new(),
+            typer: None,
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -220,6 +273,7 @@ impl MacroContext {
             current_method: None,
             current_class: None,
             defines: BTreeMap::new(),
+            typer: None,
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -229,6 +283,44 @@ impl MacroContext {
     /// Set the macro call position
     pub fn set_call_position(&mut self, pos: SourceLocation) {
         self.call_position = pos;
+    }
+
+    /// Install the live typer for the span of one deferred re-expansion.
+    ///
+    /// # Safety
+    /// The typer must outlive every dispatch until `clear_typer` runs. The
+    /// caller pairs the two around a single `expand_macro_call`.
+    pub unsafe fn set_typer(&mut self, typer: &mut dyn MacroTyper) {
+        self.typer = Some(TyperRef::new(typer));
+    }
+
+    /// Remove the installed typer. Idempotent.
+    pub fn clear_typer(&mut self) {
+        self.typer = None;
+    }
+
+    /// Copy another context's installed typer into this one. The interpreter
+    /// builds its own context per expansion; this is how the typer installed
+    /// on the expander's context reaches it. Sound for the same reason and
+    /// span as `set_typer`: both copies die before `clear_typer` runs.
+    pub fn adopt_typer_from(&mut self, other: &MacroContext) {
+        self.typer = other.typer;
+    }
+
+    /// Whether a live typer is installed (deferred re-expansion in progress).
+    pub fn has_typer(&self) -> bool {
+        self.typer.is_some()
+    }
+
+    /// `TypeTools.toString` / `Std.string` rendering for a `Type` value, when
+    /// the live typer is installed.
+    pub fn format_type(&mut self, id: TypeId, constructor_form: bool) -> Option<String> {
+        let t = self.typer.as_mut()?;
+        Some(if constructor_form {
+            t.get().type_std_string(id)
+        } else {
+            t.get().type_display(id)
+        })
     }
 
     /// Set the build class context (for @:build macros)
@@ -393,23 +485,51 @@ impl MacroContext {
         })
     }
 
-    /// `Context.typeof(expr)` — Get the type of an expression
+    /// `Context.typeof(expr)` — Get the type of an expression.
     ///
-    /// In the current implementation, this performs a basic type lookup.
-    /// Full expression typing would require integration with the type checker.
+    /// Answerable only while the live typer is installed (deferred
+    /// re-expansion during lowering). Before that, the error below is the
+    /// signal the expander reads to defer the whole macro call.
     pub fn typeof_expr(
-        &self,
-        _expr: &parser::Expr,
+        &mut self,
+        expr: &parser::Expr,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        // For now, return a context error indicating this needs the full typer
-        // Phase 5 pipeline integration will wire this to the actual type checker
-        Err(MacroError::ContextError {
-            method: "typeof".to_string(),
-            message: "typeof requires full typer integration (available after pipeline wiring)"
-                .to_string(),
-            location,
-        })
+        let Some(typer) = self.typer.as_mut() else {
+            return Err(MacroError::NeedsTyper { location });
+        };
+        match typer.get().type_expr_in_scope(expr) {
+            Ok(id) => Ok(MacroValue::Type(id)),
+            Err(message) => Err(MacroError::ContextError {
+                method: "typeof".to_string(),
+                message,
+                location,
+            }),
+        }
+    }
+
+    /// `Context.typeExpr(expr)` — type an expression, returning a TypedExpr
+    /// view. Only `t` carries a real value; the macros in the wild read `.t`
+    /// and hand it to `TypeTools.toString`.
+    pub fn type_expr(
+        &mut self,
+        expr: &parser::Expr,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let typed = self.typeof_expr(expr, location).map_err(|e| match e {
+            MacroError::ContextError {
+                message, location, ..
+            } => MacroError::ContextError {
+                method: "typeExpr".to_string(),
+                message,
+                location,
+            },
+            other => other,
+        })?;
+        let mut obj = BTreeMap::new();
+        obj.insert("t".to_string(), typed);
+        obj.insert("pos".to_string(), MacroValue::Position(location));
+        Ok(MacroValue::Object(Arc::new(obj)))
     }
 
     /// `Context.parse(expr, pos)` — Parse a string as Haxe code
@@ -595,11 +715,24 @@ impl MacroContext {
             }
             "typeof" => {
                 if let Some(MacroValue::Expr(expr)) = args.first() {
-                    self.typeof_expr(expr, location)
+                    let expr = expr.clone();
+                    self.typeof_expr(&expr, location)
                 } else {
                     Err(MacroError::ContextError {
                         method: "typeof".to_string(),
                         message: "typeof expects an Expr argument".to_string(),
+                        location,
+                    })
+                }
+            }
+            "typeExpr" => {
+                if let Some(MacroValue::Expr(expr)) = args.first() {
+                    let expr = expr.clone();
+                    self.type_expr(&expr, location)
+                } else {
+                    Err(MacroError::ContextError {
+                        method: "typeExpr".to_string(),
+                        message: "typeExpr expects an Expr argument".to_string(),
                         location,
                     })
                 }

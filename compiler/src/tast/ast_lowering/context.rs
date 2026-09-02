@@ -57,12 +57,28 @@ impl<'a> AstLowering<'a> {
             expected_lambda_params_stack: Vec::new(),
             expected_arg_type_stack: Vec::new(),
             suppress_callee_hint: false,
+            deferred_macro_expander: None,
+            deferred_macro_calls: BTreeMap::new(),
         }
     }
 
     /// Set whether to skip internal stdlib loading (for CompilationUnit)
     pub fn set_skip_stdlib_loading(&mut self, skip: bool) {
         self.skip_stdlib_loading = skip;
+    }
+
+    /// Hand over the expander and the call sites it deferred. Lowering
+    /// re-expands each site when it reaches it, with itself as the typer.
+    pub fn set_deferred_macros(
+        &mut self,
+        expander: &'a std::cell::RefCell<crate::macro_system::MacroExpander>,
+        deferred: Vec<crate::macro_system::expander::DeferredMacroCall>,
+    ) {
+        self.deferred_macro_expander = Some(expander);
+        for call in deferred {
+            self.deferred_macro_calls
+                .insert((call.span.start, call.span.end), call.name);
+        }
     }
 
     /// Set whether to skip pre-registration pass (for CompilationUnit with two-pass compilation)
