@@ -4952,6 +4952,40 @@ impl<'a> TastToHirContext<'a> {
 
     /// Try to inline a static abstract method call (e.g., Color.fromInt(1))
     /// Returns Some(inlined_expr) if successful, None otherwise
+    /// Whether an expression tree holds a lambda anywhere inside it.
+    ///
+    /// Inlining rewrites parameter references by walking the tree; a lambda's
+    /// body is not walked, so anything it captures would be left pointing at
+    /// the inlined-away function's scope.
+    fn contains_function_literal(expr: &TypedExpression) -> bool {
+        use crate::tast::node::TypedExpressionKind as K;
+        match &expr.kind {
+            K::FunctionLiteral { .. } => true,
+            K::New { arguments, .. } => arguments.iter().any(Self::contains_function_literal),
+            K::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
+                Self::contains_function_literal(receiver)
+                    || arguments.iter().any(Self::contains_function_literal)
+            }
+            K::StaticMethodCall { arguments, .. } | K::FunctionCall { arguments, .. } => {
+                arguments.iter().any(Self::contains_function_literal)
+            }
+            K::BinaryOp { left, right, .. } => {
+                Self::contains_function_literal(left) || Self::contains_function_literal(right)
+            }
+            K::UnaryOp { operand, .. } => Self::contains_function_literal(operand),
+            K::Cast { expression, .. } => Self::contains_function_literal(expression),
+            K::FieldAccess { object, .. } => Self::contains_function_literal(object),
+            K::ArrayLiteral { elements, .. } => {
+                elements.iter().any(Self::contains_function_literal)
+            }
+            _ => false,
+        }
+    }
+
     fn try_inline_static_abstract_method(
         &mut self,
         class_symbol: SymbolId,
@@ -5068,6 +5102,20 @@ impl<'a> TastToHirContext<'a> {
         } else {
             None
         };
+
+        // A lambda in the body cannot come along: `inline_expression_deep`
+        // substitutes parameters by rewriting the expression tree, and a
+        // FunctionLiteral is not one of the kinds it rewrites -- it falls
+        // through to an ordinary lowering, which builds the closure in the
+        // CALLER's scope while its capture list still names the CALLEE's
+        // parameter. `@:from static ofConst<T>(c:T) return new Lazy(function()
+        // return c)` inlined into `main` that way, and `c` resolved to nothing
+        // there ("Captured variable `c` not found in scope"). Lower the call
+        // for real instead; the parameter then exists where the closure looks
+        // for it.
+        if return_expr.is_some_and(Self::contains_function_literal) {
+            return None;
+        }
 
         if let Some(return_expr) = return_expr {
             // Use a dummy this_replacement (not used for static methods)
