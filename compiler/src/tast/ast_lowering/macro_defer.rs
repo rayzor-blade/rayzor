@@ -184,8 +184,31 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
             TypeKind::TypeAlias { type_args, .. } => {
                 ("TType".to_string(), vec![V::Type(id), args_of(&type_args)])
             }
-            TypeKind::Class { type_args, .. } | TypeKind::Interface { type_args, .. } => {
-                ("TInst".to_string(), vec![V::Type(id), args_of(&type_args)])
+            TypeKind::Class {
+                symbol_id,
+                type_args,
+            }
+            | TypeKind::Interface {
+                symbol_id,
+                type_args,
+            } => {
+                // A forward reference to a typedef (or abstract) carries a
+                // provisional Class kind until its declaration lowers; the
+                // symbol table already knows what it really is, so IT names
+                // the constructor.
+                let ctor = match self
+                    .lowering
+                    .context
+                    .symbol_table
+                    .get_symbol(symbol_id)
+                    .map(|sym| sym.kind)
+                {
+                    Some(crate::tast::symbols::SymbolKind::TypeAlias) => "TType",
+                    Some(crate::tast::symbols::SymbolKind::Abstract) => "TAbstract",
+                    Some(crate::tast::symbols::SymbolKind::Enum) => "TEnum",
+                    _ => "TInst",
+                };
+                (ctor.to_string(), vec![V::Type(id), args_of(&type_args)])
             }
             TypeKind::Enum { type_args, .. } => {
                 ("TEnum".to_string(), vec![V::Type(id), args_of(&type_args)])
@@ -223,19 +246,49 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
 
     fn instantiate_alias(&mut self, def: TypeId, args: Vec<TypeId>) -> Option<TypeId> {
         use crate::tast::core::TypeKind;
-        let (symbol_id, target_type) = match self
+        // Same named type, fresh arguments — whatever kind the def currently
+        // carries. A typedef still wearing its provisional Class kind (its
+        // declaration has not lowered yet) reconstructs as that same shape,
+        // which is what its other mentions in the file lowered to as well, so
+        // unification's same-symbol rule still lines the two up.
+        let kind = self
             .lowering
             .context
             .type_table
             .borrow()
             .get(def)
-            .map(|t| t.kind.clone())?
-        {
+            .map(|t| t.kind.clone())?;
+        let rebuilt = match kind {
             TypeKind::TypeAlias {
                 symbol_id,
                 target_type,
                 ..
-            } => (symbol_id, target_type),
+            } => TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                type_args: args,
+            },
+            TypeKind::Class { symbol_id, .. } => TypeKind::Class {
+                symbol_id,
+                type_args: args,
+            },
+            TypeKind::Interface { symbol_id, .. } => TypeKind::Interface {
+                symbol_id,
+                type_args: args,
+            },
+            TypeKind::Enum { symbol_id, .. } => TypeKind::Enum {
+                symbol_id,
+                type_args: args,
+            },
+            TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                ..
+            } => TypeKind::Abstract {
+                symbol_id,
+                underlying,
+                type_args: args,
+            },
             _ => return None,
         };
         Some(
@@ -243,14 +296,7 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 .context
                 .type_table
                 .borrow_mut()
-                .create_type_with_location(
-                    TypeKind::TypeAlias {
-                        symbol_id,
-                        target_type,
-                        type_args: args,
-                    },
-                    crate::tast::SourceLocation::unknown(),
-                ),
+                .create_type_with_location(rebuilt, crate::tast::SourceLocation::unknown()),
         )
     }
 }
