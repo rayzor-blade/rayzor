@@ -72,18 +72,24 @@ impl<'a> HirToMirContext<'a> {
             self.collect_referenced_variables_in_block(upd, &mut referenced_vars);
         }
 
-        // Only variables declared before the loop (already in symbol_map);
-        // function parameters are immutable.
+        // Which of the referenced variables the body actually ASSIGNS. Used
+        // below to decide whether a symbol with no `locals` entry — which is
+        // what a function parameter looks like here — is loop-carried.
+        let mut assigned_in_body = self.find_modified_variables_in_block(body);
+        if let Some(update) = continue_update {
+            assigned_in_body.extend(self.find_modified_variables_in_block(update));
+        }
+
+        // Anything already in symbol_map is a candidate. There is deliberately
+        // no parameter exclusion: Haxe parameters are assignable, and the
+        // `SymbolKind::Parameter` this used to test for is never constructed
+        // (`create_variable_with_type` gives every binding `SymbolKind::Variable`),
+        // so the old filter term was always false and the comment claiming
+        // "function parameters are immutable" described neither Haxe nor this
+        // code.
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
-            .filter(|sym| {
-                let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only actual parameter symbols (by kind, not by
-                // register — see is_parameter_symbol; a `var i = lo` local
-                // aliases the param's register and must still get a phi).
-                let is_param = self.is_parameter_symbol(sym);
-                in_map && !is_param
-            })
+            .filter(|sym| self.symbol_map.contains_key(sym))
             .collect();
 
         // Save initial values of loop variables before jumping to condition
@@ -94,7 +100,25 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .current_function()
                     .and_then(|func| func.locals.get(&reg))
-                    .map(|local| local.ty.clone());
+                    .map(|local| local.ty.clone())
+                    // A register that has a symbol_map entry but no `locals`
+                    // entry is a function parameter: parameters are seeded into
+                    // `register_types` and bound into `symbol_map`, and never
+                    // registered as locals. One the body ASSIGNS is loop-carried
+                    // like any local and needs the phi triple; without it the
+                    // post-loop repoint never happens and a later read sees the
+                    // register the body left behind — defined in a block that
+                    // does not dominate the read, which is not a value the
+                    // backend can find (`return head` after `head = n` became a
+                    // trap stub). One that stays read-only keeps its signature
+                    // register, which already dominates every block.
+                    .or_else(|| {
+                        if assigned_in_body.contains(symbol_id) {
+                            self.builder.get_register_type(reg)
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(local_ty) = local_ty {
                     loop_var_initial_values
                         .insert(*symbol_id, (reg, self.loop_phi_type(reg, local_ty)));
@@ -113,20 +137,31 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .add_phi_incoming(cond_block, phi_reg, entry_block, *initial_reg);
 
-                // Register the phi node as a local so Cranelift can find its type
+                // Register the phi node as a local so Cranelift can find its type.
+                // Unconditional: the initial register has no `locals` entry when
+                // it is a parameter, and the update and exit phis register theirs
+                // unconditionally already — leaving only the header phi
+                // unregistered gives the backend a phi triple it can type in two
+                // places out of three.
                 if let Some(func) = self.builder.current_function_mut() {
-                    if let Some(local) = func.locals.get(initial_reg).cloned() {
-                        func.locals.insert(
-                            phi_reg,
-                            crate::ir::IrLocal {
-                                name: format!("{}_phi", local.name),
-                                ty: var_type.clone(),
-                                mutable: true,
-                                source_location: local.source_location,
-                                allocation: crate::ir::AllocationHint::Register,
-                            },
-                        );
-                    }
+                    let prior = func.locals.get(initial_reg).cloned();
+                    let (name, source_location) = match &prior {
+                        Some(local) => (format!("{}_phi", local.name), local.source_location),
+                        None => (
+                            format!("loop_phi_{}", symbol_id.as_raw()),
+                            crate::ir::IrSourceLocation::unknown(),
+                        ),
+                    };
+                    func.locals.insert(
+                        phi_reg,
+                        crate::ir::IrLocal {
+                            name,
+                            ty: var_type.clone(),
+                            mutable: true,
+                            source_location,
+                            allocation: crate::ir::AllocationHint::Register,
+                        },
+                    );
                 }
 
                 phi_nodes.insert(*symbol_id, phi_reg);
@@ -419,17 +454,13 @@ impl<'a> HirToMirContext<'a> {
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
         self.collect_referenced_variables_in_expr(condition, &mut referenced_vars);
 
-        // Only variables declared before the loop (already in symbol_map);
-        // function parameters are immutable.
+        // See lower_while_loop: no parameter exclusion, and the body's own
+        // assignments decide what is loop-carried.
+        let assigned_in_body = self.find_modified_variables_in_block(body);
+
         let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
-            .filter(|sym| {
-                let in_map = self.symbol_map.contains_key(sym);
-                // Exclude only actual parameter symbols, by kind not register
-                // (see is_parameter_symbol).
-                let is_param = self.is_parameter_symbol(sym);
-                in_map && !is_param
-            })
+            .filter(|sym| self.symbol_map.contains_key(sym))
             .collect();
 
         // Save initial values of loop variables before jumping to body
@@ -440,7 +471,25 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .current_function()
                     .and_then(|func| func.locals.get(&reg))
-                    .map(|local| local.ty.clone());
+                    .map(|local| local.ty.clone())
+                    // A register that has a symbol_map entry but no `locals`
+                    // entry is a function parameter: parameters are seeded into
+                    // `register_types` and bound into `symbol_map`, and never
+                    // registered as locals. One the body ASSIGNS is loop-carried
+                    // like any local and needs the phi triple; without it the
+                    // post-loop repoint never happens and a later read sees the
+                    // register the body left behind — defined in a block that
+                    // does not dominate the read, which is not a value the
+                    // backend can find (`return head` after `head = n` became a
+                    // trap stub). One that stays read-only keeps its signature
+                    // register, which already dominates every block.
+                    .or_else(|| {
+                        if assigned_in_body.contains(symbol_id) {
+                            self.builder.get_register_type(reg)
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(local_ty) = local_ty {
                     loop_var_initial_values
                         .insert(*symbol_id, (reg, self.loop_phi_type(reg, local_ty)));
@@ -461,20 +510,31 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .add_phi_incoming(body_block, phi_reg, entry_block, *initial_reg);
 
-                // Register the phi node as a local so Cranelift can find its type
+                // Register the phi node as a local so Cranelift can find its type.
+                // Unconditional: the initial register has no `locals` entry when
+                // it is a parameter, and the update and exit phis register theirs
+                // unconditionally already — leaving only the header phi
+                // unregistered gives the backend a phi triple it can type in two
+                // places out of three.
                 if let Some(func) = self.builder.current_function_mut() {
-                    if let Some(local) = func.locals.get(initial_reg).cloned() {
-                        func.locals.insert(
-                            phi_reg,
-                            crate::ir::IrLocal {
-                                name: format!("{}_phi", local.name),
-                                ty: var_type.clone(),
-                                mutable: true,
-                                source_location: local.source_location,
-                                allocation: crate::ir::AllocationHint::Register,
-                            },
-                        );
-                    }
+                    let prior = func.locals.get(initial_reg).cloned();
+                    let (name, source_location) = match &prior {
+                        Some(local) => (format!("{}_phi", local.name), local.source_location),
+                        None => (
+                            format!("loop_phi_{}", symbol_id.as_raw()),
+                            crate::ir::IrSourceLocation::unknown(),
+                        ),
+                    };
+                    func.locals.insert(
+                        phi_reg,
+                        crate::ir::IrLocal {
+                            name,
+                            ty: var_type.clone(),
+                            mutable: true,
+                            source_location,
+                            allocation: crate::ir::AllocationHint::Register,
+                        },
+                    );
                 }
 
                 phi_nodes.insert(*symbol_id, phi_reg);

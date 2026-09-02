@@ -27,9 +27,12 @@
 # non-zero only when something OUTSIDE that list fails, so the script is a
 # regression gate today and a progress report as the list shrinks.
 #
-# The one left does not miscompile -- it fails to BUILD. The parameter-accumulator
-# shape installs a trap stub (W0020, "Return value IrId not found", "GEP ptr not
-# found in value_map"), which is a codegen defect upstream of free insertion.
+# Every case in that list now fails the same way: the object that escapes the loop
+# body is freed there, so the structure collapses onto one self-referential node.
+# mem_accumulator_dies is listed for the same reason seen from the other side --
+# the walk over that collapsed list never terminates, so it yields no footprint at
+# all rather than a wrong one. One defect, eight shapes; the list shrinks together
+# or not at all.
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -44,24 +47,38 @@ SLACK_MB="${SLACK_MB:-8}"
 # Ceiling for one fixture. A fix that leaks per-iteration can reach tens of GB
 # and take the machine down with it, so cap rather than trust the fixture.
 CAP_MB="${CAP_MB:-2048}"
+# Wall-clock ceiling for one fixture run. A collapsed object graph makes a list
+# walk non-terminating, which no memory cap can catch.
+RUN_LIMIT_S="${RUN_LIMIT_S:-120}"
 
-KNOWN_FAIL="local_accumulator param_accumulator static_accumulator ternary_rhs array_push capture_cell shapes_guarded_while_nested"
+KNOWN_FAIL="local_accumulator param_accumulator static_accumulator ternary_rhs array_push capture_cell shapes_guarded_while_nested mem_accumulator_dies"
 
 pass=0; known=0; regressed=0; fixed=0
 
 is_known() { case " $KNOWN_FAIL " in *" $1 "*) return 0;; *) return 1;; esac; }
 
-# Run one fixture under a footprint cap, echo its stdout.
+# Run one fixture under BOTH a footprint cap and a wall-clock limit, echo its
+# stdout. The time limit is not optional: a case whose object graph came out
+# cyclic walks `while (p != null)` forever, and a memory cap never fires on a
+# walk that allocates nothing. Without it the gate hangs instead of scoring the
+# case as broken -- which is the failure it exists to report.
 capped_run() {
     local dir="$1"; shift
-    ( cd "$dir" && "$RAYZOR" run --release --no-cache Main.hx "$@" 2>&1 ) &
+    # `exec` so the backgrounded pid IS rayzor. Without it the pid is the
+    # subshell, killing that orphans rayzor, the orphan holds the command
+    # substitution's pipe open, and the caller blocks forever with a guard that
+    # already fired.
+    ( cd "$dir" && exec "$RAYZOR" run --release --no-cache Main.hx "$@" 2>&1 ) &
     local pid=$!
     (
+        local waited=0
         while kill -0 "$pid" 2>/dev/null; do
             local rss
             rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
             [ -n "$rss" ] && [ "$rss" -gt $((CAP_MB * 1024)) ] && { kill -9 "$pid" 2>/dev/null; break; }
             sleep 0.3
+            waited=$((waited + 1))
+            [ "$waited" -gt $((RUN_LIMIT_S * 10 / 3)) ] && { kill -9 "$pid" 2>/dev/null; break; }
         done
     ) &
     local guard=$!
@@ -89,7 +106,7 @@ answer_case() {  # name expected
 # /usr/bin/time reports its DIRECT child, so it must exec rayzor itself: wrapping
 # the run in `timeout` measures the wrapper (~1MB) and hides everything.
 peak_mb() {  # dir -> integer MB
-    ( cd "$WORK/$1" && /usr/bin/time -l "$RAYZOR" run --release --no-cache Main.hx 2>&1 >/dev/null ) \
+    ( cd "$WORK/$1" && timeout -k 5 "$RUN_LIMIT_S" /usr/bin/time -l "$RAYZOR" run --release --no-cache Main.hx 2>&1 >/dev/null ) \
         | awk '/peak memory footprint/{printf "%d", $1/1048576}'
 }
 
