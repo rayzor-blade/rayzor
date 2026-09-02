@@ -131,6 +131,31 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 self.symbol_map.get(&capture_symbol).copied()
             };
+            // A monomorphized body can carry the TEMPLATE's capture symbol
+            // while the instantiated parameter registered under a fresh id.
+            // The value is in scope under its NAME; recover it that way, and
+            // only when the name is unambiguous here — two same-named locals
+            // would make the pick a guess.
+            let captured_val = captured_val.or_else(|| {
+                let want = self
+                    .symbol_table
+                    .get_symbol(capture_symbol)
+                    .and_then(|sym| self.string_interner.get(sym.name))?;
+                let mut hits = self.symbol_map.iter().filter_map(|(sym, reg)| {
+                    (*sym != capture_symbol
+                        && self
+                            .symbol_table
+                            .get_symbol(*sym)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            == Some(want))
+                    .then_some(*reg)
+                });
+                let first = hits.next();
+                if hits.next().is_some() {
+                    return None;
+                }
+                first
+            });
             if let Some(captured_val) = captured_val {
                 debug!("  Found! Register: {:?}", captured_val);
                 captured_values.push(captured_val);
@@ -144,6 +169,23 @@ impl<'a> HirToMirContext<'a> {
                     .get_symbol(capture.symbol)
                     .and_then(|symbol| self.string_interner.get(symbol.name))
                     .unwrap_or("<unknown>");
+                if std::env::var_os("RAYZOR_RESOLVE_TRACE").is_some() {
+                    eprintln!(
+                        "[RESOLVE_TRACE] capture miss: {:?} '{}' mode={:?}; symbol_map has:",
+                        capture.symbol, capture_name, capture.mode
+                    );
+                    for (sym, reg) in &self.symbol_map {
+                        eprintln!(
+                            "[RESOLVE_TRACE]   {:?} '{}' -> {:?}",
+                            sym,
+                            self.symbol_table
+                                .get_symbol(*sym)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .unwrap_or("?"),
+                            reg
+                        );
+                    }
+                }
                 self.errors.push(LoweringError {
                     message: format!(
                         "Captured variable {:?} (`{}`) not found in scope",
