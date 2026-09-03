@@ -383,24 +383,37 @@ PYGEN
   # The compact TSV is for scoring, not diagnosis. Preserve the complete output
   # for every issue so a CI-only crash/no-output result includes its tier event,
   # verifier error, and runner banner instead of only a truncated final line.
-  printf '%s\n' "$out" > "$LOGS/$base.log"
+  local log="$LOGS/$base.log"
+  printf '%s\n' "$out" > "$log"
+
+  # Everything below reads the LOG, never `$out` through a pipe. With
+  # `set -o pipefail`, `printf '%s' "$out" | grep -q PATTERN` reports FAILURE
+  # when grep matches EARLY: grep -q exits at the first hit and closes the pipe,
+  # the producer's next write takes SIGPIPE, and pipefail adopts that 141 as the
+  # pipeline's status. A passing test prints CONFORMANCE_OK on line 1, so the
+  # longer its remaining output, the likelier its own success killed the check
+  # that was looking for it -- which is why this only bit in CI, where
+  # RAYZOR_TIER_TRACE_STARTUP adds ~34 lines after that first one. Three cases
+  # scored NO_OUTPUT against logs whose first line was CONFORMANCE_OK.
+  # Reading the file has no producer to kill, and it makes the row and the log
+  # come from one source, so they cannot disagree again.
 
   # A test that reported a failed assertion and THEN died computed a wrong
   # answer; the crash is downstream of it, usually while rendering the very
   # value that was wrong. Scoring it as a crash hides the wrong answer and
   # inflates the crash count.
-  if [[ $code -ne 0 ]] && printf '%s' "$out" | grep -q '^FAILCHECK'; then
-    det=$(printf '%s' "$out" | grep -m1 '^FAILVALUES' | cut -c1-90)
-    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -m1 '^FAILCHECK' | cut -c1-90)
+  if [[ $code -ne 0 ]] && grep -q '^FAILCHECK' "$log"; then
+    det=$(grep -m1 '^FAILVALUES' "$log" | cut -c1-90)
+    [[ -z "$det" ]] && det=$(grep -m1 '^FAILCHECK' "$log" | cut -c1-90)
     emit_result "$result" "$base" WRONG_ANSWER "${det} (then exit $code)"
   elif [[ $code -ne 0 ]]; then
-    det=$(printf '%s' "$out" | grep -oE '\[E[0-9]+\][^"]{0,80}' | head -1)
+    det=$(grep -oE '\[E[0-9]+\][^"]{0,80}' "$log" | head -1)
     # A named uncompiled function is the most actionable thing a run can say:
     # it points at the exact construct the compiler could not build. Prefer it
     # over the generic exit code, which is what every one of these used to be.
-    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -oE 'rayzor: `[^`]+` was never compiled' \
+    [[ -z "$det" ]] && det=$(grep -oE 'rayzor: `[^`]+` was never compiled' "$log" \
                              | head -1 | sed -E 's/rayzor: `(.*)` was never compiled/uncompiled \1/')
-    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -iE 'error|panic|signal' | head -1 | cut -c1-90)
+    [[ -z "$det" ]] && det=$(grep -iE 'error|panic|signal' "$log" | head -1 | cut -c1-90)
     [[ -z "$det" ]] && det="exit $code"
     # Any death by signal is a crash: the watchdog reports them the way a shell
     # does, as 128+signo. Naming individual numbers filed the ones nobody had
@@ -435,14 +448,14 @@ PYGEN
     else
       emit_result "$result" "$base" "$status" "$det"
     fi
-  elif printf '%s' "$out" | grep -q '^CONFORMANCE_OK'; then
-    emit_result "$result" "$base" PASS "$(printf '%s' "$out" | grep -o 'CONFORMANCE_OK.*')"
-  elif printf '%s' "$out" | grep -q 'FAILCHECK\|CONFORMANCE_BAD'; then
-    det=$(printf '%s' "$out" | grep -m1 '^FAILVALUES' | cut -c1-90)
-    [[ -z "$det" ]] && det=$(printf '%s' "$out" | grep -m1 '^FAILCHECK' | cut -c1-90)
+  elif grep -q '^CONFORMANCE_OK' "$log"; then
+    emit_result "$result" "$base" PASS "$(grep -o 'CONFORMANCE_OK.*' "$log" | head -1)"
+  elif grep -q 'FAILCHECK\|CONFORMANCE_BAD' "$log"; then
+    det=$(grep -m1 '^FAILVALUES' "$log" | cut -c1-90)
+    [[ -z "$det" ]] && det=$(grep -m1 '^FAILCHECK' "$log" | cut -c1-90)
     emit_result "$result" "$base" WRONG_ANSWER "$det"
   else
-    emit_result "$result" "$base" NO_OUTPUT "$(printf '%s' "$out" | tail -1 | cut -c1-90)"
+    emit_result "$result" "$base" NO_OUTPUT "$(tail -1 "$log" | cut -c1-90)"
   fi
 }
 
