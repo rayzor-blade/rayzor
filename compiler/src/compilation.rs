@@ -5955,6 +5955,9 @@ impl CompilationUnit {
                 parser::TypeDeclaration::Abstract(_) => {
                     let _ = lowering.pre_register_declaration(decl);
                 }
+                parser::TypeDeclaration::Typedef(typedef_decl) => {
+                    let _ = lowering.lower_typedef_declaration(typedef_decl);
+                }
                 _ => {}
             }
         }

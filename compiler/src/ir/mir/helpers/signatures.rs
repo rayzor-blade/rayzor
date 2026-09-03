@@ -622,9 +622,29 @@ impl<'a> HirToMirContext<'a> {
                     .cloned()
                 {
                     if let Some(Some(param_name)) = names.get(param_index) {
-                        if let Some(iface_sym) =
-                            self.lookup_interface_symbol_by_qualified_name(param_name)
-                        {
+                        // The name is all this context holds of an imported
+                        // callee's signature, and it can only mean one thing:
+                        // an interface's name, or a protocol's. Resolving the
+                        // interface first settles which, so a program that
+                        // declares its own `Iterator`/`Iterable` interface keeps
+                        // the fat pointer its callee dispatches through.
+                        let iface_sym = self.lookup_interface_symbol_by_qualified_name(param_name);
+                        // A parameter the callee declares as `Iterable<T>`/
+                        // `Iterator<T>` takes an iteration handle, built here
+                        // while the argument's concrete type is still known.
+                        // Both protocols are structural, so a value that reaches
+                        // the callee as a plain pointer arrives with no entry
+                        // points at all.
+                        if iface_sym.is_none() {
+                            if let Some(handle) = self.maybe_wrap_for_named_iter_protocol(
+                                arg_reg,
+                                arg_expr.ty,
+                                param_name,
+                            ) {
+                                return handle;
+                            }
+                        }
+                        if let Some(iface_sym) = iface_sym {
                             // Don't double-wrap a value that is already a fat pointer: the
                             // nested wrapper would become the callee's `this`.
                             if self.interface_wrapped_args.contains(&arg_reg) {

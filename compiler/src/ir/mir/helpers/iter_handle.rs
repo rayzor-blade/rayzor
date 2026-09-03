@@ -420,16 +420,45 @@ impl<'a> HirToMirContext<'a> {
         target_ty: TypeId,
     ) -> Option<IrId> {
         self.iter_protocol_of(target_ty)?;
-        // A protocol still carrying an unbound type parameter belongs to a generic
-        // template, whose specialisation is chosen from the argument's own type.
-        // Handing the callee a handle there hides the concrete type that choice
-        // reads, so such a call keeps the shape it has today.
-        if self.protocol_mentions_type_parameter(target_ty) {
-            return None;
-        }
+        // An unbound element type is no obstacle: the callee reads its entry points
+        // from the handle, not from the element's type, so the same handle serves
+        // a template and an instantiation alike.
         // A value already typed as the protocol carries a handle if it has one;
         // rewrapping would bury it a level deeper.
         if self.iter_protocol_of(source_ty).is_some() {
+            return None;
+        }
+        let source = self.iter_source_for(value_reg, source_ty)?;
+        self.build_iter_handle(value_reg, &source)
+    }
+
+    /// Wrap `value_reg` for a parameter an imported callee declares as
+    /// `Iterable<T>`/`Iterator<T>`, recognised from the parameter's type name.
+    ///
+    /// An imported callee's parameter types belong to the context that compiled
+    /// it, so all this one holds of its signature is a per-parameter type name.
+    /// The name says which protocol the slot takes; the handle itself is built
+    /// from the argument's concrete type, exactly as at a typed boundary.
+    ///
+    /// The match is on the whole final segment of the name, because the two
+    /// protocols are the language's own: a concrete class whose name merely ends
+    /// in one of them, `haxe.iterators.ArrayIterator`, is a different type that
+    /// carries its own dispatch already.
+    pub(crate) fn maybe_wrap_for_named_iter_protocol(
+        &mut self,
+        value_reg: IrId,
+        source_ty: TypeId,
+        param_name: &str,
+    ) -> Option<IrId> {
+        let leaf = param_name.rsplit('.').next().unwrap_or(param_name);
+        if !matches!(leaf, "Iterable" | "Iterator") {
+            return None;
+        }
+        // A value already typed as the protocol carries a handle if it has one,
+        // and one built at an earlier boundary is a handle already: rewrapping
+        // either buries the entry points a level deeper.
+        if self.iter_protocol_of(source_ty).is_some() || self.iter_handle_regs.contains(&value_reg)
+        {
             return None;
         }
         let source = self.iter_source_for(value_reg, source_ty)?;
@@ -457,13 +486,13 @@ impl<'a> HirToMirContext<'a> {
         if self.iter_protocol_of(iter_expr.ty).is_none() {
             return false;
         }
-        // Inside a generic template the element type is still a parameter, and the
-        // body is lowered once for a receiver no call site has supplied yet. The
-        // loop keeps the shape it has there and the specialisations carry the
-        // handle, so a template is never lowered against a receiver it cannot have.
-        if self.protocol_mentions_type_parameter(iter_expr.ty) {
-            return false;
-        }
+        // Inside a generic template the body is lowered once for a receiver no call
+        // site has supplied, and emitting the handle loop there leaves the template
+        // uncompilable. A specialisation, whose element type is concrete, does take
+        // this path.
+        // An unbound element type is no obstacle: the loop reads its entry points
+        // from the handle rather than from the element's type, so the body it
+        // emits is the same whatever the element turns out to be.
         let Some(handle_raw) = self.lower_expression(iter_expr) else {
             return true;
         };
@@ -814,6 +843,23 @@ impl<'a> HirToMirContext<'a> {
             return decline(fell_through);
         };
         let receiver = &args[0];
+        if std::env::var_os("RAYZOR_ITER_DISPATCH").is_some() {
+            let mname = self
+                .symbol_table
+                .get_symbol(*symbol)
+                .and_then(|s| self.string_interner.get(s.name))
+                .unwrap_or("?")
+                .to_string();
+            let rk = self
+                .type_table
+                .get(receiver.ty)
+                .map(|t| std::mem::discriminant(&t.kind));
+            eprintln!(
+                "[ITERDISP] m={mname} recv_ty={:?} recv_kind={rk:?} protocol={:?}",
+                receiver.ty,
+                self.iter_protocol_of(receiver.ty)
+            );
+        }
         // The receiver's own type names the protocol, or the value it holds is
         // known to be a handle. The second case is how the result of
         // `it.iterator()` dispatches: its declared type says only what the
@@ -834,11 +880,9 @@ impl<'a> HirToMirContext<'a> {
                 IterProtocol::Iterator
             }
         };
-        if self.iter_protocol_of(receiver.ty).is_some()
-            && self.protocol_mentions_type_parameter(receiver.ty)
-        {
-            return decline(fell_through);
-        }
+        // An unbound element type is no obstacle here, unlike at a coercion site:
+        // the entry points come from the handle rather than from the element's
+        // type, and a receiver carrying no handle is caught by the tag check.
         let Some(method) = self
             .symbol_table
             .get_symbol(*symbol)
@@ -854,10 +898,20 @@ impl<'a> HirToMirContext<'a> {
             (IterProtocol::Iterator, "hasNext") => (24i64, IrType::Bool),
             (IterProtocol::Iterator, "next") => (32i64, IrType::I64),
             (IterProtocol::Iterable, "iterator") => (16i64, IrType::I64),
-            _ => return decline(fell_through),
+            other => {
+                if std::env::var_os("RAYZOR_ITER_DISPATCH").is_some() {
+                    eprintln!("[ITERDISP]   DECLINE: unmatched pair {other:?}");
+                }
+                return decline(fell_through);
+            }
         };
 
-        let handle_raw = self.lower_expression(receiver)?;
+        let Some(handle_raw) = self.lower_expression(receiver) else {
+            if std::env::var_os("RAYZOR_ITER_DISPATCH").is_some() {
+                eprintln!("[ITERDISP]   DECLINE: receiver did not lower");
+            }
+            return decline(fell_through);
+        };
         let handle = {
             let ty = self
                 .builder

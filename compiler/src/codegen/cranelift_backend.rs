@@ -156,6 +156,37 @@ fn jit_reloc_debug_enabled() -> bool {
 }
 
 impl CraneliftBackend {
+    /// Whether a generic function's body still depends on its type parameters.
+    ///
+    /// A template is stubbed because its body cannot be compiled until the
+    /// parameters are known. That only holds while something in it still refers
+    /// to them: a body whose values all travel in concrete slots is already
+    /// monomorphic, whatever its declaration says, and compiling it is what lets
+    /// a caller reach it at all.
+    fn references_type_params(function: &IrFunction) -> bool {
+        fn is_var(ty: &IrType) -> bool {
+            match ty {
+                IrType::TypeVar(_) => true,
+                IrType::Ptr(inner) => is_var(inner),
+                IrType::Function {
+                    params,
+                    return_type,
+                    ..
+                } => params.iter().any(is_var) || is_var(return_type),
+                _ => false,
+            }
+        }
+        if !function.type_param_tag_fixups.is_empty() {
+            return true;
+        }
+        if function.signature.parameters.iter().any(|p| is_var(&p.ty))
+            || is_var(&function.signature.return_type)
+        {
+            return true;
+        }
+        function.locals.values().any(|l| is_var(&l.ty))
+    }
+
     /// Create a new Cranelift backend with default optimization level (speed)
     pub fn new() -> Result<Self, String> {
         Self::with_symbols(&[])
@@ -761,7 +792,12 @@ impl CraneliftBackend {
             std::collections::BTreeSet::new();
         // Also skip unmonomorphized generic templates
         for (func_id, function) in &mir_module.functions {
-            if !function.signature.type_params.is_empty() {
+            // A template still referring to its type parameters cannot be called
+            // until it is instantiated, so callers must cascade past it. One whose
+            // body no longer mentions them compiles like any other function, and
+            // marking it failed would strand every caller.
+            if !function.signature.type_params.is_empty() && Self::references_type_params(function)
+            {
                 failed_funcs.insert(*func_id);
             }
             // Never declared (no 128-bit-only representation) — treat as failed
@@ -801,7 +837,8 @@ impl CraneliftBackend {
                 continue;
             }
             // Skip unmonomorphized generic template functions
-            if !function.signature.type_params.is_empty() {
+            if !function.signature.type_params.is_empty() && Self::references_type_params(function)
+            {
                 debug!("Skipping generic template function: {}", function.name);
                 if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
                     eprintln!(
@@ -1054,7 +1091,12 @@ impl CraneliftBackend {
         let mut failed_funcs: std::collections::BTreeSet<IrFunctionId> =
             std::collections::BTreeSet::new();
         for (func_id, function) in &mir_module.functions {
-            if !function.signature.type_params.is_empty() {
+            // A template still referring to its type parameters cannot be called
+            // until it is instantiated, so callers must cascade past it. One whose
+            // body no longer mentions them compiles like any other function, and
+            // marking it failed would strand every caller.
+            if !function.signature.type_params.is_empty() && Self::references_type_params(function)
+            {
                 failed_funcs.insert(*func_id);
             }
             // Never declared (no 128-bit-only representation) — treat as failed
@@ -1084,7 +1126,8 @@ impl CraneliftBackend {
                     .push((*func_id, function.clone()));
                 continue;
             }
-            if !function.signature.type_params.is_empty() {
+            if !function.signature.type_params.is_empty() && Self::references_type_params(function)
+            {
                 debug!("Skipping generic template function: {}", function.name);
                 if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
                     eprintln!(

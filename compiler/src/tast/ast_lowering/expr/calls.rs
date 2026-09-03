@@ -2092,6 +2092,76 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Infer the return type of a method call, substituting type parameters from the receiver.
+    pub(crate) fn structural_method_return_type(
+        &self,
+        receiver_type: TypeId,
+        method: crate::tast::InternedString,
+    ) -> Option<TypeId> {
+        let trace = std::env::var_os("RAYZOR_STRUCT_TRACE").is_some();
+        let mname = self
+            .context
+            .string_interner
+            .get(method)
+            .unwrap_or("?")
+            .to_string();
+        let mut current = receiver_type;
+        for step in 0..8 {
+            let kind = {
+                let tt = self.context.type_table.borrow();
+                tt.get(current).map(|ti| ti.kind.clone())
+            };
+            if trace {
+                eprintln!(
+                    "[STRUCT] m={mname} step={step} ty={current:?} kind={:?}",
+                    kind.as_ref().map(std::mem::discriminant)
+                );
+            }
+            let kind = kind?;
+            match kind {
+                crate::tast::core::TypeKind::Anonymous { fields } => {
+                    let field = fields.iter().find(|f| f.name == method)?;
+                    let tt = self.context.type_table.borrow();
+                    let r = match tt.get(field.type_id).map(|i| &i.kind) {
+                        Some(crate::tast::core::TypeKind::Function { return_type, .. }) => {
+                            Some(*return_type)
+                        }
+                        _ => None,
+                    };
+                    if trace {
+                        eprintln!("[STRUCT]   -> {r:?}");
+                    }
+                    return r;
+                }
+                crate::tast::core::TypeKind::TypeAlias { target_type, .. } => current = target_type,
+                crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
+                    current = base_type
+                }
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                    let resolved = {
+                        self.context
+                            .type_table
+                            .borrow()
+                            .resolve_type_alias(symbol_id)
+                    };
+                    if trace {
+                        eprintln!("[STRUCT]   class -> alias {resolved:?}");
+                    }
+                    if resolved == current {
+                        return None;
+                    }
+                    current = resolved;
+                }
+                _ => {
+                    if trace {
+                        eprintln!("[STRUCT]   stop");
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn infer_method_call_return_type(
         &mut self,
         method_symbol: SymbolId,
@@ -2188,6 +2258,12 @@ impl<'a> AstLowering<'a> {
                             }
                         }
                     }
+                    if let Some(mn) = method_name_intern {
+                        if let Some(ret) = self.structural_method_return_type(receiver_type, mn) {
+                            return Ok(ret);
+                        }
+                    }
+
                     // Use infer_builtin_method_type to get the method's function type,
                     // then extract the return type from it.
                     let method_func_type =
