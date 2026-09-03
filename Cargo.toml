@@ -132,13 +132,13 @@ opt-level = 2
 # and wasmtime silently falls back to the Pulley interpreter (~50x
 # slower). Drop this block once 0.133 lands on crates.io.
 [patch.crates-io]
-cranelift = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
-cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "60154144" }
+cranelift = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-jit = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-native = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
+cranelift-object = { git = "https://github.com/bytecodealliance/wasmtime", rev = "6901aa7cee" }
 
 # inkwell 0.7.1 still calls LLVMConstMul and its NSW/NUW variants, which LLVM 21
 # removed. Nothing here references those methods, so a normal build never links
