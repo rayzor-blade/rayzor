@@ -486,6 +486,37 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
         }
+        // A raw-value extern such as `Map.get` hands a String back in an integer
+        // register: the value is a pointer and the HIR type is the only thing
+        // that still says so, so reading it as a number prints the address.
+        if let Some(type_id) = hir_type_id {
+            // `Map.get` declares `Null<V>`, so the String sits inside an
+            // Optional at the call site even though the register is the same
+            // pointer either way.
+            let names_a_string = {
+                let direct = self
+                    .type_table
+                    .get(type_id)
+                    .map(|ti| matches!(ti.kind, TypeKind::String))
+                    .unwrap_or(false);
+                direct
+                    || self
+                        .type_table
+                        .get(type_id)
+                        .and_then(|ti| match ti.kind {
+                            TypeKind::Optional { inner_type } => self
+                                .type_table
+                                .get(inner_type)
+                                .map(|inner| matches!(inner.kind, TypeKind::String)),
+                            _ => None,
+                        })
+                        .unwrap_or(false)
+            };
+            if matches!(from_type, IrType::I64 | IrType::U64) && names_a_string {
+                return self.builder.build_bitcast(value, IrType::String);
+            }
+        }
+
         self.convert_to_string(value, from_type)
     }
 
