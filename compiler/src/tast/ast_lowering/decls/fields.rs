@@ -343,7 +343,14 @@ impl<'a> AstLowering<'a> {
         modifiers: &[parser::Modifier],
     ) -> LoweringResult<TypedFunction> {
         let function_name = self.context.intern_string(&func.name);
-        let function_symbol = self.context.symbol_table.create_function(function_name);
+        // A module-level function belongs to the module's scope, the way a class
+        // declared in the same file does, so the types in that file can call it by
+        // its bare name. Creating the symbol unscoped leaves it findable only by a
+        // whole-table scan, which no call site performs.
+        let function_symbol = self
+            .context
+            .symbol_table
+            .create_function_in_scope(function_name, self.context.current_scope);
         let mut symbol_flags = self.extract_metadata_flags(meta, function_symbol);
         for modifier in modifiers {
             use crate::tast::symbols::SymbolFlags;
@@ -402,6 +409,19 @@ impl<'a> AstLowering<'a> {
 
         self.context.pop_type_parameters();
         self.context.exit_scope();
+
+        // Call sites type the result of a call from the callee symbol's type. Leaving
+        // it invalid types the result as unknown, so a value returned into a Dynamic
+        // parameter is passed without being boxed and is read back as a pointer.
+        let param_types: Vec<TypeId> = parameters.iter().map(|p| p.param_type).collect();
+        let function_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type(param_types, return_type);
+        self.context
+            .symbol_table
+            .update_symbol_type(function_symbol, function_type);
 
         Ok(TypedFunction {
             symbol_id: function_symbol,

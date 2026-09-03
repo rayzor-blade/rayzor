@@ -109,7 +109,16 @@ impl<'a> AstLowering<'a> {
         // Process module-level fields - collect errors but continue
         for module_field in &file.module_fields {
             match self.lower_module_field(module_field) {
-                Ok(typed_field) => typed_file.module_fields.push(typed_field),
+                Ok(typed_field) => {
+                    // A module-level function is a function, not a variable holding a
+                    // closure: it carries a body that has to reach HIR. `functions` is
+                    // the list that gets lowered, so route it there as well and leave
+                    // the field entry for consumers that index the module by name.
+                    if let TypedModuleFieldKind::Function(function) = &typed_field.kind {
+                        typed_file.functions.push(function.clone());
+                    }
+                    typed_file.module_fields.push(typed_field);
+                }
                 Err(e) => self.collected_errors.push(e),
             }
         }
