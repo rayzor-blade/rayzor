@@ -7,7 +7,10 @@
 # private test methods are legitimately reachable), compile and run.
 #
 # A test counts as PASS only if it exits 0 AND prints "CONFORMANCE_OK" AND emits
-# no FAILCHECK line. Silence is never a pass.
+# no FAILCHECK line AND actually checked something. Silence is never a pass, and
+# neither is reaching the end having asserted nothing: that exits 0 and prints
+# the banner, so it scores like a real pass, and a change that skips assertions
+# rather than running them would read as progress. Those score NO_ASSERTIONS.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -182,15 +185,15 @@ total=$(list_cases | wc -l | tr -d ' ')
 
 seen=0
 queued=0
-c_PASS=0; c_WRONG_ANSWER=0; c_NO_OUTPUT=0
+c_PASS=0; c_WRONG_ANSWER=0; c_NO_OUTPUT=0; c_NO_ASSERTIONS=0
 c_COMPILE_FAIL=0; c_CRASH=0; c_TIMEOUT=0; c_SKIP=0
 
 # A run over the whole corpus is minutes of silence otherwise, and silence
 # looks the same as a hang. Every outcome goes through here: one line as it
 # lands, a tally every 25, both on stderr so the TSV on stdout stays clean.
 tally() {
-  printf '  ---- %d/%d   pass %d  wrong %d  no_output %d  compile_fail %d  crash %d  timeout %d  skip %d\n' \
-    "$seen" "$total" "$c_PASS" "$c_WRONG_ANSWER" "$c_NO_OUTPUT" \
+  printf '  ---- %d/%d   pass %d  wrong %d  no_assert %d  no_output %d  compile_fail %d  crash %d  timeout %d  skip %d\n' \
+    "$seen" "$total" "$c_PASS" "$c_WRONG_ANSWER" "$c_NO_ASSERTIONS" "$c_NO_OUTPUT" \
     "$c_COMPILE_FAIL" "$c_CRASH" "$c_TIMEOUT" "$c_SKIP" >&2
 }
 
@@ -201,6 +204,7 @@ record() {  # record <test> <status> <detail> <suite>
     PASS)         c_PASS=$((c_PASS+1)) ;;
     WRONG_ANSWER) c_WRONG_ANSWER=$((c_WRONG_ANSWER+1)) ;;
     NO_OUTPUT)    c_NO_OUTPUT=$((c_NO_OUTPUT+1)) ;;
+    NO_ASSERTIONS) c_NO_ASSERTIONS=$((c_NO_ASSERTIONS+1)) ;;
     COMPILE_FAIL) c_COMPILE_FAIL=$((c_COMPILE_FAIL+1)) ;;
     CRASH)        c_CRASH=$((c_CRASH+1)) ;;
     TIMEOUT)      c_TIMEOUT=$((c_TIMEOUT+1)) ;;
@@ -449,7 +453,17 @@ PYGEN
       emit_result "$result" "$base" "$status" "$det"
     fi
   elif grep -q '^CONFORMANCE_OK' "$log"; then
-    emit_result "$result" "$base" PASS "$(grep -o 'CONFORMANCE_OK.*' "$log" | head -1)"
+    ok_line=$(grep -o 'CONFORMANCE_OK.*' "$log" | head -1)
+    ok_count=$(printf '%s' "$ok_line" | grep -oE '[0-9]+$')
+    if [[ "${ok_count:-0}" -eq 0 ]]; then
+      # A case that reached the end having checked nothing is not a pass. It
+      # exits 0 and prints the banner, so it scores like a real one and inflates
+      # the total, while a change that skips assertions instead of running them
+      # would read as progress.
+      emit_result "$result" "$base" NO_ASSERTIONS "$ok_line"
+    else
+      emit_result "$result" "$base" PASS "$ok_line"
+    fi
   elif grep -q 'FAILCHECK\|CONFORMANCE_BAD' "$log"; then
     det=$(grep -m1 '^FAILVALUES' "$log" | cut -c1-90)
     [[ -z "$det" ]] && det=$(grep -m1 '^FAILCHECK' "$log" | cut -c1-90)
@@ -509,7 +523,7 @@ done
 mv "$ordered_out" "$OUT"
 
 tally
-scored=$((c_PASS + c_WRONG_ANSWER + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_TIMEOUT))
+scored=$((c_PASS + c_WRONG_ANSWER + c_NO_ASSERTIONS + c_NO_OUTPUT + c_COMPILE_FAIL + c_CRASH + c_TIMEOUT))
 echo "scored $scored  pass $c_PASS  fail $((scored - c_PASS))  (skipped $c_SKIP)"
 echo "report: $OUT"
 
