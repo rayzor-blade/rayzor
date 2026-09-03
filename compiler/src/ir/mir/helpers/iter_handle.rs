@@ -59,6 +59,14 @@ pub(crate) enum IterSource {
     },
     /// A class that is itself an iterator.
     ClassIterator { class_sym: SymbolId },
+    /// A stdlib iterator recognised from the register's class hint, for a value
+    /// whose static type says only `Dynamic` — the shape `a.iterator()` has.
+    StdlibIterator {
+        has_next: String,
+        has_next_is_mir: bool,
+        next: String,
+        next_is_mir: bool,
+    },
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -202,6 +210,22 @@ impl<'a> HirToMirContext<'a> {
         self.ensure_vtable_dispatch_thunk(func_id).or(Some(func_id))
     }
 
+    /// The entry point for a stdlib iterator method named by its runtime symbol.
+    fn iter_thunk_for_runtime(
+        &mut self,
+        name: &str,
+        is_mir: bool,
+        ret: IrType,
+    ) -> Option<IrFunctionId> {
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let func_id = if is_mir {
+            self.register_stdlib_mir_forward_ref(name, vec![ptr_void], ret)
+        } else {
+            self.get_or_register_extern_function(name, vec![ptr_void], ret)
+        };
+        self.ensure_vtable_dispatch_thunk(func_id).or(Some(func_id))
+    }
+
     /// The entry point for one of the array iterator wrappers.
     fn iter_thunk_for_wrapper(
         &mut self,
@@ -253,6 +277,17 @@ impl<'a> HirToMirContext<'a> {
                 self.iter_thunk_for_class(*class_sym, "hasNext")?,
                 self.iter_thunk_for_class(*class_sym, "next")?,
             ),
+            IterSource::StdlibIterator {
+                has_next,
+                has_next_is_mir,
+                next,
+                next_is_mir,
+            } => {
+                let hn =
+                    self.iter_thunk_for_runtime(&has_next.clone(), *has_next_is_mir, IrType::I32)?;
+                let nx = self.iter_thunk_for_runtime(&next.clone(), *next_is_mir, IrType::I64)?;
+                (None, hn, nx)
+            }
         };
 
         let malloc_fn = self.get_or_register_extern_function(
@@ -295,6 +330,7 @@ impl<'a> HirToMirContext<'a> {
         let nx = self.builder.build_function_ref(next_fn)?;
         self.store_handle_slot_value(handle, 32, nx)?;
 
+        self.iter_handle_regs.insert(handle);
         Some(handle)
     }
 
@@ -349,6 +385,29 @@ impl<'a> HirToMirContext<'a> {
         )
     }
 
+    /// Classify a source, falling back to the register's class hint when the
+    /// static type carries nothing. `a.iterator()` is typed `Dynamic`, and its
+    /// hint is the only record of which iterator it produced.
+    fn iter_source_for(&mut self, value_reg: IrId, source_ty: TypeId) -> Option<IterSource> {
+        if let Some(src) = self.iter_source_of(source_ty) {
+            return Some(src);
+        }
+        let hint = self.register_class_hints.get(&value_reg).cloned()?;
+        let key = self.stdlib_mapping.class_key(&hint)?;
+        let (_, hn) = self.stdlib_mapping.find_by_name(key, "hasNext")?;
+        let has_next = hn.runtime_name.to_string();
+        let has_next_is_mir = hn.is_mir_wrapper;
+        let (_, nx) = self.stdlib_mapping.find_by_name(key, "next")?;
+        let next = nx.runtime_name.to_string();
+        let next_is_mir = nx.is_mir_wrapper;
+        Some(IterSource::StdlibIterator {
+            has_next,
+            has_next_is_mir,
+            next,
+            next_is_mir,
+        })
+    }
+
     /// Wrap `value_reg` for a slot typed `Iterable<T>`/`Iterator<T>`.
     ///
     /// Returns `None` when the target names no protocol, when the source is
@@ -373,7 +432,7 @@ impl<'a> HirToMirContext<'a> {
         if self.iter_protocol_of(source_ty).is_some() {
             return None;
         }
-        let source = self.iter_source_of(source_ty)?;
+        let source = self.iter_source_for(value_reg, source_ty)?;
         self.build_iter_handle(value_reg, &source)
     }
 }
@@ -714,5 +773,196 @@ fn collect_incremented_symbols(stmt: &HirStatement, out: &mut BTreeSet<SymbolId>
             }
         }
         _ => {}
+    }
+}
+
+impl<'a> HirToMirContext<'a> {
+    /// Lower `it.iterator()`, `i.hasNext()` and `i.next()` written out by hand on a
+    /// receiver typed `Iterable<T>`/`Iterator<T>`.
+    ///
+    /// The handle already describes these three entry points, so each is the slot
+    /// load and indirect call the loop makes. `iterator()` additionally hands back
+    /// an `Iterator<T>`, which is itself a handle: the parent's `hasNext`/`next`
+    /// already describe the iterator it returns, so the child is built from them
+    /// with no iterator of its own.
+    ///
+    /// A receiver that carries no handle answers as an exhausted iterator rather
+    /// than calling through whatever its first word holds.
+    pub(crate) fn try_iter_handle_method_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        let HirExprKind::Call {
+            callee,
+            args,
+            is_method,
+            ..
+        } = &expr.kind
+        else {
+            *fell_through = true;
+            return None;
+        };
+        let decline = |ft: &mut bool| {
+            *ft = true;
+            None::<IrId>
+        };
+        if !*is_method || args.is_empty() {
+            return decline(fell_through);
+        }
+        let HirExprKind::Variable { symbol, .. } = &callee.kind else {
+            return decline(fell_through);
+        };
+        let receiver = &args[0];
+        // The receiver's own type names the protocol, or the value it holds is
+        // known to be a handle. The second case is how the result of
+        // `it.iterator()` dispatches: its declared type says only what the
+        // structure declares, while the register records what it carries.
+        let protocol = match self.iter_protocol_of(receiver.ty) {
+            Some(p) => p,
+            None => {
+                let holds_handle = match &receiver.kind {
+                    HirExprKind::Variable { symbol, .. } => self
+                        .symbol_map
+                        .get(symbol)
+                        .is_some_and(|r| self.iter_handle_regs.contains(r)),
+                    _ => false,
+                };
+                if !holds_handle {
+                    return decline(fell_through);
+                }
+                IterProtocol::Iterator
+            }
+        };
+        if self.iter_protocol_of(receiver.ty).is_some()
+            && self.protocol_mentions_type_parameter(receiver.ty)
+        {
+            return decline(fell_through);
+        }
+        let Some(method) = self
+            .symbol_table
+            .get_symbol(*symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .map(|s| s.to_string())
+        else {
+            return decline(fell_through);
+        };
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        // Which entry point the call names, and what an exhausted iterator answers.
+        let (slot_off, ret_ty) = match (protocol, method.as_str()) {
+            (IterProtocol::Iterator, "hasNext") => (24i64, IrType::Bool),
+            (IterProtocol::Iterator, "next") => (32i64, IrType::I64),
+            (IterProtocol::Iterable, "iterator") => (16i64, IrType::I64),
+            _ => return decline(fell_through),
+        };
+
+        let handle_raw = self.lower_expression(receiver)?;
+        let handle = {
+            let ty = self
+                .builder
+                .get_register_type(handle_raw)
+                .unwrap_or(IrType::I64);
+            if matches!(ty, IrType::Ptr(_)) {
+                handle_raw
+            } else {
+                self.builder.build_bitcast(handle_raw, ptr_u8.clone())?
+            }
+        };
+        let result_slot = self.builder.build_alloc(ret_ty.clone(), None)?;
+
+        let handle_i = self.builder.build_bitcast(handle, IrType::I64)?;
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let not_null = self.builder.build_cmp(CompareOp::Ne, handle_i, zero)?;
+        let read_tag = self.builder.create_block()?;
+        let call_block = self.builder.create_block()?;
+        let empty_block = self.builder.create_block()?;
+        let join_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(not_null, read_tag, empty_block);
+
+        self.builder.switch_to_block(read_tag);
+        let tag = self.builder.build_load(handle, IrType::I64)?;
+        let tag_const = self.builder.build_const(IrValue::I64(ITER_HANDLE_TAG))?;
+        let is_handle = self.builder.build_cmp(CompareOp::Eq, tag, tag_const)?;
+        self.builder
+            .build_cond_branch(is_handle, call_block, empty_block);
+
+        self.builder.switch_to_block(call_block);
+        let load_slot = |ctx: &mut Self, off: i64| -> Option<IrId> {
+            let o = ctx.builder.build_const(IrValue::I64(off))?;
+            let p = ctx.builder.build_ptr_add(handle, o, ptr_u8.clone())?;
+            ctx.builder.build_load(p, IrType::I64)
+        };
+        let obj = load_slot(self, 8)?;
+        let entry = load_slot(self, slot_off)?;
+        match protocol {
+            IterProtocol::Iterable => {
+                // The iterator object, then a handle over it carrying the entry
+                // points this handle already holds for it.
+                let sig = IrType::Function {
+                    params: vec![ptr_void.clone()],
+                    return_type: Box::new(ptr_void.clone()),
+                    varargs: false,
+                };
+                let it_obj = self.builder.build_call_indirect(entry, vec![obj], sig)?;
+                let hn = load_slot(self, 24)?;
+                let nx = load_slot(self, 32)?;
+                let malloc_fn = self.get_or_register_extern_function(
+                    "malloc",
+                    vec![IrType::U64],
+                    ptr_u8.clone(),
+                );
+                let size = self.builder.build_const(IrValue::U64(ITER_HANDLE_SIZE))?;
+                let child =
+                    self.builder
+                        .build_call_direct(malloc_fn, vec![size], ptr_u8.clone())?;
+                let child_tag = self.builder.build_const(IrValue::I64(ITER_HANDLE_TAG))?;
+                self.builder.build_store(child, child_tag);
+                let it_i = self
+                    .builder
+                    .build_bitcast(it_obj, IrType::I64)
+                    .unwrap_or(it_obj);
+                let none = self.builder.build_const(IrValue::I64(0))?;
+                self.store_handle_slot_value(child, 8, it_i)?;
+                self.store_handle_slot_value(child, 16, none)?;
+                self.store_handle_slot_value(child, 24, hn)?;
+                self.store_handle_slot_value(child, 32, nx)?;
+                self.iter_handle_regs.insert(child);
+                let child_i = self
+                    .builder
+                    .build_bitcast(child, IrType::I64)
+                    .unwrap_or(child);
+                self.iter_handle_regs.insert(child_i);
+                self.builder.build_store(result_slot, child_i);
+            }
+            IterProtocol::Iterator => {
+                let sig = IrType::Function {
+                    params: vec![ptr_void.clone()],
+                    return_type: Box::new(ret_ty.clone()),
+                    varargs: false,
+                };
+                let r = self.builder.build_call_indirect(entry, vec![obj], sig)?;
+                self.builder.build_store(result_slot, r);
+            }
+        }
+        self.builder.build_branch(join_block);
+
+        self.builder.switch_to_block(empty_block);
+        let empty_val = match ret_ty {
+            IrType::Bool => self.builder.build_const(IrValue::Bool(false))?,
+            _ => self.builder.build_const(IrValue::I64(0))?,
+        };
+        self.builder.build_store(result_slot, empty_val);
+        self.builder.build_branch(join_block);
+
+        self.builder.switch_to_block(join_block);
+        let result = self.builder.build_load(result_slot, ret_ty)?;
+        // `iterator()` yields a handle, and what it is bound to is this register,
+        // so a later `hasNext`/`next` on that binding can find it.
+        if matches!(protocol, IterProtocol::Iterable) {
+            self.iter_handle_regs.insert(result);
+        }
+        Some(result)
     }
 }

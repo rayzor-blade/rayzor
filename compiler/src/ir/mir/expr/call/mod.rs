@@ -197,6 +197,10 @@ impl<'a> HirToMirContext<'a> {
             // dispatches through the fat pointer's vtable.
             probe!(self.try_interface_dispatch(expr));
 
+            // `Iterable`/`Iterator` are structural, so a receiver typed as either
+            // dispatches through the handle it carries rather than through a class.
+            probe!(self.try_iter_handle_method_call(expr));
+
             // Enum instance methods delegate to runtime functions registered in
             // runtime_mapping.rs, with (type_id, is_boxed) injected as extra params.
             if *is_method && !args.is_empty() {

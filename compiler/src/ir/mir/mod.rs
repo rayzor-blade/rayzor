@@ -380,6 +380,12 @@ pub struct HirToMirContext<'a> {
     /// TODO: retain only when the call returns or stores the fat pointer.
     interface_wrapped_args: std::collections::BTreeSet<IrId>,
 
+    /// Registers holding an iteration handle. A handle's own type does not always
+    /// name the protocol — the result of `it.iterator()` is typed by what the
+    /// declaration says, not by what it carries — so the register is what says a
+    /// protocol call can dispatch through it.
+    iter_handle_regs: std::collections::BTreeSet<IrId>,
+
     /// Class method lookup: maps (class_symbol, method_name) → method SymbolId
     /// Populated during register_class_metadata for iterator protocol dispatch
     class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
@@ -1355,6 +1361,7 @@ impl<'a> HirToMirContext<'a> {
             interface_vtables: BTreeMap::new(),
             interface_extends: BTreeMap::new(),
             interface_wrapped_args: std::collections::BTreeSet::new(),
+            iter_handle_regs: std::collections::BTreeSet::new(),
             class_method_symbols: BTreeMap::new(),
             constrained_param_interfaces: BTreeMap::new(),
             abstract_from_rules: BTreeMap::new(),
