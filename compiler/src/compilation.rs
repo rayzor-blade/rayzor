@@ -6181,15 +6181,21 @@ impl CompilationUnit {
         self.add_file_from_path(&path)
     }
 
-    /// Where an unqualified supertype could live, reading outwards through the
+    /// Where an unqualified type could live, reading outwards through the
     /// enclosing packages.
     ///
-    /// A module in `unit.issues` names `unit.Test` as plain `Test`, so nothing
-    /// in the file says which file to load. Only the names actually used as a
-    /// supertype are offered, and each is a candidate rather than a claim:
+    /// Haxe resolves a bare type name against the enclosing packages, so a
+    /// module in `unit.issues` reaches `unit.Test` as plain `Test` and
+    /// `unit.HelperMacros` as plain `HelperMacros` — nothing in the file says
+    /// which file to load. Supertypes are collected here from the declaration
+    /// heads; `bare_names` carries the ones used in expression position, which
+    /// the caller already gathered. Each is a candidate rather than a claim:
     /// `load_imports_efficiently` keeps the ones that resolve to a file and
     /// ignores the rest, so a guess that is wrong costs a failed path lookup.
-    fn enclosing_package_candidates(ast: &parser::haxe_ast::HaxeFile) -> Vec<String> {
+    fn enclosing_package_candidates(
+        ast: &parser::haxe_ast::HaxeFile,
+        bare_names: &[String],
+    ) -> Vec<String> {
         use parser::haxe_ast::{Type, TypeDeclaration};
 
         let Some(package) = ast.package.as_ref() else {
@@ -6222,6 +6228,17 @@ impl CompilationUnit {
                 _ => {}
             }
         }
+        // Bare capitalized names used in expression position — `HelperMacros`
+        // in `HelperMacros.typeString(a)` is a type reference, and by Haxe
+        // convention only a type starts uppercase there.
+        names.extend(
+            bare_names
+                .iter()
+                .filter(|n| !n.contains('.') && n.chars().next().is_some_and(|c| c.is_uppercase()))
+                .cloned(),
+        );
+        names.sort();
+        names.dedup();
         if names.is_empty() {
             return Vec::new();
         }
@@ -7855,8 +7872,8 @@ impl CompilationUnit {
                     collect_qualified_type_refs_from_ast(ast, &mut discovered);
                     imports.extend(discovered);
                     let user_deps = Self::extract_all_dependencies(ast);
+                    imports.extend(Self::enclosing_package_candidates(ast, &user_deps));
                     imports.extend(user_deps);
-                    imports.extend(Self::enclosing_package_candidates(ast));
                     (imports, usings)
                 },
             );
