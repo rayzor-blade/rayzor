@@ -12,7 +12,7 @@ use crate::ir::{
     IrTypeDefId, IrTypeDefinition, IrValue, Linkage, UnaryOp,
 };
 use crate::stdlib::{IrTypeDescriptor, MethodSignature, StdlibMapping};
-use crate::tast::symbols::SymbolFlags;
+use crate::tast::symbols::{SymbolFlags, SymbolKind};
 use crate::tast::{
     InternedString, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeKind,
     TypeTable,
@@ -45,6 +45,17 @@ impl<'a> HirToMirContext<'a> {
                 args
             };
             if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                // Only a function can be the target of a direct call resolved by
+                // name. A variable that merely holds a function value carries a
+                // qualified name too — statics are qualified `Class.field` — so
+                // without this it is taken for a function whose body has not been
+                // compiled yet, and the call is emitted against a stub that no
+                // later module ever defines. Falling through instead lowers it as
+                // an indirect call through the variable, which is what it is.
+                if sym_info.kind != SymbolKind::Function {
+                    *fell_through = true;
+                    return None;
+                }
                 if let Some(qual_name) = sym_info.qualified_name {
                     if let Some(qual_name_str) = self.string_interner.get(qual_name) {
                         let _method_name = self
