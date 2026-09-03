@@ -132,6 +132,27 @@ pub struct CraneliftBackend {
     /// `format!("{:?}", IrId(n))` call site (which produced a fresh DataId
     /// per CheckLive use with useless content like `IrId(123)`).
     liveness_names: BTreeMap<IrId, String>,
+
+    /// Lowest and highest runtime symbol address handed to the JIT, kept for the
+    /// reach probe below. A call into one of these is emitted as a 32-bit
+    /// PC-relative displacement, so the distance from the JIT's code to this
+    /// range is what decides whether the relocation can be encoded at all.
+    symbol_addr_range: Option<(usize, usize)>,
+}
+
+/// Report how far the JIT's code landed from the runtime symbols it calls.
+///
+/// On x86-64 a call to a runtime symbol is `X86CallPCRel4`: a signed 32-bit
+/// displacement, so the target has to sit within +/-2GB of the call site.
+/// cranelift-jit reserves and emits out-of-range veneers for `Reloc::Arm64Call`
+/// only; the x86 arm unwraps the conversion and aborts the process instead.
+/// Whether the mapping lands in range depends on where the JIT's allocation
+/// falls relative to the process image, which ASLR alone can change between
+/// runs — so this records the actual distance rather than inferring it.
+///
+/// Enabled with `RAYZOR_JIT_RELOC_DEBUG=1`; costs nothing otherwise.
+fn jit_reloc_debug_enabled() -> bool {
+    std::env::var_os("RAYZOR_JIT_RELOC_DEBUG").is_some()
 }
 
 impl CraneliftBackend {
@@ -294,8 +315,26 @@ impl CraneliftBackend {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // Register runtime symbols from plugins
+        let mut symbol_addr_range: Option<(usize, usize)> = None;
         for (name, ptr) in symbols {
             builder.symbol(*name, *ptr);
+            let a = *ptr as usize;
+            symbol_addr_range = Some(match symbol_addr_range {
+                Some((lo, hi)) => (lo.min(a), hi.max(a)),
+                None => (a, a),
+            });
+        }
+        if jit_reloc_debug_enabled() {
+            match symbol_addr_range {
+                Some((lo, hi)) => eprintln!(
+                    "[JIT_RELOC] runtime symbols: {} entries, range 0x{:x}..0x{:x} (span {} MB)",
+                    symbols.len(),
+                    lo,
+                    hi,
+                    (hi - lo) / (1024 * 1024)
+                ),
+                None => eprintln!("[JIT_RELOC] runtime symbols: none registered"),
+            }
         }
 
         // Optional dynamic-resolution callback for any symbol not in
@@ -342,7 +381,39 @@ impl CraneliftBackend {
             qualified_name_to_func: BTreeMap::new(),
             liveness_slots: BTreeMap::new(),
             liveness_names: BTreeMap::new(),
+            symbol_addr_range,
         })
+    }
+
+    /// Record the distance between the finalized JIT code and the runtime symbols
+    /// it calls, and say whether that distance still fits a 32-bit displacement.
+    /// Called after a successful finalize, so a run that later aborts leaves the
+    /// distances of everything that came before it in the log.
+    fn log_jit_reach(&self, phase: &str) {
+        if !jit_reloc_debug_enabled() {
+            return;
+        }
+        let Some((lo, hi)) = self.symbol_addr_range else {
+            return;
+        };
+        let Some(&fid) = self.defined_functions.iter().next() else {
+            return;
+        };
+        let code = self.module.get_finalized_function(fid) as usize;
+        // Worst case over the symbol range: the largest magnitude the encoder
+        // would have to represent from this code address.
+        let worst = (code as isize - lo as isize)
+            .abs()
+            .max((code as isize - hi as isize).abs());
+        let fits = i32::try_from(worst).is_ok();
+        eprintln!(
+            "[JIT_RELOC] {phase}: code 0x{:x}  symbols 0x{:x}..0x{:x}  worst delta {} MB  fits_i32={}",
+            code,
+            lo,
+            hi,
+            worst / (1024 * 1024),
+            fits
+        );
     }
 
     /// Get the pointer size in bytes for the target architecture
@@ -829,6 +900,7 @@ impl CraneliftBackend {
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize definitions: {}", e))?;
         self.maybe_dump_jit_symbols();
+        self.log_jit_reach("compile_module");
 
         Ok(())
     }
@@ -1163,6 +1235,7 @@ impl CraneliftBackend {
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize definitions: {}", e))?;
         self.maybe_dump_jit_symbols();
+        self.log_jit_reach("finalize");
         Ok(())
     }
 
@@ -1389,6 +1462,7 @@ impl CraneliftBackend {
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize function: {}", e))?;
         self.maybe_dump_jit_symbols();
+        self.log_jit_reach("finalize_function");
 
         Ok(())
     }

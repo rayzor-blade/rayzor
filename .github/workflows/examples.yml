@@ -29,6 +29,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Core Types E2E
+        # RAYZOR_JIT_RELOC_DEBUG records how far the JIT's code lands from the
+        # symbols it calls. A call between JIT allocations is a signed 32-bit
+        # displacement that cranelift-jit aborts on rather than veneering on
+        # x86-64, and this step fails that way intermittently — the distance is
+        # whatever mmap returns, so it has to be captured from a real run.
+        env:
+          RAYZOR_JIT_RELOC_DEBUG: 1
         run: cargo run --release --package compiler --features all-backends --example test_core_types_e2e
 
       - name: sys.thread stdlib
