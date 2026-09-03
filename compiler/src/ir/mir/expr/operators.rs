@@ -31,10 +31,57 @@ impl<'a> HirToMirContext<'a> {
             | HirUnaryOp::PreIncr
             | HirUnaryOp::PostDecr
             | HirUnaryOp::PreDecr => {
+                let is_increment = matches!(op, HirUnaryOp::PostIncr | HirUnaryOp::PreIncr);
+
+                // `a[i]++` reads and writes the same element, so the receiver and
+                // the index are lowered once here and both halves reuse them. The
+                // `HirLValue` entry points lower each of them again per access,
+                // which would evaluate `i` in `a[i()]++` more than once. Without
+                // this the store was dropped entirely and the increment did
+                // nothing, silently, on arrays and maps alike.
+                // Restricted to array-style receivers: `lower_index_access` reads
+                // an element by loading the receiver's data pointer and indexing
+                // it, which for a Map would take the struct's first word and a key
+                // that is often a pointer, and fault. A Map still loses the store
+                // here, as it did before, rather than gaining a crash.
+                let index_is_array_style = matches!(&operand.kind,
+                    HirExprKind::Index { object, .. } if self.map_index_info(object.ty).is_none());
+                if let (true, HirExprKind::Index { object, index }) =
+                    (index_is_array_style, &operand.kind)
+                {
+                    let obj_reg = self.lower_expression(object)?;
+                    let idx_reg = self.lower_expression(index)?;
+                    let old_value = self.lower_index_access(obj_reg, idx_reg, object.ty)?;
+                    let one = self.builder.build_const(IrValue::I32(1))?;
+                    let new_value = if is_increment {
+                        self.builder.build_binop(BinaryOp::Add, old_value, one)?
+                    } else {
+                        self.builder.build_binop(BinaryOp::Sub, old_value, one)?
+                    };
+                    let result_type = self.convert_type(expr.ty);
+                    let src_loc = self.convert_source_location(&expr.source_location);
+                    if let Some(func) = self.builder.current_function_mut() {
+                        func.locals.insert(
+                            new_value,
+                            crate::ir::IrLocal {
+                                name: format!("_incr{}", new_value.0),
+                                ty: result_type,
+                                mutable: false,
+                                source_location: src_loc,
+                                allocation: crate::ir::AllocationHint::Stack,
+                            },
+                        );
+                    }
+                    self.store_index_with_regs(obj_reg, idx_reg, object.ty, new_value);
+                    return Some(match op {
+                        HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
+                        _ => new_value,
+                    });
+                }
+
                 let old_value = self.lower_expression(operand)?;
                 let one = self.builder.build_const(IrValue::I32(1))?;
 
-                let is_increment = matches!(op, HirUnaryOp::PostIncr | HirUnaryOp::PreIncr);
                 let new_value = if is_increment {
                     self.builder.build_binop(BinaryOp::Add, old_value, one)?
                 } else {

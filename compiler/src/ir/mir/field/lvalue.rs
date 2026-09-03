@@ -708,171 +708,178 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             HirLValue::Index { object, index } => {
-                // Typed array setters pass the value directly: boxing through
-                // haxe_box_*_ptr would store the DynamicValue tag, not the value.
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
-                        // `m[k] = v` on a Map is Map.set, not an array store --
-                        // the mirror of the get path in field/access.rs. Falling
-                        // through to the array setter passed the KEY as an INDEX,
-                        // and a string or enum key is a pointer: the array grew to
-                        // cover it and zero-filled, which is gigabytes for one
-                        // insert. With a real Map behind it the write simply went
-                        // nowhere and the value was silently lost.
-                        if let Some((set_fn_name, key_ir_type)) = self.map_index_set_info(object.ty)
-                        {
-                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                            let key_reg = if key_ir_type == IrType::I64 {
-                                let kt = self
-                                    .builder
-                                    .get_register_type(idx_reg)
-                                    .unwrap_or(IrType::I64);
-                                if kt != IrType::I64 {
-                                    self.builder
-                                        .build_cast(idx_reg, kt, IrType::I64)
-                                        .unwrap_or(idx_reg)
-                                } else {
-                                    idx_reg
-                                }
-                            } else {
-                                idx_reg
-                            };
-                            // The setter takes the value as a 64-bit slot, so a
-                            // float or pointer is reinterpreted rather than
-                            // converted -- the get side bitcasts it back.
-                            let value_i64 = match self.builder.get_register_type(value) {
-                                Some(IrType::I64) => value,
-                                Some(IrType::F64) | Some(IrType::F32) | Some(IrType::Ptr(_)) => {
-                                    self.builder
-                                        .build_bitcast(value, IrType::I64)
-                                        .unwrap_or(value)
-                                }
-                                Some(other) => self
-                                    .builder
-                                    .build_cast(value, other, IrType::I64)
-                                    .unwrap_or(value),
-                                None => value,
-                            };
-                            let set_fn = self.get_or_register_extern_function(
-                                set_fn_name,
-                                vec![ptr_void, key_ir_type, IrType::I64],
-                                IrType::Void,
-                            );
-                            self.builder.build_call_direct(
-                                set_fn,
-                                vec![obj_reg, key_reg, value_i64],
-                                IrType::Void,
-                            );
-                            return;
-                        }
-                        let idx_i64 = {
-                            let idx_ty = self.builder.get_register_type(idx_reg);
-                            match idx_ty {
-                                Some(IrType::I64) => idx_reg,
-                                Some(IrType::I32) => self
-                                    .builder
-                                    .build_cast(idx_reg, IrType::I32, IrType::I64)
-                                    .unwrap_or(idx_reg),
-                                Some(IrType::Bool) => self
-                                    .builder
-                                    .build_cast(idx_reg, IrType::Bool, IrType::I64)
-                                    .unwrap_or(idx_reg),
-                                Some(IrType::Ptr(_)) => self
-                                    .builder
-                                    .build_bitcast(idx_reg, IrType::I64)
-                                    .unwrap_or(idx_reg),
-                                Some(other) => self
-                                    .builder
-                                    .build_cast(idx_reg, other, IrType::I64)
-                                    .unwrap_or(idx_reg),
-                                None => idx_reg,
-                            }
-                        };
-
-                        let value_ir_type = self.builder.get_register_type(value);
-                        match &value_ir_type {
-                            Some(IrType::F32) | Some(IrType::F64) => {
-                                let func_id = self.get_or_register_extern_function(
-                                    "haxe_array_set_f64",
-                                    vec![
-                                        IrType::Ptr(Box::new(IrType::Void)),
-                                        IrType::I64,
-                                        IrType::F64,
-                                    ],
-                                    IrType::Bool,
-                                );
-                                let value_f64 = match value_ir_type.clone() {
-                                    Some(IrType::F64) => value,
-                                    Some(IrType::F32) => self
-                                        .builder
-                                        .build_cast(value, IrType::F32, IrType::F64)
-                                        .unwrap_or(value),
-                                    Some(other) => self
-                                        .builder
-                                        .build_cast(value, other, IrType::F64)
-                                        .unwrap_or(value),
-                                    None => value,
-                                };
-                                self.builder.build_call_direct(
-                                    func_id,
-                                    vec![obj_reg, idx_i64, value_f64],
-                                    IrType::Bool,
-                                );
-                            }
-                            _ => {
-                                // For Int, Bool, null, pointers: use haxe_array_set_i64
-                                // null=0, bool=0/1, pointers=address - all fit in i64
-                                let func_id = self.get_or_register_extern_function(
-                                    "haxe_array_set_i64",
-                                    vec![
-                                        IrType::Ptr(Box::new(IrType::Void)),
-                                        IrType::I64,
-                                        IrType::I64,
-                                    ],
-                                    IrType::Bool,
-                                );
-                                let value_i64 = match value_ir_type.clone() {
-                                    Some(IrType::I64) => value,
-                                    Some(IrType::I32) => self
-                                        .builder
-                                        .build_cast(value, IrType::I32, IrType::I64)
-                                        .unwrap_or(value),
-                                    Some(IrType::Bool) => self
-                                        .builder
-                                        .build_cast(value, IrType::Bool, IrType::I64)
-                                        .unwrap_or(value),
-                                    Some(IrType::Ptr(_)) => self
-                                        .builder
-                                        .build_bitcast(value, IrType::I64)
-                                        .unwrap_or(value),
-                                    Some(IrType::F64) => self
-                                        .builder
-                                        .build_bitcast(value, IrType::I64)
-                                        .unwrap_or(value),
-                                    Some(IrType::F32) => {
-                                        let as_i32 = self
-                                            .builder
-                                            .build_bitcast(value, IrType::I32)
-                                            .unwrap_or(value);
-                                        self.builder
-                                            .build_cast(as_i32, IrType::I32, IrType::I64)
-                                            .unwrap_or(as_i32)
-                                    }
-                                    Some(other) => self
-                                        .builder
-                                        .build_cast(value, other, IrType::I64)
-                                        .unwrap_or(value),
-                                    None => value,
-                                };
-                                self.builder.build_call_direct(
-                                    func_id,
-                                    vec![obj_reg, idx_i64, value_i64],
-                                    IrType::Bool,
-                                );
-                            }
-                        }
+                        self.store_index_with_regs(obj_reg, idx_reg, object.ty, value);
                     }
                 }
+            }
+        }
+    }
+
+    /// Store `value` into `obj_reg[idx_reg]`, given the receiver and index
+    /// ALREADY lowered. Read-modify-write targets — `a[i]++` — must evaluate the
+    /// receiver and the index once, so they cannot go through the `HirLValue`
+    /// entry point, which lowers both itself.
+    pub(crate) fn store_index_with_regs(
+        &mut self,
+        obj_reg: IrId,
+        idx_reg: IrId,
+        object_ty: TypeId,
+        value: IrId,
+    ) {
+        // `m[k] = v` on a Map is Map.set, not an array store --
+        // the mirror of the get path in field/access.rs. Falling
+        // through to the array setter passed the KEY as an INDEX,
+        // and a string or enum key is a pointer: the array grew to
+        // cover it and zero-filled, which is gigabytes for one
+        // insert. With a real Map behind it the write simply went
+        // nowhere and the value was silently lost.
+        if let Some((set_fn_name, key_ir_type)) = self.map_index_set_info(object_ty) {
+            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+            let key_reg = if key_ir_type == IrType::I64 {
+                let kt = self
+                    .builder
+                    .get_register_type(idx_reg)
+                    .unwrap_or(IrType::I64);
+                if kt != IrType::I64 {
+                    self.builder
+                        .build_cast(idx_reg, kt, IrType::I64)
+                        .unwrap_or(idx_reg)
+                } else {
+                    idx_reg
+                }
+            } else {
+                idx_reg
+            };
+            // The setter takes the value as a 64-bit slot, so a
+            // float or pointer is reinterpreted rather than
+            // converted -- the get side bitcasts it back.
+            let value_i64 = match self.builder.get_register_type(value) {
+                Some(IrType::I64) => value,
+                Some(IrType::F64) | Some(IrType::F32) | Some(IrType::Ptr(_)) => self
+                    .builder
+                    .build_bitcast(value, IrType::I64)
+                    .unwrap_or(value),
+                Some(other) => self
+                    .builder
+                    .build_cast(value, other, IrType::I64)
+                    .unwrap_or(value),
+                None => value,
+            };
+            let set_fn = self.get_or_register_extern_function(
+                set_fn_name,
+                vec![ptr_void, key_ir_type, IrType::I64],
+                IrType::Void,
+            );
+            self.builder
+                .build_call_direct(set_fn, vec![obj_reg, key_reg, value_i64], IrType::Void);
+            return;
+        }
+        let idx_i64 = {
+            let idx_ty = self.builder.get_register_type(idx_reg);
+            match idx_ty {
+                Some(IrType::I64) => idx_reg,
+                Some(IrType::I32) => self
+                    .builder
+                    .build_cast(idx_reg, IrType::I32, IrType::I64)
+                    .unwrap_or(idx_reg),
+                Some(IrType::Bool) => self
+                    .builder
+                    .build_cast(idx_reg, IrType::Bool, IrType::I64)
+                    .unwrap_or(idx_reg),
+                Some(IrType::Ptr(_)) => self
+                    .builder
+                    .build_bitcast(idx_reg, IrType::I64)
+                    .unwrap_or(idx_reg),
+                Some(other) => self
+                    .builder
+                    .build_cast(idx_reg, other, IrType::I64)
+                    .unwrap_or(idx_reg),
+                None => idx_reg,
+            }
+        };
+
+        let value_ir_type = self.builder.get_register_type(value);
+        match &value_ir_type {
+            Some(IrType::F32) | Some(IrType::F64) => {
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_array_set_f64",
+                    vec![
+                        IrType::Ptr(Box::new(IrType::Void)),
+                        IrType::I64,
+                        IrType::F64,
+                    ],
+                    IrType::Bool,
+                );
+                let value_f64 = match value_ir_type.clone() {
+                    Some(IrType::F64) => value,
+                    Some(IrType::F32) => self
+                        .builder
+                        .build_cast(value, IrType::F32, IrType::F64)
+                        .unwrap_or(value),
+                    Some(other) => self
+                        .builder
+                        .build_cast(value, other, IrType::F64)
+                        .unwrap_or(value),
+                    None => value,
+                };
+                self.builder.build_call_direct(
+                    func_id,
+                    vec![obj_reg, idx_i64, value_f64],
+                    IrType::Bool,
+                );
+            }
+            _ => {
+                // For Int, Bool, null, pointers: use haxe_array_set_i64
+                // null=0, bool=0/1, pointers=address - all fit in i64
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_array_set_i64",
+                    vec![
+                        IrType::Ptr(Box::new(IrType::Void)),
+                        IrType::I64,
+                        IrType::I64,
+                    ],
+                    IrType::Bool,
+                );
+                let value_i64 = match value_ir_type.clone() {
+                    Some(IrType::I64) => value,
+                    Some(IrType::I32) => self
+                        .builder
+                        .build_cast(value, IrType::I32, IrType::I64)
+                        .unwrap_or(value),
+                    Some(IrType::Bool) => self
+                        .builder
+                        .build_cast(value, IrType::Bool, IrType::I64)
+                        .unwrap_or(value),
+                    Some(IrType::Ptr(_)) => self
+                        .builder
+                        .build_bitcast(value, IrType::I64)
+                        .unwrap_or(value),
+                    Some(IrType::F64) => self
+                        .builder
+                        .build_bitcast(value, IrType::I64)
+                        .unwrap_or(value),
+                    Some(IrType::F32) => {
+                        let as_i32 = self
+                            .builder
+                            .build_bitcast(value, IrType::I32)
+                            .unwrap_or(value);
+                        self.builder
+                            .build_cast(as_i32, IrType::I32, IrType::I64)
+                            .unwrap_or(as_i32)
+                    }
+                    Some(other) => self
+                        .builder
+                        .build_cast(value, other, IrType::I64)
+                        .unwrap_or(value),
+                    None => value,
+                };
+                self.builder.build_call_direct(
+                    func_id,
+                    vec![obj_reg, idx_i64, value_i64],
+                    IrType::Bool,
+                );
             }
         }
     }
