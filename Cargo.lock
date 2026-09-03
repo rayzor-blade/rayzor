@@ -5190,35 +5190,20 @@ dependencies = [
 
 [[patch.unused]]
 name = "cranelift"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
-
-[[patch.unused]]
-name = "cranelift-codegen"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
-
-[[patch.unused]]
-name = "cranelift-frontend"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
+version = "0.135.0"
+source = "git+https://github.com/bytecodealliance/wasmtime?rev=60154144#60154144e42823007958fd9b9eda3ad11fc382fa"
 
 [[patch.unused]]
 name = "cranelift-jit"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
+version = "0.135.0"
+source = "git+https://github.com/bytecodealliance/wasmtime?rev=60154144#60154144e42823007958fd9b9eda3ad11fc382fa"
 
 [[patch.unused]]
 name = "cranelift-module"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
-
-[[patch.unused]]
-name = "cranelift-native"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
+version = "0.135.0"
+source = "git+https://github.com/bytecodealliance/wasmtime?rev=60154144#60154144e42823007958fd9b9eda3ad11fc382fa"
 
 [[patch.unused]]
 name = "cranelift-object"
-version = "0.136.0-dev"
-source = "git+https://github.com/bytecodealliance/wasmtime?rev=6901aa7cee#6901aa7cee056f45015e84a3650dd9850865b735"
+version = "0.135.0"
+source = "git+https://github.com/bytecodealliance/wasmtime?rev=60154144#60154144e42823007958fd9b9eda3ad11fc382fa"
