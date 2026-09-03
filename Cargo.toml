@@ -48,13 +48,23 @@ edition = "2021"
 #       Links LLVM's component archives into the binary. For a standalone
 #       download: LLVM's C++ ABI does not hold across major versions, so a
 #       shared-linked binary needs a version-matched libLLVM already present.
-default = ["llvm-backend", "llvm-dynamic"]
+default = ["llvm-backend", "llvm-dynamic", "lsp"]
+# The language server. On by default so a normal build still answers
+# `rayzor lsp`; optional so CI jobs that only need the compiler can skip it
+# with `--no-default-features --features llvm-backend,llvm-dynamic`. It pulls
+# lsp-server, lsp-types, fluent-uri and a serde_repr proc-macro that nothing
+# else in the binary needs, and the `Lsp` subcommand is the single call site.
+lsp = ["dep:rayzor-lsp"]
 llvm-backend = ["compiler/llvm-backend"]
 llvm-dynamic = ["compiler/llvm-dynamic"]
 # The self-contained shape. Nothing to enable — LLVM links statically when
 # `llvm-dynamic` is absent — so this only names the build, which is why it
 # has to be reached through `--no-default-features`.
-llvm-static = ["llvm-backend"]
+# `lsp` is included here on purpose: this is the standalone download, and the
+# language server was part of it before the dependency became optional.
+# Dropping a shipped subcommand is not something a build-time speedup should
+# do quietly, so the packaged shape names it explicitly.
+llvm-static = ["llvm-backend", "lsp"]
 # Heap + CPU profiler. Off by default; see rayzor-runtime's `profile`
 # feature for details. Activate with `cargo build --release --features profile`
 # then use RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH / RAYZOR_CPU_PROFILE.
@@ -71,7 +81,7 @@ rayzor-plugin = { path = "plugin" }
 ratatui = "0.29"
 crossterm = "0.28"
 postcard = { version = "1.0", features = ["alloc"] }
-rayzor-lsp = { path = "lsp" }
+rayzor-lsp = { path = "lsp", optional = true }
 anyhow = "1"
 walkdir = "2"
 libc = "0.2"

@@ -442,6 +442,7 @@ enum Commands {
     },
 
     /// Start the Language Server Protocol server (for IDE integration)
+    #[cfg(feature = "lsp")]
     Lsp,
 
     /// Investigative debugging toolkit: forensic run, multi-run bench, A/B
@@ -1103,6 +1104,7 @@ fn main() {
                 output,
             } => rpkg_cmd::cmd_rpkg_strip(input, os, arch, output),
         },
+        #[cfg(feature = "lsp")]
         Commands::Lsp => rayzor_lsp::run_lsp(),
         Commands::Debug { action } => action.execute().map_err(|e| e.to_string()),
     };

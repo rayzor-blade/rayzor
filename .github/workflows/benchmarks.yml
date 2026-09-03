@@ -56,7 +56,8 @@ jobs:
 
       # Every binary built from here on embeds the archive above.
       - name: Build rayzor CLI
-        run: cargo build --release --features llvm-backend
+        # Benchmarks never start the language server; skip that dependency.
+        run: cargo build --release --no-default-features --features llvm-backend,llvm-dynamic
 
       # Built here so the kernel runners and `collect` only execute it. Their
       # cargo caches are keyed per job, so building it there costs a full
