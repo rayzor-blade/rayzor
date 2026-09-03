@@ -646,8 +646,62 @@ impl<'a> HirToMirContext<'a> {
                 let _value = self.lower_expression(expr);
                 self.builder.build_const(IrValue::Bool(false))
             }
-            // Fallback: lower the expression (for side effects) and return true
-            // (trust static types — proper runtime checks need object headers)
+            // Enum-to-enum: only the same enum declaration matches. SymbolIds
+            // are context-local, so two spellings of one declaration can carry
+            // different ones; the FQN-derived runtime id is what crosses
+            // contexts, and it is the same key the object header and the
+            // Dynamic path compare. Type arguments play no part — `is` tests
+            // the declaration, not the instantiation.
+            (
+                Some(TypeKind::Enum {
+                    symbol_id: src_sym, ..
+                }),
+                Some(TypeKind::Enum {
+                    symbol_id: tgt_sym, ..
+                }),
+            ) => {
+                let src_sym = *src_sym;
+                let tgt_sym = *tgt_sym;
+                let same_enum = src_sym == tgt_sym
+                    || match (
+                        self.deterministic_iface_or_enum_type_id(src_sym, "enum"),
+                        self.deterministic_iface_or_enum_type_id(tgt_sym, "enum"),
+                    ) {
+                        (Some(src_id), Some(tgt_id)) => src_id == tgt_id,
+                        // A symbol with no resolvable name leaves the question
+                        // undecidable, so keep the permissive answer rather
+                        // than report a mismatch that may not be one.
+                        _ => true,
+                    };
+                let _value = self.lower_expression(expr);
+                self.builder.build_const(IrValue::Bool(same_enum))
+            }
+            // Enum against a kind an enum value can never inhabit → false.
+            // Enums are their own runtime shape: they are not primitives, and
+            // Haxe gives them no place in the class or interface hierarchy.
+            (Some(TypeKind::Enum { .. }), Some(TypeKind::Int))
+            | (Some(TypeKind::Enum { .. }), Some(TypeKind::Float))
+            | (Some(TypeKind::Enum { .. }), Some(TypeKind::Bool))
+            | (Some(TypeKind::Enum { .. }), Some(TypeKind::String))
+            | (Some(TypeKind::Enum { .. }), Some(TypeKind::Class { .. }))
+            | (Some(TypeKind::Enum { .. }), Some(TypeKind::Interface { .. }))
+            | (Some(TypeKind::Int), Some(TypeKind::Enum { .. }))
+            | (Some(TypeKind::Float), Some(TypeKind::Enum { .. }))
+            | (Some(TypeKind::Bool), Some(TypeKind::Enum { .. }))
+            | (Some(TypeKind::String), Some(TypeKind::Enum { .. }))
+            | (Some(TypeKind::Class { .. }), Some(TypeKind::Enum { .. }))
+            | (Some(TypeKind::Interface { .. }), Some(TypeKind::Enum { .. })) => {
+                let _value = self.lower_expression(expr);
+                self.builder.build_const(IrValue::Bool(false))
+            }
+            // Fallback: lower the expression (for side effects) and return true.
+            // Abstracts, typedefs, arrays, anonymous structures, type parameters
+            // and interface-to-class narrowing all land here, and each of them
+            // has shapes where the answer really is true — a structurally typed
+            // local does hold the class it was assigned, an erased type
+            // parameter does hold the argument it was instantiated with. A
+            // constant `false` would turn those into silent wrong answers, so
+            // the permissive answer stays until each kind gets a real test.
             _ => {
                 let _value = self.lower_expression(expr);
                 self.builder.build_const(IrValue::Bool(true))
