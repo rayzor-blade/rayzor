@@ -117,16 +117,53 @@ impl<'a> AstLowering<'a> {
     /// or if the concrete container class isn't loaded yet. The returned
     /// TypeId is a fully-formed class type and can be substituted wherever
     /// the original `Map<K,V>` Abstract TypeId would have appeared.
+    /// The type a `Map` key selects its container by: an abstract key picks the
+    /// container its UNDERLYING type would, which is what haxe's multiType
+    /// resolution does (it follows the key before choosing). `UInt` is
+    /// `abstract UInt(Int)` and belongs in an IntMap; an `enum abstract Foo(String)`
+    /// belongs in a StringMap. Without this an abstract key matched no arm, the
+    /// selection returned None, and the caller's fallback path recursed until the
+    /// compiler's stack ran out — `new Map<UInt,String>()` overflowed as soon as it
+    /// was indexed.
+    fn map_key_repr(&self, key_ty: TypeId) -> TypeId {
+        let mut current = key_ty;
+        // Abstracts can nest (`abstract Id(UInt)`), and a broken declaration could
+        // point one at itself, so the walk is bounded.
+        for _ in 0..16 {
+            let underlying = {
+                let tt = self.context.type_table.borrow();
+                match tt.get(current).map(|t| &t.kind) {
+                    Some(crate::tast::core::TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => Some(*u),
+                    Some(crate::tast::core::TypeKind::TypeAlias { target_type, .. }) => {
+                        Some(*target_type)
+                    }
+                    _ => None,
+                }
+            };
+            match underlying {
+                Some(next) if next != current => current = next,
+                _ => break,
+            }
+        }
+        current
+    }
+
     pub(crate) fn resolve_multitype_map_to_concrete(&self, type_args: &[TypeId]) -> Option<TypeId> {
         if type_args.len() != 2 {
             return None;
         }
         let key_ty = type_args[0];
         let value_ty = type_args[1];
+        // Choose by what the key IS underneath; keep the declared key in the
+        // container's type arguments so the map still reads as Map<Foo, V>.
+        let key_repr = self.map_key_repr(key_ty);
 
         let (concrete_name, concrete_type_args): (&str, Vec<TypeId>) = {
             let tt = self.context.type_table.borrow();
-            let key_kind = tt.get(key_ty).map(|t| &t.kind);
+            let key_kind = tt.get(key_repr).map(|t| &t.kind);
             match key_kind {
                 Some(crate::tast::core::TypeKind::String) => ("StringMap", vec![value_ty]),
                 Some(crate::tast::core::TypeKind::Int) => ("IntMap", vec![value_ty]),
@@ -183,11 +220,12 @@ impl<'a> AstLowering<'a> {
 
         let key_ty = original_type_args[0];
         let value_ty = original_type_args[1];
+        let key_repr = self.map_key_repr(key_ty);
 
         // Pick the concrete container name + remaining type args from K's kind.
         let (concrete_name, concrete_type_args): (&str, Vec<TypeId>) = {
             let tt = self.context.type_table.borrow();
-            let key_kind = tt.get(key_ty).map(|t| &t.kind);
+            let key_kind = tt.get(key_repr).map(|t| &t.kind);
             match key_kind {
                 Some(crate::tast::core::TypeKind::String) => ("StringMap", vec![value_ty]),
                 Some(crate::tast::core::TypeKind::Int) => ("IntMap", vec![value_ty]),
