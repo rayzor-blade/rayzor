@@ -665,7 +665,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
         };
 
         let body = if self.stream.at(TokenKind::LBrace) {
-            Some(Box::new(self.parse_expression()?))
+            let expr = self.parse_expression()?;
+            // `function f() {};` — a `;` after a block body is redundant but legal,
+            // and is the declaration's terminator rather than part of the body, the
+            // same way the expression-body branch below treats it. Left in place it
+            // reaches the class-body loop, which reads it as the start of a field.
+            self.stream.eat(TokenKind::Semicolon);
+            Some(Box::new(expr))
         } else if self.stream.at(TokenKind::Semicolon) {
             self.stream.advance();
             None

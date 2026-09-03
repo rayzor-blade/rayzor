@@ -238,6 +238,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.advance(); // 'function'
                 let field_name = self.stream.current_text().to_string();
                 self.stream.advance();
+                // A structure field's method may be generic:
+                // `{ function f<T>(x:T):T; }`. The field records a signature, not a
+                // declaration, so the parameters are accepted and dropped — the
+                // alternative is failing the whole module over syntax it can express.
+                let _type_params = self.parse_type_params()?;
                 let params: Vec<Type> = if self.stream.at(TokenKind::LParen) {
                     let fn_params = self.parse_function_params()?;
                     fn_params
