@@ -459,6 +459,17 @@ impl<'a> HirToMirContext<'a> {
                     let resolved_param = self.resolve_through_aliases(param_type_id);
                     let resolved_arg = self.resolve_through_aliases(arg_expr.ty);
 
+                    // A parameter typed `Iterable<T>`/`Iterator<T>` takes an
+                    // iteration handle, built here while the argument's concrete
+                    // type is still known. This precedes the anon handling below
+                    // because both protocols are structural, and materializing one
+                    // as a plain anonymous structure would drop the entry points.
+                    if let Some(handle) =
+                        self.maybe_wrap_for_iter_protocol(arg_reg, arg_expr.ty, param_type_id)
+                    {
+                        return handle;
+                    }
+
                     // Concrete → Dynamic at the call boundary must box, as Let/Assign and
                     // the Cast→Dynamic path do: a raw primitive would be read back as a
                     // bogus Dynamic pointer.

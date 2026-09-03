@@ -327,6 +327,14 @@ impl<'a> HirToMirContext<'a> {
         value_type: TypeId,
         target_type: TypeId,
     ) -> (IrId, bool) {
+        // `Iterable<T>`/`Iterator<T>` are structural, so they never resolve to an
+        // interface symbol. A value crossing into one carries an iteration handle
+        // instead, built here where its concrete type is still known.
+        if let Some(handle) = self.maybe_wrap_for_iter_protocol(value_reg, value_type, target_type)
+        {
+            return (handle, true);
+        }
+
         let iface_sym = match self.get_interface_symbol(target_type) {
             Some(s) => s,
             None => return (value_reg, false),

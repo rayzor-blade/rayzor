@@ -34,6 +34,7 @@ mod errors;
 mod exhaustiveness;
 mod globals;
 mod interfaces;
+mod iter_handle;
 mod patterns;
 mod reflection;
 mod signatures;

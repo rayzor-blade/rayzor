@@ -176,6 +176,14 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
+        // A receiver typed `Iterable<T>`/`Iterator<T>` is structural and names no
+        // class to call, so it carries an iteration handle built where it crossed
+        // into that type. This precedes the class path below because such a
+        // receiver resolves to a symbol whose methods are declarations only.
+        if self.try_lower_for_in_iter_handle(pattern, iter_expr, body, label) {
+            return;
+        }
+
         // For class/interface types with hasNext()/next() iterator protocol,
         // desugar to a while loop calling those methods directly.
         // Dynamic is included because arr.iterator() returns Dynamic-typed iterators
