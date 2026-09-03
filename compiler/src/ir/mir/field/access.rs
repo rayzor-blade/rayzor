@@ -1170,6 +1170,22 @@ impl<'a> HirToMirContext<'a> {
             obj_reg
         );
 
+        self.lower_field_expr_with_receiver(expr, obj_reg)
+    }
+
+    /// The rest of `lower_field_expr`, entered with the receiver already
+    /// lowered. A read-modify-write on a field — `o.n++` — reads and writes
+    /// through one evaluation of the receiver, so it lowers the receiver itself
+    /// and hands the same register to both halves.
+    pub(crate) fn lower_field_expr_with_receiver(
+        &mut self,
+        expr: &HirExpr,
+        obj_reg: IrId,
+    ) -> Option<IrId> {
+        let HirExprKind::Field { object, field } = &expr.kind else {
+            unreachable!("lower_field_expr_with_receiver on a non-Field expression")
+        };
+
         // @:move strict-move tracking: prepend a CheckLive guard if
         // the field's receiver register is a strict-move local. The
         // inner Variable arm may have already emitted one when the
@@ -1404,53 +1420,8 @@ impl<'a> HirToMirContext<'a> {
         // Map index: `a[k]` where `a` is a Map (or IntMap/StringMap/ObjectMap
         // extern class) must call the map's get, not GEP into array storage.
         // The element type is the map's value type.
-        if let Some((get_fn_name, key_ir_type, value_type_id)) = self.map_index_info(object.ty) {
-            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-            let key_reg = if key_ir_type == IrType::I64 {
-                let idx_ty = self
-                    .builder
-                    .get_register_type(idx_reg)
-                    .unwrap_or(IrType::I64);
-                if idx_ty != IrType::I64 {
-                    self.builder
-                        .build_cast(idx_reg, idx_ty, IrType::I64)
-                        .unwrap_or(idx_reg)
-                } else {
-                    idx_reg
-                }
-            } else {
-                idx_reg
-            };
-            let get_fn = self.get_or_register_extern_function(
-                get_fn_name,
-                vec![ptr_void, key_ir_type],
-                IrType::I64,
-            );
-            let raw_value =
-                self.builder
-                    .build_call_direct(get_fn, vec![obj_reg, key_reg], IrType::I64)?;
-            // Strings are stored as a `*mut HaxeString` pointer in map slots,
-            // not as the StringPtr struct convert_type yields — mirror
-            // lower_index_access so trace/string-concat see a String, not an Int.
-            let is_string = matches!(
-                self.type_table.get(value_type_id).map(|t| &t.kind),
-                Some(crate::tast::TypeKind::String)
-            );
-            if is_string {
-                let ptr_string = IrType::Ptr(Box::new(IrType::String));
-                return self
-                    .builder
-                    .build_bitcast(raw_value, ptr_string)
-                    .or(Some(raw_value));
-            }
-            let value_ir_type = self.convert_type(value_type_id);
-            return match &value_ir_type {
-                IrType::Ptr(_) | IrType::F64 => self
-                    .builder
-                    .build_bitcast(raw_value, value_ir_type)
-                    .or(Some(raw_value)),
-                _ => Some(raw_value),
-            };
+        if self.map_index_info(object.ty).is_some() {
+            return self.load_map_index_with_regs(obj_reg, idx_reg, object.ty);
         }
 
         self.lower_index_access(obj_reg, idx_reg, expr.ty)
@@ -1535,5 +1506,74 @@ impl<'a> HirToMirContext<'a> {
             ("haxe_objectmap_get", IrType::Ptr(Box::new(IrType::U8)))
         };
         Some((fn_name, key_ir, value_type))
+    }
+
+    /// Coerce an already-lowered index register to the key type a map's get and
+    /// set take. An int key travels in the runtime's 64-bit key slot; a string
+    /// or object key is already a pointer and passes through.
+    ///
+    /// Shared by the read and the write so one key register cannot be coerced
+    /// one way going in and another coming out.
+    pub(crate) fn coerce_map_key(&mut self, idx_reg: IrId, key_ir_type: &IrType) -> IrId {
+        if *key_ir_type != IrType::I64 {
+            return idx_reg;
+        }
+        let idx_ty = self
+            .builder
+            .get_register_type(idx_reg)
+            .unwrap_or(IrType::I64);
+        if idx_ty == IrType::I64 {
+            return idx_reg;
+        }
+        self.builder
+            .build_cast(idx_reg, idx_ty, IrType::I64)
+            .unwrap_or(idx_reg)
+    }
+
+    /// Read `obj_reg[idx_reg]` out of a Map, with the receiver and the key
+    /// ALREADY lowered. The one implementation of the map read, behind both
+    /// `m[k]` and the read half of `m[k]++`.
+    ///
+    /// The caller establishes that the receiver is a map: a non-map belongs on
+    /// the array path, and `None` here means the get could not be built.
+    pub(crate) fn load_map_index_with_regs(
+        &mut self,
+        obj_reg: IrId,
+        idx_reg: IrId,
+        object_ty: TypeId,
+    ) -> Option<IrId> {
+        let (get_fn_name, key_ir_type, value_type_id) = self.map_index_info(object_ty)?;
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let key_reg = self.coerce_map_key(idx_reg, &key_ir_type);
+        let get_fn = self.get_or_register_extern_function(
+            get_fn_name,
+            vec![ptr_void, key_ir_type],
+            IrType::I64,
+        );
+        let raw_value =
+            self.builder
+                .build_call_direct(get_fn, vec![obj_reg, key_reg], IrType::I64)?;
+        // Strings are stored as a `*mut HaxeString` pointer in map slots,
+        // not as the StringPtr struct convert_type yields — mirror
+        // lower_index_access so trace/string-concat see a String, not an Int.
+        let is_string = matches!(
+            self.type_table.get(value_type_id).map(|t| &t.kind),
+            Some(crate::tast::TypeKind::String)
+        );
+        if is_string {
+            let ptr_string = IrType::Ptr(Box::new(IrType::String));
+            return self
+                .builder
+                .build_bitcast(raw_value, ptr_string)
+                .or(Some(raw_value));
+        }
+        let value_ir_type = self.convert_type(value_type_id);
+        match &value_ir_type {
+            IrType::Ptr(_) | IrType::F64 => self
+                .builder
+                .build_bitcast(raw_value, value_ir_type)
+                .or(Some(raw_value)),
+            _ => Some(raw_value),
+        }
     }
 }

@@ -37,21 +37,35 @@ impl<'a> HirToMirContext<'a> {
                 // the index are lowered once here and both halves reuse them. The
                 // `HirLValue` entry points lower each of them again per access,
                 // which would evaluate `i` in `a[i()]++` more than once. Without
-                // this the store was dropped entirely and the increment did
+                // this the store is dropped entirely and the increment does
                 // nothing, silently, on arrays and maps alike.
-                // Restricted to array-style receivers: `lower_index_access` reads
-                // an element by loading the receiver's data pointer and indexing
-                // it, which for a Map would take the struct's first word and a key
-                // that is often a pointer, and fault. A Map still loses the store
-                // here, as it did before, rather than gaining a crash.
-                let index_is_array_style = matches!(&operand.kind,
-                    HirExprKind::Index { object, .. } if self.map_index_info(object.ty).is_none());
+                // `load_index_with_regs` picks the read that matches the
+                // receiver — a Map through its get, an array by indexing its
+                // data pointer — and `store_index_with_regs` writes the value
+                // back the same way, so the two halves agree on the element.
+                //
+                // A Map element travels back through the map's set as a 64-bit
+                // slot, so a Map takes this path only when its value type is a
+                // number: adding one to a String or an object handle would put
+                // a pointer into the map that no longer addresses the value.
+                // Any other value type falls through to the generic tail below,
+                // which reads the element and leaves it alone.
+                let map_value_is_numeric = match &operand.kind {
+                    HirExprKind::Index { object, .. } => match self.map_index_info(object.ty) {
+                        Some((_, _, value_ty)) => {
+                            let value_ir = self.convert_type(value_ty);
+                            value_ir.is_integer() || value_ir.is_float()
+                        }
+                        None => true,
+                    },
+                    _ => true,
+                };
                 if let (true, HirExprKind::Index { object, index }) =
-                    (index_is_array_style, &operand.kind)
+                    (map_value_is_numeric, &operand.kind)
                 {
                     let obj_reg = self.lower_expression(object)?;
                     let idx_reg = self.lower_expression(index)?;
-                    let old_value = self.lower_index_access(obj_reg, idx_reg, object.ty)?;
+                    let old_value = self.load_index_with_regs(obj_reg, idx_reg, object.ty)?;
                     let one = self.builder.build_const(IrValue::I32(1))?;
                     let new_value = if is_increment {
                         self.builder.build_binop(BinaryOp::Add, old_value, one)?
@@ -73,6 +87,63 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
                     self.store_index_with_regs(obj_reg, idx_reg, object.ty, new_value);
+                    return Some(match op {
+                        HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
+                        _ => new_value,
+                    });
+                }
+
+                // `o.n++` reads and writes the same field, so the receiver is
+                // lowered once here and both halves take that register: through
+                // the plain read and then the lvalue write it is evaluated
+                // twice, and `get().n++` calls `get` twice. The write also has
+                // to reach every receiver an assignment reaches -- an anonymous
+                // structure, a Dynamic, a `@:cstruct`, a property setter, a
+                // static -- which a GEP-and-store covers only for a class
+                // instance, so on every other receiver the increment was
+                // silently dropped.
+                // An enum-variant access (`Color.Red`) is also a Field, but its
+                // object is the enum TYPE rather than a value:
+                // `lower_field_expr` answers it from the variant table before a
+                // receiver exists, so it has none to share and stays on the
+                // plain path.
+                let field_receiver_is_enum_type = match &operand.kind {
+                    HirExprKind::Field { object, .. } => match &object.kind {
+                        HirExprKind::Variable { symbol, .. } => self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .map(|s| s.kind == crate::tast::SymbolKind::Enum)
+                            .unwrap_or(false),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if let (false, HirExprKind::Field { object, field }) =
+                    (field_receiver_is_enum_type, &operand.kind)
+                {
+                    let obj_reg = self.lower_expression(object)?;
+                    let old_value = self.lower_field_expr_with_receiver(operand, obj_reg)?;
+                    let one = self.builder.build_const(IrValue::I32(1))?;
+                    let new_value = if is_increment {
+                        self.builder.build_binop(BinaryOp::Add, old_value, one)?
+                    } else {
+                        self.builder.build_binop(BinaryOp::Sub, old_value, one)?
+                    };
+                    let result_type = self.convert_type(expr.ty);
+                    let src_loc = self.convert_source_location(&expr.source_location);
+                    if let Some(func) = self.builder.current_function_mut() {
+                        func.locals.insert(
+                            new_value,
+                            crate::ir::IrLocal {
+                                name: format!("_incr{}", new_value.0),
+                                ty: result_type,
+                                mutable: false,
+                                source_location: src_loc,
+                                allocation: crate::ir::AllocationHint::Stack,
+                            },
+                        );
+                    }
+                    self.store_field_with_regs(obj_reg, object, field, new_value);
                     return Some(match op {
                         HirUnaryOp::PostIncr | HirUnaryOp::PostDecr => old_value,
                         _ => new_value,
@@ -127,35 +198,6 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             self.symbol_map.insert(*symbol, new_value);
-                        }
-                    }
-                    HirExprKind::Field { object, field } => {
-                        if let Some(obj_reg) = self.lower_expression(object) {
-                            let field_idx = self
-                                .field_index_map
-                                .get(field)
-                                .map(|&(_, idx)| idx)
-                                .or_else(|| {
-                                    let field_name =
-                                        self.symbol_table.get_symbol(*field).map(|s| s.name)?;
-                                    let receiver_ty = object.ty;
-                                    self.resolve_field_index_by_name(field_name, receiver_ty)
-                                        .map(|(_, idx)| idx)
-                                });
-                            if let Some(idx) = field_idx {
-                                let idx_const = self.builder.build_const(IrValue::I32(idx as i32));
-                                if let Some(idx_reg) = idx_const {
-                                    let field_ty = result_type.clone();
-                                    let field_ptr = self.builder.build_gep(
-                                        obj_reg,
-                                        vec![idx_reg],
-                                        field_ty.clone(),
-                                    );
-                                    if let Some(ptr) = field_ptr {
-                                        self.builder.build_store(ptr, new_value);
-                                    }
-                                }
-                            }
                         }
                     }
                     _ => {}
