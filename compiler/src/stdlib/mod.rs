@@ -28,6 +28,7 @@
 //! - I/O operations (print, trace)
 
 pub mod array;
+pub mod map_iter;
 pub mod bytes;
 pub mod ereg;
 pub mod memory;
@@ -103,6 +104,7 @@ pub fn build_stdlib() -> IrModule {
 
     // Build Array<T> type and methods
     array::build_array_type(&mut builder);
+    map_iter::build_map_iterators(&mut builder);
 
     // Build Bytes hot-path helpers
     bytes::build_bytes_type(&mut builder);
@@ -151,6 +153,7 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     vec_u8::build_vec_u8_type(&mut builder);
     string::build_string_type(&mut builder);
     array::build_array_type(&mut builder);
+    map_iter::build_map_iterators(&mut builder);
     bytes::build_bytes_type(&mut builder);
     stdtypes::build_std_types(&mut builder);
     thread::build_thread_type(&mut builder);

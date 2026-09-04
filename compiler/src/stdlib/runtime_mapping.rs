@@ -518,6 +518,12 @@ impl StdlibMapping {
                 "rayzor.concurrent.MutexGuard",
             ),
             ("Array", "iterator", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.StringMap", "keys", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.StringMap", "iterator", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.IntMap", "keys", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.IntMap", "iterator", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.ObjectMap", "keys", "haxe.iterators.ArrayIterator"),
+            ("haxe.ds.ObjectMap", "iterator", "haxe.iterators.ArrayIterator"),
             (
                 "Array",
                 "keyValueIterator",
@@ -2864,6 +2870,10 @@ impl StdlibMapping {
             // StringMap<T>::toString() -> String
             // Returns pointer directly
             map_method!(instance "haxe.ds.StringMap", "toString" => "haxe_stringmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.StringMap", "keys" => "stringmap_keys_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "haxe.ds.StringMap", "iterator" => "stringmap_values_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
@@ -2906,6 +2916,10 @@ impl StdlibMapping {
             // IntMap<T>::toString() -> String
             // Returns pointer directly
             map_method!(instance "haxe.ds.IntMap", "toString" => "haxe_intmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.IntMap", "keys" => "intmap_keys_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "haxe.ds.IntMap", "iterator" => "intmap_values_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
@@ -2934,6 +2948,10 @@ impl StdlibMapping {
             map_method!(instance "haxe.ds.ObjectMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
             // ObjectMap<K,V>::toString() -> String
             map_method!(instance "haxe.ds.ObjectMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
+            map_method!(instance "haxe.ds.ObjectMap", "keys" => "objectmap_keys_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "haxe.ds.ObjectMap", "iterator" => "objectmap_values_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
             // ObjectMap<K,V>::copy() -> ObjectMap<K,V>
             map_method!(instance "haxe.ds.ObjectMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
         ];
