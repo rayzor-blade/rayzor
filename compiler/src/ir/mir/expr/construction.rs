@@ -431,9 +431,44 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Decided ONCE, from the parsed declaration, and reused twice: to gate
+        // the value wrap just below, and to size the allocation further down.
+        // `None` preserves every existing behaviour exactly.
+        let unlowered_ctor_class: Option<String> = if has_constructor || args.len() != 1 {
+            None
+        } else {
+            self.unlowered_constructor_class(actual_symbol_id, final_class_name, args.len())
+        };
+
         // No constructor plus exactly one argument is a value wrap; this catches
         // abstract types not detected above.
-        if !has_constructor && args.len() == 1 {
+        //
+        // It also swallows a real defect. A cross-module `new C(x)` whose class
+        // has not been MIR-lowered yet reaches here with all six paths above
+        // missed — `constructor_name_map` is a snapshot taken BEFORE this
+        // module was lowered — and the object is then silently replaced by `x`:
+        // the constructor never runs and the program exits 0 with the wrong
+        // answer. The SAME program written with 0 or 2 arguments is CORRECT
+        // today, in the identical compile order, because it falls through to
+        // the allocation and the named forward-ref stub below that
+        // `fixup_stale_cross_module_refs` rebinds. This arity guard is the only
+        // thing keeping the one-argument shape out of that working path.
+        //
+        // The wrap still fires for everything else that lands here, and that
+        // matters: an unresolved abstract, an `extern class` with a one-
+        // argument `new` (`new String(s)`, `new sys.net.Host(s)`), a generic
+        // class, a stdlib class — all of those work TODAY because of this
+        // line, and an emitted-but-unbindable stub would SIGILL instead.
+        // `unlowered_constructor_class` says yes only when the declaration
+        // proves the stub will bind.
+        if !has_constructor && args.len() == 1 && unlowered_ctor_class.is_none() {
+            if crate::debug_flags::ctor_debug() {
+                eprintln!(
+                    "[CTOR] class={} path=VALUE-WRAP class_type={:?} (no constructor, 1 arg)",
+                    debug_class_name.unwrap_or("?"),
+                    class_type
+                );
+            }
             let result = self.lower_expression(&args[0]);
             return result;
         }
@@ -627,6 +662,37 @@ impl<'a> HirToMirContext<'a> {
                             .and_then(|b| index.instance_field_count(b, &no_parse))
                     })?;
                 Some((count as u64 + 1) * 8)
+            })
+            // Same source as `stage=ast`, but keyed by the class name the wrap
+            // guard above already VERIFIED, because that guard is the only
+            // reason this allocation is reachable at all. A cross-module
+            // `new C(x)` whose file lowers later arrives with a Placeholder
+            // type and no SymbolId, so `stage=ast` bails at
+            // `class_sym_for_name?` and the arg-count guess under-allocates:
+            // a four-field class reached through a one-argument constructor
+            // would get 16 bytes and its last field stores would run off the
+            // block.
+            //
+            // Floored by that same guess, so this stage can only ever allocate
+            // the SAME OR MORE than before — a wrong answer here over-
+            // allocates, it can never corrupt. Scoped to the newly-reachable
+            // case, so every program that works today keeps byte-identical
+            // allocation behaviour.
+            .or_else(|| {
+                let key = unlowered_ctor_class.as_deref()?;
+                let index = self.static_sig_index.as_ref()?.clone();
+                let mut index = index.borrow_mut();
+                index.ensure_indexed_from_known_files(key);
+                let no_parse = |_: &str| -> Option<std::path::PathBuf> { None };
+                let count = index.instance_field_count(key, &no_parse)?;
+                // Set only on success, so RAYZOR_ALLOC_DEBUG never labels a
+                // miss here as `ast-name`.
+                stage.set("ast-name");
+                Some(
+                    ((count as u64 + 1) * 8)
+                        .max((args.len() as u64 + 1) * 8)
+                        .max(16),
+                )
             })
             .unwrap_or_else(|| {
                 stage.set("argcount");

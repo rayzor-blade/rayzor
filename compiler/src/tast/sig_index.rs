@@ -36,6 +36,22 @@ struct ClassSigs {
     extends: Option<String>,
     /// Package that declared this class, used to qualify a bare `extends`.
     package: String,
+    /// Parameter count of a `function new` this declaration writes ITSELF and
+    /// gives a BODY — recorded ONLY for a non-generic, non-`extern` `class`.
+    ///
+    /// Read by `declared_constructor_arity` to decide whether a MIR
+    /// forward-ref stub named `<C>.new` will have something to bind to, so
+    /// every absence below is a case where such a stub would be left dangling
+    /// and SIGILL at the call:
+    ///   - an `abstract`: its `new` is a value wrap with no allocation;
+    ///   - an `extern class`, or a BODYLESS `new` (`function new(a:Int);`):
+    ///     declared but never lowered, so `<C>.new` has no MIR body anywhere;
+    ///   - a GENERIC class: its constructor is monomorphised, and a call
+    ///     emitted against the bare template is trap-stubbed;
+    ///   - an INHERITED constructor: that defines `<Base>.new`, never
+    ///     `<Sub>.new`;
+    ///   - a name no parse has reached: unknown rather than guessed.
+    ctor_params: Option<usize>,
 }
 
 impl ClassSigs {
@@ -63,9 +79,94 @@ pub struct StaticSigIndex {
     indexed_files: BTreeSet<String>,
     /// Qualified names whose on-demand parse failed — don't retry.
     parse_misses: BTreeSet<String>,
+    /// Type name → the file declaring it, recorded by the import loader from
+    /// paths it has ALREADY resolved. Read only by
+    /// `ensure_indexed_from_known_files` and `declared_constructor_arity`, for
+    /// a caller that has no namespace resolver of its own: MIR lowering passes
+    /// a `no_parse` closure, yet has to read the declaration of a class whose
+    /// file lowers LATER in the same import pass. Recording is free (a key and
+    /// a path, no parse, no I/O); nothing is parsed until some `new` actually
+    /// needs a declaration.
+    ///
+    /// Membership doubles as the "this program's own import graph declares it"
+    /// test, which is what keeps the constructor query off stdlib classes.
+    known_files: BTreeMap<String, std::path::PathBuf>,
 }
 
 impl StaticSigIndex {
+    /// Record where a type is declared, WITHOUT parsing it: one key and one
+    /// path per import the loader has already resolved. First writer wins, so
+    /// a bare name two packages both spell keeps the resolution the loader
+    /// made.
+    pub fn record_file(&mut self, name: &str, path: std::path::PathBuf) {
+        if name.is_empty() {
+            return;
+        }
+        self.known_files.entry(name.to_string()).or_insert(path);
+    }
+
+    /// Index the file declaring `class_name` using the loader's recorded
+    /// name→path table, for a caller with no namespace resolver of its own.
+    ///
+    /// Deliberately separate from `ensure_indexed`: that one is also reached
+    /// from ast_lowering's `resolve_declared_method_sig`, which passes a REAL
+    /// resolver, and widening it there would change how method signatures are
+    /// typed across the whole frontend. This entry point is used only by the
+    /// two constructor queries below. A no-op once the name is known, or
+    /// known-missing, or absent from the table.
+    pub fn ensure_indexed_from_known_files(&mut self, class_name: &str) {
+        if self.classes.contains_key(class_name)
+            || self.aliases.contains_key(class_name)
+            || self.parse_misses.contains(class_name)
+        {
+            return;
+        }
+        // Cloned out first: nothing may borrow `self` across `ensure_indexed`,
+        // which takes `&mut self`. The explicit `&dyn Fn` annotation forces the
+        // higher-ranked closure signature at the coercion site.
+        let Some(path) = self.known_files.get(class_name).cloned() else {
+            return;
+        };
+        let resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf> =
+            &move |_: &str| Some(path.clone());
+        self.ensure_indexed(class_name, resolve_file);
+    }
+
+    /// Declared constructor arity for a USER class indexed under EXACTLY this
+    /// name: the parameter count of its own body-ful `function new`.
+    ///
+    /// Deliberately strict on three axes, because the caller turns a `Some`
+    /// into an allocation plus a named forward-ref call that must resolve:
+    ///
+    ///  - EXACT name. No typedef-alias following, no bare-name
+    ///    disambiguation: only the class indexed under this name ever defines
+    ///    the `<name>.new` the stub will be looking for.
+    ///  - The import loader must have resolved this very name to a file of its
+    ///    own (`known_files`), so the answer describes a class in THIS
+    ///    program's import graph rather than one that merely got parsed.
+    ///  - That file must not be a stdlib file. `parse_file` indexes haxe-std
+    ///    too, so without this an `extern class String { function
+    ///    new(string:String); }` would look like a constructible class and
+    ///    `new String(s)` — which works today via the value wrap — would
+    ///    become a dangling stub. It also keeps the ~40 stdlib classes with a
+    ///    one-argument `new` (Xml, haxe.io.Path, the string iterators, …) on
+    ///    exactly the code path they take today.
+    ///
+    /// `None` when any of those fail, when the name is unknown, when it names
+    /// an `abstract`, or when it names a class that declares no body-ful `new`
+    /// of its own — see `ClassSigs::ctor_params`.
+    pub fn declared_constructor_arity(&mut self, class_name: &str) -> Option<usize> {
+        let is_user_declared = self
+            .known_files
+            .get(class_name)
+            .is_some_and(|p| !p.to_string_lossy().contains("haxe-std"));
+        if !is_user_declared {
+            return None;
+        }
+        self.ensure_indexed_from_known_files(class_name);
+        self.classes.get(class_name)?.ctor_params
+    }
+
     /// Record all class/abstract static signatures and typedef aliases in a
     /// parsed file. Idempotent per file.
     pub fn index_file(&mut self, file: &parser::HaxeFile) {
@@ -87,10 +188,34 @@ impl StaticSigIndex {
         match decl {
             TypeDeclaration::Class(c) => {
                 let parent = c.extends.as_ref().and_then(Self::type_path_name);
-                self.index_fields(package, &c.name, &c.fields, parent);
+                // Only a class that will actually OWN a MIR constructor may
+                // record one, because the caller turns a "yes" into an alloc
+                // plus a named forward-ref call.
+                //
+                // `extern class Host { function new(name:String); }` is a
+                // `TypeDeclaration::Class` — extern is a MODIFIER, not a
+                // variant — and gets no MIR body, so a stub for `Host.new`
+                // can never be rebound and the call SIGILLs. `new String(s)`
+                // and `new sys.net.Host(s)` work today ONLY because the value
+                // wrap fires for them; this is what keeps it firing.
+                //
+                // A GENERIC class is excluded too: its constructor is
+                // monomorphised, and a call emitted against the bare `<C>.new`
+                // template is trap-stubbed (see the `ctor_type_args` comment
+                // in `lower_new`).
+                let record_ctor = c.type_params.is_empty()
+                    && !c
+                        .modifiers
+                        .iter()
+                        .any(|m| matches!(m, parser::Modifier::Extern));
+                self.index_fields(package, &c.name, &c.fields, parent, record_ctor);
             }
             TypeDeclaration::Abstract(a) => {
-                self.index_fields(package, &a.name, &a.fields, None);
+                // `false`: an abstract must never record a constructor. Its
+                // `new` is a value wrap over the underlying value, and a
+                // cross-module `new SomeAbstract(x)` that reaches the fallback
+                // in `lower_new` is lowered correctly by that wrap today.
+                self.index_fields(package, &a.name, &a.fields, None, false);
             }
             TypeDeclaration::Typedef(t) => {
                 // Only straight `typedef A = pkg.B` renames participate in
@@ -136,6 +261,7 @@ impl StaticSigIndex {
         class_name: &str,
         fields: &[parser::ClassField],
         extends: Option<String>,
+        record_ctor: bool,
     ) {
         let qname = Self::qualify(package, class_name);
         let fresh = !self.classes.contains_key(&qname);
@@ -158,6 +284,28 @@ impl StaticSigIndex {
                 continue;
             };
             if func.name == "new" {
+                // Recorded rather than tabled: `declared_constructor_arity`
+                // needs to know a CLASS constructor exists and how many
+                // parameters it declares, while the method tables stay keyed
+                // by callable name exactly as before. First declaration wins,
+                // mirroring the `or_insert` tables below.
+                //
+                // `body.is_some()` is load-bearing, not defensive: a bodyless
+                // `new` is a DECLARATION with no definition, and answering an
+                // interprocedural question from one is how `free((void*)42)`
+                // happened once already. Here it would leave a forward-ref
+                // stub with nothing to bind to and SIGILL at the call.
+                let ctor_is_extern = field
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, parser::Modifier::Extern));
+                if record_ctor
+                    && func.body.is_some()
+                    && !ctor_is_extern
+                    && entry.ctor_params.is_none()
+                {
+                    entry.ctor_params = Some(func.params.len());
+                }
                 continue;
             }
             let table = if is_static {
