@@ -3694,7 +3694,17 @@ impl CompilationUnit {
             };
 
             let filename = file_path_str;
-            let deps = match parser::parse_haxe_file(&filename, &source, false) {
+            // Parsed with the compile's own defines. The parser's defaults lack
+            // `eval`, so a reference inside `#if eval` — StringMap's
+            // `new MapKeyValueIterator(this)` — never reached the dependency
+            // graph, and the iterator was lowered after its constructor site.
+            let deps = match parser::haxe_parser::parse_haxe_file_with_config(
+                &filename,
+                &source,
+                false,
+                false,
+                &self.preprocessor_config(),
+            ) {
                 Ok(ast) => Self::extract_all_dependencies(&ast),
                 Err(_) => Vec::new(),
             };
