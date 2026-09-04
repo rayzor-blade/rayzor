@@ -65,10 +65,51 @@ class StringTools {
 		});
 		s = lua.NativeStringTools.gsub(s, " ", "+");
 		return s;
+		#elseif rayzor
+		// Percent-encode per UTF-8 byte. String is byte-based here, so
+		// `unsafeCodeAt` already yields the bytes to encode, and every byte
+		// this emits is ASCII, which `addChar` passes through unchanged.
+		var buf = new StringBuf();
+		var i = 0;
+		var len = s.length;
+		while (i < len) {
+			var c = unsafeCodeAt(s, i);
+			if ((c >= 'a'.code && c <= 'z'.code)
+				|| (c >= 'A'.code && c <= 'Z'.code)
+				|| (c >= '0'.code && c <= '9'.code)
+				|| c == '-'.code
+				|| c == '_'.code
+				|| c == '.'.code) {
+				buf.addChar(c);
+			} else {
+				buf.addChar('%'.code);
+				buf.addChar(hexDigitUpper((c >> 4) & 15));
+				buf.addChar(hexDigitUpper(c & 15));
+			}
+			i++;
+		}
+		return buf.toString();
 		#else
 		return null;
 		#end
 	}
+
+	#if rayzor
+	static function hexDigitUpper(v:Int):Int {
+		return v < 10 ? '0'.code + v : 'A'.code + (v - 10);
+	}
+
+	/** Value of one hex digit, or -1 if `c` is not one. */
+	static function hexValue(c:Int):Int {
+		if (c >= '0'.code && c <= '9'.code)
+			return c - '0'.code;
+		if (c >= 'a'.code && c <= 'f'.code)
+			return c - 'a'.code + 10;
+		if (c >= 'A'.code && c <= 'F'.code)
+			return c - 'A'.code + 10;
+		return -1;
+	}
+	#end
 
 	#if java
 	private static function postProcessUrlEncode(s:String):String {
@@ -136,6 +177,58 @@ class StringTools {
 		});
 		s = lua.NativeStringTools.gsub(s, "\r\n", "\n");
 		return s;
+		#elseif rayzor
+		// Decodes to a byte stream, then reassembles code points from it,
+		// because `StringBuf.addChar` UTF-8-encodes a code point rather than
+		// appending a byte. Using a byte buffer here instead would add a
+		// dependency to this module and perturb stdlib compile order.
+		var buf = new StringBuf();
+		var i = 0;
+		var len = s.length;
+		var pending = 0;
+		var need = 0;
+		while (i < len) {
+			var c = unsafeCodeAt(s, i);
+			var b:Int = 0;
+			if (c == '+'.code) {
+				b = ' '.code;
+				i++;
+			} else if (c == '%'.code) {
+				var h1 = i + 1 < len ? hexValue(unsafeCodeAt(s, i + 1)) : -1;
+				var h2 = i + 2 < len ? hexValue(unsafeCodeAt(s, i + 2)) : -1;
+				if (h1 >= 0 && h2 >= 0) {
+					b = (h1 << 4) | h2;
+					i += 3;
+				} else {
+					// A malformed escape drops the '%' and keeps the rest.
+					i++;
+					continue;
+				}
+			} else {
+				b = c;
+				i++;
+			}
+			if (need > 0) {
+				pending = (pending << 6) | (b & 0x3F);
+				need--;
+				if (need == 0)
+					buf.addChar(pending);
+			} else if (b < 0x80) {
+				buf.addChar(b);
+			} else if (b >= 0xF0) {
+				pending = b & 0x07;
+				need = 3;
+			} else if (b >= 0xE0) {
+				pending = b & 0x0F;
+				need = 2;
+			} else if (b >= 0xC0) {
+				pending = b & 0x1F;
+				need = 1;
+			} else {
+				buf.addChar(b);
+			}
+		}
+		return buf.toString();
 		#else
 		return null;
 		#end
