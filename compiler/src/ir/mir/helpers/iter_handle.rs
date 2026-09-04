@@ -67,6 +67,10 @@ pub(crate) enum IterSource {
         next: String,
         next_is_mir: bool,
     },
+    /// A map, which supplies its values. They are copied into an array when the
+    /// handle is built, and the array iterator wrappers carry it from there --
+    /// the same reading of a map that the `for`-in form takes.
+    MapValues { values_fn: &'static str },
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -125,6 +129,11 @@ impl<'a> HirToMirContext<'a> {
             let ty = type_table.get(tid)?;
             match &ty.kind {
                 TypeKind::Array { .. } => return Some(IterSource::Array),
+                TypeKind::Map { key_type, .. } => {
+                    return Some(IterSource::MapValues {
+                        values_fn: self.map_values_fn_for_key(*key_type)?,
+                    })
+                }
                 TypeKind::Class { symbol_id, .. } => {
                     let class_sym = *symbol_id;
                     let name = self
@@ -133,6 +142,29 @@ impl<'a> HirToMirContext<'a> {
                         .and_then(|s| self.string_interner.get(s.name));
                     if name == Some("Array") {
                         return Some(IterSource::Array);
+                    }
+                    // The three concrete map containers supply their values, which
+                    // is the reading `for`-in takes of them. This precedes the
+                    // method probes below because a map declares `iterator()` as
+                    // well, and that one returns a structure rather than a class,
+                    // so it names no entry points.
+                    match name {
+                        Some("IntMap") => {
+                            return Some(IterSource::MapValues {
+                                values_fn: "haxe_intmap_values_to_array",
+                            })
+                        }
+                        Some("StringMap") => {
+                            return Some(IterSource::MapValues {
+                                values_fn: "haxe_stringmap_values_to_array",
+                            })
+                        }
+                        Some("ObjectMap") => {
+                            return Some(IterSource::MapValues {
+                                values_fn: "haxe_objectmap_values_to_array",
+                            })
+                        }
+                        _ => {}
                     }
                     let has = |m: &str| {
                         let interned = self.string_interner.intern(m);
@@ -155,8 +187,58 @@ impl<'a> HirToMirContext<'a> {
                 }
                 TypeKind::TypeAlias { target_type, .. } => tid = *target_type,
                 TypeKind::GenericInstance { base_type, .. } => tid = *base_type,
+                // An abstract is its underlying value at run time, so a value
+                // that reaches a protocol slot through one supplies the protocol
+                // the way that underlying type does.
+                TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    type_args,
+                } => {
+                    // An instantiation records its arguments and leaves the
+                    // underlying off, so the underlying is read from the
+                    // declaration the symbol carries.
+                    let declared = match underlying {
+                        Some(u) => Some(*u),
+                        None => match self
+                            .symbol_table
+                            .get_symbol(*symbol_id)
+                            .and_then(|s| type_table.get(s.type_id))
+                            .map(|t| &t.kind)
+                        {
+                            Some(TypeKind::Abstract { underlying, .. }) => *underlying,
+                            _ => None,
+                        },
+                    }?;
+                    // `abstract Foo<T>(T)` names its own parameter as the
+                    // underlying, and an instantiation binds that parameter in
+                    // `type_args` rather than substituting it. One parameter says
+                    // which binding that is; several do not, so the walk keeps the
+                    // parameter and classifies nothing. This is the rule
+                    // `convert_type` reads a generic abstract's representation by.
+                    tid = match type_table.get(declared).map(|t| &t.kind) {
+                        Some(TypeKind::TypeParameter { .. }) if type_args.len() == 1 => {
+                            type_args[0]
+                        }
+                        _ => declared,
+                    };
+                }
                 _ => return None,
             }
+        }
+    }
+
+    /// Which runtime call copies a map's values into an array, chosen by the key
+    /// type the way the map form of `for`-in chooses it.
+    ///
+    /// `None` for an enum key, whose container is a balanced tree rather than one
+    /// of the three hash maps, so nothing is classified for it.
+    fn map_values_fn_for_key(&self, key_type: TypeId) -> Option<&'static str> {
+        match self.type_table.get(key_type).map(|t| &t.kind) {
+            Some(TypeKind::Int) | Some(TypeKind::Bool) => Some("haxe_intmap_values_to_array"),
+            Some(TypeKind::String) => Some("haxe_stringmap_values_to_array"),
+            Some(TypeKind::Enum { .. }) => None,
+            _ => Some("haxe_objectmap_values_to_array"),
         }
     }
 
@@ -243,8 +325,36 @@ impl<'a> HirToMirContext<'a> {
     /// cannot all be named produces no handle rather than a half-filled one.
     pub(crate) fn build_iter_handle(&mut self, obj_reg: IrId, source: &IterSource) -> Option<IrId> {
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        // A map hands its values over as an array, and from there the handle
+        // carries an array like any other. The copy is taken here, where the map
+        // itself is in hand, because the wrappers the slots below name read an
+        // array and nothing else.
+        let obj_reg = match source {
+            IterSource::MapValues { values_fn } => {
+                let values_fn = *values_fn;
+                let map_ptr = {
+                    let ty = self
+                        .builder
+                        .get_register_type(obj_reg)
+                        .unwrap_or(IrType::I64);
+                    if matches!(ty, IrType::Ptr(_)) {
+                        obj_reg
+                    } else {
+                        self.builder.build_bitcast(obj_reg, ptr_void.clone())?
+                    }
+                };
+                let values = self.get_or_register_extern_function(
+                    values_fn,
+                    vec![ptr_void.clone()],
+                    ptr_void.clone(),
+                );
+                self.builder
+                    .build_call_direct(values, vec![map_ptr], ptr_void.clone())?
+            }
+            _ => obj_reg,
+        };
         let (iterator_fn, has_next_fn, next_fn) = match source {
-            IterSource::Array => (
+            IterSource::Array | IterSource::MapValues { .. } => (
                 Some(self.iter_thunk_for_wrapper(
                     "array_iterator",
                     vec![ptr_void.clone()],
