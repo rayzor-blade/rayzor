@@ -1374,6 +1374,19 @@ impl<'a> HirToMirContext<'a> {
             HirPattern::Variable { symbol, .. } => {
                 self.symbol_map.insert(*symbol, element_value);
             }
+            // `for (k => v in array)`: the key is the index, the value the element.
+            HirPattern::Tuple(subs) if subs.len() == 2 => {
+                if let HirPattern::Variable { symbol: key, .. } = &subs[0] {
+                    let key_i32 = self
+                        .builder
+                        .build_cast(idx_for_access, IrType::I64, IrType::I32)
+                        .unwrap_or(idx_for_access);
+                    self.symbol_map.insert(*key, key_i32);
+                }
+                if let HirPattern::Variable { symbol: value, .. } = &subs[1] {
+                    self.symbol_map.insert(*value, element_value);
+                }
+            }
             _ => {}
         }
 
