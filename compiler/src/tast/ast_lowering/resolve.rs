@@ -449,6 +449,46 @@ impl<'a> AstLowering<'a> {
                 // look up the method in that class's scope.
                 let receiver_typed = self.lower_expression(obj).ok()?;
                 let receiver_type_id = receiver_typed.expr_type;
+
+                // An Array receiver has no class scope. Its callback-taking
+                // methods answer with a formal whose parameter is the element
+                // type, so an untyped lambda is typed to match what the native
+                // trampoline actually passes; nothing else about Array answers,
+                // so no other Array call gains argument coercion. A type
+                // parameter stays untyped, as today.
+                let array_elem = {
+                    let tt = self.context.type_table.borrow();
+                    match tt.get(receiver_type_id).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Array { element_type })
+                            if !matches!(
+                                tt.get(*element_type).map(|t| &t.kind),
+                                Some(crate::tast::core::TypeKind::TypeParameter { .. })
+                            ) =>
+                        {
+                            Some(*element_type)
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(elem) = array_elem {
+                    let name: &str = field;
+                    let (params, ret) = {
+                        let tt = self.context.type_table.borrow();
+                        match name {
+                            "map" => (vec![elem], tt.dynamic_type()),
+                            "filter" => (vec![elem], tt.bool_type()),
+                            "sort" => (vec![elem, elem], tt.int_type()),
+                            _ => return None,
+                        }
+                    };
+                    let callback = self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_function_type(params, ret);
+                    return Some(vec![callback]);
+                }
+
                 let class_symbol = {
                     let type_table = self.context.type_table.borrow();
                     let t = type_table.get(receiver_type_id)?;

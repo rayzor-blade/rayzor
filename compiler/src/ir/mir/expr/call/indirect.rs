@@ -34,6 +34,24 @@ impl<'a> HirToMirContext<'a> {
             args.len()
         );
 
+        // Formal parameter types from the callee's function type. A `Void`
+        // entry is Haxe's spelling for "takes nothing", not a slot.
+        let formal_tys: Option<Vec<TypeId>> = {
+            let type_table = self.type_table;
+            type_table.get(callee.ty).and_then(|t| match &t.kind {
+                crate::tast::TypeKind::Function { params, .. } => Some(
+                    params
+                        .iter()
+                        .copied()
+                        .filter(|p| {
+                            !matches!(type_table.get(*p).map(|t| &t.kind), Some(TypeKind::Void))
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+        };
+
         // Arguments are lowered before the callee, so lambdas passed as
         // arguments are still generated when callee lowering fails.
         debug!("About to lower {} indirect call arguments", args.len());
@@ -51,6 +69,21 @@ impl<'a> HirToMirContext<'a> {
                     std::mem::discriminant(&a.kind)
                 );
                 return None;
+            };
+            // A scalar or String handed to a `Dynamic` formal must box, as the
+            // direct-call path does: the callee unboxes those. It does NOT unbox
+            // a function, anonymous, class or enum value received as `Dynamic` —
+            // it uses the raw pointer, so boxing those here breaks the callee.
+            let boxable = {
+                let type_table = self.type_table;
+                matches!(
+                    type_table.get(a.ty).map(|t| &t.kind),
+                    Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String)
+                )
+            };
+            let reg = match formal_tys.as_ref().and_then(|f| f.get(i).copied()) {
+                Some(formal) if boxable => self.maybe_box_value(reg, a.ty, formal).unwrap_or(reg),
+                _ => reg,
             };
             arg_regs.push(reg);
         }
