@@ -739,32 +739,12 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", fqn))
     }
 
-    /// Canonical class key for a `new C(x)` that none of `lower_new`'s
-    /// constructor paths could resolve, when the parsed DECLARATION says `C`
-    /// really is a constructible user `class`.
-    ///
-    /// `Some(fqn)` means: allocate and call the constructor through the named
-    /// forward-ref stub, exactly as the zero- and two-argument shapes of the
-    /// same program already do today. `None` means keep whatever fallback the
-    /// caller had.
-    ///
-    /// The key is DERIVED from `cross_module_constructor_fqn_key` — the same
-    /// function that names the stub — and checked against the declaration
-    /// index under exactly that name. A "yes" is therefore a promise that the
-    /// stub about to be emitted names a class this program declares AND
-    /// lowers, so `fixup_stale_cross_module_refs` has a real function to bind
-    /// it to. An unmatched stub is not a no-op: the call dispatches into an
-    /// empty `Unreachable` body and SIGILLs. A guessed package that names
-    /// nothing answers "no" and nothing changes.
-    ///
-    /// Answers "no" for: an abstract; an `extern class` or any bodyless `new`;
-    /// a generic class; a class that only INHERITS a constructor; anything
-    /// declared in haxe-std; a name this program's import loader never
-    /// resolved (all six enforced by `declared_constructor_arity` and
-    /// `ClassSigs::ctor_params`); and any `new` lowered INSIDE a haxe-std
-    /// module, where `Array.iterator` and `StringTools.iterator` /
-    /// `keyValueIterator` lower `new <Iterator>(x)` with the constructor
-    /// unavailable and are carried by the value wrap today.
+    /// Class key for a `new C(x)` no constructor path resolved, when the parsed
+    /// declaration says `C` is a constructible user class. `Some` means emit
+    /// alloc + the named forward-ref stub; `None` keeps the caller's fallback.
+    /// The key comes from `cross_module_constructor_fqn_key`, which also names
+    /// the stub, so a "yes" promises the fixup pass has something to bind —
+    /// an unmatched stub SIGILLs rather than no-opping.
     pub(crate) fn unlowered_constructor_class(
         &self,
         actual_symbol_id: Option<SymbolId>,
@@ -774,9 +754,7 @@ impl<'a> HirToMirContext<'a> {
         if crate::debug_flags::no_xmodule_ctor() {
             return None;
         }
-        // The same test `compile_file_with_shared_state_ex` uses for
-        // `is_stdlib_file`: it sets `hir_module.metadata.source_file` from the
-        // very `filename` it tests, and that string reaches the module here.
+        // `is_stdlib_file` tests the same string that reaches us as source_file.
         if self.builder.module.source_file.contains("haxe-std") {
             return None;
         }
@@ -785,8 +763,7 @@ impl<'a> HirToMirContext<'a> {
         let class_fqn = key.strip_suffix(".new")?.to_string();
         let mut index = index.borrow_mut();
         let arity = index.declared_constructor_arity(&class_fqn)?;
-        // A declaration that takes fewer parameters than this call passes is a
-        // mis-resolution, not the class being constructed.
+        // Fewer declared params than the call passes means we resolved the wrong class.
         (arity >= argc).then_some(class_fqn)
     }
 

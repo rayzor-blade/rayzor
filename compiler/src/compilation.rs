@@ -3708,18 +3708,10 @@ impl CompilationUnit {
                 }
             }
 
-            // Record where this type is declared BEFORE anything compiles. MIR
-            // lowering carries no namespace resolver, so `StaticSigIndex` uses
-            // this to read the declaration of a class whose own file lowers
-            // LATER in this pass — specifically, whether the name is a
-            // constructible user class at all, which is unanswerable at the
-            // point `new C(x)` lowers and was being guessed from the argument
-            // count. Membership also scopes that query to this program's own
-            // sources, keeping it off stdlib declarations.
-            //
-            // Only the resolved path is stored: no parse, no I/O, and the
-            // dependency extraction above is untouched, so the topological
-            // compile order is byte-for-byte what it was.
+            // Where each type is declared, recorded before anything compiles:
+            // MIR lowering has no namespace resolver, so this is how
+            // `StaticSigIndex` reads the declaration of a class whose own file
+            // lowers later. Path only — no parse, no I/O, order untouched.
             self.static_sig_index
                 .borrow_mut()
                 .record_file(&qualified_path, file_path.clone());

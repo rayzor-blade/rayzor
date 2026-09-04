@@ -48,10 +48,8 @@ cached_flag!(
 );
 cached_flag!(
     /// `RAYZOR_NO_XMODULE_CTOR`: restore the unconditional one-argument value
-    /// wrap in `lower_new`, disabling the declaration-index recovery of a
-    /// cross-module constructor whose class has not been lowered yet. Escape
-    /// hatch for attributing a regression in one run instead of a rebuild and
-    /// bisect; the recovery is ON by default.
+    /// wrap in `lower_new`, disabling cross-module constructor recovery.
+    /// Attributes a regression in one run instead of a rebuild and bisect.
     no_xmodule_ctor,
     "RAYZOR_NO_XMODULE_CTOR"
 );

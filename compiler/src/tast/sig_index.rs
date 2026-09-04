@@ -36,21 +36,10 @@ struct ClassSigs {
     extends: Option<String>,
     /// Package that declared this class, used to qualify a bare `extends`.
     package: String,
-    /// Parameter count of a `function new` this declaration writes ITSELF and
-    /// gives a BODY — recorded ONLY for a non-generic, non-`extern` `class`.
-    ///
-    /// Read by `declared_constructor_arity` to decide whether a MIR
-    /// forward-ref stub named `<C>.new` will have something to bind to, so
-    /// every absence below is a case where such a stub would be left dangling
-    /// and SIGILL at the call:
-    ///   - an `abstract`: its `new` is a value wrap with no allocation;
-    ///   - an `extern class`, or a BODYLESS `new` (`function new(a:Int);`):
-    ///     declared but never lowered, so `<C>.new` has no MIR body anywhere;
-    ///   - a GENERIC class: its constructor is monomorphised, and a call
-    ///     emitted against the bare template is trap-stubbed;
-    ///   - an INHERITED constructor: that defines `<Base>.new`, never
-    ///     `<Sub>.new`;
-    ///   - a name no parse has reached: unknown rather than guessed.
+    /// Parameter count of a body-ful `function new` this class declares itself,
+    /// recorded only for a non-generic, non-`extern` `class`. Every other shape
+    /// (abstract, extern, bodyless `new`, generic, inherited ctor) is absent,
+    /// because a `<C>.new` stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
 }
 
@@ -79,17 +68,11 @@ pub struct StaticSigIndex {
     indexed_files: BTreeSet<String>,
     /// Qualified names whose on-demand parse failed — don't retry.
     parse_misses: BTreeSet<String>,
-    /// Type name → the file declaring it, recorded by the import loader from
-    /// paths it has ALREADY resolved. Read only by
-    /// `ensure_indexed_from_known_files` and `declared_constructor_arity`, for
-    /// a caller that has no namespace resolver of its own: MIR lowering passes
-    /// a `no_parse` closure, yet has to read the declaration of a class whose
-    /// file lowers LATER in the same import pass. Recording is free (a key and
-    /// a path, no parse, no I/O); nothing is parsed until some `new` actually
-    /// needs a declaration.
-    ///
-    /// Membership doubles as the "this program's own import graph declares it"
-    /// test, which is what keeps the constructor query off stdlib classes.
+    /// Type name → declaring file, recorded by the import loader from paths it
+    /// already resolved, so MIR lowering (which has no resolver) can read the
+    /// declaration of a class whose file lowers later. Free to record; nothing
+    /// is parsed until a `new` needs it. Membership also scopes the constructor
+    /// query to this program's own import graph.
     known_files: BTreeMap<String, std::path::PathBuf>,
 }
 
@@ -105,15 +88,10 @@ impl StaticSigIndex {
         self.known_files.entry(name.to_string()).or_insert(path);
     }
 
-    /// Index the file declaring `class_name` using the loader's recorded
-    /// name→path table, for a caller with no namespace resolver of its own.
-    ///
-    /// Deliberately separate from `ensure_indexed`: that one is also reached
-    /// from ast_lowering's `resolve_declared_method_sig`, which passes a REAL
-    /// resolver, and widening it there would change how method signatures are
-    /// typed across the whole frontend. This entry point is used only by the
-    /// two constructor queries below. A no-op once the name is known, or
-    /// known-missing, or absent from the table.
+    /// Index the file declaring `class_name` via the loader's name→path table.
+    /// Separate from `ensure_indexed`, which ast_lowering reaches with a real
+    /// resolver — widening it there would retype method signatures frontend-wide.
+    /// No-op once the name is known, known-missing, or absent from the table.
     pub fn ensure_indexed_from_known_files(&mut self, class_name: &str) {
         if self.classes.contains_key(class_name)
             || self.aliases.contains_key(class_name)
@@ -132,29 +110,13 @@ impl StaticSigIndex {
         self.ensure_indexed(class_name, resolve_file);
     }
 
-    /// Declared constructor arity for a USER class indexed under EXACTLY this
-    /// name: the parameter count of its own body-ful `function new`.
-    ///
-    /// Deliberately strict on three axes, because the caller turns a `Some`
-    /// into an allocation plus a named forward-ref call that must resolve:
-    ///
-    ///  - EXACT name. No typedef-alias following, no bare-name
-    ///    disambiguation: only the class indexed under this name ever defines
-    ///    the `<name>.new` the stub will be looking for.
-    ///  - The import loader must have resolved this very name to a file of its
-    ///    own (`known_files`), so the answer describes a class in THIS
-    ///    program's import graph rather than one that merely got parsed.
-    ///  - That file must not be a stdlib file. `parse_file` indexes haxe-std
-    ///    too, so without this an `extern class String { function
-    ///    new(string:String); }` would look like a constructible class and
-    ///    `new String(s)` — which works today via the value wrap — would
-    ///    become a dangling stub. It also keeps the ~40 stdlib classes with a
-    ///    one-argument `new` (Xml, haxe.io.Path, the string iterators, …) on
-    ///    exactly the code path they take today.
-    ///
-    /// `None` when any of those fail, when the name is unknown, when it names
-    /// an `abstract`, or when it names a class that declares no body-ful `new`
-    /// of its own — see `ClassSigs::ctor_params`.
+    /// Declared constructor arity for a user class indexed under EXACTLY this
+    /// name. Strict on three axes, because the caller turns a `Some` into an
+    /// allocation plus a named call that must resolve: exact name (no alias or
+    /// bare-name matching), the loader must have resolved it to a file of its
+    /// own, and that file must not be stdlib — `extern class String` would
+    /// otherwise look constructible and turn today's working `new String(s)`
+    /// into a dangling stub.
     pub fn declared_constructor_arity(&mut self, class_name: &str) -> Option<usize> {
         let is_user_declared = self
             .known_files
@@ -188,21 +150,11 @@ impl StaticSigIndex {
         match decl {
             TypeDeclaration::Class(c) => {
                 let parent = c.extends.as_ref().and_then(Self::type_path_name);
-                // Only a class that will actually OWN a MIR constructor may
-                // record one, because the caller turns a "yes" into an alloc
-                // plus a named forward-ref call.
-                //
-                // `extern class Host { function new(name:String); }` is a
-                // `TypeDeclaration::Class` — extern is a MODIFIER, not a
-                // variant — and gets no MIR body, so a stub for `Host.new`
-                // can never be rebound and the call SIGILLs. `new String(s)`
-                // and `new sys.net.Host(s)` work today ONLY because the value
-                // wrap fires for them; this is what keeps it firing.
-                //
-                // A GENERIC class is excluded too: its constructor is
-                // monomorphised, and a call emitted against the bare `<C>.new`
-                // template is trap-stubbed (see the `ctor_type_args` comment
-                // in `lower_new`).
+                // Only a class that will own a MIR constructor may record one.
+                // `extern` is a modifier, not a variant, so `extern class Host`
+                // arrives here yet has no MIR body; generics are monomorphised
+                // and a call on the bare template is trap-stubbed. Both keep the
+                // value wrap, which is what makes `new String(s)` work today.
                 let record_ctor = c.type_params.is_empty()
                     && !c
                         .modifiers
@@ -284,17 +236,10 @@ impl StaticSigIndex {
                 continue;
             };
             if func.name == "new" {
-                // Recorded rather than tabled: `declared_constructor_arity`
-                // needs to know a CLASS constructor exists and how many
-                // parameters it declares, while the method tables stay keyed
-                // by callable name exactly as before. First declaration wins,
-                // mirroring the `or_insert` tables below.
-                //
-                // `body.is_some()` is load-bearing, not defensive: a bodyless
-                // `new` is a DECLARATION with no definition, and answering an
-                // interprocedural question from one is how `free((void*)42)`
-                // happened once already. Here it would leave a forward-ref
-                // stub with nothing to bind to and SIGILL at the call.
+                // Recorded separately so the method tables stay keyed by
+                // callable name; first declaration wins, like the tables below.
+                // `body.is_some()` is load-bearing: a bodyless `new` is a
+                // declaration with no definition, so its stub would never bind.
                 let ctor_is_extern = field
                     .modifiers
                     .iter()
@@ -418,15 +363,10 @@ impl StaticSigIndex {
         None
     }
 
-    /// Declared instance-field count for `class_name` (qualified or unique
-    /// bare name; follows typedef aliases; parses the declaring file on
-    /// demand). Used for object allocation when a `new` lowers before the
-    /// class does.
-    /// Total instance slots for `class_name`: its own declared fields plus
-    /// every ancestor's, since a subclass object is parent slots followed by
-    /// own slots. Returns None only when the class itself is unknown; an
-    /// unresolvable ANCESTOR yields None too, because a partial count would
-    /// under-allocate the object and silently corrupt the heap.
+    /// Total instance slots for `class_name`: own declared fields plus every
+    /// ancestor's. Used to size an allocation when a `new` lowers before its
+    /// class does. An unresolvable ancestor yields None rather than a partial
+    /// count, which would under-allocate and corrupt the heap.
     pub fn instance_field_count(
         &mut self,
         class_name: &str,
