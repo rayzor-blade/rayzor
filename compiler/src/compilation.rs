@@ -3793,6 +3793,11 @@ impl CompilationUnit {
             }
         }
 
+        if std::env::var_os("RAYZOR_IMPORT_GRAPH").is_some() {
+            for (dep, dependents) in &graph {
+                eprintln!("[import-graph] {} -> {}", dep, dependents.join(", "));
+            }
+        }
         let mut queue: VecDeque<String> = in_degree
             .iter()
             .filter(|(_, &deg)| deg == 0)
@@ -3914,6 +3919,11 @@ impl CompilationUnit {
         add_profile_ms(&mut self.typecheck_timings.import_toposort_ms, t_toposort);
 
         let t_import_compile = profile_timer(self.config.profile_typecheck);
+        if std::env::var_os("RAYZOR_IMPORT_GRAPH").is_some() {
+            for (i, n) in compile_order.iter().enumerate() {
+                eprintln!("[import-order] {:>3} {}", i, n);
+            }
+        }
         // Step 3: Compile in topological order with retry for files that fail
         // due to unresolved symbols (dependency ordering issues from cycles).
         debug!(
