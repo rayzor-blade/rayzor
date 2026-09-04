@@ -1810,9 +1810,23 @@ impl<'a> AstLowering<'a> {
                     // initializer — lets a bare enum-variant identifier
                     // (`var v:ColorA = Red`) disambiguate against same-named
                     // variants on other enums.
+                    // A declared function type also types an untyped lambda
+                    // initializer's parameters, as a call's formal does for its
+                    // lambda argument.
+                    let lambda_hint: Option<Vec<TypeId>> = declared_type.and_then(|dt| {
+                        let tt = self.context.type_table.borrow();
+                        match tt.get(dt).map(|t| &t.kind) {
+                            Some(crate::tast::core::TypeKind::Function { params, .. }) => {
+                                Some(params.clone())
+                            }
+                            _ => None,
+                        }
+                    });
+                    self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
                     let result = self.lower_expression(init_expr);
                     self.expected_arg_type_stack.pop();
+                    self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
                     result?
                 } else {
@@ -1923,9 +1937,23 @@ impl<'a> AstLowering<'a> {
                 let initializer = if let Some(init_expr) = expr {
                     // Annotation = expected type of the initializer (bare
                     // enum-variant disambiguation, mirroring `var`).
+                    // A declared function type also types an untyped lambda
+                    // initializer's parameters, as a call's formal does for its
+                    // lambda argument.
+                    let lambda_hint: Option<Vec<TypeId>> = declared_type.and_then(|dt| {
+                        let tt = self.context.type_table.borrow();
+                        match tt.get(dt).map(|t| &t.kind) {
+                            Some(crate::tast::core::TypeKind::Function { params, .. }) => {
+                                Some(params.clone())
+                            }
+                            _ => None,
+                        }
+                    });
+                    self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
                     let result = self.lower_expression(init_expr);
                     self.expected_arg_type_stack.pop();
+                    self.expected_lambda_params_stack.pop();
                     result?
                 } else {
                     return Err(LoweringError::IncompleteImplementation {
