@@ -37,9 +37,9 @@ struct ClassSigs {
     /// Package that declared this class, used to qualify a bare `extends`.
     package: String,
     /// Parameter count of a body-ful `function new` this class declares itself,
-    /// recorded only for a non-generic, non-`extern` `class`. Every other shape
-    /// (abstract, extern, bodyless `new`, generic, inherited ctor) is absent,
-    /// because a `<C>.new` stub for those would dangle and SIGILL at the call.
+    /// recorded only for a non-`extern` `class`. Every other shape (abstract,
+    /// extern, bodyless `new`, inherited ctor) is absent, because a `<C>.new`
+    /// stub for those would dangle and SIGILL at the call.
     ctor_params: Option<usize>,
 }
 
@@ -102,7 +102,7 @@ impl StaticSigIndex {
         // Cloned out first: nothing may borrow `self` across `ensure_indexed`,
         // which takes `&mut self`. The explicit `&dyn Fn` annotation forces the
         // higher-ranked closure signature at the coercion site.
-        let Some(path) = self.known_files.get(class_name).cloned() else {
+        let Some(path) = self.known_file(class_name) else {
             return;
         };
         let resolve_file: &dyn Fn(&str) -> Option<std::path::PathBuf> =
@@ -110,21 +110,27 @@ impl StaticSigIndex {
         self.ensure_indexed(class_name, resolve_file);
     }
 
-    /// Declared constructor arity for a user class indexed under EXACTLY this
-    /// name. Strict on three axes, because the caller turns a `Some` into an
-    /// allocation plus a named call that must resolve: exact name (no alias or
-    /// bare-name matching), the loader must have resolved it to a file of its
-    /// own, and that file must not be stdlib — `extern class String` would
-    /// otherwise look constructible and turn today's working `new String(s)`
-    /// into a dangling stub.
-    pub fn declared_constructor_arity(&mut self, class_name: &str) -> Option<usize> {
-        let is_user_declared = self
-            .known_files
-            .get(class_name)
-            .is_some_and(|p| !p.to_string_lossy().contains("haxe-std"));
-        if !is_user_declared {
-            return None;
+    /// The file the loader resolved for `class_name`, under the name it used:
+    /// the qualified name, or the bare name when the path itself spells the
+    /// package (`haxe/iterators/StringIterator.hx` for
+    /// `haxe.iterators.StringIterator`). Never a bare name alone.
+    fn known_file(&self, class_name: &str) -> Option<std::path::PathBuf> {
+        if let Some(p) = self.known_files.get(class_name) {
+            return Some(p.clone());
         }
+        let (_, bare) = class_name.rsplit_once('.')?;
+        let p = self.known_files.get(bare)?;
+        let suffix = format!("{}.hx", class_name.replace('.', "/"));
+        p.ends_with(std::path::Path::new(&suffix)).then(|| p.clone())
+    }
+
+    /// Declared constructor arity for a class indexed under EXACTLY this name.
+    /// Strict on two axes, because the caller turns a `Some` into an allocation
+    /// plus a named call that must resolve: exact name (no alias or bare-name
+    /// matching), and the loader must have resolved it to a file of its own.
+    /// `extern class String` records no arity, so it keeps the value wrap.
+    pub fn declared_constructor_arity(&mut self, class_name: &str) -> Option<usize> {
+        self.known_file(class_name)?;
         self.ensure_indexed_from_known_files(class_name);
         self.classes.get(class_name)?.ctor_params
     }
@@ -152,14 +158,12 @@ impl StaticSigIndex {
                 let parent = c.extends.as_ref().and_then(Self::type_path_name);
                 // Only a class that will own a MIR constructor may record one.
                 // `extern` is a modifier, not a variant, so `extern class Host`
-                // arrives here yet has no MIR body; generics are monomorphised
-                // and a call on the bare template is trap-stubbed. Both keep the
-                // value wrap, which is what makes `new String(s)` work today.
-                let record_ctor = c.type_params.is_empty()
-                    && !c
-                        .modifiers
-                        .iter()
-                        .any(|m| matches!(m, parser::Modifier::Extern));
+                // arrives here yet has no MIR body; it keeps the value wrap,
+                // which is what makes `new String(s)` work today.
+                let record_ctor = !c
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, parser::Modifier::Extern));
                 self.index_fields(package, &c.name, &c.fields, parent, record_ctor);
             }
             TypeDeclaration::Abstract(a) => {

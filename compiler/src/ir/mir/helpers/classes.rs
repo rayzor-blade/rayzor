@@ -740,7 +740,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Class key for a `new C(x)` no constructor path resolved, when the parsed
-    /// declaration says `C` is a constructible user class. `Some` means emit
+    /// declaration says `C` is a constructible class. `Some` means emit
     /// alloc + the named forward-ref stub; `None` keeps the caller's fallback.
     /// The key comes from `cross_module_constructor_fqn_key`, which also names
     /// the stub, so a "yes" promises the fixup pass has something to bind —
@@ -752,10 +752,6 @@ impl<'a> HirToMirContext<'a> {
         argc: usize,
     ) -> Option<String> {
         if crate::debug_flags::no_xmodule_ctor() {
-            return None;
-        }
-        // `is_stdlib_file` tests the same string that reaches us as source_file.
-        if self.builder.module.source_file.contains("haxe-std") {
             return None;
         }
         let index = self.static_sig_index.as_ref()?.clone();
