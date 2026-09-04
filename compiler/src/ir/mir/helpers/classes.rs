@@ -763,6 +763,42 @@ impl<'a> HirToMirContext<'a> {
         (arity >= argc).then_some(class_fqn)
     }
 
+    /// Entry points of a class iterator whose module lowers later, when its
+    /// parsed declaration names `hasNext` and `next`: stubs keyed
+    /// `<class>.hasNext`/`<class>.next` for the fixup pass to bind, as a
+    /// constructor in that position gets. `None` keeps the caller's fallback.
+    pub(crate) fn unlowered_iterator_stubs(
+        &mut self,
+        class_sym: SymbolId,
+    ) -> Option<(IrFunctionId, IrFunctionId)> {
+        if crate::debug_flags::no_xmodule_ctor() {
+            return None;
+        }
+        let index = self.static_sig_index.as_ref()?.clone();
+        let key = self.cross_module_constructor_fqn_key(Some(class_sym), None)?;
+        let class_fqn = key.strip_suffix(".new")?.to_string();
+        {
+            let mut index = index.borrow_mut();
+            if !index.declares_instance_method(&class_fqn, "hasNext")
+                || !index.declares_instance_method(&class_fqn, "next")
+            {
+                return None;
+            }
+        }
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let hn = self.register_stdlib_mir_forward_ref(
+            &format!("{class_fqn}.hasNext"),
+            vec![ptr_void.clone()],
+            IrType::Bool,
+        );
+        let n = self.register_stdlib_mir_forward_ref(
+            &format!("{class_fqn}.next"),
+            vec![ptr_void],
+            IrType::I64,
+        );
+        Some((hn, n))
+    }
+
     /// Best-effort class/type name for a field-access receiver type. Handles
     /// Class (qualified or bare name), Placeholder (unresolved cross-module
     /// extern, carries the name), and TypeAlias. Returns None for anonymous /

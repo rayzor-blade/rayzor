@@ -630,8 +630,16 @@ impl<'a> HirToMirContext<'a> {
         {
             match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
                 (Some(hn), Some(n)) => (obj_reg, hn, n),
-                _ => return,
+                _ => match self.unlowered_iterator_stubs(class_sym) {
+                    Some((hn, n)) => (obj_reg, hn, n),
+                    None => return,
+                },
             }
+        // The class lowers later in this pass: its methods are not registered
+        // yet, but its parsed declaration is, so the entry points are named
+        // stubs the fixup pass binds, as a constructor in that position gets.
+        } else if let Some((hn, n)) = self.unlowered_iterator_stubs(class_sym) {
+            (obj_reg, hn, n)
         } else {
             // Fallback 1: Check stdlib runtime mappings by class name
             // This handles runtime-backed iterator classes (ArrayIterator, ArrayKeyValueIterator)

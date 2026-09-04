@@ -135,6 +135,18 @@ impl StaticSigIndex {
         self.classes.get(class_name)?.ctor_params
     }
 
+    /// Whether the class indexed under EXACTLY this name declares instance
+    /// method `name` itself. Same strictness as `declared_constructor_arity`.
+    pub fn declares_instance_method(&mut self, class_name: &str, name: &str) -> bool {
+        if self.known_file(class_name).is_none() {
+            return false;
+        }
+        self.ensure_indexed_from_known_files(class_name);
+        self.classes
+            .get(class_name)
+            .is_some_and(|c| c.instances.contains_key(name))
+    }
+
     /// Record all class/abstract static signatures and typedef aliases in a
     /// parsed file. Idempotent per file.
     pub fn index_file(&mut self, file: &parser::HaxeFile) {
