@@ -257,6 +257,9 @@ impl<'a> HirToMirContext<'a> {
                             let return_class = self.get_return_class_hint(class_name, method_name);
                             self.register_class_hints
                                 .insert(result_reg, return_class.to_string());
+                            if let Some(h) = self.wrap_stdlib_iter_result(result_reg, expr.ty) {
+                                return Some(h);
+                            }
                         }
 
                         return final_result;
@@ -1621,6 +1624,9 @@ impl<'a> HirToMirContext<'a> {
                 let return_class = self.get_return_class_hint(class_name, method_name);
                 self.register_class_hints
                     .insert(result_reg, return_class.to_string());
+                if let Some(h) = self.wrap_stdlib_iter_result(result_reg, expr.ty) {
+                    return Some(h);
+                }
             }
             return final_result;
         }

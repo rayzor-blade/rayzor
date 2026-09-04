@@ -370,6 +370,9 @@ impl<'a> HirToMirContext<'a> {
                             self.register_class_hints
                                 .insert(call_result, return_class.to_string());
                         }
+                        if let Some(h) = self.wrap_stdlib_iter_result(call_result, expr.ty) {
+                            return Some(h);
+                        }
 
                         // Auto-unbox if MIR wrapper returns Ptr(U8) but HIR expects primitive
                         // (e.g., Thread<Int>.join() returns boxed int, Channel<Int>.tryReceive()

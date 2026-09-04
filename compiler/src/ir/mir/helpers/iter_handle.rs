@@ -502,6 +502,11 @@ impl<'a> HirToMirContext<'a> {
         if let Some(src) = self.iter_source_of(source_ty) {
             return Some(src);
         }
+        self.iter_source_from_hint(value_reg)
+    }
+
+    /// The stdlib iterator a register's class hint names.
+    fn iter_source_from_hint(&mut self, value_reg: IrId) -> Option<IterSource> {
         let hint = self.register_class_hints.get(&value_reg).cloned()?;
         let key = self.stdlib_mapping.class_key(&hint)?;
         let (_, hn) = self.stdlib_mapping.find_by_name(key, "hasNext")?;
@@ -573,6 +578,22 @@ impl<'a> HirToMirContext<'a> {
         }
         let source = self.iter_source_for(value_reg, source_ty)?;
         self.build_iter_handle(value_reg, &source)
+    }
+
+    /// Wrap a stdlib call's result for the protocol its declared return type
+    /// names. The runtime hands back the concrete iterator the call's class hint
+    /// records, so the call itself is the boundary.
+    pub(crate) fn wrap_stdlib_iter_result(
+        &mut self,
+        result_reg: IrId,
+        ret_ty: TypeId,
+    ) -> Option<IrId> {
+        self.iter_protocol_of(ret_ty)?;
+        if self.iter_handle_regs.contains(&result_reg) {
+            return None;
+        }
+        let source = self.iter_source_from_hint(result_reg)?;
+        self.build_iter_handle(result_reg, &source)
     }
 }
 
@@ -807,6 +828,15 @@ impl<'a> HirToMirContext<'a> {
             .build_call_indirect(nx_b, vec![obj_b], next_sig)
         {
             if let HirPattern::Variable { symbol, .. } = pattern {
+                let target = self
+                    .symbol_table
+                    .get_symbol(*symbol)
+                    .map(|s| s.type_id)
+                    .map(|t| self.convert_type(t));
+                let value = match target {
+                    Some(t) => self.iter_elem_from_i64(value, &t).unwrap_or(value),
+                    None => value,
+                };
                 self.symbol_map.insert(*symbol, value);
             }
         }
@@ -927,6 +957,51 @@ impl<'a> HirToMirContext<'a> {
     ///
     /// A receiver that carries no handle answers as an exhausted iterator rather
     /// than calling through whatever its first word holds.
+    /// IR type of `T` for a receiver typed `Iterator<T>`/`Iterable<T>`, or None
+    /// when the element is unbound.
+    fn iter_elem_ir_type(&mut self, iter_ty: TypeId) -> Option<IrType> {
+        let mut tid = iter_ty;
+        for _ in 0..8 {
+            let kind = self.type_table.get(tid)?.kind.clone();
+            let elem = match kind {
+                // An instantiated alias carries its argument on the alias node.
+                TypeKind::TypeAlias {
+                    target_type,
+                    type_args,
+                    ..
+                } => match type_args.first() {
+                    Some(&t) => t,
+                    None => {
+                        tid = target_type;
+                        continue;
+                    }
+                },
+                TypeKind::GenericInstance { type_args, .. } => *type_args.first()?,
+                _ => return None,
+            };
+            let elem_kind = &self.type_table.get(elem)?.kind;
+            if matches!(elem_kind, TypeKind::TypeParameter { .. } | TypeKind::Dynamic) {
+                return None;
+            }
+            return Some(self.convert_type(elem));
+        }
+        None
+    }
+
+    /// A handle's `next` thunk answers in a bare I64; give the caller the
+    /// element's own representation.
+    fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
+        match target {
+            IrType::I64 => Some(value),
+            IrType::I32 | IrType::I16 | IrType::I8 | IrType::U8 | IrType::U16 | IrType::U32 | IrType::Bool => {
+                self.builder.build_cast(value, IrType::I64, target.clone())
+            }
+            IrType::F64 => self.builder.build_bitcast(value, IrType::F64),
+            IrType::F32 => Some(value),
+            _ => self.builder.build_bitcast(value, target.clone()),
+        }
+    }
+
     pub(crate) fn try_iter_handle_method_call(
         &mut self,
         expr: &HirExpr,
@@ -1122,6 +1197,11 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(join_block);
         let result = self.builder.build_load(result_slot, ret_ty)?;
+        if matches!(protocol, IterProtocol::Iterator) && method == "next" {
+            if let Some(elem_ty) = self.iter_elem_ir_type(receiver.ty) {
+                return self.iter_elem_from_i64(result, &elem_ty);
+            }
+        }
         // `iterator()` yields a handle, and what it is bound to is this register,
         // so a later `hasNext`/`next` on that binding can find it.
         if matches!(protocol, IterProtocol::Iterable) {
