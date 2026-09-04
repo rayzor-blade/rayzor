@@ -2004,14 +2004,14 @@ impl<'a> AstLowering<'a> {
                 }
                 let inner_expr = self.lower_expression(expr)?;
 
-                // Convert parser metadata to typed metadata
+                // Metadata arguments are opaque (`@:nullSafety(Off)` names no symbol).
                 let typed_meta = TypedMetadata {
                     name: self.context.intern_string(&meta.name),
                     params: meta
                         .params
                         .iter()
-                        .map(|param_expr| self.lower_expression(param_expr))
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .filter_map(|param_expr| self.lower_expression(param_expr).ok())
+                        .collect(),
                     source_location: self.context.span_to_location(&meta.span),
                 };
 
