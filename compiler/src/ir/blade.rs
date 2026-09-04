@@ -47,7 +47,7 @@ use std::path::Path;
 const BLADE_MAGIC: &[u8; 4] = b"BLAD";
 
 /// Current BLADE format version
-const BLADE_VERSION: u32 = 2;
+const BLADE_VERSION: u32 = 3;
 
 /// Metadata about the compiled module
 #[derive(Debug, Clone, Serialize, Deserialize)]

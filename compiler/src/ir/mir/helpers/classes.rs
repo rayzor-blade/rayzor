@@ -181,7 +181,7 @@ impl<'a> HirToMirContext<'a> {
             for field in &parent_class.fields {
                 if !field.is_static {
                     if let Some(ref prop) = field.property_access {
-                        if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
+                        if !prop.has_backing_storage() {
                             continue;
                         }
                     }
@@ -233,9 +233,9 @@ impl<'a> HirToMirContext<'a> {
                 continue;
             }
 
-            // Skip property fields with non-Default getters (no backing storage)
+            // Skip computed property fields, which have no backing storage
             if let Some(ref prop) = parent_field.property_access {
-                if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
+                if !prop.has_backing_storage() {
                     continue;
                 }
             }

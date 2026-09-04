@@ -192,9 +192,17 @@ impl<'a> AstLowering<'a> {
                     let getter_accessor = self.convert_property_accessor(getter, name, true);
                     let setter_accessor = self.convert_property_accessor(setter, name, false);
 
+                    // `@:isVar` marks the property physical, so the class
+                    // layout reserves a slot its accessors work over.
+                    let is_var = field
+                        .meta
+                        .iter()
+                        .any(|m| m.name.strip_prefix(':').unwrap_or(&m.name) == "isVar");
+
                     let property_info = Some(crate::tast::PropertyAccessInfo {
                         getter: getter_accessor,
                         setter: setter_accessor,
+                        is_var,
                     });
 
                     (

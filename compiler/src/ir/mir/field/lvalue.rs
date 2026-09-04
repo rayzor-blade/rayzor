@@ -175,7 +175,12 @@ impl<'a> HirToMirContext<'a> {
         let property_info_owned = self.property_access_map.get(field).cloned();
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.setter {
-                crate::tast::PropertyAccessor::Method(setter_method_name) => {
+                // The guard keeps `this.p = v` inside `p`'s own setter on the
+                // backing slot, where calling the setter would re-enter the
+                // function being lowered.
+                crate::tast::PropertyAccessor::Method(setter_method_name)
+                    if !self.is_inside_own_accessor(obj_reg, *setter_method_name) =>
+                {
                     let setter_func_id = self
                         .function_map
                         .iter()
@@ -244,6 +249,10 @@ impl<'a> HirToMirContext<'a> {
                 }
                 crate::tast::PropertyAccessor::Default | crate::tast::PropertyAccessor::Dynamic => {
                     // Fall through to direct field access
+                }
+                crate::tast::PropertyAccessor::Method(_) => {
+                    // An `@:isVar` property written from inside its own setter:
+                    // fall through to a direct store into the backing slot.
                 }
             }
         }

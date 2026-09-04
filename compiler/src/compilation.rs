@@ -2364,7 +2364,14 @@ impl CompilationUnit {
             let setter = accessor(&property.setter, &mut self.string_interner);
             self.import_property_access_map.insert(
                 field_symbol,
-                crate::tast::PropertyAccessInfo { getter, setter },
+                // Restored entries drive accessor dispatch. The storage bit is
+                // read from the declaration when a layout is built, and a
+                // restored class has none.
+                crate::tast::PropertyAccessInfo {
+                    getter,
+                    setter,
+                    is_var: false,
+                },
             );
         }
 
@@ -4701,9 +4708,12 @@ impl CompilationUnit {
                         };
                         self.import_property_access_map.insert(
                             field_sym,
+                            // As above: a restored entry answers dispatch, and
+                            // the layout it belongs to is not rebuilt here.
                             crate::tast::PropertyAccessInfo {
                                 getter: from_blade(&entry.getter),
                                 setter: from_blade(&entry.setter),
+                                is_var: false,
                             },
                         );
                     }

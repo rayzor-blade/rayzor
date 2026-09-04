@@ -22,6 +22,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// Whether the access being lowered is `this.p` inside `p`'s own accessor.
+    ///
+    /// Haxe reads and writes the backing slot at that position, so dispatching
+    /// to the accessor here re-enters the function being lowered. The receiver
+    /// must be `this`: the same accessor reaching the property on another
+    /// instance still goes through that instance's accessor.
+    pub(crate) fn is_inside_own_accessor(&self, obj: IrId, accessor: InternedString) -> bool {
+        // `this` is parameter 0, mapped under SymbolId(0) for instance methods
+        // only, and symbol_map is cleared at every function entry.
+        if self.symbol_map.get(&SymbolId::from_raw(0)).copied() != Some(obj) {
+            return false;
+        }
+        let Some(accessor_name) = self.string_interner.get(accessor) else {
+            return false;
+        };
+        self.builder.current_function().is_some_and(|f| {
+            f.name == accessor_name
+                || f.qualified_name
+                    .as_deref()
+                    .and_then(|q| q.rsplit('.').next())
+                    == Some(accessor_name)
+        })
+    }
+
     pub(crate) fn lower_field_access(
         &mut self,
         obj: IrId,
@@ -428,7 +452,12 @@ impl<'a> HirToMirContext<'a> {
         }
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
-                crate::tast::PropertyAccessor::Method(getter_method_name) => {
+                // The guard keeps `this.p` inside `p`'s own getter on the
+                // backing slot, where calling the getter would re-enter the
+                // function being lowered.
+                crate::tast::PropertyAccessor::Method(getter_method_name)
+                    if !self.is_inside_own_accessor(obj, *getter_method_name) =>
+                {
                     // The receiver's own class first. The scans below match on the
                     // BARE method name across every module in the session, and
                     // `get_length` is declared by several stdlib classes — the
@@ -520,6 +549,10 @@ impl<'a> HirToMirContext<'a> {
                 }
                 crate::tast::PropertyAccessor::Default | crate::tast::PropertyAccessor::Dynamic => {
                     // Fall through to direct field access
+                }
+                crate::tast::PropertyAccessor::Method(_) => {
+                    // An `@:isVar` property read from inside its own getter:
+                    // fall through to a direct read of the backing slot.
                 }
             }
         }

@@ -110,11 +110,11 @@ impl<'a> HirToMirContext<'a> {
                 self.property_access_map
                     .insert(field.symbol_id, property_info.clone());
 
-                // Properties with non-Default getters have no backing storage —
-                // skip field_index_map and struct layout for them.
+                // A computed property has no backing storage — skip
+                // field_index_map and struct layout for it.
                 // But still record the class name for BLADE cache serialization
                 // so the property accessor can be restored from cache.
-                if !matches!(property_info.getter, crate::tast::PropertyAccessor::Default) {
+                if !property_info.has_backing_storage() {
                     let class_name_str = self
                         .symbol_table
                         .get_symbol(class.symbol_id)
@@ -604,7 +604,7 @@ impl<'a> HirToMirContext<'a> {
                 for field in &class.fields {
                     if !field.is_static {
                         if let Some(ref prop) = field.property_access {
-                            if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
+                            if !prop.has_backing_storage() {
                                 continue; // Skip computed properties
                             }
                         }
