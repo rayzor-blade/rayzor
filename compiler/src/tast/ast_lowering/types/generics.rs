@@ -675,7 +675,8 @@ impl<'a> AstLowering<'a> {
                         }
                         TypeSubstitutionResult::NeedGenericInstance { .. }
                         | TypeSubstitutionResult::NeedClassInstance { .. }
-                        | TypeSubstitutionResult::NeedOptional { .. } => {
+                        | TypeSubstitutionResult::NeedOptional { .. }
+                        | TypeSubstitutionResult::NeedTypeAlias { .. } => {
                             // Would need to create nested type - for now just use the original
                             // This is a limitation, but handles most common cases
                             new_type_args.push(*arg);
@@ -718,7 +719,8 @@ impl<'a> AstLowering<'a> {
                         }
                         TypeSubstitutionResult::NeedGenericInstance { .. }
                         | TypeSubstitutionResult::NeedClassInstance { .. }
-                        | TypeSubstitutionResult::NeedOptional { .. } => {
+                        | TypeSubstitutionResult::NeedOptional { .. }
+                        | TypeSubstitutionResult::NeedTypeAlias { .. } => {
                             new_type_args.push(*arg);
                         }
                     }
@@ -726,6 +728,33 @@ impl<'a> AstLowering<'a> {
                 if changed {
                     return TypeSubstitutionResult::NeedClassInstance {
                         symbol_id: *symbol_id,
+                        type_args: new_type_args,
+                    };
+                }
+                TypeSubstitutionResult::NoChange(return_type)
+            }
+            // An alias carries its arguments on its own node (`Iterator<T>`), so
+            // the substitution rebuilds the alias over the substituted arguments.
+            crate::tast::core::TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                type_args: ret_type_args,
+            } => {
+                let mut new_type_args = Vec::with_capacity(ret_type_args.len());
+                let mut changed = false;
+                for arg in ret_type_args {
+                    match self.compute_type_substitution(*arg, receiver_type, type_table) {
+                        TypeSubstitutionResult::DirectSubstitution(new_arg) => {
+                            new_type_args.push(new_arg);
+                            changed = true;
+                        }
+                        _ => new_type_args.push(*arg),
+                    }
+                }
+                if changed {
+                    return TypeSubstitutionResult::NeedTypeAlias {
+                        symbol_id: *symbol_id,
+                        target_type: *target_type,
                         type_args: new_type_args,
                     };
                 }

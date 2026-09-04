@@ -886,6 +886,14 @@ pub(crate) enum TypeSubstitutionResult {
     /// stays an abstract `V`, and the caller boxes the value with an
     /// unresolved type tag (corrupting enum/reference values).
     NeedOptional { inner_type: TypeId },
+    /// Need an alias over substituted arguments — `Iterator<T>` returned off a
+    /// `StringMap<Int>` receiver becomes `Iterator<Int>`, keeping the alias's
+    /// own declaration as its target.
+    NeedTypeAlias {
+        symbol_id: SymbolId,
+        target_type: TypeId,
+        type_args: Vec<TypeId>,
+    },
 }
 
 mod context;

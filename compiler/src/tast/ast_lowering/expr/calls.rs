@@ -2105,6 +2105,9 @@ impl<'a> AstLowering<'a> {
             .unwrap_or("?")
             .to_string();
         let mut current = receiver_type;
+        // What each instantiated alias on the way binds its declaration's
+        // parameters to; the structure itself mentions only the parameters.
+        let mut bindings: Vec<(SymbolId, TypeId)> = Vec::new();
         for step in 0..8 {
             let kind = {
                 let tt = self.context.type_table.borrow();
@@ -2120,23 +2123,39 @@ impl<'a> AstLowering<'a> {
             match kind {
                 crate::tast::core::TypeKind::Anonymous { fields } => {
                     let field = fields.iter().find(|f| f.name == method)?;
-                    let tt = self.context.type_table.borrow();
-                    let r = match tt.get(field.type_id).map(|i| &i.kind) {
-                        Some(crate::tast::core::TypeKind::Function { return_type, .. }) => {
-                            Some(*return_type)
+                    let r = {
+                        let tt = self.context.type_table.borrow();
+                        match tt.get(field.type_id).map(|i| &i.kind) {
+                            Some(crate::tast::core::TypeKind::Function { return_type, .. }) => {
+                                Some(*return_type)
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     };
                     if trace {
                         eprintln!("[STRUCT]   -> {r:?}");
                     }
-                    return r;
+                    return r.map(|t| self.substitute_alias_args(t, &bindings));
                 }
-                crate::tast::core::TypeKind::TypeAlias { target_type, .. } => current = target_type,
+                crate::tast::core::TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                } => {
+                    bindings.extend(self.alias_bindings(symbol_id, &type_args));
+                    current = target_type
+                }
                 crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
                     current = base_type
                 }
-                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                // A typedef pre-registered as a class keeps that symbol kind, so
+                // its instantiation is a Class node whose arguments bind the
+                // alias's parameters all the same.
+                crate::tast::core::TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                } => {
+                    bindings.extend(self.alias_bindings(symbol_id, &type_args));
                     let resolved = {
                         self.context
                             .type_table
@@ -2160,6 +2179,125 @@ impl<'a> AstLowering<'a> {
             }
         }
         None
+    }
+
+    /// What an instantiated alias binds each parameter of its declaration to.
+    fn alias_bindings(&self, alias: SymbolId, args: &[TypeId]) -> Vec<(SymbolId, TypeId)> {
+        let tt = self.context.type_table.borrow();
+        let Some(decl) = self
+            .context
+            .symbol_table
+            .get_symbol(alias)
+            .and_then(|s| tt.get(s.type_id))
+        else {
+            return Vec::new();
+        };
+        let crate::tast::core::TypeKind::TypeAlias { type_args: params, .. } = &decl.kind else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .zip(args)
+            .filter_map(|(p, a)| match tt.get(*p).map(|i| &i.kind) {
+                Some(crate::tast::core::TypeKind::TypeParameter { symbol_id, .. }) if p != a => {
+                    Some((*symbol_id, *a))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `ty` with every bound parameter replaced; a node is rebuilt only where
+    /// something under it changed.
+    fn substitute_alias_args(&self, ty: TypeId, bindings: &[(SymbolId, TypeId)]) -> TypeId {
+        use crate::tast::core::{AnonymousField, TypeKind};
+        if bindings.is_empty() {
+            return ty;
+        }
+        let kind = self.context.type_table.borrow().get(ty).map(|i| i.kind.clone());
+        let sub = |ids: &[TypeId]| -> Vec<TypeId> {
+            ids.iter()
+                .map(|t| self.substitute_alias_args(*t, bindings))
+                .collect()
+        };
+        let rebuilt = match kind {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                return match bindings.iter().find(|(p, _)| *p == symbol_id) {
+                    Some((_, a)) => self.substitute_alias_args(*a, bindings),
+                    None => ty,
+                };
+            }
+            Some(TypeKind::TypeAlias {
+                symbol_id,
+                target_type,
+                type_args,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args: args,
+                }
+            }
+            Some(TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                instantiation_cache_id,
+            }) => {
+                let args = sub(&type_args);
+                if args == type_args {
+                    return ty;
+                }
+                TypeKind::GenericInstance {
+                    base_type,
+                    type_args: args,
+                    instantiation_cache_id,
+                }
+            }
+            Some(TypeKind::Array { element_type }) => {
+                let elem = self.substitute_alias_args(element_type, bindings);
+                if elem == element_type {
+                    return ty;
+                }
+                TypeKind::Array { element_type: elem }
+            }
+            Some(TypeKind::Function {
+                params,
+                return_type,
+                effects,
+            }) => {
+                let p = sub(&params);
+                let r = self.substitute_alias_args(return_type, bindings);
+                if p == params && r == return_type {
+                    return ty;
+                }
+                TypeKind::Function {
+                    params: p,
+                    return_type: r,
+                    effects,
+                }
+            }
+            Some(TypeKind::Anonymous { fields }) => {
+                let rebuilt: Vec<AnonymousField> = fields
+                    .iter()
+                    .map(|f| AnonymousField {
+                        name: f.name,
+                        type_id: self.substitute_alias_args(f.type_id, bindings),
+                        is_public: f.is_public,
+                        optional: f.optional,
+                    })
+                    .collect();
+                if rebuilt.iter().zip(&fields).all(|(a, b)| a.type_id == b.type_id) {
+                    return ty;
+                }
+                TypeKind::Anonymous { fields: rebuilt }
+            }
+            _ => return ty,
+        };
+        self.context.type_table.borrow_mut().create_type(rebuilt)
     }
 
     pub(crate) fn infer_method_call_return_type(
@@ -2346,6 +2484,17 @@ impl<'a> AstLowering<'a> {
                 .type_table
                 .borrow_mut()
                 .create_optional_type(inner_type)),
+            TypeSubstitutionResult::NeedTypeAlias {
+                symbol_id,
+                target_type,
+                type_args,
+            } => Ok(self.context.type_table.borrow_mut().create_type(
+                crate::tast::core::TypeKind::TypeAlias {
+                    symbol_id,
+                    target_type,
+                    type_args,
+                },
+            )),
         }
     }
 

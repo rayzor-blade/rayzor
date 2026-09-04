@@ -971,59 +971,46 @@ impl<'a> AstLowering<'a> {
 
     /// Infer the element type from an iterable expression (array, map, etc.)
     fn infer_element_type_from_iterable(&self, iterable: &TypedExpression) -> TypeId {
-        let type_table = self.context.type_table.borrow();
-
-        // Get the actual type of the iterable
-        if let Some(actual_type) = type_table.get(iterable.expr_type) {
-            match &actual_type.kind {
-                TypeKind::Array { element_type } => *element_type,
-                TypeKind::Map { value_type, .. } => *value_type,
-                TypeKind::Dynamic => type_table.dynamic_type(),
-                _ => {
-                    // Check if type implements Iterable<T> interface
-                    if let TypeKind::Class { symbol_id, .. } = &actual_type.kind {
-                        // Look for Iterable interface implementation
-                        if let Some(class_symbol) = self.context.symbol_table.get_symbol(*symbol_id)
-                        {
-                            if let Some(hierarchy) =
-                                self.context.symbol_table.get_class_hierarchy(*symbol_id)
-                            {
-                                // Check implemented interfaces for Iterable<T>
-                                for interface_type in &hierarchy.interfaces {
-                                    if let Some(interface_info) = type_table.get(*interface_type) {
-                                        if let TypeKind::Interface {
-                                            symbol_id: interface_symbol,
-                                            ..
-                                        } = &interface_info.kind
-                                        {
-                                            // Check if this is the Iterable interface
-                                            if let Some(interface) = self
-                                                .context
-                                                .symbol_table
-                                                .get_symbol(*interface_symbol)
-                                            {
-                                                let iterable_name =
-                                                    self.context.string_interner.intern("Iterable");
-                                                if interface.name == iterable_name {
-                                                    // For generic interfaces, extract the type argument
-                                                    // This would require tracking instantiated type arguments
-                                                    return type_table.dynamic_type();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Not iterable or can't determine element type
-                    type_table.dynamic_type()
-                }
-            }
-        } else {
-            // If we can't determine the type, use dynamic
-            type_table.dynamic_type()
+        let (kind, dynamic) = {
+            let type_table = self.context.type_table.borrow();
+            (
+                type_table.get(iterable.expr_type).map(|t| t.kind.clone()),
+                type_table.dynamic_type(),
+            )
+        };
+        match kind {
+            Some(TypeKind::Array { element_type }) => element_type,
+            Some(TypeKind::Map { value_type, .. }) => value_type,
+            // A structure declaring `next()` is an iterator and one declaring
+            // `iterator()` yields one; either way the element is what `next()`
+            // answers. A class reaches neither and stays Dynamic, as before.
+            // A bare parameter is kept Dynamic, as it was: a local typed by it
+            // makes the enclosing template a stub until instantiated.
+            Some(TypeKind::TypeAlias { .. })
+            | Some(TypeKind::Class { .. })
+            | Some(TypeKind::Anonymous { .. }) => self
+                .structural_element_type(iterable.expr_type)
+                .filter(|t| !self.is_bare_type_param(*t))
+                .unwrap_or(dynamic),
+            _ => dynamic,
         }
+    }
+
+    fn is_bare_type_param(&self, ty: TypeId) -> bool {
+        matches!(
+            self.context.type_table.borrow().get(ty).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. }) | Some(TypeKind::Placeholder { .. })
+        )
+    }
+
+    fn structural_element_type(&self, ty: TypeId) -> Option<TypeId> {
+        let next = self.context.string_interner.intern("next");
+        if let Some(elem) = self.structural_method_return_type(ty, next) {
+            return Some(elem);
+        }
+        let iterator = self.context.string_interner.intern("iterator");
+        let it = self.structural_method_return_type(ty, iterator)?;
+        self.structural_method_return_type(it, next)
     }
 
     /// Determine variable usage based on expression kind (simplified for TAST)
