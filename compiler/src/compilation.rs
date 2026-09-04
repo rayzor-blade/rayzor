@@ -3129,11 +3129,13 @@ impl CompilationUnit {
                             && !is_stdtypes_ambient_name(&type_path.name)
                         {
                             deps.insert(type_path.name.clone());
+                            deps.insert(format!("new:{}", type_path.name));
                         }
                     } else if !type_path.package.is_empty() {
                         let mut full_path = type_path.package.clone();
                         full_path.push(type_path.name.clone());
                         deps.insert(full_path.join("."));
+                        deps.insert(format!("new:{}", full_path.join(".")));
                     }
                     // Recurse into type params and args
                     for param in params {
@@ -3623,6 +3625,9 @@ impl CompilationUnit {
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
+        // Which files each file CONSTRUCTS, split off from its dependencies:
+        // a cycle is broken by emitting the constructed class first.
+        let mut constructs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut to_process: VecDeque<String> = VecDeque::new();
         for name in imports {
             if is_stdtypes_ambient_import(name) {
@@ -3708,6 +3713,12 @@ impl CompilationUnit {
                 Ok(ast) => Self::extract_all_dependencies(&ast),
                 Err(_) => Vec::new(),
             };
+            let (ctor_marks, deps): (Vec<String>, Vec<String>) =
+                deps.into_iter().partition(|d| d.starts_with("new:"));
+            constructs.insert(
+                qualified_path.clone(),
+                ctor_marks.iter().map(|d| d["new:".len()..].to_string()).collect(),
+            );
             // Queue dependencies for processing
             for dep in &deps {
                 if is_stdtypes_ambient_import(dep) {
@@ -3869,10 +3880,26 @@ impl CompilationUnit {
                         .iter()
                         .map(|(name, deps)| {
                             let outstanding = deps.iter().filter(|d| !emitted.contains(*d)).count();
-                            (outstanding, name.clone())
+                            // Among equals, the class that is constructed goes
+                            // before the class that constructs it, so its
+                            // constructor exists when the `new` lowers.
+                            let builds_a_stuck_file = constructs
+                                .get(name)
+                                .map(|cs| {
+                                    cs.iter().any(|c| {
+                                        let r = if all_files.contains_key(c) {
+                                            Some(c.clone())
+                                        } else {
+                                            bare_to_qualified.get(c).cloned()
+                                        };
+                                        r.is_some_and(|r| r != *name && stuck.contains_key(&r))
+                                    })
+                                })
+                                .unwrap_or(false);
+                            (outstanding, builds_a_stuck_file, name.clone())
                         })
                         .min()
-                        .map(|(_, name)| name);
+                        .map(|(_, _, name)| name);
                     if let Some(name) = victim {
                         compile_order.push(name.clone());
                         emitted.insert(name.clone());
@@ -7902,7 +7929,10 @@ impl CompilationUnit {
                     let mut discovered = Vec::new();
                     collect_qualified_type_refs_from_ast(ast, &mut discovered);
                     imports.extend(discovered);
-                    let user_deps = Self::extract_all_dependencies(ast);
+                    let user_deps: Vec<String> = Self::extract_all_dependencies(ast)
+                        .into_iter()
+                        .filter(|d| !d.starts_with("new:"))
+                        .collect();
                     imports.extend(Self::enclosing_package_candidates(ast, &user_deps));
                     imports.extend(user_deps);
                     (imports, usings)
