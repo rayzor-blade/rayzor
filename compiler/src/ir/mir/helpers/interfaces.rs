@@ -25,6 +25,53 @@ impl<'a> HirToMirContext<'a> {
     /// Wrap a class instance in an interface fat pointer.
     /// Fat pointer layout: { object_ptr: i64, fn_ptr_0: i64, fn_ptr_1: i64, ... }
     /// One slot per interface method, in the interface's method order.
+    /// `wrap_in_interface_fat_ptr` with the value's static type known, so a
+    /// map adapter boxes `get` results as the container's V.
+    pub(crate) fn wrap_in_interface_fat_ptr_for(
+        &mut self,
+        obj_reg: IrId,
+        value_type: TypeId,
+        class_symbol: SymbolId,
+        interface_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let prev = self.wrap_value_type.replace(value_type);
+        let wrapped = self.wrap_in_interface_fat_ptr(obj_reg, class_symbol, interface_symbol);
+        self.wrap_value_type = prev;
+        wrapped
+    }
+
+    /// The box kind of a map container's value type: its last type argument.
+    /// `erased` when unknown or a type parameter, which keeps the int box.
+    fn map_value_kind(&self, value_type: Option<TypeId>) -> &'static str {
+        let Some(ty) = value_type else { return "erased" };
+        let resolved = self.resolve_through_aliases(ty);
+        let Some(info) = self.type_table.get(resolved) else { return "erased" };
+        let last = match &info.kind {
+            TypeKind::Class { type_args, .. } | TypeKind::Interface { type_args, .. } => {
+                type_args.last().copied()
+            }
+            _ => None,
+        };
+        let Some(v) = last else { return "erased" };
+        let v = self.resolve_through_aliases(v);
+        match self.type_table.get(v).map(|t| &t.kind) {
+            Some(TypeKind::Int) => "int",
+            Some(TypeKind::Bool) => "bool",
+            Some(TypeKind::Float) => "float",
+            Some(
+                TypeKind::String
+                | TypeKind::Class { .. }
+                | TypeKind::Interface { .. }
+                | TypeKind::Array { .. }
+                | TypeKind::Anonymous { .. }
+                | TypeKind::Function { .. }
+                | TypeKind::Enum { .. }
+                | TypeKind::Map { .. },
+            ) => "ref",
+            _ => "erased",
+        }
+    }
+
     pub(crate) fn wrap_in_interface_fat_ptr(
         &mut self,
         obj_reg: IrId,
@@ -137,6 +184,7 @@ impl<'a> HirToMirContext<'a> {
         // call lives in another) need to find the method's IrFunctionId in
         // `external_function_map` — the per-context `function_map` only has
         // functions lowered in *this* file.
+        let value_kind = self.map_value_kind(self.wrap_value_type);
         for (i, method_sym_opt) in vtable.iter().enumerate() {
             // A mapped extern's method is a runtime mapping, not a function to
             // point at: the slot gets an adapter over the mapping.
@@ -149,7 +197,13 @@ impl<'a> HirToMirContext<'a> {
             });
             if let Some((fqn, mname, runtime_name, argc)) = mapped {
                 if let Some(thunk) =
-                    self.ensure_extern_mapped_dispatch_thunk(&fqn, &mname, runtime_name, argc)
+                    self.ensure_extern_mapped_dispatch_thunk(
+                        &fqn,
+                        &mname,
+                        runtime_name,
+                        argc,
+                        value_kind,
+                    )
                 {
                     let fn_ref = self.builder.build_function_ref(thunk)?;
                     let offset_val = self
@@ -377,7 +431,12 @@ impl<'a> HirToMirContext<'a> {
             // No (class, iface) vtable here does not mean no implementation: an
             // imported class has none in this context, and the builder resolves
             // its slots by name.
-            return match self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym) {
+            return match self.wrap_in_interface_fat_ptr_for(
+                value_reg,
+                value_type,
+                class_sym,
+                iface_sym,
+            ) {
                 Some(wrapped) => (wrapped, true),
                 None => (value_reg, false),
             };

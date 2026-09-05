@@ -380,6 +380,11 @@ pub struct HirToMirContext<'a> {
     /// TODO: retain only when the call returns or stores the fat pointer.
     interface_wrapped_args: std::collections::BTreeSet<IrId>,
 
+    /// The static type of the value a fat pointer is being built over, when
+    /// the wrap site knows it: the container's value type picks a map
+    /// adapter's box kind.
+    wrap_value_type: Option<TypeId>,
+
     /// Registers holding an iteration handle. A handle's own type does not always
     /// name the protocol — the result of `it.iterator()` is typed by what the
     /// declaration says, not by what it carries — so the register is what says a
@@ -1361,6 +1366,7 @@ impl<'a> HirToMirContext<'a> {
             interface_vtables: BTreeMap::new(),
             interface_extends: BTreeMap::new(),
             interface_wrapped_args: std::collections::BTreeSet::new(),
+            wrap_value_type: None,
             iter_handle_regs: std::collections::BTreeSet::new(),
             class_method_symbols: BTreeMap::new(),
             constrained_param_interfaces: BTreeMap::new(),

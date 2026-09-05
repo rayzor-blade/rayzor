@@ -164,6 +164,7 @@ impl<'a> HirToMirContext<'a> {
         method: &str,
         runtime_name: &'static str,
         param_count: usize,
+        value_kind: &'static str,
     ) -> Option<IrFunctionId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
@@ -178,7 +179,12 @@ impl<'a> HirToMirContext<'a> {
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        let thunk_name = format!("__vtable_dispatch_thunk__{sanitized}");
+        // `get` boxes as the container's V, so each kind is its own adapter.
+        let thunk_name = if method == "get" && value_kind != "erased" {
+            format!("__vtable_dispatch_thunk__{sanitized}__{value_kind}")
+        } else {
+            format!("__vtable_dispatch_thunk__{sanitized}")
+        };
         for (func_id, func) in &self.builder.module.functions {
             if func.name == thunk_name {
                 return Some(*func_id);
@@ -270,13 +276,36 @@ impl<'a> HirToMirContext<'a> {
                     let join_block = self.builder.create_block()?;
                     self.builder.build_cond_branch(present, box_block, null_block)?;
                     self.builder.switch_to_block(box_block);
-                    let bits = self.builder.build_cast(raw, IrType::U64, IrType::I64)?;
-                    let box_fn = self.get_or_register_extern_function(
-                        "haxe_box_int_ptr",
-                        vec![IrType::I64],
-                        ptr_u8.clone(),
-                    );
-                    let boxed = self.builder.build_call_direct(box_fn, vec![bits], ptr_u8.clone())?;
+                    let boxed = match value_kind {
+                        "ref" => self.builder.build_bitcast(raw, ptr_u8.clone())?,
+                        "float" => {
+                            let f = self.builder.build_bitcast(raw, IrType::F64)?;
+                            let box_fn = self.get_or_register_extern_function(
+                                "haxe_box_float_ptr",
+                                vec![IrType::F64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder.build_call_direct(box_fn, vec![f], ptr_u8.clone())?
+                        }
+                        "bool" => {
+                            let b = self.builder.build_cast(raw, IrType::U64, IrType::Bool)?;
+                            let box_fn = self.get_or_register_extern_function(
+                                "haxe_box_bool_ptr",
+                                vec![IrType::Bool],
+                                ptr_u8.clone(),
+                            );
+                            self.builder.build_call_direct(box_fn, vec![b], ptr_u8.clone())?
+                        }
+                        _ => {
+                            let bits = self.builder.build_cast(raw, IrType::U64, IrType::I64)?;
+                            let box_fn = self.get_or_register_extern_function(
+                                "haxe_box_int_ptr",
+                                vec![IrType::I64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder.build_call_direct(box_fn, vec![bits], ptr_u8.clone())?
+                        }
+                    };
                     self.builder.build_branch(join_block)?;
                     self.builder.switch_to_block(null_block);
                     let zero = self.builder.build_const(IrValue::I64(0))?;
