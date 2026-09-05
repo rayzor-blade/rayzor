@@ -4079,7 +4079,7 @@ pub extern "C" fn haxe_stringmap_to_string(map_ptr: *mut HaxeStringMap) -> *mut 
             .iter()
             .map(|(k, v)| format!("{} => {}", k, v))
             .collect();
-        let result = format!("{{{}}}", entries.join(", "));
+        let result = format!("[{}]", entries.join(", "));
         rust_string_to_haxe(result)
     }
 }
@@ -4213,7 +4213,7 @@ pub extern "C" fn haxe_intmap_to_string(map_ptr: *mut HaxeIntMap) -> *mut HaxeSt
             .iter()
             .map(|(k, v)| format!("{} => {}", k, v))
             .collect();
-        let result = format!("{{{}}}", entries.join(", "));
+        let result = format!("[{}]", entries.join(", "));
         rust_string_to_haxe(result)
     }
 }
@@ -4465,14 +4465,14 @@ pub extern "C" fn haxe_objectmap_to_string(map_ptr: *mut HaxeObjectMap) -> *mut 
     }
     unsafe {
         let map = &*map_ptr;
-        let mut result = String::from("{");
+        let mut result = String::from("[");
         for (i, (key, value)) in map.map.iter().enumerate() {
             if i > 0 {
                 result.push_str(", ");
             }
             result.push_str(&format!("0x{:x} => {}", key, value));
         }
-        result.push('}');
+        result.push(']');
         rust_string_to_haxe(result)
     }
 }
