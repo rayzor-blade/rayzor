@@ -691,6 +691,10 @@ pub(crate) struct LoopContext {
     /// so that the update block can merge values from both the continue path
     /// and the normal body-end path.
     continue_phi_nodes: BTreeMap<SymbolId, IrId>,
+    /// Stack slots a slot-carried loop keeps its body-modified variables in.
+    /// `break`/`continue` leave the body without reaching its end, so they
+    /// flush these themselves or the loop reads a stale slot.
+    carried_slots: BTreeMap<SymbolId, (IrId, IrType)>,
 }
 
 #[derive(Debug)]

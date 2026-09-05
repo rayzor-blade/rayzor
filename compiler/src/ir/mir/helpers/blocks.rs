@@ -180,6 +180,21 @@ impl<'a> HirToMirContext<'a> {
 
     /// Emit a while loop that calls hasNext/next on an iterator object.
     /// Used by lower_for_in_iterator_protocol for both typed and Dynamic iterators.
+    /// Store the current value of every slot-carried variable back into its
+    /// slot. `break` and `continue` leave the body without reaching the
+    /// store-back at its end, so they call this on their own edge.
+    pub(crate) fn flush_carried_slots(&mut self, label: Option<&SymbolId>) {
+        let slots = match self.find_loop_context(label) {
+            Some(ctx) => ctx.carried_slots.clone(),
+            None => return,
+        };
+        for (sym, (slot, _ty)) in &slots {
+            if let Some(&reg) = self.symbol_map.get(sym) {
+                self.builder.build_store(*slot, reg);
+            }
+        }
+    }
+
     pub(crate) fn emit_iterator_while_loop(
         &mut self,
         pattern: &HirPattern,
@@ -201,10 +216,13 @@ impl<'a> HirToMirContext<'a> {
 
         // Also store mutable variables from outer scope in stack slots
         // so assignments in the loop body are visible after the loop
+        // `n++` is a write the shared walker does not record, so the counter
+        // would get no slot and never be carried across an iteration.
         let modified_vars = {
             let mut modified = std::collections::BTreeSet::new();
             for stmt in &body.statements {
                 self.find_modified_variables_in_statement(stmt, &mut modified);
+                super::iter_handle::collect_incremented_symbols(stmt, &mut modified);
             }
             modified
         };
@@ -241,6 +259,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: var_slots.clone(),
         });
 
         // Condition block: call hasNext()

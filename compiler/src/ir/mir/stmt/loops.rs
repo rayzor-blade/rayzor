@@ -228,6 +228,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(), // Will be populated after condition eval
             continue_phi_nodes: loop_continue_phi_nodes,
+            carried_slots: BTreeMap::new(),
         });
 
         // Short-circuit operators create extra blocks, so this may leave us in a
@@ -555,6 +556,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: BTreeMap::new(),
         });
 
         // Lower the body statements. Track loop-carried symbols so the body's

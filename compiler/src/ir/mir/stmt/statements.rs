@@ -1157,6 +1157,9 @@ impl<'a> HirToMirContext<'a> {
                     let saved_scope_stack = self.drop_scope_stack.clone();
                     let saved_owned = self.owned_heap_values.clone();
 
+                    // A slot-carried loop reads its variables back from their
+                    // slots, and this edge skips the body's own store-back.
+                    self.flush_carried_slots(label.as_ref());
                     // Free loop body allocations before breaking out
                     self.exit_drop_scope();
                     self.builder.build_branch(break_block);
@@ -1194,6 +1197,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    self.flush_carried_slots(label.as_ref());
                     // Save drop state around the cleanup, same reason as break above.
                     let saved_scope_stack = self.drop_scope_stack.clone();
                     let saved_owned = self.owned_heap_values.clone();

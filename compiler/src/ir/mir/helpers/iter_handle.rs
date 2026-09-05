@@ -783,6 +783,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: var_slots.clone(),
         });
 
         self.builder.switch_to_block(cond_block);
@@ -895,7 +896,7 @@ impl<'a> HirToMirContext<'a> {
 /// Written here rather than added to the shared walker because every loop form
 /// depends on that one, and widening what it reports changes how they all carry
 /// their variables.
-fn collect_incremented_symbols(stmt: &HirStatement, out: &mut BTreeSet<SymbolId>) {
+pub(super) fn collect_incremented_symbols(stmt: &HirStatement, out: &mut BTreeSet<SymbolId>) {
     fn walk_expr(e: &HirExpr, out: &mut BTreeSet<SymbolId>) {
         match &e.kind {
             HirExprKind::Unary { op, operand } => {
@@ -1024,7 +1025,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// A handle's `next` thunk answers in a bare I64; give the caller the
     /// element's own representation.
-    fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
+    pub(super) fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
         match target {
             IrType::I64 => Some(value),
             IrType::I32 | IrType::I16 | IrType::I8 | IrType::U8 | IrType::U16 | IrType::U32 | IrType::Bool => {

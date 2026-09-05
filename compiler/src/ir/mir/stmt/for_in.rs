@@ -415,6 +415,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: exit_phi_nodes.clone(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: BTreeMap::new(),
         });
 
         // Condition block: counter < end
@@ -1061,6 +1062,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: exit_phi_nodes.clone(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: BTreeMap::new(),
         });
 
         // Condition: index < length
@@ -1356,6 +1358,7 @@ impl<'a> HirToMirContext<'a> {
             label: label.cloned(),
             exit_phi_nodes: exit_phi_nodes.clone(),
             continue_phi_nodes: BTreeMap::new(),
+            carried_slots: BTreeMap::new(),
         });
 
         // Condition block: index < length
