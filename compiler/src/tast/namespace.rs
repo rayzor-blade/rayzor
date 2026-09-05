@@ -311,16 +311,21 @@ impl NamespaceResolver {
                     let full_path = base.join(&module_path);
                     if full_path.exists() {
                         if let Ok(content) = std::fs::read_to_string(&full_path) {
-                            let patterns = [
-                                format!("class {} ", sub_type),
-                                format!("class {}{{", sub_type),
-                                format!("enum {} ", sub_type),
-                                format!("enum {}{{", sub_type),
-                                format!("typedef {} ", sub_type),
-                                format!("abstract {} ", sub_type),
-                                format!("interface {} ", sub_type),
-                            ];
-                            if patterns.iter().any(|p| content.contains(p)) {
+                            // `interface IMap<K, V> {` declares IMap as much as
+                            // `interface IMap {` does: the name ends at any
+                            // non-identifier character.
+                            let declares = ["class", "interface", "enum", "typedef", "abstract"]
+                                .iter()
+                                .any(|kw| {
+                                    let needle = format!("{kw} {sub_type}");
+                                    content.match_indices(&needle).any(|(i, m)| {
+                                        content[i + m.len()..]
+                                            .chars()
+                                            .next()
+                                            .map_or(true, |c| !(c.is_alphanumeric() || c == '_'))
+                                    })
+                                });
+                            if declares {
                                 if check_loaded && self.is_file_loaded(&full_path) {
                                     return None;
                                 }
