@@ -61,6 +61,10 @@ impl<'a> HirToMirContext<'a> {
                 let target = *target_type;
                 self.runtime_type_id(target)
             }
+            // The runtime's `TYPE_ANON_OBJECT`: what JSON builds and reflection
+            // unwraps. A context-local id here left `Reflect.field` reading the
+            // box as the object.
+            Some(TypeKind::Anonymous { .. }) => 6,
             _ => 0, // default to void/unknown
         }
     }

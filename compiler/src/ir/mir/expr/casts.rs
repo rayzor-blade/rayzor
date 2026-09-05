@@ -237,10 +237,13 @@ impl<'a> HirToMirContext<'a> {
             (Some(TypeKind::Dynamic), _) if !matches!(&target_kind, Some(TypeKind::Dynamic)) => {
                 let value_reg = self.lower_expression(expr)?;
                 // DynamicValue boxing uses TAST TypeId (value_ty.as_raw()),
-                // so downcast comparison must also use TAST TypeId for consistency.
-                let type_id_const = self
-                    .builder
-                    .build_const(IrValue::I64(target.as_raw() as i64))?;
+                // so downcast comparison must also use TAST TypeId for consistency;
+                // an anonymous target carries the runtime's own tag instead.
+                let expected_id = match &target_kind {
+                    Some(TypeKind::Anonymous { .. }) => self.runtime_type_id(*target) as i64,
+                    _ => target.as_raw() as i64,
+                };
+                let type_id_const = self.builder.build_const(IrValue::I64(expected_id))?;
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                 let downcast_id = self.get_or_register_extern_function(
                     "haxe_std_downcast",
