@@ -140,6 +140,24 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower an expression
+    /// An empty `{}` in a value position is an empty anonymous object, as the
+    /// typer reads it upstream; only a statement keeps it as a block.
+    pub(crate) fn lower_value_expression(
+        &mut self,
+        expr: &parser::Expr,
+    ) -> LoweringResult<TypedExpression> {
+        if let parser::ExprKind::Block(elements) = &expr.kind {
+            if elements.is_empty() {
+                let object = parser::Expr {
+                    kind: parser::ExprKind::Object(Vec::new()),
+                    span: expr.span.clone(),
+                };
+                return self.lower_expression(&object);
+            }
+        }
+        self.lower_expression(expr)
+    }
+
     pub(crate) fn lower_expression(
         &mut self,
         expression: &Expr,
@@ -1238,7 +1256,7 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Return(expr) => {
                 let return_expr = if let Some(expr) = expr {
-                    Some(Box::new(self.lower_expression(expr)?))
+                    Some(Box::new(self.lower_value_expression(expr)?))
                 } else {
                     None
                 };
@@ -1824,7 +1842,7 @@ impl<'a> AstLowering<'a> {
                     });
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
-                    let result = self.lower_expression(init_expr);
+                    let result = self.lower_value_expression(init_expr);
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     self.context.expected_new_type_hint = prev_hint;
@@ -1951,7 +1969,7 @@ impl<'a> AstLowering<'a> {
                     });
                     self.expected_lambda_params_stack.push(lambda_hint);
                     self.expected_arg_type_stack.push(declared_type);
-                    let result = self.lower_expression(init_expr);
+                    let result = self.lower_value_expression(init_expr);
                     self.expected_arg_type_stack.pop();
                     self.expected_lambda_params_stack.pop();
                     result?

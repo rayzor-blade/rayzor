@@ -898,7 +898,7 @@ impl<'a> AstLowering<'a> {
                     .and_then(|ts| ts.get(i).copied());
                 self.expected_lambda_params_stack.push(hint);
                 self.expected_arg_type_stack.push(arg_type_hint);
-                let result = self.lower_expression(arg);
+                let result = self.lower_value_expression(arg);
                 self.expected_arg_type_stack.pop();
                 self.expected_lambda_params_stack.pop();
                 result
