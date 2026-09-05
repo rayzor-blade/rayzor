@@ -2545,8 +2545,20 @@ impl CompilationUnit {
             sym.is_exported = true;
         }
 
+        // A generic alias's own parameters, so `KeyValueIterator<K,V> =
+        // Iterator<{key:K, value:V}>` restores with K and V as type parameters
+        // rather than unresolved names, and keeps them on the node — which is
+        // what binds an argument at each use.
+        let alias_params = self.register_manifest_type_params(&alias_info.type_params);
+        let ordered: Vec<TypeId> = alias_info
+            .type_params
+            .iter()
+            .filter_map(|name| alias_params.get(name).copied())
+            .collect();
+        let outer_params = std::mem::replace(&mut self.manifest_type_params, alias_params);
         // Parse the target type string and create appropriate TypeId
         let target_type = self.resolve_blade_type(&alias_info.target_type);
+        self.manifest_type_params = outer_params;
 
         // Create type alias type
         let alias_type = self
@@ -2555,7 +2567,7 @@ impl CompilationUnit {
             .create_type(TypeKind::TypeAlias {
                 symbol_id,
                 target_type,
-                type_args: vec![],
+                type_args: ordered,
             });
 
         // Update symbol with type
@@ -2598,8 +2610,19 @@ impl CompilationUnit {
             .create_abstract_in_scope(root_name, ScopeId::first());
         self.index_manifest_short_name(&abstract_info.package, short_name, symbol_id);
 
+        // The abstract's own parameters, for the same reason an alias needs
+        // them: `Map<K,V>`'s underlying `IMap<K,V>` names them.
+        let abstract_params = self.register_manifest_type_params(&abstract_info.type_params);
+        let ordered_abstract: Vec<TypeId> = abstract_info
+            .type_params
+            .iter()
+            .filter_map(|name| abstract_params.get(name).copied())
+            .collect();
+        let outer_abstract_params =
+            std::mem::replace(&mut self.manifest_type_params, abstract_params);
         // Parse the underlying type
         let underlying_type = self.resolve_blade_type(&abstract_info.underlying_type);
+        self.manifest_type_params = outer_abstract_params;
 
         // Update symbol metadata including the abstract scope
         if let Some(sym) = self.symbol_table.get_symbol_mut(symbol_id) {
@@ -2621,7 +2644,7 @@ impl CompilationUnit {
             .create_type(TypeKind::Abstract {
                 symbol_id,
                 underlying: Some(underlying_type),
-                type_args: vec![],
+                type_args: ordered_abstract,
             });
 
         // Update symbol with type
@@ -7334,16 +7357,20 @@ impl CompilationUnit {
                     std::collections::BTreeMap::new();
                 let mut thunk_stubs: Vec<(String, IrFunctionId)> = Vec::new();
                 for (func_id, func) in &mir_module.functions {
-                    if !func.name.starts_with("__vtable_dispatch_thunk__") {
-                        continue;
-                    }
+                    // Any bodyless function shadowing a compiled one of the same
+                    // identity has the same problem the thunks had: a call bound
+                    // to the stub traps at runtime. A declaration restored from
+                    // the symbol manifest produces exactly that for a method
+                    // whose class is also compiled here. An extern keeps its own
+                    // name, so nothing non-empty answers to it and it is left be.
+                    let identity = func.qualified_name.clone().unwrap_or_else(|| func.name.clone());
                     if func.cfg.blocks.is_empty()
                         || func.cfg.blocks.values().all(|b| b.instructions.is_empty())
                     {
-                        thunk_stubs.push((func.name.clone(), *func_id));
+                        thunk_stubs.push((identity, *func_id));
                     } else {
                         // Prefer the first real (non-empty) definition per name.
-                        thunk_real.entry(func.name.clone()).or_insert(*func_id);
+                        thunk_real.entry(identity).or_insert(*func_id);
                     }
                 }
                 let mut thunk_replacements: std::collections::BTreeMap<IrFunctionId, IrFunctionId> =
