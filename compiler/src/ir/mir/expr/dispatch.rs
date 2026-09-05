@@ -421,11 +421,13 @@ impl<'a> HirToMirContext<'a> {
                 }
             } else {
                 // If no else branch, the else path just falls through to merge
-                // with the original values
+                // with the original values. That edge leaves the block which
+                // evaluated the condition — the entry block only when the
+                // condition needed no blocks of its own.
                 for (symbol_id, (initial_reg, _)) in &var_initial_values {
                     else_values.insert(*symbol_id, *initial_reg);
                 }
-                Some(entry_block)
+                Some(cond_eval_block)
             };
 
             self.builder.switch_to_block(merge_block);
