@@ -566,6 +566,16 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A class that declares `toString` renders through it, which is also
+        // how a map reaches the renderer that knows its value type. Everything
+        // else declines and keeps the conversion below.
+        if let Some(type_id) = hir_type_id {
+            let resolved = self.resolve_through_aliases(type_id);
+            if let Some(Some(reg)) = self.try_call_tostring(value, resolved) {
+                return Some(reg);
+            }
+        }
+
         self.convert_to_string(value, from_type)
     }
 

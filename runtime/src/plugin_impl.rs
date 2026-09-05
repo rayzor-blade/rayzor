@@ -841,6 +841,10 @@ register_symbol!(
     "haxe_stringmap_to_string",
     crate::haxe_sys::haxe_stringmap_to_string
 );
+register_symbol!(
+    "haxe_stringmap_to_string_typed",
+    crate::haxe_sys::haxe_stringmap_to_string_typed
+);
 
 // ============================================================================
 // IntMap<T> (haxe.ds.IntMap)
@@ -856,6 +860,10 @@ register_symbol!("haxe_intmap_keys", crate::haxe_sys::haxe_intmap_keys);
 register_symbol!(
     "haxe_intmap_to_string",
     crate::haxe_sys::haxe_intmap_to_string
+);
+register_symbol!(
+    "haxe_intmap_to_string_typed",
+    crate::haxe_sys::haxe_intmap_to_string_typed
 );
 register_symbol!(
     "haxe_stringmap_keys_to_array",
@@ -899,6 +907,10 @@ register_symbol!(
 register_symbol!(
     "haxe_objectmap_to_string",
     crate::haxe_sys::haxe_objectmap_to_string
+);
+register_symbol!(
+    "haxe_objectmap_to_string_typed",
+    crate::haxe_sys::haxe_objectmap_to_string_typed
 );
 register_symbol!(
     "haxe_objectmap_keys_to_array",

@@ -4067,6 +4067,95 @@ pub extern "C" fn haxe_stringmap_keys(
 }
 
 /// Convert StringMap to string representation
+/// Render one raw 8-byte map slot the way `"" + value` would.
+/// Tags: 1=Int 2=Bool 4=Float 5=String 6=Ref; anything else keeps the
+/// raw-integer print the untyped renderers use.
+fn map_slot_to_string(bits: u64, tag: i32) -> String {
+    if tag == 0 {
+        return format!("{}", bits);
+    }
+    let rendered = haxe_value_to_string_by_tag(bits as i64, tag);
+    if rendered.is_null() {
+        return "null".to_string();
+    }
+    unsafe {
+        let hs = &*rendered;
+        if hs.ptr.is_null() {
+            return "null".to_string();
+        }
+        String::from_utf8_lossy(std::slice::from_raw_parts(hs.ptr, hs.len)).into_owned()
+    }
+}
+
+/// `haxe_stringmap_to_string` with the value's static type, so a non-Int V
+/// renders as itself instead of as the raw bits of its slot.
+#[no_mangle]
+pub extern "C" fn haxe_stringmap_to_string_typed(
+    map_ptr: *mut HaxeStringMap,
+    val_tag: i32,
+) -> *mut HaxeString {
+    if map_ptr.is_null() {
+        return rust_string_to_haxe("null".to_string());
+    }
+    unsafe {
+        let map = &*map_ptr;
+        let entries: Vec<String> = map
+            .map
+            .iter()
+            .map(|(k, v)| format!("{} => {}", k, map_slot_to_string(*v, val_tag)))
+            .collect();
+        rust_string_to_haxe(format!("[{}]", entries.join(", ")))
+    }
+}
+
+/// `haxe_intmap_to_string` with the value's static type.
+#[no_mangle]
+pub extern "C" fn haxe_intmap_to_string_typed(
+    map_ptr: *mut HaxeIntMap,
+    val_tag: i32,
+) -> *mut HaxeString {
+    if map_ptr.is_null() {
+        return rust_string_to_haxe("null".to_string());
+    }
+    unsafe {
+        let map = &*map_ptr;
+        let entries: Vec<String> = map
+            .map
+            .iter()
+            .map(|(k, v)| format!("{} => {}", k, map_slot_to_string(*v, val_tag)))
+            .collect();
+        rust_string_to_haxe(format!("[{}]", entries.join(", ")))
+    }
+}
+
+/// `haxe_objectmap_to_string` with both static types: an object key has no
+/// readable form of its own, so it renders the way `"" + key` does.
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_to_string_typed(
+    map_ptr: *mut HaxeObjectMap,
+    key_tag: i32,
+    val_tag: i32,
+) -> *mut HaxeString {
+    if map_ptr.is_null() {
+        return rust_string_to_haxe("null".to_string());
+    }
+    unsafe {
+        let map = &*map_ptr;
+        let entries: Vec<String> = map
+            .map
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{} => {}",
+                    map_slot_to_string(*k as u64, key_tag),
+                    map_slot_to_string(*v, val_tag)
+                )
+            })
+            .collect();
+        rust_string_to_haxe(format!("[{}]", entries.join(", ")))
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn haxe_stringmap_to_string(map_ptr: *mut HaxeStringMap) -> *mut HaxeString {
     if map_ptr.is_null() {

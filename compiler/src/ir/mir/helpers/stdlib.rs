@@ -274,6 +274,98 @@ impl<'a> HirToMirContext<'a> {
     /// If `type_id` resolves to a Class with a `toString()` in the current module,
     /// call `obj.toString()` and return the resulting `*HaxeString` register.
     /// Returns `Some(string_reg)` on success, `None` if not a class or toString not found.
+    /// Std.string's tag for a value type: 1=Int 2=Bool 4=Float 5=String
+    /// 6=Ref, 0 when nothing is known. Same table `Array.join` uses, so a map
+    /// and an array render a value the same way.
+    fn std_string_tag(&self, ty: TypeId) -> i32 {
+        let resolved = self.resolve_through_aliases(ty);
+        match self.type_table.get(resolved).map(|t| &t.kind) {
+            Some(TypeKind::Int) => 1,
+            Some(TypeKind::Bool) => 2,
+            Some(TypeKind::Float) => 4,
+            Some(TypeKind::String) => 5,
+            Some(TypeKind::Optional { inner_type }) => {
+                let t = *inner_type;
+                self.std_string_tag(t)
+            }
+            Some(
+                TypeKind::Class { .. }
+                | TypeKind::Interface { .. }
+                | TypeKind::Anonymous { .. }
+                | TypeKind::Array { .. }
+                | TypeKind::Enum { .. }
+                | TypeKind::Map { .. },
+            ) => 6,
+            _ => 0,
+        }
+    }
+
+    /// A map's `toString` through the renderer that knows what its keys and
+    /// values are. `None` when the receiver is not a map container, which
+    /// leaves every other class on its usual path.
+    pub(crate) fn try_lower_map_to_string(
+        &mut self,
+        obj_reg: IrId,
+        receiver_ty: TypeId,
+    ) -> Option<IrId> {
+        let resolved = self.resolve_through_aliases(receiver_ty);
+        let (class_sym, type_args) = match self.type_table.get(resolved).map(|t| &t.kind) {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            })
+            | Some(TypeKind::Interface {
+                symbol_id,
+                type_args,
+            }) => (*symbol_id, type_args.clone()),
+            _ => return None,
+        };
+        let name = self
+            .symbol_table
+            .get_symbol(class_sym)
+            .and_then(|s| s.qualified_name.or(Some(s.name)))
+            .and_then(|n| self.string_interner.get(n))?
+            .to_string();
+        let bare = name.rsplit('.').next().unwrap_or(&name);
+        let value_tag = self.std_string_tag(*type_args.last()?);
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let string_ptr = IrType::Ptr(Box::new(IrType::String));
+        let (runtime, mut params, mut call_args) = match bare {
+            "StringMap" => (
+                "haxe_stringmap_to_string_typed",
+                vec![ptr_void.clone(), IrType::I32],
+                vec![obj_reg],
+            ),
+            "IntMap" => (
+                "haxe_intmap_to_string_typed",
+                vec![ptr_void.clone(), IrType::I32],
+                vec![obj_reg],
+            ),
+            "ObjectMap" | "EnumValueMap" | "WeakMap" => (
+                "haxe_objectmap_to_string_typed",
+                vec![ptr_void.clone(), IrType::I32, IrType::I32],
+                vec![obj_reg],
+            ),
+            _ => return None,
+        };
+        if params.len() == 3 {
+            let key_tag = self.std_string_tag(*type_args.first()?);
+            call_args.push(self.builder.build_const(IrValue::I32(key_tag))?);
+        }
+        call_args.push(self.builder.build_const(IrValue::I32(value_tag))?);
+        let ret = params.pop();
+        let _ = ret;
+        let func = self.get_or_register_extern_function(
+            runtime,
+            match bare {
+                "StringMap" | "IntMap" => vec![ptr_void.clone(), IrType::I32],
+                _ => vec![ptr_void.clone(), IrType::I32, IrType::I32],
+            },
+            string_ptr.clone(),
+        );
+        self.builder.build_call_direct(func, call_args, string_ptr)
+    }
+
     pub(crate) fn try_call_tostring(
         &mut self,
         obj_reg: IrId,
@@ -324,6 +416,11 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A map renders its VALUES, and only the call site knows what they are:
+        // the container stores every value in a u64 slot.
+        if let Some(rendered) = self.try_lower_map_to_string(obj_reg, type_id) {
+            return Some(Some(rendered));
+        }
         // Fallback for stdlib classes (StringMap, IntMap, Date, Bytes): a toString()
         // registered in stdlib_mapping, looked up under the class's key.
         let class_name = self
