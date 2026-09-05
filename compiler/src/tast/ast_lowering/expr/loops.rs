@@ -969,6 +969,41 @@ impl<'a> AstLowering<'a> {
         })
     }
 
+    /// `xs.iterator()` yields what `xs` holds. The call's own type names the
+    /// iterator class, whose element the class alone cannot say, so the
+    /// receiver answers instead — the same element `for (x in xs)` binds.
+    fn element_type_from_iterator_call(&self, iterable: &TypedExpression) -> Option<TypeId> {
+        let (receiver, method_symbol) = match &iterable.kind {
+            TypedExpressionKind::MethodCall {
+                receiver,
+                method_symbol,
+                arguments,
+                ..
+            } if arguments.is_empty() => (receiver, *method_symbol),
+            _ => return None,
+        };
+        let name = self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.context.string_interner.get(s.name))?;
+        if name != "iterator" {
+            return None;
+        }
+        let tt = self.context.type_table.borrow();
+        match tt.get(receiver.expr_type).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Array { element_type }) => Some(*element_type),
+            Some(crate::tast::core::TypeKind::Map { value_type, .. }) => Some(*value_type),
+            Some(crate::tast::core::TypeKind::Class { type_args, .. })
+            | Some(crate::tast::core::TypeKind::Interface { type_args, .. })
+                if type_args.len() == 1 =>
+            {
+                Some(type_args[0])
+            }
+            _ => None,
+        }
+    }
+
     /// Infer the element type from an iterable expression (array, map, etc.)
     fn infer_element_type_from_iterable(&self, iterable: &TypedExpression) -> TypeId {
         let (kind, dynamic) = {
@@ -978,6 +1013,11 @@ impl<'a> AstLowering<'a> {
                 type_table.dynamic_type(),
             )
         };
+        if let Some(elem) = self.element_type_from_iterator_call(iterable) {
+            if !self.is_bare_type_param(elem) {
+                return elem;
+            }
+        }
         match kind {
             Some(TypeKind::Array { element_type }) => element_type,
             Some(TypeKind::Map { value_type, .. }) => value_type,

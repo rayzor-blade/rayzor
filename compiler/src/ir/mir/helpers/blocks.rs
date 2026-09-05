@@ -281,9 +281,27 @@ impl<'a> HirToMirContext<'a> {
         // Body block
         self.builder.switch_to_block(loop_body_block);
 
-        // Load modified vars from slots at body entry
+        // Load modified vars from slots at body entry. The body's `if` merges
+        // only variables whose register is a declared local, so each reloaded
+        // value is declared here; without it a conditional `n++` never reaches
+        // the merge and the slot keeps the value from before the `if`.
         for (sym, (slot, ty)) in &var_slots {
             if let Some(loaded) = self.builder.build_load(*slot, ty.clone()) {
+                let name = self
+                    .symbol_table
+                    .get_symbol(*sym)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .unwrap_or("iter_carried")
+                    .to_string();
+                if let Some(func) = self.builder.current_function_mut() {
+                    func.locals.entry(loaded).or_insert(crate::ir::IrLocal {
+                        name,
+                        ty: ty.clone(),
+                        mutable: true,
+                        source_location: crate::ir::IrSourceLocation::unknown(),
+                        allocation: crate::ir::AllocationHint::Register,
+                    });
+                }
                 self.symbol_map.insert(*sym, loaded);
             }
         }
