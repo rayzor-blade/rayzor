@@ -335,6 +335,89 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// A `Null<scalar>` answered as raw bits becomes the box every other
+    /// producer hands out — null when `probe` (the container's `exists` over
+    /// the same arguments) says the key is absent. `None` leaves the raw value.
+    pub(crate) fn box_raw_optional_result(
+        &mut self,
+        raw: IrId,
+        declared_ty: TypeId,
+        probe: Option<(crate::ir::IrFunctionId, Vec<IrId>)>,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let inner = match self.type_table.get(declared_ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => return None,
+        };
+        if !self.optional_inner_is_boxable_primitive(inner) {
+            return None;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (box_name, arg_ty, arg) = match self.builder.get_register_type(raw)? {
+            IrType::I32 => (
+                "haxe_box_int_ptr",
+                IrType::I64,
+                self.builder.build_cast(raw, IrType::I32, IrType::I64)?,
+            ),
+            IrType::I64 => ("haxe_box_int_ptr", IrType::I64, raw),
+            IrType::F64 => ("haxe_box_float_ptr", IrType::F64, raw),
+            IrType::F32 => (
+                "haxe_box_float_ptr",
+                IrType::F64,
+                self.builder.build_cast(raw, IrType::F32, IrType::F64)?,
+            ),
+            IrType::Bool => ("haxe_box_bool_ptr", IrType::Bool, raw),
+            _ => return None,
+        };
+        let box_fn = self.get_or_register_extern_function(box_name, vec![arg_ty], ptr_u8.clone());
+        let Some((exists_fn, probe_args)) = probe else {
+            return self.builder.build_call_direct(box_fn, vec![arg], ptr_u8);
+        };
+        let present = self
+            .builder
+            .build_call_direct(exists_fn, probe_args, IrType::Bool)?;
+        let box_block = self.builder.create_block()?;
+        let null_block = self.builder.create_block()?;
+        let join_block = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(present, box_block, null_block)?;
+        self.builder.switch_to_block(box_block);
+        let boxed = self
+            .builder
+            .build_call_direct(box_fn, vec![arg], ptr_u8.clone())?;
+        self.builder.build_branch(join_block)?;
+        self.builder.switch_to_block(null_block);
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let null = self.builder.build_bitcast(zero, ptr_u8.clone())?;
+        self.builder.build_branch(join_block)?;
+        self.builder.switch_to_block(join_block);
+        let result = self.builder.build_phi(join_block, ptr_u8)?;
+        self.builder
+            .add_phi_incoming(join_block, result, box_block, boxed);
+        self.builder
+            .add_phi_incoming(join_block, result, null_block, null);
+        Some(result)
+    }
+
+    /// The container's `exists` over the call's own arguments, when the class
+    /// maps one of the same arity: the presence test for a raw `Null<scalar>`.
+    pub(crate) fn raw_optional_probe(
+        &mut self,
+        class_name: &str,
+        argc: usize,
+        param_types: Vec<IrType>,
+        args: Vec<IrId>,
+    ) -> Option<(crate::ir::IrFunctionId, Vec<IrId>)> {
+        let name = self
+            .stdlib_mapping
+            .class_key(class_name)
+            .and_then(|k| self.stdlib_mapping.find_by_name(k, "exists"))
+            .filter(|(_, ex)| ex.param_count == argc)
+            .map(|(_, ex)| ex.runtime_name)?;
+        let f = self.get_or_register_extern_function(name, param_types, IrType::Bool);
+        Some((f, args))
+    }
+
     pub(crate) fn maybe_box_for_optional(
         &mut self,
         value: IrId,

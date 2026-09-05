@@ -251,6 +251,7 @@ impl<'a> HirToMirContext<'a> {
                     let is_mir_wrapper = runtime_call.is_mir_wrapper;
                     let returns_raw_value = runtime_call.returns_raw_value;
                     let raw_value_params = runtime_call.raw_value_params;
+                    let call_param_count = runtime_call.param_count;
                     let extend_to_i64_params = runtime_call.extend_to_i64_params;
                     let has_return = runtime_call.has_return;
                     let explicit_return_type = runtime_call.return_type.map(|t| t.to_ir_type());
@@ -550,6 +551,8 @@ impl<'a> HirToMirContext<'a> {
                         params
                     };
 
+                    let probe_param_types = param_types.clone();
+                    let probe_args = arg_regs.clone();
                     let extern_func_id = self.get_or_register_extern_function(
                         runtime_func,
                         param_types,
@@ -664,6 +667,21 @@ impl<'a> HirToMirContext<'a> {
                                     .build_cast(call_result, IrType::U64, IrType::I64)
                             }
                         };
+                        // Declared `Null<scalar>`: consumers expect the box, and the
+                        // raw bits cannot say "absent". Probe with the container's
+                        // `exists`, then box.
+                        if let Some(raw) = final_result {
+                            let probe = self.raw_optional_probe(
+                                class_name,
+                                call_param_count,
+                                probe_param_types,
+                                probe_args,
+                            );
+                            if let Some(boxed) = self.box_raw_optional_result(raw, expr.ty, probe)
+                            {
+                                return Some(boxed);
+                            }
+                        }
                         return final_result;
                     }
 

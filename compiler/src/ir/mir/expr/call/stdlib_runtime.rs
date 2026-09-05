@@ -531,6 +531,8 @@ impl<'a> HirToMirContext<'a> {
                         resolved_return_type.clone()
                     };
 
+                    let probe_param_types = param_types.clone();
+                    let probe_args = final_arg_regs.clone();
                     let runtime_func_id = self.get_or_register_extern_function(
                         &runtime_func,
                         param_types,
@@ -589,6 +591,22 @@ impl<'a> HirToMirContext<'a> {
                                     self.builder.build_cast(raw_reg, IrType::U64, IrType::I64)
                                 }
                             };
+                            // Declared `Null<scalar>`: consumers expect the box, and
+                            // the raw bits cannot say "absent". Probe with the
+                            // container's `exists`, then box.
+                            if let Some(raw) = final_result {
+                                let probe = self.raw_optional_probe(
+                                    class_name,
+                                    method_param_count,
+                                    probe_param_types,
+                                    probe_args,
+                                );
+                                if let Some(boxed) =
+                                    self.box_raw_optional_result(raw, expr.ty, probe)
+                                {
+                                    return Some(boxed);
+                                }
+                            }
                             return final_result;
                         }
                     }
