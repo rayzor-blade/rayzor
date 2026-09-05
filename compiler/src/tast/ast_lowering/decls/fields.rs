@@ -707,6 +707,24 @@ impl<'a> AstLowering<'a> {
     ) -> LoweringResult<TypedMethodSignature> {
         let function_name = self.context.intern_string(&func.name);
         let function_symbol = self.context.symbol_table.create_function(function_name);
+        // An interface's methods are found across files by qualified name, the
+        // way class methods are, so they take the interface scope as their own.
+        let in_interface = self
+            .context
+            .scope_tree
+            .get_scope(self.context.current_scope)
+            .map(|s| matches!(s.kind, crate::tast::scopes::ScopeKind::Interface))
+            .unwrap_or(false);
+        if in_interface {
+            let scope_id = self.context.current_scope;
+            if let Some(sym) = self.context.symbol_table.get_symbol_mut(function_symbol) {
+                sym.scope_id = scope_id;
+            }
+            if let Some(scope) = self.context.scope_tree.get_scope_mut(scope_id) {
+                scope.add_symbol(function_symbol, function_name);
+            }
+            self.context.update_symbol_qualified_name(function_symbol);
+        }
 
         // Enter function scope
         let function_scope = self.context.enter_scope(ScopeKind::Function);

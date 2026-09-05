@@ -318,14 +318,30 @@ impl<'a> AstLowering<'a> {
     /// Lower a class declaration
 
     /// Lower an interface declaration
+    /// The symbol registered for `name` in the current package, if any.
+    fn packaged_symbol(&self, name: InternedString) -> Option<SymbolId> {
+        let package_id = self.context.current_package?;
+        let path = self
+            .context
+            .namespace_resolver
+            .get_package(package_id)?
+            .full_path
+            .clone();
+        let qp = crate::tast::namespace::QualifiedPath::new(path, name);
+        self.context.namespace_resolver.lookup_symbol(&qp)
+    }
+
     pub(crate) fn lower_interface_declaration(
         &mut self,
         interface_decl: &InterfaceDecl,
     ) -> LoweringResult<TypedDeclaration> {
         let interface_name = self.context.intern_string(&interface_decl.name);
 
-        // Look up the existing symbol that was created during pre-registration
-        let interface_symbol = if let Some(existing_symbol) = self
+        // The pre-registered symbol: the one under this package first, since the
+        // root slot may hold a same-named type from another package.
+        let interface_symbol = if let Some(id) = self.packaged_symbol(interface_name) {
+            id
+        } else if let Some(existing_symbol) = self
             .context
             .symbol_table
             .lookup_symbol(ScopeId::first(), interface_name)
@@ -347,6 +363,10 @@ impl<'a> AstLowering<'a> {
             new_symbol
         };
 
+        if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
+            let qn = self.context.symbol_table.get_symbol(interface_symbol).and_then(|s| s.qualified_name).and_then(|q| self.context.string_interner.get(q)).unwrap_or("-");
+            eprintln!("[sym] lower iface {} -> {interface_symbol:?} qn={qn}", interface_decl.name);
+        }
         // Enter interface scope with name
         let interface_scope = self
             .context
@@ -377,6 +397,18 @@ impl<'a> AstLowering<'a> {
                 tp.variance.into(),
             );
             type_param_map.insert(tp.name, type_id);
+        }
+        // Receivers typed by this interface substitute their arguments through
+        // the same record classes keep.
+        if !type_param_map.is_empty() {
+            let ordered: Vec<TypeId> = type_params
+                .iter()
+                .filter_map(|tp| type_param_map.get(&tp.name).copied())
+                .collect();
+            self.context
+                .symbol_table
+                .set_class_type_params(interface_symbol, ordered.clone());
+            self.class_type_params.insert(interface_symbol, ordered);
         }
         self.context.push_type_parameters(type_param_map);
 

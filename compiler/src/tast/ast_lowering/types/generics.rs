@@ -526,6 +526,10 @@ impl<'a> AstLowering<'a> {
             crate::tast::core::TypeKind::Class {
                 symbol_id,
                 type_args,
+            }
+            | crate::tast::core::TypeKind::Interface {
+                symbol_id,
+                type_args,
             } if !type_args.is_empty() => {
                 // Concrete generic class instance like `Mutex<State>` —
                 // type_args holds the concrete substitution. Derive the

@@ -277,15 +277,28 @@ impl<'a> AstLowering<'a> {
             TypeDeclaration::Interface(interface_decl) => {
                 let interface_name = self.context.intern_string(&interface_decl.name);
 
-                // Check if this interface already exists in the root scope
-                if self
+                // A same-named root symbol is this interface only when it is one
+                // (an import placeholder minted as Interface). A typedef alias to
+                // it, like root `IMap` for `haxe.Constraints.IMap`, keeps the root
+                // slot and the interface registers under its package alone.
+                let existing = self
                     .context
                     .symbol_table
                     .lookup_symbol(ScopeId::first(), interface_name)
-                    .is_some()
-                {
-                    return Ok(());
+                    .map(|s| (s.id, s.kind.clone(), s.package_id.is_none()));
+                if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
+                    eprintln!("[sym] pre-register iface {} existing={existing:?}", interface_decl.name);
                 }
+                let root_taken = match existing {
+                    Some((id, crate::tast::SymbolKind::Interface, unpackaged)) => {
+                        if unpackaged {
+                            self.register_symbol_with_package(id, &interface_decl.name);
+                        }
+                        return Ok(());
+                    }
+                    Some(_) => true,
+                    None => false,
+                };
 
                 let interface_symbol = self
                     .context
@@ -313,12 +326,13 @@ impl<'a> AstLowering<'a> {
                     .symbol_table
                     .register_type_symbol_mapping(interface_type, interface_symbol);
 
-                // Add to root scope for global resolution
-                self.context
-                    .scope_tree
-                    .get_scope_mut(ScopeId::first())
-                    .expect("Root scope should exist")
-                    .add_symbol(interface_symbol, interface_name);
+                if !root_taken {
+                    self.context
+                        .scope_tree
+                        .get_scope_mut(ScopeId::first())
+                        .expect("Root scope should exist")
+                        .add_symbol(interface_symbol, interface_name);
+                }
             }
             TypeDeclaration::Enum(enum_decl) => {
                 let enum_name = self.context.intern_string(&enum_decl.name);

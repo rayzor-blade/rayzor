@@ -305,6 +305,7 @@ impl<'a> AstLowering<'a> {
                     .context
                     .namespace_resolver
                     .lookup_symbol(&qualified_path_for_lookup)
+                    .or_else(|| self.lookup_module_subtype(&import.path))
                 {
                     // Reuse the pre-registered symbol from namespace
                     existing_symbol
@@ -354,15 +355,7 @@ impl<'a> AstLowering<'a> {
                         }
                         existing_symbol
                     } else {
-                        // Create placeholder with correct qualified_name
-                        let new_sym = self
-                            .context
-                            .symbol_table
-                            .create_class_in_scope(symbol_name, ScopeId::first());
-                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
-                            sym.qualified_name = Some(qn_interned);
-                        }
-                        new_sym
+                        self.create_import_placeholder(symbol_name, &full_qualified_name)
                     }
                 } else if let Some(existing_symbol) =
                     self.resolve_symbol_in_scope_hierarchy(symbol_name)
@@ -414,38 +407,8 @@ impl<'a> AstLowering<'a> {
                     // Reuse it to preserve correct type kind (Abstract, Enum, etc.)
                     existing.id
                 } else {
-                    // Create a placeholder symbol for the imported type
-                    let new_sym = self
-                        .context
-                        .symbol_table
-                        .create_class_in_scope(symbol_name, ScopeId::first());
-
-                    // CRITICAL FIX: Set the qualified name to the FULL import path, not just the class name.
-                    // When importing "rayzor.Bytes", the qualified name should be "rayzor.Bytes", not just "Bytes".
-                    // This is needed for runtime mapping to work correctly (e.g., "rayzor_Bytes" pattern matching).
                     let full_qualified_name = import.path.join(".");
-                    if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
-                        sym.qualified_name =
-                            Some(self.context.string_interner.intern(&full_qualified_name));
-                    }
-
-                    // CRITICAL: For imported classes (especially extern classes like StringMap),
-                    // we must create a class type and link it to the symbol. Without this,
-                    // new StringMap<Int>() will have TypeId::invalid() because the symbol has no type.
-                    let class_type = self.context.type_table.borrow_mut().create_type(
-                        crate::tast::core::TypeKind::Class {
-                            symbol_id: new_sym,
-                            type_args: Vec::new(), // Type args are applied at instantiation
-                        },
-                    );
-                    self.context
-                        .symbol_table
-                        .update_symbol_type(new_sym, class_type);
-                    self.context
-                        .symbol_table
-                        .register_type_symbol_mapping(class_type, new_sym);
-
-                    new_sym
+                    self.create_import_placeholder(symbol_name, &full_qualified_name)
                 };
 
                 // Add to root scope so it can be resolved
@@ -467,6 +430,65 @@ impl<'a> AstLowering<'a> {
             alias,
             source_location: self.context.create_location_from_span(import.span),
         })
+    }
+
+    /// Placeholder for an imported type nothing has registered yet. The source's
+    /// declaring keyword picks the kind: an `interface` placeholder left as a
+    /// Class makes receivers typed by it call the abstract method by name
+    /// instead of dispatching through the fat pointer.
+    fn create_import_placeholder(
+        &mut self,
+        name: InternedString,
+        qualified_name: &str,
+    ) -> crate::tast::SymbolId {
+        let is_interface =
+            self.context.namespace_resolver.declared_kind(qualified_name) == Some("interface");
+        if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
+            eprintln!("[sym] import-placeholder {qualified_name} interface={is_interface}");
+        }
+        let sym = if is_interface {
+            self.context
+                .symbol_table
+                .create_interface_in_scope(name, ScopeId::first())
+        } else {
+            self.context
+                .symbol_table
+                .create_class_in_scope(name, ScopeId::first())
+        };
+        let qn = self.context.string_interner.intern(qualified_name);
+        if let Some(s) = self.context.symbol_table.get_symbol_mut(sym) {
+            s.qualified_name = Some(qn);
+        }
+        // A typeless placeholder leaves `this` untyped once the class itself is
+        // lowered against it, so the placeholder carries its type from the start.
+        let kind = if is_interface {
+            TypeKind::Interface { symbol_id: sym, type_args: Vec::new() }
+        } else {
+            TypeKind::Class { symbol_id: sym, type_args: Vec::new() }
+        };
+        let ty = self.context.type_table.borrow_mut().create_type(kind);
+        self.context.symbol_table.update_symbol_type(sym, ty);
+        self.context.symbol_table.register_type_symbol_mapping(ty, sym);
+        sym
+    }
+
+    /// `pkg.Module.Name` names a sub-type of `Module`; the sub-type registers
+    /// under `pkg` alone, so retry the lookup with the module segment dropped.
+    fn lookup_module_subtype(&self, path: &[String]) -> Option<crate::tast::SymbolId> {
+        if path.len() < 3 {
+            return None;
+        }
+        let module = &path[path.len() - 2];
+        if !module.chars().next().map_or(false, |c| c.is_uppercase()) {
+            return None;
+        }
+        let package: Vec<InternedString> = path[..path.len() - 2]
+            .iter()
+            .map(|p| self.context.string_interner.intern(p))
+            .collect();
+        let name = self.context.string_interner.intern(&path[path.len() - 1]);
+        let qp = super::namespace::QualifiedPath::new(package, name);
+        self.context.namespace_resolver.lookup_symbol(&qp)
     }
 
     /// Lower a using declaration

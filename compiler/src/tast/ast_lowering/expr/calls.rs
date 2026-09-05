@@ -417,6 +417,15 @@ impl<'a> AstLowering<'a> {
 
         // Create a method symbol placeholder if we can't resolve it
         // Set qualified name based on receiver's class to help MIR disambiguation
+        if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
+            let m = self.context.string_interner.get(method_name).unwrap_or("?");
+            let k = self.context.type_table.borrow().get(receiver.expr_type).map(|t| format!("{:?}", t.kind));
+            eprintln!("[sym] member-synth {m} recv={} class={:?}", k.unwrap_or_default().chars().take(80).collect::<String>(), self.get_class_name_for_type(receiver.expr_type));
+            for cand in self.context.symbol_table.find_symbols(|s| s.name == method_name).into_iter().take(8) {
+                let qn = cand.qualified_name.and_then(|q| self.context.string_interner.get(q)).unwrap_or("-");
+                eprintln!("[sym]   cand {:?} kind={:?} qn={qn} type_valid={} scope={:?}", cand.id, cand.kind, cand.type_id.is_valid(), cand.scope_id);
+            }
+        }
         let new_symbol = self.context.symbol_table.create_function(method_name);
         if let Some(class_name) = self.get_class_name_for_type(receiver.expr_type) {
             let method_name_str = self.context.string_interner.get(method_name).unwrap_or("");
@@ -446,9 +455,11 @@ impl<'a> AstLowering<'a> {
         let class_sym = self.context.symbol_table.get_symbol(class_symbol)?;
 
         // Strategy 2: exact qualified-name match Class.method
+        // A root-package type has no qualified name; its bare name is the path.
         if let (Some(class_qname), Some(method_name_str)) = (
             class_sym
                 .qualified_name
+                .or(Some(class_sym.name))
                 .and_then(|qn| self.context.string_interner.get(qn)),
             self.context.string_interner.get(method_name),
         ) {

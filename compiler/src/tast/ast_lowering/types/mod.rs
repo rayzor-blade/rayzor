@@ -121,6 +121,32 @@ impl<'a> AstLowering<'a> {
                                         return Some((sym.id, sym.kind.clone()));
                                     }
                                 }
+                                // `pkg.Module.Name`: a sub-type registers under `pkg`
+                                // alone, so retry with the module segment dropped.
+                                let segments: Vec<&str> = name.split('.').collect();
+                                if segments.len() >= 3 {
+                                    let module = segments[segments.len() - 2];
+                                    if module.chars().next().map_or(false, |c| c.is_uppercase()) {
+                                        let pkg: Vec<InternedString> = segments
+                                            [..segments.len() - 2]
+                                            .iter()
+                                            .map(|p| self.context.intern_string(p))
+                                            .collect();
+                                        let qp = crate::tast::namespace::QualifiedPath::new(
+                                            pkg,
+                                            class_interned,
+                                        );
+                                        if let Some(sym_id) =
+                                            self.context.namespace_resolver.lookup_symbol(&qp)
+                                        {
+                                            if let Some(sym) =
+                                                self.context.symbol_table.get_symbol(sym_id)
+                                            {
+                                                return Some((sym.id, sym.kind.clone()));
+                                            }
+                                        }
+                                    }
+                                }
                                 // Also try short name lookup in root scope
                                 if let Some(sym) = self
                                     .context
@@ -146,6 +172,9 @@ impl<'a> AstLowering<'a> {
                         }
                     });
 
+                if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() && name.contains('.') {
+                    eprintln!("[sym] type-path {name} -> {symbol_info:?}");
+                }
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
                     // Process type arguments if present (now the symbol borrow is dropped)
                     let type_arg_ids = if !params.is_empty() {

@@ -311,20 +311,8 @@ impl NamespaceResolver {
                     let full_path = base.join(&module_path);
                     if full_path.exists() {
                         if let Ok(content) = std::fs::read_to_string(&full_path) {
-                            // `interface IMap<K, V> {` declares IMap as much as
-                            // `interface IMap {` does: the name ends at any
-                            // non-identifier character.
-                            let declares = ["class", "interface", "enum", "typedef", "abstract"]
-                                .iter()
-                                .any(|kw| {
-                                    let needle = format!("{kw} {sub_type}");
-                                    content.match_indices(&needle).any(|(i, m)| {
-                                        content[i + m.len()..]
-                                            .chars()
-                                            .next()
-                                            .map_or(true, |c| !(c.is_alphanumeric() || c == '_'))
-                                    })
-                                });
+                            let declares =
+                                Self::declaring_keyword(&content, sub_type).is_some();
                             if declares {
                                 if check_loaded && self.is_file_loaded(&full_path) {
                                     return None;
@@ -338,6 +326,33 @@ impl NamespaceResolver {
         }
 
         None
+    }
+
+    /// Keyword declaring `name` in `content`: `interface IMap<K, V> {` declares
+    /// IMap as much as `interface IMap {` does, so the name ends at any
+    /// non-identifier character.
+    fn declaring_keyword(content: &str, name: &str) -> Option<&'static str> {
+        ["class", "interface", "enum", "typedef", "abstract"]
+            .into_iter()
+            .find(|kw| {
+                let needle = format!("{kw} {name}");
+                content.match_indices(&needle).any(|(i, m)| {
+                    content[i + m.len()..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !(c.is_alphanumeric() || c == '_'))
+                })
+            })
+    }
+
+    /// The keyword declaring the type at `qualified_path`, read from its source,
+    /// so an import can mint a placeholder of the right kind before the module
+    /// is lowered.
+    pub fn declared_kind(&self, qualified_path: &str) -> Option<&'static str> {
+        let name = qualified_path.rsplit('.').next()?;
+        let file = self.resolve_qualified_path_to_file_force(qualified_path)?;
+        let content = std::fs::read_to_string(file).ok()?;
+        Self::declaring_keyword(&content, name)
     }
 
     /// Resolve a QualifiedPath to a filesystem path
