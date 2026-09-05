@@ -72,6 +72,26 @@ impl<'a> HirToMirContext<'a> {
                 false
             };
 
+            if std::env::var_os("RAYZOR_IFACE_DIAG").is_some() && *is_method && !args.is_empty() {
+                let recv = self.resolve_through_aliases(args[0].ty);
+                let kind = self.type_table.get(recv).map(|t| format!("{:?}", t.kind)).unwrap_or_default();
+                let sym_kind = match self.type_table.get(recv).map(|t| &t.kind) {
+                    Some(TypeKind::Class { symbol_id, .. }) => {
+                        self.symbol_table.get_symbol(*symbol_id).map(|s| format!("{:?}", s.kind))
+                    }
+                    _ => None,
+                };
+                let callee = self
+                    .symbol_table
+                    .get_symbol(*symbol)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .unwrap_or("?");
+                eprintln!(
+                    "[resolved-call] callee={callee} recv_kind={} sym_kind={sym_kind:?} special={receiver_needs_special_dispatch}",
+                    kind.chars().take(140).collect::<String>()
+                );
+            }
+
             // An imported generic instance method resolves to a cross-module
             // forward-ref stub whose FunctionKind is not UserDefined, and the
             // fallback path below does not attach the receiver's type_args, so

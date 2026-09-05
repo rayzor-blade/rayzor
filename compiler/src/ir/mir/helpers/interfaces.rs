@@ -138,6 +138,32 @@ impl<'a> HirToMirContext<'a> {
         // `external_function_map` — the per-context `function_map` only has
         // functions lowered in *this* file.
         for (i, method_sym_opt) in vtable.iter().enumerate() {
+            // A mapped extern's method is a runtime mapping, not a function to
+            // point at: the slot gets an adapter over the mapping.
+            let mapped = class_fqn.as_deref().and_then(|fqn| {
+                let mname = iface_method_names.get(i)?.as_deref()?;
+                let key = self.stdlib_mapping.class_key(fqn)?;
+                let (sig, call) = self.stdlib_mapping.find_by_name(key, mname)?;
+                (!sig.is_static && !sig.is_constructor)
+                    .then(|| (fqn.to_string(), mname.to_string(), call.runtime_name, call.param_count))
+            });
+            if let Some((fqn, mname, runtime_name, argc)) = mapped {
+                if let Some(thunk) =
+                    self.ensure_extern_mapped_dispatch_thunk(&fqn, &mname, runtime_name, argc)
+                {
+                    let fn_ref = self.builder.build_function_ref(thunk)?;
+                    let offset_val = self
+                        .builder
+                        .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
+                    let slot_ptr = self.builder.build_ptr_add(
+                        fat_ptr,
+                        offset_val,
+                        IrType::Ptr(Box::new(IrType::U8)),
+                    )?;
+                    self.builder.build_store(slot_ptr, fn_ref);
+                    continue;
+                }
+            }
             // Resolve this slot's function IrFunctionId. Prefer the SymbolId
             // path (when the method symbol resolved), then fall back to the
             // FQN-keyed name lookup for imported classes whose method SymbolIds
@@ -348,10 +374,9 @@ impl<'a> HirToMirContext<'a> {
             if self.interface_wrapped_args.contains(&value_reg) {
                 return (value_reg, false);
             }
-            if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
-                return (value_reg, false);
-            }
-
+            // No (class, iface) vtable here does not mean no implementation: an
+            // imported class has none in this context, and the builder resolves
+            // its slots by name.
             return match self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym) {
                 Some(wrapped) => (wrapped, true),
                 None => (value_reg, false),

@@ -35,6 +35,7 @@ mod exhaustiveness;
 mod globals;
 mod interfaces;
 mod iter_handle;
+pub(crate) use iter_handle::IterSource;
 mod patterns;
 mod reflection;
 mod signatures;

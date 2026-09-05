@@ -151,6 +151,215 @@ impl<'a> HirToMirContext<'a> {
         Some(thunk_id)
     }
 
+    /// Interface slot for a method of an extern map that is a runtime mapping
+    /// rather than a compiled function: an adapter with the slot's
+    /// `(env, this, args…)` shape that converts the erased arguments for the
+    /// runtime, calls it, and shapes the result as the interface promises.
+    /// Values travel as erased bits: `get` answers a box (null when absent),
+    /// `keys`/`iterator` an iteration handle. `None` for a method the adapter
+    /// does not know, leaving the caller's fallback.
+    pub(crate) fn ensure_extern_mapped_dispatch_thunk(
+        &mut self,
+        class_fqn: &str,
+        method: &str,
+        runtime_name: &'static str,
+        param_count: usize,
+    ) -> Option<IrFunctionId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let ret_ir = match method {
+            "get" | "keys" | "iterator" => ptr_u8.clone(),
+            "set" | "clear" => IrType::Void,
+            "exists" | "remove" => IrType::Bool,
+            "toString" => IrType::String,
+            _ => return None,
+        };
+        let sanitized: String = format!("{class_fqn}.{method}")
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let thunk_name = format!("__vtable_dispatch_thunk__{sanitized}");
+        for (func_id, func) in &self.builder.module.functions {
+            if func.name == thunk_name {
+                return Some(*func_id);
+            }
+        }
+        // The runtime keys a StringMap by string pointer, an IntMap by i64 and
+        // an ObjectMap by the object's address.
+        let key_ir = if class_fqn.ends_with("StringMap") {
+            IrType::String
+        } else if class_fqn.ends_with("IntMap") {
+            IrType::I64
+        } else {
+            IrType::U64
+        };
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8.clone())
+            .param("this".to_string(), ptr_void.clone())
+            .returns(ret_ir.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for i in 0..param_count {
+            sig_builder = sig_builder.param(format!("a{i}"), IrType::I64);
+        }
+        let thunk_sig = sig_builder.build();
+        let thunk_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        let saved_strict_move_locals = self.strict_move_locals.clone();
+        self.symbol_map.clear();
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
+        self.strict_move_locals.clear();
+        self.reset_move_recorder();
+        let thunk_id = self
+            .builder
+            .start_function(thunk_symbol, thunk_name, thunk_sig);
+        let restore = |ctx: &mut Self| {
+            ctx.check_move_flow();
+            ctx.builder.finish_function();
+            ctx.builder.current_function = saved_current_function;
+            ctx.builder.current_block = saved_current_block;
+            ctx.symbol_map = saved_symbol_map.clone();
+            ctx.strict_move_locals = saved_strict_move_locals.clone();
+        };
+        let mut params = Vec::with_capacity(param_count + 1);
+        for i in 1..=param_count + 1 {
+            match self.builder.current_function().and_then(|f| f.get_param_reg(i)) {
+                Some(reg) => params.push(reg),
+                None => {
+                    restore(self);
+                    return None;
+                }
+            }
+        }
+        let body = (|| -> Option<Option<IrId>> {
+            let this = self.builder.build_bitcast(params[0], ptr_u8.clone())?;
+            let key = |ctx: &mut Self, raw: IrId| -> Option<IrId> {
+                match &key_ir {
+                    IrType::String => ctx.builder.build_cast(raw, IrType::I64, IrType::String),
+                    IrType::U64 => ctx.builder.build_bitcast(raw, IrType::U64),
+                    _ => Some(raw),
+                }
+            };
+            match method {
+                "get" => {
+                    let k = key(self, params[1])?;
+                    let get_fn = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone(), key_ir.clone()],
+                        IrType::U64,
+                    );
+                    let raw = self.builder.build_call_direct(get_fn, vec![this, k], IrType::U64)?;
+                    let exists_name: &'static str = match class_fqn.rsplit('.').next() {
+                        Some("StringMap") => "haxe_stringmap_exists",
+                        Some("IntMap") => "haxe_intmap_exists",
+                        _ => "haxe_objectmap_exists",
+                    };
+                    let exists_fn = self.get_or_register_extern_function(
+                        exists_name,
+                        vec![ptr_u8.clone(), key_ir.clone()],
+                        IrType::Bool,
+                    );
+                    let present =
+                        self.builder.build_call_direct(exists_fn, vec![this, k], IrType::Bool)?;
+                    let box_block = self.builder.create_block()?;
+                    let null_block = self.builder.create_block()?;
+                    let join_block = self.builder.create_block()?;
+                    self.builder.build_cond_branch(present, box_block, null_block)?;
+                    self.builder.switch_to_block(box_block);
+                    let bits = self.builder.build_cast(raw, IrType::U64, IrType::I64)?;
+                    let box_fn = self.get_or_register_extern_function(
+                        "haxe_box_int_ptr",
+                        vec![IrType::I64],
+                        ptr_u8.clone(),
+                    );
+                    let boxed = self.builder.build_call_direct(box_fn, vec![bits], ptr_u8.clone())?;
+                    self.builder.build_branch(join_block)?;
+                    self.builder.switch_to_block(null_block);
+                    let zero = self.builder.build_const(IrValue::I64(0))?;
+                    let null = self.builder.build_bitcast(zero, ptr_u8.clone())?;
+                    self.builder.build_branch(join_block)?;
+                    self.builder.switch_to_block(join_block);
+                    let result = self.builder.build_phi(join_block, ptr_u8.clone())?;
+                    self.builder.add_phi_incoming(join_block, result, box_block, boxed);
+                    self.builder.add_phi_incoming(join_block, result, null_block, null);
+                    Some(Some(result))
+                }
+                "set" => {
+                    let k = key(self, params[1])?;
+                    let v = self.builder.build_bitcast(params[2], IrType::U64)?;
+                    let set_fn = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone(), key_ir.clone(), IrType::U64],
+                        IrType::Void,
+                    );
+                    self.builder.build_call_direct(set_fn, vec![this, k, v], IrType::Void);
+                    Some(None)
+                }
+                "exists" | "remove" => {
+                    let k = key(self, params[1])?;
+                    let f = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone(), key_ir.clone()],
+                        IrType::Bool,
+                    );
+                    Some(Some(self.builder.build_call_direct(f, vec![this, k], IrType::Bool)?))
+                }
+                "clear" => {
+                    let f = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone()],
+                        IrType::Void,
+                    );
+                    self.builder.build_call_direct(f, vec![this], IrType::Void);
+                    Some(None)
+                }
+                "toString" => {
+                    let f = self.get_or_register_extern_function(
+                        runtime_name,
+                        vec![ptr_u8.clone()],
+                        IrType::String,
+                    );
+                    Some(Some(self.builder.build_call_direct(f, vec![this], IrType::String)?))
+                }
+                _ => {
+                    // keys / iterator: the mapped wrapper's ArrayIterator, as a handle.
+                    let wrapper = self.register_stdlib_mir_forward_ref(
+                        runtime_name,
+                        vec![ptr_void.clone()],
+                        ptr_void.clone(),
+                    );
+                    let this_v = self.builder.build_bitcast(this, ptr_void.clone())?;
+                    let it = self
+                        .builder
+                        .build_call_direct(wrapper, vec![this_v], ptr_void.clone())?;
+                    let source = crate::ir::mir::helpers::IterSource::StdlibIterator {
+                        has_next: "ArrayIterator_hasNext".to_string(),
+                        has_next_is_mir: true,
+                        next: "ArrayIterator_next".to_string(),
+                        next_is_mir: true,
+                    };
+                    Some(Some(self.build_iter_handle(it, &source)?))
+                }
+            }
+        })();
+        match body {
+            Some(result) => {
+                self.builder.build_return(result);
+                restore(self);
+                Some(thunk_id)
+            }
+            None => {
+                self.builder.build_return(None);
+                restore(self);
+                None
+            }
+        }
+    }
+
     /// Generate (or return cached) a virtual/interface dispatch thunk.
     ///
     /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
