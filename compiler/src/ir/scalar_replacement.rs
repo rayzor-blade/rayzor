@@ -541,12 +541,7 @@ fn try_build_phi_candidate(
     // Check escape conditions and collect field stores/loads
     // Use BTreeMap for deterministic iteration order
     let mut field_types: BTreeMap<usize, IrType> = BTreeMap::new();
-    let mut malloc_field_stores: BTreeMap<IrId, BTreeMap<usize, IrId>> = BTreeMap::new();
     let mut free_locations: Vec<(IrBlockId, usize)> = Vec::new();
-
-    for malloc_id in malloc_tracked.keys() {
-        malloc_field_stores.insert(*malloc_id, BTreeMap::new());
-    }
 
     for &(block_id, block) in &sorted {
         // Check phi nodes for escapes (other than the one we're analyzing)
@@ -594,18 +589,6 @@ fn try_build_phi_candidate(
                         }
 
                         // Find which malloc this store belongs to
-                        for (malloc_id, tracked) in &malloc_tracked {
-                            if tracked.contains(ptr) {
-                                if let Some(&field_idx) =
-                                    malloc_gep_maps.get(malloc_id).unwrap().get(ptr)
-                                {
-                                    malloc_field_stores
-                                        .get_mut(malloc_id)
-                                        .unwrap()
-                                        .insert(field_idx, *value);
-                                }
-                            }
-                        }
                     } else if all_tracked.contains(value) {
                         return None; // Escapes via store
                     }
@@ -669,7 +652,15 @@ fn try_build_phi_candidate(
                     return None;
                 }
 
-                _ => {}
+                // Anything else that reads the object (a StoreGlobal, an
+                // indirect call) lets it escape; an alias definition (gep,
+                // cast) is what the tracking loop already followed.
+                other => {
+                    let defines_alias = other.dest().is_some_and(|d| all_tracked.contains(&d));
+                    if !defines_alias && other.uses().iter().any(|u| all_tracked.contains(u)) {
+                        return None;
+                    }
+                }
             }
         }
 
@@ -737,8 +728,20 @@ fn try_build_phi_candidate(
         }
     }
 
-    // Verify each malloc has stores for all fields that are loaded from the phi
-    for (malloc_id, stores) in &malloc_field_stores {
+    // Each edge's seed is the store that actually reaches it, not the last
+    // store in block-id order: the inliner hands a later call's body a lower
+    // block id than an earlier call's continuation, so id order can put the
+    // zero-init after the constructor's stores.
+    let mut incoming_allocs: Vec<(IrBlockId, IrId, BTreeMap<usize, IrId>)> = Vec::new();
+    for (src_block, malloc_id) in incoming_mallocs {
+        let (malloc_block, _) = *malloc_locations.get(malloc_id)?;
+        let field_ptrs = malloc_gep_maps.get(malloc_id)?;
+        let stores = reaching_field_stores(cfg, malloc_block, *src_block, field_ptrs)?;
+        incoming_allocs.push((*src_block, *malloc_id, stores));
+    }
+
+    // Verify each edge has stores for all fields that are loaded from the phi
+    for (_, _, stores) in &incoming_allocs {
         for field_idx in phi_gep_map.values() {
             if !stores.contains_key(field_idx) {
                 return None; // Missing field store
@@ -806,14 +809,6 @@ fn try_build_phi_candidate(
         }
     }
 
-    // Build incoming_allocs
-    let mut incoming_allocs: Vec<(IrBlockId, IrId, BTreeMap<usize, IrId>)> = Vec::new();
-    for (src_block, malloc_id) in incoming_mallocs {
-        let stores = malloc_field_stores.get(malloc_id).unwrap().clone();
-        incoming_allocs.push((*src_block, *malloc_id, stores));
-    }
-
-    // Collect alloc locations
     let alloc_locations: Vec<(IrBlockId, usize)> = incoming_mallocs
         .iter()
         .filter_map(|(_, malloc_id)| malloc_locations.get(malloc_id).copied())
@@ -832,6 +827,41 @@ fn try_build_phi_candidate(
 }
 
 /// Apply phi-aware SRA transformation.
+/// The stores to one allocation's fields that reach the phi edge leaving
+/// `src_block`, in execution order along the unconditional chain from the
+/// allocating block. A branch on the way means no single store reaches the
+/// edge, and the candidate is refused rather than seeded wrongly.
+fn reaching_field_stores(
+    cfg: &super::blocks::IrControlFlowGraph,
+    malloc_block: IrBlockId,
+    src_block: IrBlockId,
+    field_ptrs: &BTreeMap<IrId, usize>,
+) -> Option<BTreeMap<usize, IrId>> {
+    let mut stores = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut cur = malloc_block;
+    loop {
+        if !seen.insert(cur) {
+            return None;
+        }
+        let block = cfg.blocks.get(&cur)?;
+        for inst in &block.instructions {
+            if let IrInstruction::Store { ptr, value, .. } = inst {
+                if let Some(&idx) = field_ptrs.get(ptr) {
+                    stores.insert(idx, *value);
+                }
+            }
+        }
+        if cur == src_block {
+            return Some(stores);
+        }
+        match &block.terminator {
+            super::blocks::IrTerminator::Branch { target } => cur = *target,
+            _ => return None,
+        }
+    }
+}
+
 fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usize {
     let mut eliminated = 0;
     let sorted = sorted_blocks(&function.cfg);
