@@ -1012,6 +1012,8 @@ impl<'a> AstLowering<'a> {
                 // Handle block expressions with error recovery
                 let mut statements = Vec::new();
                 let block_scope = self.context.enter_scope(ScopeKind::Block);
+                let map_uses = self.scan_map_ctor_uses(block_elements);
+                self.map_first_uses.push(map_uses);
 
                 for elem in block_elements {
                     match elem {
@@ -1256,7 +1258,13 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Return(expr) => {
                 let return_expr = if let Some(expr) = expr {
-                    Some(Box::new(self.lower_value_expression(expr)?))
+                    // A returned bare `new Map()` takes its type args from the
+                    // declared return type, as a Var annotation supplies them.
+                    let prev_hint = self.context.expected_new_type_hint;
+                    self.context.expected_new_type_hint = self.context.expected_return_type;
+                    let lowered = self.lower_value_expression(expr);
+                    self.context.expected_new_type_hint = prev_hint;
+                    Some(Box::new(lowered?))
                 } else {
                     None
                 };
@@ -1563,6 +1571,7 @@ impl<'a> AstLowering<'a> {
                 };
 
                 // Exit the function scope
+                self.map_first_uses.pop();
                 self.context.exit_scope();
 
                 TypedExpressionKind::FunctionLiteral {
@@ -1823,7 +1832,12 @@ impl<'a> AstLowering<'a> {
                 // declarations shouldn't leak their hint.
                 let initializer = if let Some(init_expr) = expr {
                     let prev_hint = self.context.expected_new_type_hint;
-                    self.context.expected_new_type_hint = declared_type;
+                    let map_hint = if declared_type.is_none() {
+                        self.map_ctor_hint(name, init_expr)
+                    } else {
+                        None
+                    };
+                    self.context.expected_new_type_hint = declared_type.or(map_hint);
                     // The annotation is also the expected type of the whole
                     // initializer — lets a bare enum-variant identifier
                     // (`var v:ColorA = Red`) disambiguate against same-named

@@ -99,8 +99,18 @@ impl<'a> AstLowering<'a> {
                     expr,
                 } => {
                     // Lower initializer first so we can infer type from it
+                    // A field's declared type seeds a bare `new Map()` initializer's
+                    // type args, as a Var annotation does.
+                    let hint = match type_hint {
+                        Some(th) => Some(self.lower_type(th)?),
+                        None => None,
+                    };
                     let initializer = if let Some(expr) = expr {
-                        Some(self.lower_expression(expr)?)
+                        let prev_hint = self.context.expected_new_type_hint;
+                        self.context.expected_new_type_hint = hint;
+                        let lowered = self.lower_expression(expr);
+                        self.context.expected_new_type_hint = prev_hint;
+                        Some(lowered?)
                     } else {
                         None
                     };
@@ -134,8 +144,18 @@ impl<'a> AstLowering<'a> {
                     expr,
                 } => {
                     // Lower initializer first so we can infer type from it
+                    // A field's declared type seeds a bare `new Map()` initializer's
+                    // type args, as a Var annotation does.
+                    let hint = match type_hint {
+                        Some(th) => Some(self.lower_type(th)?),
+                        None => None,
+                    };
                     let initializer = if let Some(expr) = expr {
-                        Some(self.lower_expression(expr)?)
+                        let prev_hint = self.context.expected_new_type_hint;
+                        self.context.expected_new_type_hint = hint;
+                        let lowered = self.lower_expression(expr);
+                        self.context.expected_new_type_hint = prev_hint;
+                        Some(lowered?)
                     } else {
                         None
                     };

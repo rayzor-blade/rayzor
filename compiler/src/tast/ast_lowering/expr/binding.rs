@@ -351,3 +351,172 @@ impl<'a> AstLowering<'a> {
         })
     }
 }
+
+impl<'a> AstLowering<'a> {
+    /// For each unannotated `var x = new Map()` in `elements`, the first later
+    /// `x.set(k, v)` or `x[k] = v`, whose operands type the map's K and V.
+    pub(crate) fn scan_map_ctor_uses(
+        &self,
+        elements: &[BlockElement],
+    ) -> BTreeMap<String, (Expr, Expr)> {
+        let mut uses = BTreeMap::new();
+        for (i, elem) in elements.iter().enumerate() {
+            let BlockElement::Expr(e) = elem else { continue };
+            let ExprKind::Var {
+                name,
+                type_hint: None,
+                expr: Some(init),
+            } = &e.kind
+            else {
+                continue;
+            };
+            if !is_bare_new_map(init) {
+                continue;
+            }
+            let found = elements[i + 1..].iter().find_map(|later| match later {
+                BlockElement::Expr(le) => first_map_use(le, name),
+                _ => None,
+            });
+            if let Some((k, v)) = found {
+                uses.insert(name.clone(), (k.clone(), v.clone()));
+            }
+        }
+        uses
+    }
+
+    /// The concrete map an unannotated `var x = new Map()` should construct,
+    /// read off its first `set`; `None` leaves the declaration as it was.
+    pub(crate) fn map_ctor_hint(&mut self, var_name: &str, init: &Expr) -> Option<TypeId> {
+        if !is_bare_new_map(init) {
+            return None;
+        }
+        let (k, v) = self.map_first_uses.last()?.get(var_name)?.clone();
+        let kt = self.peek_map_operand_type(&k)?;
+        let vt = self.peek_map_operand_type(&v)?;
+        self.resolve_multitype_map_to_concrete(&[kt, vt])
+    }
+
+    fn peek_map_operand_type(&mut self, e: &Expr) -> Option<TypeId> {
+        let ty = self.peek_ast_expr_type(e).or_else(|| {
+            matches!(
+                &e.kind,
+                ExprKind::Call { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::New { .. }
+            )
+            .then(|| self.lower_expression(e).ok().map(|te| te.expr_type))
+            .flatten()
+        })?;
+        let tt = self.context.type_table.borrow();
+        let concrete = !matches!(
+            tt.get(ty).map(|t| &t.kind),
+            None | Some(
+                crate::tast::core::TypeKind::Dynamic
+                    | crate::tast::core::TypeKind::Unknown
+                    | crate::tast::core::TypeKind::TypeParameter { .. }
+                    | crate::tast::core::TypeKind::Placeholder { .. }
+            )
+        );
+        concrete.then_some(ty)
+    }
+}
+
+fn is_bare_new_map(e: &Expr) -> bool {
+    matches!(
+        &e.kind,
+        ExprKind::New { type_path, params, args }
+            if type_path.name == "Map" && params.is_empty() && args.is_empty()
+    )
+}
+
+/// The first `name.set(k, v)` or `name[k] = v` in `e`, in source order.
+fn first_map_use<'e>(e: &'e Expr, name: &str) -> Option<(&'e Expr, &'e Expr)> {
+    use parser::AssignOp;
+    let is_var = |x: &Expr| matches!(&x.kind, ExprKind::Ident(n) if n == name);
+    match &e.kind {
+        ExprKind::Call { expr, args } => {
+            if let ExprKind::Field { expr: recv, field, .. } = &expr.kind {
+                if field == "set" && args.len() == 2 && is_var(recv) {
+                    return Some((&args[0], &args[1]));
+                }
+            }
+            first_map_use(expr, name).or_else(|| args.iter().find_map(|a| first_map_use(a, name)))
+        }
+        ExprKind::Assign { left, op, right } => {
+            if let ExprKind::Index { expr: recv, index } = &left.kind {
+                if matches!(op, AssignOp::Assign) && is_var(recv) {
+                    return Some((index, right));
+                }
+            }
+            first_map_use(left, name).or_else(|| first_map_use(right, name))
+        }
+        ExprKind::Field { expr, .. }
+        | ExprKind::Unary { expr, .. }
+        | ExprKind::Cast { expr, .. }
+        | ExprKind::TypeCheck { expr, .. }
+        | ExprKind::Untyped(expr)
+        | ExprKind::Meta { expr, .. }
+        | ExprKind::Paren(expr)
+        | ExprKind::Inline(expr)
+        | ExprKind::Throw(expr) => first_map_use(expr, name),
+        ExprKind::Index { expr, index } => {
+            first_map_use(expr, name).or_else(|| first_map_use(index, name))
+        }
+        ExprKind::New { args, .. } | ExprKind::Array(args) | ExprKind::Tuple(args) => {
+            args.iter().find_map(|a| first_map_use(a, name))
+        }
+        ExprKind::Binary { left, right, .. } => {
+            first_map_use(left, name).or_else(|| first_map_use(right, name))
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => first_map_use(cond, name)
+            .or_else(|| first_map_use(then_expr, name))
+            .or_else(|| first_map_use(else_expr, name)),
+        ExprKind::Object(fields) => fields.iter().find_map(|f| first_map_use(&f.expr, name)),
+        ExprKind::Block(elements) => elements.iter().find_map(|el| match el {
+            BlockElement::Expr(x) => first_map_use(x, name),
+            _ => None,
+        }),
+        ExprKind::Var { expr, .. } | ExprKind::Final { expr, .. } | ExprKind::Return(expr) => {
+            expr.as_deref().and_then(|x| first_map_use(x, name))
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => first_map_use(cond, name)
+            .or_else(|| first_map_use(then_branch, name))
+            .or_else(|| else_branch.as_deref().and_then(|x| first_map_use(x, name))),
+        ExprKind::Switch {
+            expr,
+            cases,
+            default,
+        } => first_map_use(expr, name)
+            .or_else(|| cases.iter().find_map(|c| first_map_use(&c.body, name)))
+            .or_else(|| default.as_deref().and_then(|x| first_map_use(x, name))),
+        ExprKind::For { iter, body, .. } => {
+            first_map_use(iter, name).or_else(|| first_map_use(body, name))
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            first_map_use(cond, name).or_else(|| first_map_use(body, name))
+        }
+        ExprKind::Try {
+            expr,
+            catches,
+            finally_block,
+        } => first_map_use(expr, name)
+            .or_else(|| catches.iter().find_map(|c| first_map_use(&c.body, name)))
+            .or_else(|| finally_block.as_deref().and_then(|x| first_map_use(x, name))),
+        ExprKind::Function(f) => f.body.as_deref().and_then(|x| first_map_use(x, name)),
+        ExprKind::Arrow { expr, .. } => first_map_use(expr, name),
+        ExprKind::ArrayComprehension { expr, .. } => first_map_use(expr, name),
+        ExprKind::MapComprehension { key, value, .. } => {
+            first_map_use(key, name).or_else(|| first_map_use(value, name))
+        }
+        _ => None,
+    }
+}

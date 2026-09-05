@@ -47,6 +47,7 @@ impl<'a> AstLowering<'a> {
             skip_pre_registration: false,
             collected_errors: Vec::new(),
             empty_array_inferred: std::collections::BTreeMap::new(),
+            map_first_uses: Vec::new(),
             empty_array_used_uncertain: std::collections::BTreeSet::new(),
             using_modules: Vec::new(),
             pending_usings: Vec::new(),
