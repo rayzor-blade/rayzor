@@ -9,7 +9,7 @@
 //! - Closure calls where the function pointer is a known constant
 
 use super::optimization::{OptimizationPass, OptimizationResult};
-use super::{IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrType, IrValue};
+use super::{IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrValue, OwnershipMode};
 use std::collections::BTreeMap;
 
 pub struct DevirtualizationPass;
@@ -40,17 +40,17 @@ impl OptimizationPass for DevirtualizationPass {
         let mut result = OptimizationResult::unchanged();
 
         // Collect all function names → IrFunctionId for resolving function refs
-        let func_name_to_id: BTreeMap<String, IrFunctionId> = module
+        let param_counts: BTreeMap<IrFunctionId, usize> = module
             .functions
             .iter()
-            .map(|(&id, f)| (f.name.clone(), id))
+            .map(|(&id, f)| (id, f.signature.parameters.len()))
             .collect();
 
         let func_ids: Vec<IrFunctionId> = module.functions.keys().copied().collect();
         for func_id in func_ids {
             let r = devirtualize_function(
                 module.functions.get_mut(&func_id).unwrap(),
-                &func_name_to_id,
+                &param_counts,
             );
             result = result.combine(r);
         }
@@ -61,7 +61,7 @@ impl OptimizationPass for DevirtualizationPass {
 
 fn devirtualize_function(
     function: &mut IrFunction,
-    _func_name_to_id: &BTreeMap<String, IrFunctionId>,
+    param_counts: &BTreeMap<IrFunctionId, usize>,
 ) -> OptimizationResult {
     // Phase 1: Analyze — build value origin map across all blocks
     let mut origins: BTreeMap<IrId, ValueOrigin> = BTreeMap::new();
@@ -166,43 +166,79 @@ fn devirtualize_function(
         }
     }
 
-    // Phase 2: Transform — replace CallIndirect with CallDirect where possible
+    // Phase 2: Transform — replace CallIndirect with CallDirect where possible.
+    // An indirect call passes the closure's env first, and a `fn_ref` closure's
+    // env is null, so a callee declaring that extra leading parameter gets a
+    // null prepended. Any other arity mismatch stays indirect.
     let mut devirtualized = 0;
 
     for &block_id in &block_ids {
-        let block = function.cfg.blocks.get_mut(&block_id).unwrap();
-        for inst in &mut block.instructions {
-            if let IrInstruction::CallIndirect {
-                dest,
-                func_ptr,
-                args,
-                signature,
-                arg_ownership,
-                is_tail_call,
-            } = inst
-            {
-                // Check if func_ptr resolves to a known function
-                if let Some(ValueOrigin::FunctionRef(known_func_id)) = origins.get(func_ptr) {
-                    let func_id = *known_func_id;
-                    let dest_val = *dest;
-                    let args_val = args.clone();
-                    let ownership_val = arg_ownership.clone();
-                    let type_args = Vec::new();
-                    let tail = *is_tail_call;
-
-                    *inst = IrInstruction::CallDirect {
-                        dest: dest_val,
-                        func_id: func_id,
-                        args: args_val,
-                        arg_ownership: ownership_val,
-                        type_args,
-                        is_tail_call: tail,
-                    };
-
-                    devirtualized += 1;
+        let old = std::mem::take(
+            &mut function
+                .cfg
+                .blocks
+                .get_mut(&block_id)
+                .unwrap()
+                .instructions,
+        );
+        let mut rewritten = Vec::with_capacity(old.len());
+        for inst in old {
+            let (dest, func_ptr, args, arg_ownership, tail) = match &inst {
+                IrInstruction::CallIndirect {
+                    dest,
+                    func_ptr,
+                    args,
+                    arg_ownership,
+                    is_tail_call,
+                    ..
+                } => (
+                    *dest,
+                    *func_ptr,
+                    args.clone(),
+                    arg_ownership.clone(),
+                    *is_tail_call,
+                ),
+                _ => {
+                    rewritten.push(inst);
+                    continue;
+                }
+            };
+            let Some(ValueOrigin::FunctionRef(func_id)) = origins.get(&func_ptr) else {
+                rewritten.push(inst);
+                continue;
+            };
+            let func_id = *func_id;
+            let mut args = args;
+            let mut arg_ownership = arg_ownership;
+            match param_counts.get(&func_id).copied() {
+                Some(n) if n == args.len() + 1 => {
+                    let env = function.alloc_reg();
+                    rewritten.push(IrInstruction::Const {
+                        dest: env,
+                        value: IrValue::Null,
+                    });
+                    args.insert(0, env);
+                    if !arg_ownership.is_empty() {
+                        arg_ownership.insert(0, OwnershipMode::BorrowImmutable);
+                    }
+                }
+                Some(n) if n == args.len() => {}
+                _ => {
+                    rewritten.push(inst);
+                    continue;
                 }
             }
+            rewritten.push(IrInstruction::CallDirect {
+                dest,
+                func_id,
+                args,
+                arg_ownership,
+                type_args: Vec::new(),
+                is_tail_call: tail,
+            });
+            devirtualized += 1;
         }
+        function.cfg.blocks.get_mut(&block_id).unwrap().instructions = rewritten;
     }
 
     if devirtualized > 0 {
