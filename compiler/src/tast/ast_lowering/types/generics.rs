@@ -151,6 +151,53 @@ impl<'a> AstLowering<'a> {
         current
     }
 
+    /// A `Map<K,V>` whose key is a type parameter can never pick a container:
+    /// Haxe forbids constructing one there, but such a map is still held and
+    /// dispatched on, and the abstract's own methods already go through its
+    /// underlying `IMap<K,V>`. Typing the slot as that interface makes the
+    /// value a fat pointer, which is what those methods read.
+    pub(crate) fn multitype_map_underlying_imap(&self, type_args: &[TypeId]) -> Option<TypeId> {
+        if type_args.len() != 2 {
+            return None;
+        }
+        let key_repr = self.map_key_repr(type_args[0]);
+        let key_is_param = matches!(
+            self.context.type_table.borrow().get(key_repr).map(|t| &t.kind),
+            Some(crate::tast::core::TypeKind::TypeParameter { .. })
+        );
+        if !key_is_param {
+            return None;
+        }
+        let imap = self
+            .context
+            .string_interner
+            .intern("haxe.Constraints.IMap");
+        let bare = self.context.string_interner.intern("IMap");
+        let sym = self
+            .context
+            .symbol_table
+            .resolve_qualified_name(imap)
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .lookup_symbol(ScopeId::first(), bare)
+                    .map(|s| s.id)
+            })
+            .filter(|id| {
+                self.context
+                    .symbol_table
+                    .get_symbol(*id)
+                    .map(|s| matches!(s.kind, crate::tast::SymbolKind::Interface))
+                    .unwrap_or(false)
+            })?;
+        Some(self.context.type_table.borrow_mut().create_type(
+            crate::tast::core::TypeKind::Interface {
+                symbol_id: sym,
+                type_args: type_args.to_vec(),
+            },
+        ))
+    }
+
     pub(crate) fn resolve_multitype_map_to_concrete(&self, type_args: &[TypeId]) -> Option<TypeId> {
         if type_args.len() != 2 {
             return None;

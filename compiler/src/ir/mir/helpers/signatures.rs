@@ -601,6 +601,7 @@ impl<'a> HirToMirContext<'a> {
                         // when the typechecker promoted the arg to the interface.
                         let class_sym = self
                             .get_class_symbol(resolved_arg)
+                            .or_else(|| self.map_container_class_symbol(resolved_arg))
                             .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
                         if let Some(class_sym) = class_sym {
                             if let Some(wrapped) =

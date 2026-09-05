@@ -218,6 +218,11 @@ impl<'a> AstLowering<'a> {
                                 {
                                     return Ok(resolved);
                                 }
+                                if let Some(imap) =
+                                    self.multitype_map_underlying_imap(&type_arg_ids)
+                                {
+                                    return Ok(imap);
+                                }
                             }
                             // Check if this class already has a type from pre-registration
                             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
@@ -277,6 +282,11 @@ impl<'a> AstLowering<'a> {
                                 {
                                     return Ok(resolved);
                                 }
+                                if let Some(imap) =
+                                    self.multitype_map_underlying_imap(&type_arg_ids)
+                                {
+                                    return Ok(imap);
+                                }
                             }
                             // For type aliases, we need to get the target type
                             let target_type = type_resolution::resolve_type_alias(
@@ -313,6 +323,11 @@ impl<'a> AstLowering<'a> {
                                     self.resolve_multitype_map_to_concrete(&type_arg_ids)
                                 {
                                     return Ok(resolved);
+                                }
+                                if let Some(imap) =
+                                    self.multitype_map_underlying_imap(&type_arg_ids)
+                                {
+                                    return Ok(imap);
                                 }
                             }
                             // Reuse the type the declaration interned, which

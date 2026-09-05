@@ -1156,6 +1156,22 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// The container class a `Map<K,V>` value lowers to, chosen by its key the
+    /// way the typer chooses one. A map literal's type names no class of its
+    /// own, so a wrap site has nothing else to resolve.
+    pub(crate) fn map_container_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let key_type = match self.type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Map { key_type, .. }) => *key_type,
+            _ => return None,
+        };
+        let name = match self.type_table.get(key_type).map(|t| &t.kind) {
+            Some(TypeKind::Int) | Some(TypeKind::Bool) => "haxe.ds.IntMap",
+            Some(TypeKind::String) => "haxe.ds.StringMap",
+            _ => "haxe.ds.ObjectMap",
+        };
+        self.lookup_class_symbol_by_name(name)
+    }
+
     pub(crate) fn lookup_class_symbol_by_name(&self, name: &str) -> Option<SymbolId> {
         // Accept a bare or qualified name; compare against both the symbol's
         // qualified name and its bare name, and also the trailing segment of a
