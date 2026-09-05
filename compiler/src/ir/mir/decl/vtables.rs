@@ -22,6 +22,135 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// A mapped static method taken as a value: a function shaped like the
+    /// reference's own type that boxes its arguments for the runtime's
+    /// `Dynamic` formals and calls the mapping, so `a.sort(Reflect.compare)`
+    /// gets the comparator a user static would be. `None` when the symbol
+    /// names no such mapping.
+    pub(crate) fn mapped_static_function_ref(
+        &mut self,
+        symbol: SymbolId,
+        ref_ty: TypeId,
+    ) -> Option<IrFunctionId> {
+        let (runtime_name, param_count) = {
+            let sym = self.symbol_table.get_symbol(symbol)?;
+            if sym.kind != crate::tast::SymbolKind::Function {
+                return None;
+            }
+            let qname = sym
+                .qualified_name
+                .and_then(|n| self.string_interner.get(n))?
+                .to_string();
+            let (class_name, method) = qname.rsplit_once('.')?;
+            let key = self.stdlib_mapping.class_key(class_name)?;
+            let (sig, call) = self.stdlib_mapping.find_by_name(key, method)?;
+            if !sig.is_static || sig.is_constructor || call.is_mir_wrapper {
+                return None;
+            }
+            (call.runtime_name, call.param_count)
+        };
+        let (param_tys, ret_ty) = self.resolve_function_type_signature(ref_ty)?;
+        if param_tys.len() != param_count {
+            return None;
+        }
+        let thunk_name = format!("__mapped_static_ref__{}__{}", runtime_name, ref_ty.as_raw());
+        for (func_id, func) in &self.builder.module.functions {
+            if func.name == thunk_name {
+                return Some(*func_id);
+            }
+        }
+        let ret_ir = self.convert_type(ret_ty);
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .returns(ret_ir.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for (i, t) in param_tys.iter().enumerate() {
+            sig_builder = sig_builder.param(format!("a{i}"), self.convert_type(*t));
+        }
+        let thunk_sig = sig_builder.build();
+        let thunk_symbol = SymbolId::from_raw(u32::MAX - 3000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        let saved_strict_move_locals = self.strict_move_locals.clone();
+        self.symbol_map.clear();
+        self.interface_call_result_types.clear();
+        self.boxed_value_regs.clear();
+        self.strict_move_locals.clear();
+        self.reset_move_recorder();
+        let thunk_id = self
+            .builder
+            .start_function(thunk_symbol, thunk_name, thunk_sig);
+        let restore = |ctx: &mut Self| {
+            ctx.check_move_flow();
+            ctx.builder.finish_function();
+            ctx.builder.current_function = saved_current_function;
+            ctx.builder.current_block = saved_current_block;
+            ctx.symbol_map = saved_symbol_map.clone();
+            ctx.strict_move_locals = saved_strict_move_locals.clone();
+        };
+        let mut params = Vec::with_capacity(param_count);
+        for i in 0..param_count {
+            match self.builder.current_function().and_then(|f| f.get_param_reg(i)) {
+                Some(reg) => params.push(reg),
+                None => {
+                    restore(self);
+                    return None;
+                }
+            }
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let dynamic = self.type_table.dynamic_type();
+        let mut args = Vec::with_capacity(param_count);
+        for (reg, ty) in params.into_iter().zip(param_tys.iter()) {
+            let boxed = self.maybe_box_value(reg, *ty, dynamic).unwrap_or(reg);
+            // A parameter still erased here carries raw bits; the callee's
+            // `Dynamic` formal reads a box, so box them as an int.
+            let boxed = if boxed == reg
+                && !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+            {
+                let v64 = match self.builder.get_register_type(reg) {
+                    Some(IrType::I32) => self.builder.build_cast(reg, IrType::I32, IrType::I64)?,
+                    _ => reg,
+                };
+                let box_fn = self.get_or_register_extern_function(
+                    "haxe_box_int_ptr",
+                    vec![IrType::I64],
+                    ptr_u8.clone(),
+                );
+                self.builder.build_call_direct(box_fn, vec![v64], ptr_u8.clone())?
+            } else {
+                boxed
+            };
+            args.push(boxed);
+        }
+        let extern_id = self.get_or_register_extern_function(
+            runtime_name,
+            vec![ptr_u8; param_count],
+            IrType::I64,
+        );
+        let native_ret = self
+            .builder
+            .module
+            .functions
+            .get(&extern_id)
+            .map(|f| f.signature.return_type.clone())
+            .unwrap_or(IrType::I64);
+        if matches!(ret_ir, IrType::Void) {
+            self.builder.build_call_direct(extern_id, args, IrType::Void);
+            self.builder.build_return(None);
+        } else {
+            let result = self
+                .builder
+                .build_call_direct(extern_id, args, native_ret.clone())
+                .map(|r| self.reconcile_extern_return(r, &native_ret, &ret_ir));
+            self.builder.build_return(result);
+        }
+        restore(self);
+        Some(thunk_id)
+    }
+
     /// Generate (or return cached) a virtual/interface dispatch thunk.
     ///
     /// Thunk ABI is `(env, this, ...args)`: the indirect-call convention used by
