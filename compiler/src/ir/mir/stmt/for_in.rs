@@ -180,6 +180,14 @@ impl<'a> HirToMirContext<'a> {
         // class to call, so it carries an iteration handle built where it crossed
         // into that type. This precedes the class path below because such a
         // receiver resolves to a symbol whose methods are declarations only.
+        if std::env::var_os("RAYZOR_FORIN_DEBUG").is_some() {
+            eprintln!(
+                "[for-in] ty={:?} kind={:?} protocol={:?}",
+                iter_expr.ty,
+                iter_type_kind.as_ref().map(std::mem::discriminant),
+                self.iter_protocol_of(iter_expr.ty).is_some()
+            );
+        }
         if self.try_lower_for_in_iter_handle(pattern, iter_expr, body, label) {
             return;
         }

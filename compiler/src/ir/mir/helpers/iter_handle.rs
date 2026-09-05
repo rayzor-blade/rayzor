@@ -102,7 +102,9 @@ impl<'a> HirToMirContext<'a> {
                 .and_then(|s| self.symbol_table.get_symbol(s))
                 .and_then(|s| self.string_interner.get(s.name));
             match name {
-                Some("Iterator") => return Some(IterProtocol::Iterator),
+                Some("Iterator") | Some("KeyValueIterator") => {
+                    return Some(IterProtocol::Iterator)
+                }
                 Some("Iterable") => return Some(IterProtocol::Iterable),
                 _ => {}
             }
@@ -963,8 +965,20 @@ impl<'a> HirToMirContext<'a> {
         let mut tid = iter_ty;
         for _ in 0..8 {
             let kind = self.type_table.get(tid)?.kind.clone();
+            // `KeyValueIterator<K, V>` is `Iterator<{key: K, value: V}>`: its
+            // element is the pair, not its first type argument.
+            let is_kv = |me: &Self, sym: SymbolId| {
+                me.symbol_table
+                    .get_symbol(sym)
+                    .and_then(|s| me.string_interner.get(s.name))
+                    == Some("KeyValueIterator")
+            };
             let elem = match kind {
-                // An instantiated alias carries its argument on the alias node.
+                TypeKind::TypeAlias { symbol_id, .. } | TypeKind::Class { symbol_id, .. }
+                    if is_kv(self, symbol_id) =>
+                {
+                    return Some(IrType::Ptr(Box::new(IrType::U8)));
+                }
                 TypeKind::TypeAlias {
                     target_type,
                     type_args,
@@ -976,6 +990,7 @@ impl<'a> HirToMirContext<'a> {
                         continue;
                     }
                 },
+                TypeKind::Class { type_args, .. } => *type_args.first()?,
                 TypeKind::GenericInstance { type_args, .. } => *type_args.first()?,
                 _ => return None,
             };
