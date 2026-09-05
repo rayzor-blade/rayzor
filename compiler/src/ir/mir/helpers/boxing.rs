@@ -648,6 +648,15 @@ impl<'a> HirToMirContext<'a> {
             return Some(value);
         }
 
+        // `Iterator<T>`/`Iterable<T>` are structural, and a value crossing into
+        // one is a raw collection or iterator, never a boxed DynamicValue.
+        // Unboxing would read its first word as the box's payload, and the fresh
+        // register it hands on carries no class hint, so the boundary that turns
+        // the value into an iteration handle can no longer classify it.
+        if self.iter_protocol_of(target_ty).is_some() {
+            return Some(value);
+        }
+
         // A value whose MIR register is already a primitive is not a boxed
         // Dynamic (e.g. Usize ops return I64 but are typed Dynamic in HIR).
         // Same for a reference target whose register is already a pointer:
