@@ -353,7 +353,19 @@ impl<'a> HirToMirContext<'a> {
             return None;
         }
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let (box_name, arg_ty, arg) = match self.builder.get_register_type(raw)? {
+        // The box's kind comes from the DECLARED inner type: a container erases
+        // its value into a u64 slot and hands a Bool back as 0/1 in an i64, so
+        // the register alone would say Int and the box would print `1`.
+        let declared_bool = matches!(self.convert_type(inner), IrType::Bool);
+        let (box_name, arg_ty, arg) = if declared_bool {
+            let b = match self.builder.get_register_type(raw)? {
+                IrType::Bool => raw,
+                t @ (IrType::I32 | IrType::I64) => self.builder.build_cast(raw, t, IrType::Bool)?,
+                _ => return None,
+            };
+            ("haxe_box_bool_ptr", IrType::Bool, b)
+        } else {
+            match self.builder.get_register_type(raw)? {
             IrType::I32 => (
                 "haxe_box_int_ptr",
                 IrType::I64,
@@ -368,6 +380,7 @@ impl<'a> HirToMirContext<'a> {
             ),
             IrType::Bool => ("haxe_box_bool_ptr", IrType::Bool, raw),
             _ => return None,
+            }
         };
         let box_fn = self.get_or_register_extern_function(box_name, vec![arg_ty], ptr_u8.clone());
         let Some((exists_fn, probe_args)) = probe else {
