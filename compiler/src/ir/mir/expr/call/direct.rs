@@ -302,6 +302,14 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                         self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
+                        let hir_types: Vec<Option<TypeId>> =
+                            args.iter().map(|a| Some(a.ty)).collect();
+                        self.unbox_optional_args_for_erased_formals(
+                            func_id,
+                            &mut arg_regs,
+                            &hir_types,
+                            false,
+                        );
                         return self
                             .builder
                             .build_call_direct(func_id, arg_regs, result_type);

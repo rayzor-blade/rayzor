@@ -765,6 +765,9 @@ impl<'a> HirToMirContext<'a> {
                     let call_arg_types: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
                     self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, true);
                     self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, true);
+                    let hir_types: Vec<Option<TypeId>> =
+                        call_arg_types.iter().map(|t| Some(*t)).collect();
+                    self.unbox_optional_args_for_erased_formals(func_id, &mut arg_regs, &hir_types, true);
                     self.fill_default_args(func_id, &mut arg_regs, true);
 
                     // Extract type_args for generic method calls.
@@ -999,6 +1002,9 @@ impl<'a> HirToMirContext<'a> {
                     let call_arg_types: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
                     self.bind_skipped_optional_args(func_id, &mut arg_regs, &call_arg_types, false);
                     self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
+                    let hir_types: Vec<Option<TypeId>> =
+                        call_arg_types.iter().map(|t| Some(*t)).collect();
+                    self.unbox_optional_args_for_erased_formals(func_id, &mut arg_regs, &hir_types, false);
                     self.fill_default_args(func_id, &mut arg_regs, false);
 
                     // Last-chance parity guard for static-call symbol collisions:

@@ -419,6 +419,47 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The in-module rule for an erased formal, at a cross-module call where only
+    /// IR parameter types survive: a `Null<scalar>` box bound for an I64 slot
+    /// hands over the scalar's bits, as a plain Int passed there does.
+    /// `arg_types` are the HIR types aligned with `arg_regs` (None for a
+    /// receiver that has no HIR expression).
+    pub(crate) fn unbox_optional_args_for_erased_formals(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut [IrId],
+        arg_types: &[Option<crate::tast::TypeId>],
+        skip_first: bool,
+    ) {
+        let Some(param_types) = self.external_function_param_types.get(&func_id).cloned() else {
+            return;
+        };
+        let start = if skip_first { 1 } else { 0 };
+        for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
+            if !matches!(param_types.get(i), Some(IrType::I64)) {
+                continue;
+            }
+            if !matches!(self.builder.get_register_type(*arg_reg), Some(IrType::Ptr(_))) {
+                continue;
+            }
+            let Some(Some(hir_ty)) = arg_types.get(i).copied() else {
+                continue;
+            };
+            let inner = match self.type_table.get(hir_ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => *inner_type,
+                _ => continue,
+            };
+            if !self.optional_inner_is_boxable_primitive(inner) {
+                continue;
+            }
+            if let Some(scalar) = self.maybe_unbox_optional(*arg_reg, hir_ty, inner) {
+                if let Some(erased) = self.coerce_to_i64(scalar, inner) {
+                    *arg_reg = erased;
+                }
+            }
+        }
+    }
+
     /// Like convert_type but returns TypeVar for TypeParameter types that match
     /// a known type param name. This preserves generic type info in function signatures
     /// so the monomorphizer can specialize them.
