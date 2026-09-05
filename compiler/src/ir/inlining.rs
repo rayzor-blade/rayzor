@@ -328,6 +328,9 @@ impl InliningPass {
     ) -> Result<(), String> {
         // Extract type_args from the CallDirect instruction at the call site.
         // Must do this before borrowing module mutably for caller.
+        // Parameter slots that hold an erased type parameter, so the argument
+        // can be handed over as raw bits below.
+        let mut erased_tp_slots: Vec<usize> = Vec::new();
         let type_sub_map: BTreeMap<String, IrType> = {
             let caller_func = module
                 .functions
@@ -405,8 +408,18 @@ impl InliningPass {
                                 if let Some(arg_ty) =
                                     concrete_arg_type(caller_func, call_site.args[i])
                                 {
-                                    sub_map.insert(type_param.name.clone(), arg_ty);
-                                    break;
+                                    // Every slot this parameter fills is erased,
+                                    // not just the first: `eq<T>(v:T, v2:T)` has two.
+                                    match sub_map.get(&type_param.name) {
+                                        None => {
+                                            sub_map.insert(type_param.name.clone(), arg_ty);
+                                            erased_tp_slots.push(i);
+                                        }
+                                        Some(bound) if *bound == arg_ty => {
+                                            erased_tp_slots.push(i)
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                         }
@@ -417,6 +430,8 @@ impl InliningPass {
             // Type substitution map built from type_args + callee type_params
             sub_map
         };
+        erased_tp_slots.sort_unstable();
+        erased_tp_slots.dedup();
 
         // Get callee function (clone to avoid borrow issues)
         let callee = module
@@ -435,9 +450,56 @@ impl InliningPass {
         // Use BTreeMap for deterministic iteration order
         let mut reg_map: BTreeMap<IrId, IrId> = BTreeMap::new();
 
-        // Map callee parameters to call arguments
-        for (param, arg) in callee.signature.parameters.iter().zip(&call_site.args) {
-            reg_map.insert(param.reg, *arg);
+        // Map callee parameters to call arguments. An erased slot is declared
+        // I64 and the body reads it through the tag this inline just resolved,
+        // so a float argument crosses as its BITS; passing the caller's f64
+        // register would leave a float where the by-tag helpers read an int.
+        let mut arg_coercions: Vec<IrInstruction> = Vec::new();
+        for (i, (param, arg)) in callee
+            .signature
+            .parameters
+            .iter()
+            .zip(&call_site.args)
+            .enumerate()
+        {
+            let mut mapped = *arg;
+            if erased_tp_slots.contains(&i) {
+                match caller.register_types.get(arg) {
+                    Some(IrType::F64) => {
+                        let bits = IrId::new(*next_reg_id);
+                        *next_reg_id += 1;
+                        arg_coercions.push(IrInstruction::BitCast {
+                            dest: bits,
+                            src: *arg,
+                            ty: IrType::I64,
+                        });
+                        caller.register_types.insert(bits, IrType::I64);
+                        mapped = bits;
+                    }
+                    Some(IrType::F32) => {
+                        let wide = IrId::new(*next_reg_id);
+                        *next_reg_id += 1;
+                        let bits = IrId::new(*next_reg_id);
+                        *next_reg_id += 1;
+                        arg_coercions.push(IrInstruction::Cast {
+                            dest: wide,
+                            src: *arg,
+                            from_ty: IrType::F32,
+                            to_ty: IrType::F64,
+                        });
+                        arg_coercions.push(IrInstruction::BitCast {
+                            dest: bits,
+                            src: wide,
+                            ty: IrType::I64,
+                        });
+                        caller.register_types.insert(wide, IrType::F64);
+                        caller.register_types.insert(bits, IrType::I64);
+                        mapped = bits;
+                    }
+                    _ => {}
+                }
+            }
+            reg_map.insert(param.reg, mapped);
         }
 
         // Allocate new registers for callee's internal values
@@ -666,6 +728,13 @@ impl InliningPass {
 
             // Remove the call instruction
             call_block.instructions.remove(call_site.instruction_index);
+            // The coercions stand where the call did: their operands are
+            // already defined and this block branches into the inlined body.
+            for (k, inst) in arg_coercions.into_iter().enumerate() {
+                call_block
+                    .instructions
+                    .insert(call_site.instruction_index + k, inst);
+            }
 
             // Save original terminator for continuation
             let original_terminator = call_block.terminator.clone();
