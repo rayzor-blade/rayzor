@@ -1875,6 +1875,26 @@ impl<'a> HirToMirContext<'a> {
             }
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
+                // `Null<T>` of a reference type is the same raw pointer as `T`, so
+                // its members resolve through `T`; a scalar's `Null` is a box.
+                Some(TypeKind::Optional { inner_type })
+                    if matches!(
+                        type_table.get(*inner_type).map(|t| &t.kind),
+                        Some(
+                            TypeKind::String
+                                | TypeKind::Class { .. }
+                                | TypeKind::Interface { .. }
+                                | TypeKind::Array { .. }
+                                | TypeKind::Anonymous { .. }
+                                | TypeKind::Function { .. }
+                                | TypeKind::Enum { .. }
+                                | TypeKind::Map { .. }
+                                | TypeKind::TypeAlias { .. }
+                        )
+                    ) =>
+                {
+                    current = *inner_type
+                }
                 Some(TypeKind::Placeholder { name }) => {
                     // Match a class OR a typedef by name: a cross-module structural
                     // typedef (`typedef Loaded = { var m:Base; ... }`) decays to a

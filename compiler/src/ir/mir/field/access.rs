@@ -53,6 +53,9 @@ impl<'a> HirToMirContext<'a> {
         receiver_ty: TypeId,
         field_ty: TypeId,
     ) -> Option<IrId> {
+        // `Null<String>` is the same pointer as `String`, so its members resolve
+        // through the inner type (an alias likewise through its target).
+        let receiver_ty = self.resolve_through_aliases(receiver_ty);
         // Type erasure: if field_ty is a TypeParameter, resolve to concrete type
         // using the receiver's type arguments (e.g., Container<Float>.value → Float)
         let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
@@ -345,7 +348,15 @@ impl<'a> HirToMirContext<'a> {
 
         // Property with a custom getter: SymbolId lookup first, then by name.
         let mut property_info_owned = self.property_access_map.get(&field).cloned();
-        if property_info_owned.is_none() {
+        // An anonymous object's field is its own: a same-named property getter on
+        // some class (`StringBuf.length`) must not answer `{length: 0.5}.length`.
+        let receiver_is_anon = matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(receiver_ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Anonymous { .. })
+        );
+        if property_info_owned.is_none() && !receiver_is_anon {
             // Name-based fallback: SymbolIds may differ between import and user modules.
             // Prefer entries with `Method(...)` getters over `Default` — orphan entries
             // from prior BLADE cache loads (with empty class_name and Default getter)
