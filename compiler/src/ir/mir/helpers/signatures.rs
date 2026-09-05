@@ -473,40 +473,10 @@ impl<'a> HirToMirContext<'a> {
                     // The inverse for an erased formal: a `Null<scalar>` travels as a
                     // box, but a `T` slot carries the scalar's own bits, as a plain Int
                     // passed there does — so the callee's `a == b` compares values.
-                    let param_is_type_param = {
-                        let type_table = self.type_table;
-                        matches!(
-                            type_table.get(resolved_param).map(|t| &t.kind),
-                            Some(TypeKind::TypeParameter { .. })
-                        )
-                    };
-                    if param_is_type_param
-                        && matches!(self.builder.get_register_type(arg_reg), Some(IrType::Ptr(_)))
+                    if let Some(erased) =
+                        self.unbox_optional_for_erased_formal(arg_reg, resolved_arg, resolved_param)
                     {
-                        let inner = {
-                            let type_table = self.type_table;
-                            match type_table.get(resolved_arg).map(|t| &t.kind) {
-                                Some(TypeKind::Optional { inner_type }) => type_table
-                                    .get(*inner_type)
-                                    .filter(|t| {
-                                        matches!(
-                                            t.kind,
-                                            TypeKind::Int | TypeKind::Float | TypeKind::Bool
-                                        )
-                                    })
-                                    .map(|_| *inner_type),
-                                _ => None,
-                            }
-                        };
-                        if let Some(inner) = inner {
-                            if let Some(scalar) =
-                                self.maybe_unbox_optional(arg_reg, resolved_arg, inner)
-                            {
-                                if let Some(erased) = self.coerce_to_i64(scalar, inner) {
-                                    return erased;
-                                }
-                            }
-                        }
+                        return erased;
                     }
 
                     // Concrete → Dynamic at the call boundary must box, as Let/Assign and

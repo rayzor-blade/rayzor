@@ -64,9 +64,23 @@ impl<'a> HirToMirContext<'a> {
 
             if let Some((slot_index, _defining_class)) = vtable_slot {
                 let obj_reg = self.lower_expression(&args[0])?;
+                // The method's own formals: a `Null<scalar>` bound for an erased
+                // `T` hands over the scalar's bits, as at a direct call.
+                let formals: Vec<TypeId> = self
+                    .symbol_table
+                    .get_symbol(*symbol)
+                    .and_then(|s| self.resolve_function_type_signature(s.type_id))
+                    .map(|(params, _)| params)
+                    .unwrap_or_default();
                 let mut call_args = vec![obj_reg];
-                for arg in args.iter().skip(1) {
+                for (i, arg) in args.iter().skip(1).enumerate() {
                     if let Some(reg) = self.lower_expression(arg) {
+                        let reg = match formals.get(i) {
+                            Some(&formal) => self
+                                .unbox_optional_for_erased_formal(reg, arg.ty, formal)
+                                .unwrap_or(reg),
+                            None => reg,
+                        };
                         call_args.push(reg);
                     }
                 }
@@ -81,9 +95,16 @@ impl<'a> HirToMirContext<'a> {
                     vec![obj_reg, slot_reg],
                     IrType::I64,
                 )?;
+                // Parameter types follow the registers actually passed, so a
+                // coerced argument is not declared as the type it arrived with.
                 let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
-                for arg in args.iter().skip(1) {
-                    param_types.push(self.convert_type(arg.ty));
+                for (i, arg) in args.iter().skip(1).enumerate() {
+                    let declared = self.convert_type(arg.ty);
+                    let passed = call_args
+                        .get(i + 1)
+                        .and_then(|r| self.builder.get_register_type(*r))
+                        .unwrap_or(declared);
+                    param_types.push(passed);
                 }
                 let return_type = Box::new(self.convert_type(expr.ty));
                 let func_signature = IrType::Function {

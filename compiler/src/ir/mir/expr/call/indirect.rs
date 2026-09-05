@@ -83,7 +83,10 @@ impl<'a> HirToMirContext<'a> {
             };
             let reg = match formal_tys.as_ref().and_then(|f| f.get(i).copied()) {
                 Some(formal) if boxable => self.maybe_box_value(reg, a.ty, formal).unwrap_or(reg),
-                _ => reg,
+                Some(formal) => self
+                    .unbox_optional_for_erased_formal(reg, a.ty, formal)
+                    .unwrap_or(reg),
+                None => reg,
             };
             arg_regs.push(reg);
         }

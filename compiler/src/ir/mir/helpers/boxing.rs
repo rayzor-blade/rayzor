@@ -399,6 +399,36 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    /// A `Null<scalar>` box bound for an erased `T` formal hands over the
+    /// scalar's bits, as a plain Int passed there does. `None` when this is
+    /// not that case.
+    pub(crate) fn unbox_optional_for_erased_formal(
+        &mut self,
+        reg: IrId,
+        arg_ty: TypeId,
+        formal_ty: TypeId,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let formal_is_param = matches!(
+            self.type_table.get(formal_ty).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        );
+        if !formal_is_param
+            || !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+        {
+            return None;
+        }
+        let inner = match self.type_table.get(arg_ty).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => return None,
+        };
+        if !self.optional_inner_is_boxable_primitive(inner) {
+            return None;
+        }
+        let scalar = self.maybe_unbox_optional(reg, arg_ty, inner)?;
+        self.coerce_to_i64(scalar, inner)
+    }
+
     /// The container's `exists` over the call's own arguments, when the class
     /// maps one of the same arity: the presence test for a raw `Null<scalar>`.
     pub(crate) fn raw_optional_probe(

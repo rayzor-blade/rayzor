@@ -419,6 +419,15 @@ impl<'a> HirToMirContext<'a> {
                                 call_args.push(reg);
                             }
                         }
+                        let hir_types: Vec<Option<crate::tast::TypeId>> = std::iter::once(None)
+                            .chain(args.iter().map(|a| Some(a.ty)))
+                            .collect();
+                        self.unbox_optional_args_for_erased_formals(
+                            func_id,
+                            &mut call_args,
+                            &hir_types,
+                            true,
+                        );
                         let ret = self.convert_type(expr.ty);
                         return self.builder.build_call_direct(func_id, call_args, ret);
                     }
@@ -519,7 +528,11 @@ impl<'a> HirToMirContext<'a> {
                     method_arg_regs.push(reg);
                 }
             }
-            let arg_regs = method_arg_regs;
+            let mut arg_regs = method_arg_regs;
+            let hir_types: Vec<Option<crate::tast::TypeId>> = std::iter::once(None)
+                .chain(args.iter().map(|a| Some(a.ty)))
+                .collect();
+            self.unbox_optional_args_for_erased_formals(func_id, &mut arg_regs, &hir_types, true);
 
             // Use the function's actual return type: expr.ty can be an unresolved
             // TypeParameter.

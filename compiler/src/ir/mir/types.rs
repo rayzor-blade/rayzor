@@ -419,9 +419,9 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    /// The in-module rule for an erased formal, at a cross-module call where only
-    /// IR parameter types survive: a `Null<scalar>` box bound for an I64 slot
-    /// hands over the scalar's bits, as a plain Int passed there does.
+    /// The erased-formal rule where the callee is known by function id: a
+    /// `Null<scalar>` box bound for an I64 or `TypeVar` slot hands over the
+    /// scalar's bits, as a plain Int passed there does.
     /// `arg_types` are the HIR types aligned with `arg_regs` (None for a
     /// receiver that has no HIR expression).
     pub(crate) fn unbox_optional_args_for_erased_formals(
@@ -431,12 +431,20 @@ impl<'a> HirToMirContext<'a> {
         arg_types: &[Option<crate::tast::TypeId>],
         skip_first: bool,
     ) {
-        let Some(param_types) = self.external_function_param_types.get(&func_id).cloned() else {
-            return;
+        // An import's formals live in the external table; a local callee's in
+        // its own signature.
+        let param_types: Vec<IrType> = match self.external_function_param_types.get(&func_id) {
+            Some(types) => types.clone(),
+            None => match self.builder.module.functions.get(&func_id) {
+                Some(f) => f.signature.parameters.iter().map(|p| p.ty.clone()).collect(),
+                None => return,
+            },
         };
         let start = if skip_first { 1 } else { 0 };
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
-            if !matches!(param_types.get(i), Some(IrType::I64)) {
+            // A generic formal survives as `TypeVar` where the callee's own
+            // signature is known, and as the erased I64 otherwise.
+            if !matches!(param_types.get(i), Some(IrType::I64) | Some(IrType::TypeVar(_))) {
                 continue;
             }
             if !matches!(self.builder.get_register_type(*arg_reg), Some(IrType::Ptr(_))) {
