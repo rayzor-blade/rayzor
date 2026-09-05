@@ -898,7 +898,9 @@ impl<'a> AstLowering<'a> {
                     .and_then(|ts| ts.get(i).copied());
                 self.expected_lambda_params_stack.push(hint);
                 self.expected_arg_type_stack.push(arg_type_hint);
-                let result = self.lower_value_expression(arg);
+                let result = self
+                    .lower_value_expression(arg)
+                    .map(|typed| self.instantiate_function_reference(typed, arg_type_hint));
                 self.expected_arg_type_stack.pop();
                 self.expected_lambda_params_stack.pop();
                 result
@@ -2089,6 +2091,43 @@ impl<'a> AstLowering<'a> {
             source_location: self.context.span_to_location(&expression.span),
             metadata,
         })
+    }
+
+    /// A reference to a generic function (`Reflect.compare`, typed `(T, T) -> Int`)
+    /// passed where a concrete function type of the same arity is expected takes
+    /// that type, as a lambda in the same position is typed from its hint.
+    fn instantiate_function_reference(
+        &self,
+        mut typed: TypedExpression,
+        hint: Option<TypeId>,
+    ) -> TypedExpression {
+        use crate::tast::core::TypeKind;
+        let Some(hint) = hint else { return typed };
+        if matches!(typed.kind, TypedExpressionKind::FunctionLiteral { .. }) {
+            return typed;
+        }
+        let tt = self.context.type_table.borrow();
+        let is_param = |t: TypeId| {
+            matches!(tt.get(t).map(|i| &i.kind), Some(TypeKind::TypeParameter { .. }))
+        };
+        let generic = match tt.get(typed.expr_type).map(|i| &i.kind) {
+            Some(TypeKind::Function { params, .. }) => {
+                Some(params.clone()).filter(|p| p.iter().any(|t| is_param(*t)))
+            }
+            _ => None,
+        };
+        let concrete = match tt.get(hint).map(|i| &i.kind) {
+            Some(TypeKind::Function { params, .. }) => {
+                Some(params.clone()).filter(|p| !p.iter().any(|t| is_param(*t)))
+            }
+            _ => None,
+        };
+        if let (Some(g), Some(c)) = (generic, concrete) {
+            if g.len() == c.len() {
+                typed.expr_type = hint;
+            }
+        }
+        typed
     }
 
     /// Infer the return type of a method call, substituting type parameters from the receiver.
