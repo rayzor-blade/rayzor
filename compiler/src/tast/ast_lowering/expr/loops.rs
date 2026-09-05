@@ -1043,9 +1043,34 @@ impl<'a> AstLowering<'a> {
         )
     }
 
+    /// The single type argument of a one-parameter protocol, which is what an
+    /// unbound `next()` return stands for. A two-parameter iterator answers with
+    /// a pair rather than a bare parameter, so it never reaches here.
+    fn sole_type_arg(&self, ty: TypeId) -> Option<TypeId> {
+        let tt = self.context.type_table.borrow();
+        match tt.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::TypeAlias { type_args, .. })
+            | Some(crate::tast::core::TypeKind::Class { type_args, .. })
+            | Some(crate::tast::core::TypeKind::Interface { type_args, .. })
+                if type_args.len() == 1 =>
+            {
+                Some(type_args[0])
+            }
+            _ => None,
+        }
+    }
+
     fn structural_element_type(&self, ty: TypeId) -> Option<TypeId> {
         let next = self.context.string_interner.intern("next");
         if let Some(elem) = self.structural_method_return_type(ty, next) {
+            // A declaration restored from the cache can carry no parameter list
+            // to bind against, leaving the element as the parameter itself; the
+            // receiver's own argument is what that parameter stands for.
+            if self.is_bare_type_param(elem) {
+                if let Some(arg) = self.sole_type_arg(ty) {
+                    return Some(arg);
+                }
+            }
             return Some(elem);
         }
         let iterator = self.context.string_interner.intern("iterator");
