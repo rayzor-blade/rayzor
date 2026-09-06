@@ -26,7 +26,16 @@ impl<'a> HirToMirContext<'a> {
         match lit {
             HirLiteral::Int(i) => {
                 // Use the actual type from type checking instead of always using I64
-                let ir_type = self.convert_type(type_id);
+                let mut ir_type = self.convert_type(type_id);
+                // A literal too wide for the slot the typer picked is widened
+                // rather than cut: `3000000000000` typed `Int` was emitted as
+                // its low 32 bits and printed 2112827392, and
+                // `9223372036854775807i64` printed -1.
+                if i32::try_from(*i).is_err()
+                    && matches!(ir_type, IrType::I8 | IrType::I16 | IrType::I32)
+                {
+                    ir_type = IrType::I64;
+                }
                 let result = self.builder.build_int(*i, ir_type);
                 if result.is_none() {
                     // Fallback to I32 if the type is unrecognized (e.g., Ptr(Void) from inlined static fields)
