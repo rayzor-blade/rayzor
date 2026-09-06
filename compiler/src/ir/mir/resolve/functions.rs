@@ -275,6 +275,37 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // An inherited method is registered under the class that DECLARED it,
+        // so the receiver's own name never matches it. One level up resolves
+        // through the candidate loops above, which compare scopes; a grandparent
+        // in another module reaches neither, and the call ends at a stub named
+        // for the receiver.
+        let mut current = class_symbol;
+        let mut seen_classes: BTreeSet<SymbolId> = BTreeSet::new();
+        seen_classes.insert(current);
+        while let Some(&parent) = self.class_parent_map.get(&current) {
+            if !seen_classes.insert(parent) {
+                break; // cyclic `extends`; the type checker reports it
+            }
+            if let Some(name) = self
+                .symbol_table
+                .get_symbol(parent)
+                .and_then(|s| s.qualified_name.or(Some(s.name)))
+                .and_then(|n| self.string_interner.get(n))
+            {
+                let short = name.rsplit('.').next().unwrap_or(name);
+                for candidate in [
+                    format!("{}.{}", name, method_name_str),
+                    format!("{}.{}", short, method_name_str),
+                ] {
+                    if let Some(&func_id) = self.external_function_name_map.get(&candidate) {
+                        return Some(func_id);
+                    }
+                }
+            }
+            current = parent;
+        }
+
         None
     }
 

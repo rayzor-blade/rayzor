@@ -15,6 +15,41 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// The class `class_symbol` extends, even when this context never lowered it.
+    ///
+    /// `class_parents` holds only what THIS lowering registered, so the chain
+    /// ends at the first class from another module -- one hop resolves and the
+    /// grandparent does not. The signature index records `extends` by name for
+    /// every file it has seen, which is what crosses that boundary.
+    fn parent_class_symbol(&self, class_symbol: SymbolId) -> Option<SymbolId> {
+        if let Some(&parent) = self.class_parents.get(&class_symbol) {
+            return Some(parent);
+        }
+        let child = self
+            .context
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| s.qualified_name.or(Some(s.name)))
+            .and_then(|n| self.context.string_interner.get(n))?
+            .to_string();
+        let index = self.static_sig_index.as_ref()?.clone();
+        let parent_name = index.borrow_mut().parent_of(&child)?;
+        let short = parent_name.rsplit('.').next().unwrap_or(&parent_name);
+        let matches = self.context.symbol_table.find_symbols(|sym| {
+            if sym.kind != crate::tast::symbols::SymbolKind::Class {
+                return false;
+            }
+            let qn = sym
+                .qualified_name
+                .and_then(|q| self.context.string_interner.get(q));
+            if qn == Some(parent_name.as_str()) {
+                return true;
+            }
+            qn.is_none() && self.context.string_interner.get(sym.name) == Some(short)
+        });
+        matches.into_iter().next().map(|s| s.id)
+    }
+
     /// Build the parser-level AST `expr.get()` for deref coercion.
     /// Re-running `lower_expression` on the result re-uses the normal
     /// method-call lowering path so the inner type is recovered through
@@ -223,7 +258,7 @@ impl<'a> AstLowering<'a> {
                         let mut seen: std::collections::BTreeSet<SymbolId> =
                             std::collections::BTreeSet::new();
                         seen.insert(current);
-                        while let Some(&parent) = self.class_parents.get(&current) {
+                        while let Some(parent) = self.parent_class_symbol(current) {
                             if !seen.insert(parent) {
                                 break; // cyclic `extends`; the type checker reports it
                             }
