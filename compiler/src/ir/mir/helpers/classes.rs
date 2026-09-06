@@ -739,6 +739,21 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", fqn))
     }
 
+    /// The `X.new` a `new C()` must actually call, following `extends`.
+    ///
+    /// `cross_module_constructor_fqn_key` names C's own constructor, and the
+    /// stub it keys can only be bound if C declares one. A class that inherits
+    /// its constructor declares none, so that stub never binds and the call
+    /// traps. The MIR walk in `inherited_constructor` reads the current
+    /// module's HIR and cannot see a parent declared elsewhere; the signature
+    /// index can, because it walks recorded names.
+    pub(crate) fn inherited_constructor_fqn_key(&self, class_fqn: &str) -> Option<String> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        let mut index = index.borrow_mut();
+        let (owner, _) = index.constructor_owner(class_fqn)?;
+        Some(format!("{}.new", owner))
+    }
+
     /// Class key for a `new C(x)` no constructor path resolved, when the parsed
     /// declaration says `C` is a constructible class. `Some` means emit
     /// alloc + the named forward-ref stub; `None` keeps the caller's fallback.

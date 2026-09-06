@@ -887,6 +887,13 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or(IrType::Ptr(Box::new(IrType::Void)))
                 })
                 .collect();
+            // A class that inherits its constructor declares none, so a stub
+            // keyed on its own name has nothing to bind to; the ancestor that
+            // declares one is what this call runs.
+            let ctor_key = ctor_key
+                .strip_suffix(".new")
+                .and_then(|fqn| self.inherited_constructor_fqn_key(fqn))
+                .unwrap_or(ctor_key);
             let stub_id =
                 self.register_stdlib_mir_forward_ref(&ctor_key, param_types, IrType::Void);
             self.builder

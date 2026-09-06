@@ -135,6 +135,48 @@ impl StaticSigIndex {
         self.classes.get(class_name)?.ctor_params
     }
 
+    /// The ancestor whose constructor `class_name` runs, with its arity.
+    ///
+    /// `class Sub extends Base {}` is constructible in Haxe and runs Base's
+    /// constructor. The MIR walk for that reads the current module's HIR, so a
+    /// subclass whose parent was declared elsewhere finds nothing and the call
+    /// goes to a stub named after a constructor that does not exist. Names are
+    /// what cross a module boundary, so walk the recorded `extends` here.
+    pub fn constructor_owner(&mut self, class_name: &str) -> Option<(String, usize)> {
+        let mut next = Some(class_name.to_string());
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(name) = next {
+            if !seen.insert(name.clone()) {
+                break; // cyclic `extends` -- stop rather than spin
+            }
+            // The entry file is parsed but not registered as a known file, so
+            // an already-indexed class counts even without one.
+            if self.known_file(&name).is_some() {
+                self.ensure_indexed_from_known_files(&name);
+            }
+            let class = self.classes.get(&name)?;
+            if let Some(arity) = class.ctor_params {
+                return Some((name, arity));
+            }
+            let (parent, pkg) = (class.extends.clone(), class.package.clone());
+            // A bare `extends Base` names a type in the subclass's own package
+            // first; fall back to the name as written so an imported parent
+            // still resolves through the unambiguous bare form.
+            next = parent.map(|p| {
+                if p.contains('.') || pkg.is_empty() {
+                    return p;
+                }
+                let qualified = format!("{}.{}", pkg, p);
+                if self.classes.contains_key(&qualified) {
+                    qualified
+                } else {
+                    p
+                }
+            });
+        }
+        None
+    }
+
     /// Whether the class indexed under EXACTLY this name declares instance
     /// method `name` itself. Same strictness as `declared_constructor_arity`.
     pub fn declares_instance_method(&mut self, class_name: &str, name: &str) -> bool {
