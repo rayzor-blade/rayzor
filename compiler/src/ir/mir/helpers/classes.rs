@@ -754,6 +754,27 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", owner))
     }
 
+    /// The `X.new` a `super()` in the current class must call.
+    ///
+    /// The parent's TypeId is often absent from this context's type table, so
+    /// the type is no help; the current class's recorded `extends` is.
+    pub(crate) fn super_constructor_fqn_key(&self) -> Option<String> {
+        let current = self
+            .current_class_symbol
+            .and_then(|s| self.symbol_table.get_symbol(s))
+            .and_then(|s| {
+                s.qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(s.name))
+            })?
+            .to_string();
+        let index = self.static_sig_index.as_ref()?.clone();
+        let mut index = index.borrow_mut();
+        let parent = index.parent_of(&current)?;
+        let (owner, _) = index.constructor_owner(&parent)?;
+        Some(format!("{}.new", owner))
+    }
+
     /// Class key for a `new C(x)` no constructor path resolved, when the parsed
     /// declaration says `C` is a constructible class. `Some` means emit
     /// alloc + the named forward-ref stub; `None` keeps the caller's fallback.

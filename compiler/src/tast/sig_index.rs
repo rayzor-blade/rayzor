@@ -135,6 +135,31 @@ impl StaticSigIndex {
         self.classes.get(class_name)?.ctor_params
     }
 
+    /// The class `class_name` extends, under the name this index records it.
+    pub fn parent_of(&mut self, class_name: &str) -> Option<String> {
+        if self.known_file(class_name).is_some() {
+            self.ensure_indexed_from_known_files(class_name);
+        }
+        let class = self.classes.get(class_name)?;
+        let (parent, pkg) = (class.extends.clone()?, class.package.clone());
+        Some(self.qualify_parent(parent, &pkg))
+    }
+
+    /// A bare `extends Base` names a type in the subclass's own package first;
+    /// fall back to the name as written so an imported parent still resolves
+    /// through the unambiguous bare form.
+    fn qualify_parent(&self, parent: String, pkg: &str) -> String {
+        if parent.contains('.') || pkg.is_empty() {
+            return parent;
+        }
+        let qualified = format!("{}.{}", pkg, parent);
+        if self.classes.contains_key(&qualified) {
+            qualified
+        } else {
+            parent
+        }
+    }
+
     /// The ancestor whose constructor `class_name` runs, with its arity.
     ///
     /// `class Sub extends Base {}` is constructible in Haxe and runs Base's
@@ -159,20 +184,7 @@ impl StaticSigIndex {
                 return Some((name, arity));
             }
             let (parent, pkg) = (class.extends.clone(), class.package.clone());
-            // A bare `extends Base` names a type in the subclass's own package
-            // first; fall back to the name as written so an imported parent
-            // still resolves through the unambiguous bare form.
-            next = parent.map(|p| {
-                if p.contains('.') || pkg.is_empty() {
-                    return p;
-                }
-                let qualified = format!("{}.{}", pkg, p);
-                if self.classes.contains_key(&qualified) {
-                    qualified
-                } else {
-                    p
-                }
-            });
+            next = parent.map(|p| self.qualify_parent(p, &pkg));
         }
         None
     }

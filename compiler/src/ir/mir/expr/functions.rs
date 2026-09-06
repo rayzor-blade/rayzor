@@ -982,6 +982,17 @@ impl<'a> HirToMirContext<'a> {
                             None
                         });
 
+                // The parent's module may lower later, so its constructor is
+                // not in `constructor_name_map` yet. Name the call and let the
+                // cross-module fixup bind it, the way `new` does.
+                let parent_ctor_key: Option<String> = if parent_ctor_id.is_some() {
+                    None
+                } else {
+                    // A cross-module parent often arrives as a placeholder
+                    // rather than a Class, and the placeholder carries the name.
+                    self.super_constructor_fqn_key()
+                };
+
                 if let Some(parent_ctor_id) = parent_ctor_id {
                     // Lower super call arguments
                     let mut arg_regs = vec![this_reg]; // 'this' is first argument
@@ -1000,6 +1011,30 @@ impl<'a> HirToMirContext<'a> {
                         arg_regs,
                         crate::ir::IrType::Void,
                     );
+                } else if let Some(ctor_key) = parent_ctor_key {
+                    let mut arg_regs = vec![this_reg];
+                    for arg in &super_call.args {
+                        if let Some(arg_reg) = self.lower_expression(arg) {
+                            arg_regs.push(arg_reg);
+                        }
+                    }
+                    let param_types: Vec<crate::ir::IrType> = arg_regs
+                        .iter()
+                        .map(|r| {
+                            self.builder
+                                .get_register_type(*r)
+                                .unwrap_or(crate::ir::IrType::Ptr(Box::new(
+                                    crate::ir::IrType::Void,
+                                )))
+                        })
+                        .collect();
+                    let stub_id = self.register_stdlib_mir_forward_ref(
+                        &ctor_key,
+                        param_types,
+                        crate::ir::IrType::Void,
+                    );
+                    self.builder
+                        .build_call_direct(stub_id, arg_regs, crate::ir::IrType::Void);
                 } else {
                     self.add_error(
                         &format!(
