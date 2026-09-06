@@ -209,6 +209,14 @@ register_symbol!(
     "haxe_array_to_string_f64",
     crate::haxe_array::haxe_array_to_string_f64
 );
+register_symbol!(
+    "haxe_array_to_string_i64",
+    crate::haxe_array::haxe_array_to_string_i64
+);
+register_symbol!(
+    "haxe_array_to_string_bool",
+    crate::haxe_array::haxe_array_to_string_bool
+);
 
 // Higher-order methods
 register_symbol!("haxe_array_map", crate::haxe_array::haxe_array_map);

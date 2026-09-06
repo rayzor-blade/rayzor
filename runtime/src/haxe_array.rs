@@ -1539,6 +1539,55 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
 ///
 /// The compiler dispatches `Array<Float>.toString` to this variant when
 /// the element type is statically known to be F64.
+/// `toString` for an array whose element type is statically an integer.
+///
+/// The untyped formatter has to guess what a raw slot holds and reads 0 as
+/// `null`, so `[0, 2, 4]` printed `[null, 2, 4]`. When the element type is
+/// known there is nothing to guess.
+#[no_mangle]
+pub extern "C" fn haxe_array_to_string_i64(arr: *const HaxeArray) -> *mut HaxeString {
+    unsafe { array_to_string_typed(arr, |v| v.to_string()) }
+}
+
+/// `toString` for an array whose element type is statically `Bool`.
+#[no_mangle]
+pub extern "C" fn haxe_array_to_string_bool(arr: *const HaxeArray) -> *mut HaxeString {
+    unsafe {
+        array_to_string_typed(arr, |v| if v != 0 { "true" } else { "false" }.to_string())
+    }
+}
+
+/// Shared body for the typed array formatters: every slot rendered by the
+/// caller's element formatter, no null heuristic.
+unsafe fn array_to_string_typed(
+    arr: *const HaxeArray,
+    render: impl Fn(i64) -> String,
+) -> *mut HaxeString {
+    let result_layout = Layout::new::<HaxeString>();
+    let result_ptr = alloc(result_layout) as *mut HaxeString;
+    if result_ptr.is_null() {
+        panic!("Failed to allocate HaxeString for toString");
+    }
+    if arr.is_null() || (*arr).len == 0 {
+        crate::haxe_string::haxe_string_from_bytes(result_ptr, b"[]".as_ptr(), 2);
+        return result_ptr;
+    }
+    let arr_ref = &*arr;
+    let mut s = String::with_capacity(arr_ref.len * 4 + 2);
+    s.push('[');
+    let data = arr_ref.ptr as *const i64;
+    for i in 0..arr_ref.len {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&render(*data.add(i)));
+    }
+    s.push(']');
+    let bytes = s.as_bytes();
+    crate::haxe_string::haxe_string_from_bytes(result_ptr, bytes.as_ptr(), bytes.len());
+    result_ptr
+}
+
 #[no_mangle]
 pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe {

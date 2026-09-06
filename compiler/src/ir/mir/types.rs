@@ -498,9 +498,18 @@ impl<'a> HirToMirContext<'a> {
         // Check HIR type for Array (maps to Ptr(Void) in MIR, indistinguishable from Dynamic)
         if let Some(type_id) = hir_type_id {
             let type_kind = self.type_table.get(type_id).map(|ti| ti.kind.clone());
-            if matches!(type_kind.as_ref(), Some(TypeKind::Array { .. })) {
+            if let Some(TypeKind::Array { element_type }) = type_kind.as_ref() {
+                // The untyped formatter guesses what a raw slot holds and
+                // reads 0 as `null`, so `[0, 2, 4]` printed `[null, 2, 4]`.
+                // A statically known element type leaves nothing to guess.
+                let runtime_name = match self.type_table.get(*element_type).map(|t| &t.kind) {
+                    Some(TypeKind::Int) => "haxe_array_to_string_i64",
+                    Some(TypeKind::Bool) => "haxe_array_to_string_bool",
+                    Some(TypeKind::Float) => "haxe_array_to_string_f64",
+                    _ => "haxe_array_to_string",
+                };
                 let func_id = self.get_or_register_extern_function(
-                    "haxe_array_to_string",
+                    runtime_name,
                     vec![IrType::Ptr(Box::new(IrType::Void))],
                     IrType::Ptr(Box::new(IrType::String)),
                 );
