@@ -512,6 +512,10 @@ fn fully_unroll_loop(
     let mut unrolled_instructions: Vec<IrInstruction> = Vec::new();
     let mut reg_id = function.next_reg_id;
 
+    // The final iteration's mapping, kept so the exit block's phis can name the
+    // registers the unrolled copy actually defines.
+    let mut last_reg_map: BTreeMap<IrId, IrId> = BTreeMap::new();
+
     for iteration in 0..info.trip_count {
         let iv_value = info.init_const + (iteration as i64) * info.step_amount;
 
@@ -537,6 +541,44 @@ fn fully_unroll_loop(
                 &mut function.register_types,
             );
             unrolled_instructions.push(new_inst);
+        }
+        last_reg_map = reg_map;
+    }
+
+    // The induction variable's value AFTER the loop is the one that failed the
+    // test, one step past the last iteration -- not the last iteration's value,
+    // which is what `last_reg_map` holds for it.
+    let iv_exit_value = info.init_const + (info.trip_count as i64) * info.step_amount;
+    let iv_exit_reg = IrId::new(reg_id);
+    reg_id += 1;
+    unrolled_instructions.push(IrInstruction::Const {
+        dest: iv_exit_reg,
+        value: IrValue::I32(iv_exit_value as i32),
+    });
+    function.register_types.insert(iv_exit_reg, IrType::I32);
+
+    // Work out what every exit phi coming from the loop should name, BEFORE
+    // touching the CFG. The loop blocks are about to be deleted, so an incoming
+    // this cannot map would be left pointing at a register nothing defines --
+    // which is exactly what used to happen: the header's phi dest survived in
+    // the exit phi and the backend refused the function with "not found in
+    // value_map for phi incoming".
+    let mut exit_phi_rewrites: Vec<(IrId, IrId, IrId)> = Vec::new();
+    if let Some(exit_block) = function.cfg.blocks.get(&exit_target) {
+        for phi in &exit_block.phi_nodes {
+            for &(pred, val) in &phi.incoming {
+                if !loop_blocks.contains(&pred) {
+                    continue;
+                }
+                let mapped = if val == info.iv_phi {
+                    iv_exit_reg
+                } else if let Some(&m) = last_reg_map.get(&val) {
+                    m
+                } else {
+                    return false;
+                };
+                exit_phi_rewrites.push((phi.dest, val, mapped));
+            }
         }
     }
 
@@ -571,8 +613,12 @@ fn fully_unroll_loop(
             let mut new_incoming = Vec::new();
             for &(pred, val) in &phi.incoming {
                 if loop_blocks.contains(&pred) {
-                    // Map the value through the last iteration's register map
-                    new_incoming.push((unrolled_block_id, val));
+                    let mapped = exit_phi_rewrites
+                        .iter()
+                        .find(|(dest, from, _)| *dest == phi.dest && *from == val)
+                        .map(|(_, _, to)| *to)
+                        .unwrap_or(val);
+                    new_incoming.push((unrolled_block_id, mapped));
                 } else {
                     new_incoming.push((pred, val));
                 }
