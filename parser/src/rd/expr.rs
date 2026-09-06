@@ -6,6 +6,18 @@ use crate::haxe_ast::*;
 use crate::haxe_parser_expr::unescape_string;
 use crate::token::TokenKind;
 
+/// A numeric literal's digits, without the group separators and the type
+/// suffix the lexer now accepts. `0x12_0` reaches `from_str_radix` as `120`;
+/// left as written it fails to parse and the literal silently reads as 0.
+fn strip_numeric_noise(text: &str) -> String {
+    let body = ["i32", "u32", "i64", "f64"]
+        .iter()
+        .find_map(|s| text.strip_suffix(s))
+        .unwrap_or(text);
+    body.replace('_', "")
+}
+
+
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
@@ -361,16 +373,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::IntLit => {
                 let text = token.text(self.source);
                 self.stream.advance();
-                let val = if text.starts_with("0x") || text.starts_with("0X") {
-                    i64::from_str_radix(&text[2..], 16).unwrap_or(0)
-                } else if text.starts_with('0')
-                    && text.len() > 1
-                    && text.as_bytes()[1].is_ascii_digit()
+                let digits = strip_numeric_noise(text);
+                let val = if digits.starts_with("0x") || digits.starts_with("0X") {
+                    i64::from_str_radix(&digits[2..], 16).unwrap_or(0)
+                } else if digits.starts_with("0b") || digits.starts_with("0B") {
+                    i64::from_str_radix(&digits[2..], 2).unwrap_or(0)
+                } else if digits.starts_with('0')
+                    && digits.len() > 1
+                    && digits.as_bytes()[1].is_ascii_digit()
                 {
                     // Octal: 0755 → 493
-                    i64::from_str_radix(&text[1..], 8).unwrap_or(0)
+                    i64::from_str_radix(&digits[1..], 8).unwrap_or(0)
                 } else {
-                    text.parse::<i64>().unwrap_or(0)
+                    digits.parse::<i64>().unwrap_or(0)
                 };
                 Ok(Expr {
                     kind: ExprKind::Int(val),
@@ -381,7 +396,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let text = token.text(self.source);
                 self.stream.advance();
                 Ok(Expr {
-                    kind: ExprKind::Float(text.parse().unwrap_or(0.0)),
+                    kind: ExprKind::Float(strip_numeric_noise(text).parse().unwrap_or(0.0)),
                     span: token.span,
                 })
             }

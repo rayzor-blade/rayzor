@@ -12,6 +12,13 @@ pub struct LexError {
     pub offset: usize,
 }
 
+/// What a numeric literal's type suffix says it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NumSuffix {
+    Int,
+    Float,
+}
+
 impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Lex error at byte {}: {}", self.offset, self.message)
@@ -419,11 +426,31 @@ impl<'a> Lexer<'a> {
             {
                 self.pos += 1;
             }
+            self.lex_number_suffix();
             return Ok(Token::new(TokenKind::IntLit, start, self.pos));
         }
 
-        // Decimal digits
-        while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
+        // Binary: 0b1010. Without this the digits lex as a separate
+        // identifier and the literal silently reads as 0.
+        if self.source[start] == b'0'
+            && self.pos < self.source.len()
+            && (self.source[self.pos] == b'b' || self.source[self.pos] == b'B')
+            && matches!(self.source.get(self.pos + 1), Some(b'0' | b'1'))
+        {
+            self.pos += 1; // skip 'b'
+            while self.pos < self.source.len()
+                && matches!(self.source[self.pos], b'0' | b'1' | b'_')
+            {
+                self.pos += 1;
+            }
+            self.lex_number_suffix();
+            return Ok(Token::new(TokenKind::IntLit, start, self.pos));
+        }
+
+        // Decimal digits, with `_` group separators (`1_000_000`).
+        while self.pos < self.source.len()
+            && (self.source[self.pos].is_ascii_digit() || self.source[self.pos] == b'_')
+        {
             self.pos += 1;
         }
 
@@ -462,7 +489,9 @@ impl<'a> Lexer<'a> {
             if is_fraction {
                 is_float = true;
                 self.pos += 1; // skip '.'
-                while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
+                while self.pos < self.source.len()
+                    && (self.source[self.pos].is_ascii_digit() || self.source[self.pos] == b'_')
+                {
                     self.pos += 1;
                 }
             } else if is_trailing_dot_float {
@@ -489,10 +518,16 @@ impl<'a> Lexer<'a> {
             if probe < self.source.len() && self.source[probe].is_ascii_digit() {
                 is_float = true;
                 self.pos = probe;
-                while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
+                while self.pos < self.source.len()
+                    && (self.source[self.pos].is_ascii_digit() || self.source[self.pos] == b'_')
+                {
                     self.pos += 1;
                 }
             }
+        }
+
+        if self.lex_number_suffix() == Some(NumSuffix::Float) {
+            is_float = true;
         }
 
         if is_float {
@@ -500,6 +535,32 @@ impl<'a> Lexer<'a> {
         } else {
             Ok(Token::new(TokenKind::IntLit, start, self.pos))
         }
+    }
+
+    /// Consume a Haxe 4.3 numeric type suffix (`7i32`, `1u32`, `9i64`,
+    /// `7.0f64`) if one follows the digits. Only these four spellings, and
+    /// only when no identifier character follows, so `1x` stays two tokens.
+    fn lex_number_suffix(&mut self) -> Option<NumSuffix> {
+        const SUFFIXES: [(&[u8], NumSuffix); 4] = [
+            (b"i32", NumSuffix::Int),
+            (b"u32", NumSuffix::Int),
+            (b"i64", NumSuffix::Int),
+            (b"f64", NumSuffix::Float),
+        ];
+        for (spelling, kind) in SUFFIXES {
+            let end = self.pos + spelling.len();
+            if self.source.len() >= end
+                && &self.source[self.pos..end] == spelling
+                && !self
+                    .source
+                    .get(end)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            {
+                self.pos = end;
+                return Some(kind);
+            }
+        }
+        None
     }
 
     fn lex_identifier(&mut self, start: usize) -> Result<Token, LexError> {
