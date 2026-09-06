@@ -44,10 +44,26 @@ impl<'a> AstLowering<'a> {
     ) -> Option<SymbolId> {
         let mut current_scope = self.context.current_scope;
 
+        // A local always wins; anything else found up the scope chain is only a
+        // fallback, because the class's own and inherited members come first.
+        // Without that order a bare `eq(...)` inside a `unit.Test` subclass
+        // bound to `haxe.Int64.eq` -- a namesake visible further up -- and the
+        // call carried that method's types from then on.
+        let mut outer_match: Option<SymbolId> = None;
+
         loop {
             // Check if symbol exists in current scope
             if let Some(symbol) = self.context.symbol_table.lookup_symbol(current_scope, name) {
-                return Some(symbol.id);
+                if matches!(
+                    symbol.kind,
+                    crate::tast::symbols::SymbolKind::Variable
+                        | crate::tast::symbols::SymbolKind::Parameter
+                ) {
+                    return Some(symbol.id);
+                }
+                if outer_match.is_none() {
+                    outer_match = Some(symbol.id);
+                }
             }
 
             // Get parent scope
@@ -140,6 +156,12 @@ impl<'a> AstLowering<'a> {
                 }
                 current = parent;
             }
+        }
+
+        // A namesake from an enclosing scope, now that the class hierarchy has
+        // had its turn.
+        if let Some(found) = outer_match {
+            return Some(found);
         }
 
         // Fallback: explicitly check the global root scope (ScopeId::first())
