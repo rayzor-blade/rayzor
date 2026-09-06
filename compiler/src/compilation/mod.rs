@@ -566,7 +566,7 @@ fn blade_type_param_name(ty: Option<&bsym::BladeType>) -> Option<&str> {
 /// What declaring a class from a manifest publishes: enough for any sibling's
 /// signature to resolve it, and enough to register its members afterwards
 /// without deriving any of it again.
-struct DeclaredClass {
+pub(crate) struct DeclaredClass {
     symbol_id: SymbolId,
     class_scope: ScopeId,
     type_params: BTreeMap<String, TypeId>,
