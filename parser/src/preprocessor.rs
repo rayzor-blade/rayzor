@@ -88,8 +88,23 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
             // would leak through as raw tokens and break downstream parsing.
             let joined: String = selected_lines.join("\n");
             let nested = preprocess(&joined, config);
+            let emitted = if nested.is_empty() {
+                0
+            } else {
+                nested.lines().count()
+            };
             result.push_str(&nested);
             if !nested.is_empty() {
+                result.push('\n');
+            }
+            // Stand a blank line in for every line this block did not emit --
+            // the directives themselves and the branches not taken. Deleting
+            // them shifts every line after the block, and the diagnostic then
+            // cites the wrong source line: an error inside `MacroStringTools`
+            // at line 70 was reported at 51, exactly the 19 lines its `#if
+            // macro` block occupies.
+            let consumed = end_idx.saturating_sub(i) + 1;
+            for _ in emitted..consumed {
                 result.push('\n');
             }
 
@@ -99,10 +114,13 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
             || trimmed.starts_with("#end")
         {
             // These should be handled by extract_conditional_block
-            // If we encounter them here, just skip them
+            // If we encounter them here, just skip them -- as a blank line, so
+            // the lines after keep their numbers.
+            result.push('\n');
             i += 1;
         } else if trimmed.starts_with("#error") {
             // Skip #error directives - they're compile-time messages
+            result.push('\n');
             i += 1;
         } else {
             // Regular line, keep it
