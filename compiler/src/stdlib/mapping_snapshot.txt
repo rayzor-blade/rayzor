@@ -262,6 +262,8 @@ haxe.NativeStackTrace toHaxe static=true ctor=false params=2 -> rayzor_native_st
 haxe.ds.IntMap clear static=false ctor=false params=0 -> haxe_intmap_clear
 haxe.ds.IntMap exists static=false ctor=false params=1 -> haxe_intmap_exists
 haxe.ds.IntMap get static=false ctor=false params=1 -> haxe_intmap_get
+haxe.ds.IntMap iterator static=false ctor=false params=0 -> intmap_values_iterator
+haxe.ds.IntMap keys static=false ctor=false params=0 -> intmap_keys_iterator
 haxe.ds.IntMap new static=true ctor=true params=0 -> haxe_intmap_new
 haxe.ds.IntMap remove static=false ctor=false params=1 -> haxe_intmap_remove
 haxe.ds.IntMap set static=false ctor=false params=2 -> haxe_intmap_set
@@ -270,6 +272,8 @@ haxe.ds.ObjectMap clear static=false ctor=false params=0 -> haxe_objectmap_clear
 haxe.ds.ObjectMap copy static=false ctor=false params=0 -> haxe_objectmap_copy
 haxe.ds.ObjectMap exists static=false ctor=false params=1 -> haxe_objectmap_exists
 haxe.ds.ObjectMap get static=false ctor=false params=1 -> haxe_objectmap_get
+haxe.ds.ObjectMap iterator static=false ctor=false params=0 -> objectmap_values_iterator
+haxe.ds.ObjectMap keys static=false ctor=false params=0 -> objectmap_keys_iterator
 haxe.ds.ObjectMap new static=true ctor=true params=0 -> haxe_objectmap_new
 haxe.ds.ObjectMap remove static=false ctor=false params=1 -> haxe_objectmap_remove
 haxe.ds.ObjectMap set static=false ctor=false params=2 -> haxe_objectmap_set
@@ -277,6 +281,8 @@ haxe.ds.ObjectMap toString static=false ctor=false params=0 -> haxe_objectmap_to
 haxe.ds.StringMap clear static=false ctor=false params=0 -> haxe_stringmap_clear
 haxe.ds.StringMap exists static=false ctor=false params=1 -> haxe_stringmap_exists
 haxe.ds.StringMap get static=false ctor=false params=1 -> haxe_stringmap_get
+haxe.ds.StringMap iterator static=false ctor=false params=0 -> stringmap_values_iterator
+haxe.ds.StringMap keys static=false ctor=false params=0 -> stringmap_keys_iterator
 haxe.ds.StringMap new static=true ctor=true params=0 -> haxe_stringmap_new
 haxe.ds.StringMap remove static=false ctor=false params=1 -> haxe_stringmap_remove
 haxe.ds.StringMap set static=false ctor=false params=2 -> haxe_stringmap_set
