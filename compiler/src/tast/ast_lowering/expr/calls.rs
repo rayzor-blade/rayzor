@@ -15,6 +15,73 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// Whether an expression spells `_` anywhere, which only a pattern does.
+    fn expr_has_wildcard(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Ident(name) => name == "_",
+            ExprKind::Call { expr: callee, args } => {
+                Self::expr_has_wildcard(callee) || args.iter().any(Self::expr_has_wildcard)
+            }
+            ExprKind::Array(elements) => elements.iter().any(Self::expr_has_wildcard),
+            _ => false,
+        }
+    }
+
+    /// The pattern an expression spells, for `e.match(pattern)`.
+    ///
+    /// The argument was parsed in expression position, so it arrives as a call
+    /// or an identifier. Mirrors the pattern parser: a bare dotted name is
+    /// `Var` whatever its case (a later stage decides constructor or binding),
+    /// a call is a constructor, and `_` is the wildcard.
+    fn pattern_from_expr(expr: &Expr) -> Option<parser::haxe_ast::Pattern> {
+        use parser::haxe_ast::{Pattern, TypePath};
+        fn dotted_path(expr: &Expr) -> Option<Vec<String>> {
+            match &expr.kind {
+                ExprKind::Ident(name) => Some(vec![name.clone()]),
+                ExprKind::Field { expr, field, .. } => {
+                    let mut parts = dotted_path(expr)?;
+                    parts.push(field.clone());
+                    Some(parts)
+                }
+                _ => None,
+            }
+        }
+        match &expr.kind {
+            ExprKind::Ident(name) if name == "_" => Some(Pattern::Underscore),
+            ExprKind::Null => Some(Pattern::Null),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Bool(_) => Some(Pattern::Const(expr.clone())),
+            ExprKind::Ident(_) | ExprKind::Field { .. } => {
+                Some(Pattern::Var(dotted_path(expr)?.join(".")))
+            }
+            ExprKind::Array(elements) => Some(Pattern::Array(
+                elements
+                    .iter()
+                    .map(Self::pattern_from_expr)
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            ExprKind::Call { expr: callee, args } => {
+                let mut parts = dotted_path(callee)?;
+                let name = parts.pop()?;
+                let params = args
+                    .iter()
+                    .map(Self::pattern_from_expr)
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Pattern::Constructor {
+                    path: TypePath {
+                        package: parts,
+                        name,
+                        sub: None,
+                    },
+                    params,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The class `class_symbol` extends, even when this context never lowered it.
     ///
     /// `class_parents` holds only what THIS lowering registered, so the chain
@@ -904,6 +971,58 @@ impl<'a> AstLowering<'a> {
                             message: format!("macro '{}' failed during typing: {}", name, e),
                             location: self.context.create_location_from_span(expression.span),
                         });
+                    }
+                }
+            }
+        }
+
+        // `e.match(pattern)` is sugar for `switch (e) { case pattern: true;
+        // default: false; }`. Lowered as an ordinary call the pattern is read
+        // as an expression, so `_` resolves as a variable and the call fails
+        // with "Cannot find name '_'". `EReg.match(s:String)` is a real method,
+        // so only a receiver with no `match` member of its own is desugared.
+        if let ExprKind::Field {
+            expr: receiver_expr,
+            field,
+            ..
+        } = &expr.kind
+        {
+            if field == "match" && args.len() == 1 {
+                let receiver = self.lower_expression(receiver_expr)?;
+                // An enum receiver, or an argument spelling a wildcard, is a
+                // pattern. Anything else keeps the method it names -- asking
+                // whether the receiver's class declares `match` is not enough,
+                // because a stdlib class like `EReg` resolves to nothing in
+                // this context and its real `match(s:String)` would be eaten.
+                let receiver_is_enum = {
+                    let tt = self.context.type_table.borrow();
+                    tt.get(receiver.expr_type)
+                        .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Enum { .. }))
+                        .unwrap_or(false)
+                };
+                if receiver_is_enum || Self::expr_has_wildcard(&args[0]) {
+                    if let Some(pattern) = Self::pattern_from_expr(&args[0]) {
+                        let span = expression.span;
+                        let switch_expr = Expr {
+                            kind: ExprKind::Switch {
+                                expr: Box::new((**receiver_expr).clone()),
+                                cases: vec![parser::haxe_ast::Case {
+                                    patterns: vec![pattern],
+                                    guard: None,
+                                    body: Expr {
+                                        kind: ExprKind::Bool(true),
+                                        span,
+                                    },
+                                    span,
+                                }],
+                                default: Some(Box::new(Expr {
+                                    kind: ExprKind::Bool(false),
+                                    span,
+                                })),
+                            },
+                            span,
+                        };
+                        return self.lower_expression(&switch_expr);
                     }
                 }
             }
