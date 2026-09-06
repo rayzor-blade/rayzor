@@ -213,6 +213,27 @@ impl<'a> AstLowering<'a> {
                         {
                             return found;
                         }
+                        // An inherited method is declared by an ancestor, and
+                        // every strategy above is keyed on the receiver's own
+                        // class. Missing it hands back a placeholder whose type
+                        // is unknown, so the call's return type is unresolved --
+                        // an Int comes back as a pointer and printing it ends
+                        // the process with no output.
+                        let mut current = class_symbol;
+                        let mut seen: std::collections::BTreeSet<SymbolId> =
+                            std::collections::BTreeSet::new();
+                        seen.insert(current);
+                        while let Some(&parent) = self.class_parents.get(&current) {
+                            if !seen.insert(parent) {
+                                break; // cyclic `extends`; the type checker reports it
+                            }
+                            if let Some(found) =
+                                self.resolve_class_method_symbol(parent, method_name)
+                            {
+                                return found;
+                            }
+                            current = parent;
+                        }
                     }
                 }
             }
