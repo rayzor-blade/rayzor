@@ -597,6 +597,10 @@ impl MacroContext {
         let mut obj = BTreeMap::new();
         obj.insert("t".to_string(), typed);
         obj.insert("pos".to_string(), MacroValue::Position(location));
+        // The expression itself, so `Context.storeTypedExpr` can give back what
+        // was typed. A real typed AST is not kept, and this round trip is what
+        // the `storeTypedExpr(typeExpr(e))` idiom actually needs.
+        obj.insert("expr".to_string(), MacroValue::Expr(Arc::new(expr.clone())));
         Ok(MacroValue::Object(Arc::new(obj)))
     }
 
@@ -777,6 +781,70 @@ impl MacroContext {
                 Ok(self.defined_value(&key))
             }
             "getDefines" => Ok(self.get_defines()),
+            // `Context.getExpectedType()` — Haxe types this `Null<Type>` and
+            // null is the honest answer: the expected type at a macro call
+            // site is not tracked. A macro that branches on it takes its
+            // unknown path instead of failing to expand at all.
+            "getExpectedType" => Ok(MacroValue::Null),
+            // `Context.toComplexType(t)` — the syntax form of a type. Built
+            // from the type's source spelling, so a plain path converts and
+            // anything with parameters, a function arrow or a structure gives
+            // null, which the signature already allows.
+            "toComplexType" => {
+                let Some(MacroValue::Type(id)) = args.first().cloned() else {
+                    return Err(MacroError::ContextError {
+                        method: "toComplexType".to_string(),
+                        message: "toComplexType expects a Type argument".to_string(),
+                        location,
+                    });
+                };
+                let Some(typer) = self.typer.as_mut() else {
+                    return Err(MacroError::NeedsTyper { location });
+                };
+                let spelling = typer.get().type_display(id);
+                if spelling.is_empty()
+                    || spelling.contains(['<', '{', '(', '>', '-'])
+                {
+                    return Ok(MacroValue::Null);
+                }
+                let mut pack: Vec<&str> = spelling.split('.').collect();
+                let name = pack.pop().unwrap_or("").to_string();
+                let mut obj = BTreeMap::new();
+                obj.insert("kind".to_string(), MacroValue::String("TPath".into()));
+                obj.insert(
+                    "pack".to_string(),
+                    MacroValue::Array(Arc::new(
+                        pack.into_iter()
+                            .map(|p| MacroValue::String(p.into()))
+                            .collect(),
+                    )),
+                );
+                obj.insert("name".to_string(), MacroValue::String(name.into()));
+                obj.insert("params".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+                obj.insert("sub".to_string(), MacroValue::Null);
+                Ok(MacroValue::Object(Arc::new(obj)))
+            }
+            // `Context.storeTypedExpr(t)` — hand back the expression `typeExpr`
+            // was given. Haxe stores a typed AST and returns a reference to it;
+            // re-expanding the source expression is the same thing to every
+            // caller that does not inspect the result.
+            "storeTypedExpr" => match args.first() {
+                Some(MacroValue::Object(fields)) => match fields.get("expr") {
+                    Some(expr @ MacroValue::Expr(_)) => Ok(expr.clone()),
+                    _ => Err(MacroError::ContextError {
+                        method: "storeTypedExpr".to_string(),
+                        message: "storeTypedExpr expects the result of Context.typeExpr"
+                            .to_string(),
+                        location,
+                    }),
+                },
+                Some(expr @ MacroValue::Expr(_)) => Ok(expr.clone()),
+                _ => Err(MacroError::ContextError {
+                    method: "storeTypedExpr".to_string(),
+                    message: "storeTypedExpr expects a typed expression".to_string(),
+                    location,
+                }),
+            },
             "getType" => {
                 let name = arg_as_string(args, 0, "getType", location)?;
                 self.get_type(&name, location)
