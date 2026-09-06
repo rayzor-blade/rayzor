@@ -2631,6 +2631,12 @@ impl<'a> TastToHirContext<'a> {
                 // Desugar array comprehension to a loop that builds an array
                 self.desugar_array_comprehension(for_parts, expression, *element_type)
             }
+            TypedExpressionKind::MapComprehension {
+                for_parts,
+                key_expr,
+                value_expr,
+                ..
+            } => self.desugar_map_comprehension(for_parts, key_expr, value_expr, expr.expr_type),
             TypedExpressionKind::Return { value } => {
                 // Return as an expression creates a block that never returns normally
                 let return_stmt =
@@ -3814,6 +3820,94 @@ impl<'a> TastToHirContext<'a> {
         };
 
         HirExprKind::Block(block)
+    }
+
+    /// Desugar `[for (x in xs) k => v]` the way the array form is desugared,
+    /// except the accumulator is a map and each step is `_tmp[k] = v` -- a map
+    /// is index-assigned exactly like an array, so no counter is needed.
+    fn desugar_map_comprehension(
+        &mut self,
+        for_parts: &[TypedComprehensionFor],
+        key_expr: &TypedExpression,
+        value_expr: &TypedExpression,
+        map_type: TypeId,
+    ) -> HirExprKind {
+        let mut statements = Vec::new();
+
+        let (temp_name, temp_symbol) = self.gen_temp_var();
+        let empty_map = HirExpr::new(
+            HirExprKind::Map {
+                entries: Vec::new(),
+            },
+            map_type,
+            self.current_lifetime,
+            SourceLocation::unknown(),
+        );
+        statements.push(HirStatement::Let {
+            pattern: HirPattern::Variable {
+                name: temp_name,
+                symbol: temp_symbol,
+            },
+            type_hint: Some(map_type),
+            init: Some(empty_map),
+            is_mutable: true,
+        });
+
+        let map_ref = |this: &Self| {
+            HirExpr::new(
+                HirExprKind::Variable {
+                    symbol: temp_symbol,
+                    capture_mode: None,
+                },
+                map_type,
+                this.current_lifetime,
+                SourceLocation::unknown(),
+            )
+        };
+
+        let set_entry = HirStatement::Assign {
+            lhs: HirLValue::Index {
+                object: Box::new(map_ref(self)),
+                index: Box::new(self.lower_expression(key_expr)),
+            },
+            rhs: self.lower_expression(value_expr),
+            op: None,
+        };
+        let mut current_body = HirBlock::new(vec![set_entry], self.current_scope);
+
+        for for_part in for_parts.iter().rev() {
+            let pattern = if let Some(key_var) = for_part.key_var_symbol {
+                HirPattern::Tuple(vec![
+                    HirPattern::Variable {
+                        name: self.get_symbol_name(key_var),
+                        symbol: key_var,
+                    },
+                    HirPattern::Variable {
+                        name: self.get_symbol_name(for_part.var_symbol),
+                        symbol: for_part.var_symbol,
+                    },
+                ])
+            } else {
+                HirPattern::Variable {
+                    name: self.get_symbol_name(for_part.var_symbol),
+                    symbol: for_part.var_symbol,
+                }
+            };
+            let for_stmt = HirStatement::ForIn {
+                label: None,
+                pattern,
+                iterator: self.lower_expression(&for_part.iterator),
+                body: current_body,
+            };
+            current_body = HirBlock::new(vec![for_stmt], self.current_scope);
+        }
+        statements.extend(current_body.statements);
+
+        HirExprKind::Block(HirBlock {
+            statements,
+            expr: Some(Box::new(map_ref(self))),
+            scope: self.current_scope,
+        })
     }
 
     /// Build the innermost body for array comprehension that pushes to the array.

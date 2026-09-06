@@ -1605,6 +1605,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
             // Body expression that yields each element (or `k => v` for map).
             let body = self.parse_expression()?;
+            // `=>` binds as a binary operator, so the body already swallowed it
+            // and the `eat` below never fires. Split the pair back out.
+            if let ExprKind::Binary {
+                op: BinaryOp::Arrow,
+                left,
+                right,
+            } = body.kind
+            {
+                let end = self.stream.expect(TokenKind::RBracket)?;
+                return Ok(Expr {
+                    kind: ExprKind::MapComprehension {
+                        for_parts,
+                        key: left,
+                        value: right,
+                    },
+                    span: Span::new(start, end.end),
+                });
+            }
             if self.stream.eat(TokenKind::FatArrow).is_some() {
                 let value = self.parse_expression()?;
                 let end = self.stream.expect(TokenKind::RBracket)?;
