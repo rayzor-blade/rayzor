@@ -6140,6 +6140,37 @@ impl<'a> TastToHirContext<'a> {
         }
     }
 
+    /// Whether an ancestor of `class_type` declares a constructor this call's
+    /// argument count fits. A class that declares none inherits its parent's.
+    fn inherits_constructor_for(&self, class_type: TypeId, arg_count: usize) -> bool {
+        let Some(file) = &self.current_file else {
+            return false;
+        };
+        let mut current = self.type_table.borrow().get_type_symbol(class_type);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..16 {
+            let Some(sym) = current else { return false };
+            if !seen.insert(sym) {
+                return false;
+            }
+            let Some(class) = file.classes.iter().find(|c| c.symbol_id == sym) else {
+                // The parent is not in this file. Its constructor, if any, is
+                // bound by name later; refusing the call here would reject code
+                // that does compile.
+                return true;
+            };
+            if let Some(ctor) = class.constructors.first() {
+                // An optional parameter may be omitted, so the call fits when it
+                // passes no more arguments than the constructor declares.
+                return arg_count <= ctor.parameters.len();
+            }
+            current = class
+                .super_class
+                .and_then(|t| self.type_table.borrow().get_type_symbol(t));
+        }
+        false
+    }
+
     /// Validate that a constructor exists for the given class type and argument count
     fn validate_constructor(
         &mut self,
@@ -6161,7 +6192,14 @@ impl<'a> TastToHirContext<'a> {
 
                         if !has_constructor {
                             // In Haxe, classes without explicit constructors have
-                            // an implicit default (no-arg) constructor.
+                            // an implicit default (no-arg) constructor -- unless
+                            // they extend one that declares a constructor, which
+                            // they inherit, arity and all. `class Child extends
+                            // Parent {}` with `new Parent(x)` is `new Child(12)`.
+                            if arg_count > 0 && self.inherits_constructor_for(class_type, arg_count)
+                            {
+                                return;
+                            }
                             if arg_count > 0 {
                                 let class_name_str = self
                                     .string_interner
