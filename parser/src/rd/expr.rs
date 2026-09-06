@@ -31,6 +31,38 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_ternary()?;
 
+        // `a ??= b` is `a = a ?? b`. Desugaring here keeps `AssignOp` as it
+        // is; the left side is re-read, so only a plain name or field access
+        // qualifies -- re-evaluating an index or a call could run its
+        // subexpressions twice.
+        if self.stream.at(TokenKind::QuestionQuestionAssign) {
+            if !matches!(left.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) {
+                return Err(ParseError::new(
+                    "`??=` needs a variable or field on its left",
+                    self.stream.peek().span,
+                ));
+            }
+            self.stream.advance();
+            let right = self.parse_assignment()?;
+            let span = left.span.merge(right.span);
+            let coalesced = Expr {
+                kind: ExprKind::Binary {
+                    left: Box::new(left.clone()),
+                    op: BinaryOp::NullCoal,
+                    right: Box::new(right),
+                },
+                span,
+            };
+            return Ok(Expr {
+                kind: ExprKind::Assign {
+                    left: Box::new(left),
+                    op: AssignOp::Assign,
+                    right: Box::new(coalesced),
+                },
+                span,
+            });
+        }
+
         if self.stream.at_any(&[
             TokenKind::Assign,
             TokenKind::PlusAssign,

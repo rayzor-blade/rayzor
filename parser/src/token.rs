@@ -110,6 +110,7 @@ pub enum TokenKind {
     Question,         // ?
     QuestionDot,      // ?.
     QuestionQuestion, // ??
+    QuestionQuestionAssign, // ??=
     Hash,             // #
 
     // === Operators ===
