@@ -143,13 +143,14 @@ impl CompilationUnit {
             // error — a failed macro call otherwise routes to a regular
             // method (often the stdlib namesake) with no indication the
             // macro didn't run.
+            let mut macro_diagnostics: Vec<diagnostics::Diagnostic> = Vec::new();
+            // The expander re-walks a dirty declaration once per iteration and
+            // records the same failure each time, so the batch repeats itself.
+            let mut seen_macro_diags: std::collections::BTreeSet<(String, u32, u32)> =
+                std::collections::BTreeSet::new();
             for diag in &expansion.diagnostics {
-                // Skip Info-level diagnostics — they're used for per-macro
-                // registration traces and would spam the output.
+                // Info is a per-macro registration trace and would spam.
                 if matches!(diag.severity, crate::macro_system::MacroSeverity::Info) {
-                    if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
-                        debug!("Macro expansion error in {}: {}", filename, diag.message);
-                    }
                     continue;
                 }
                 let severity = match diag.severity {
@@ -174,8 +175,11 @@ impl CompilationUnit {
                     (loc.column.max(1) + 1) as usize,
                     (loc.byte_offset + 1) as usize,
                 );
+                if !seen_macro_diags.insert((diag.message.clone(), loc.line, loc.column)) {
+                    continue;
+                }
                 let span = diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0));
-                self.collected_diagnostics.push(diagnostics::Diagnostic {
+                macro_diagnostics.push(diagnostics::Diagnostic {
                     severity,
                     code: Some("MACRO".to_string()),
                     message: format!("macro expansion in {}: {}", filename, diag.message),
@@ -188,6 +192,13 @@ impl CompilationUnit {
                 if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
                     debug!("Macro expansion error in {}: {}", filename, diag.message);
                 }
+            }
+            // PRINT them. Collecting alone only stores for cache replay, so the
+            // reason a macro did not run was never shown: the macro's own
+            // definition is stripped after expansion, and the user saw nothing
+            // but `Cannot find name '<macro>'` at the call site.
+            if !macro_diagnostics.is_empty() {
+                self.print_mir_diagnostics(&macro_diagnostics);
             }
             if expansion.expansions_count > 0 {
                 debug!(
