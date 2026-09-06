@@ -1011,7 +1011,7 @@ fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &BTreeMap<Str
 /// type-tag fixup is left at its 0 placeholder — `Std.string(x:T)` with T=Float
 /// then renders the f64 bits as an integer. The bitcast source still carries
 /// the real type. Returns `None` when the type is genuinely erased.
-fn concrete_arg_type(caller: &IrFunction, reg: IrId) -> Option<IrType> {
+pub(crate) fn concrete_arg_type(caller: &IrFunction, reg: IrId) -> Option<IrType> {
     let erased = |t: &IrType| matches!(t, IrType::I64 | IrType::TypeVar(_));
 
     if let Some(ty) = caller.register_types.get(&reg) {

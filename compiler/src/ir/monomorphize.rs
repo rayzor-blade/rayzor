@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::functions::{IrFunctionSignature, IrParameter};
 use super::modules::IrModule;
 use super::{
-    IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrInstruction,
+    IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId, IrInstruction,
     IrTerminator, IrType, IrValue,
 };
 
@@ -329,6 +329,55 @@ impl Monomorphizer {
                             }
                         }
                     }
+                    // An erased method-level generic never spells its type
+                    // variable in a parameter, but its body still reads the
+                    // erasure through a tag this pass resolves, and the
+                    // argument says what that tag is. One variable only, and
+                    // only when the erased slots agree: with two of them
+                    // nothing says which argument belongs to which variable.
+                    if !found
+                        && callee.signature.type_params.len() == 1
+                        && !callee.type_param_tag_fixups.is_empty()
+                    {
+                        let mut agreed: Option<IrType> = None;
+                        let mut conflict = false;
+                        for (i, sig_param) in callee.signature.parameters.iter().enumerate() {
+                            if sig_param.ty != IrType::I64 || i >= args.len() {
+                                continue;
+                            }
+                            // One slot known and another not is not agreement.
+                            // `eq(12, t.get())` over `T:(Float)` reads Int off
+                            // the literal while the call returns float bits,
+                            // and the tag that comes out compares them unequal.
+                            let ty = match crate::ir::inlining::concrete_arg_type(
+                                context_func,
+                                args[i],
+                            ) {
+                                Some(ty) => ty,
+                                None => {
+                                    conflict = true;
+                                    break;
+                                }
+                            };
+                            match &agreed {
+                                Some(prev) if *prev != ty => conflict = true,
+                                Some(_) => {}
+                                None => agreed = Some(ty),
+                            }
+                        }
+                        if !conflict {
+                            if let Some(ty) = agreed {
+                                if dbg_mono {
+                                    eprintln!(
+                                        "[mono]   -> inferred '{}' = {:?} from an erased slot",
+                                        type_param.name, ty
+                                    );
+                                }
+                                inferred_args.push(ty);
+                                found = true;
+                            }
+                        }
+                    }
                     if !found {
                         // Can't infer all type params — skip
                         if dbg_mono {
@@ -396,6 +445,14 @@ impl Monomorphizer {
             new_register_types.insert(*id, self.substitute_type(ty));
         }
         specialized.register_types = new_register_types;
+
+        // A parameter's register holds what its slot holds, and an erased slot
+        // stays I64 whatever the type argument is. Substituting the register
+        // types alone can put a concrete type on a register the ABI still
+        // passes as bits.
+        for param in &specialized.signature.parameters {
+            specialized.register_types.insert(param.reg, param.ty.clone());
+        }
 
         // Substitute types in CFG instructions
         self.substitute_cfg(&mut specialized.cfg);
@@ -783,6 +840,14 @@ impl Monomorphizer {
         }
         specialized.register_types = new_register_types;
 
+        // A parameter's register holds what its slot holds, and an erased slot
+        // stays I64 whatever the type argument is. Substituting the register
+        // types alone can put a concrete type on a register the ABI still
+        // passes as bits.
+        for param in &specialized.signature.parameters {
+            specialized.register_types.insert(param.reg, param.ty.clone());
+        }
+
         // Substitute types in locals
         for (_, local) in specialized.locals.iter_mut() {
             local.ty = self.substitute_type(&local.ty);
@@ -808,31 +873,127 @@ impl Monomorphizer {
         (new_id, true)
     }
 
-    /// Rewrite call sites to use specialized functions
+    /// Point each call at its instance, handing an erased slot the bits.
+    ///
+    /// A slot the callee declares `I64` takes a float as its BITS -- the body
+    /// reads it through the tag this pass resolved. Inlining already coerces
+    /// there; a call that survives as a call had nobody to do it, and passing
+    /// an f64 register into an integer slot is a register class Cranelift
+    /// refuses to emit.
     fn rewrite_call_sites(
         &mut self,
         module: &mut IrModule,
         requests: &BTreeMap<MonoKey, Vec<CallSiteLocation>>,
     ) {
+        let mut param_tys: BTreeMap<IrFunctionId, Vec<IrType>> = BTreeMap::new();
+        let mut by_block: BTreeMap<(IrFunctionId, IrBlockId), Vec<(usize, IrFunctionId)>> =
+            BTreeMap::new();
         for (key, locations) in requests {
-            if let Some(&specialized_id) = self.instances.get(key) {
-                for loc in locations {
-                    if let Some(func) = module.functions.get_mut(&loc.function_id) {
-                        if let Some(block) = func.cfg.blocks.get_mut(&loc.block_id) {
-                            if let Some(inst) = block.instructions.get_mut(loc.instruction_index) {
-                                if let IrInstruction::CallDirect {
-                                    func_id, type_args, ..
-                                } = inst
-                                {
-                                    *func_id = specialized_id;
-                                    type_args.clear(); // No longer generic
-                                    self.stats.call_sites_rewritten += 1;
-                                }
-                            }
+            let specialized_id = match self.instances.get(key) {
+                Some(id) => *id,
+                None => continue,
+            };
+            if let Some(f) = module.functions.get(&specialized_id) {
+                param_tys.entry(specialized_id).or_insert_with(|| {
+                    f.signature.parameters.iter().map(|p| p.ty.clone()).collect()
+                });
+            }
+            for loc in locations {
+                by_block
+                    .entry((loc.function_id, loc.block_id))
+                    .or_default()
+                    .push((loc.instruction_index, specialized_id));
+            }
+        }
+
+        for ((func_id, block_id), mut sites) in by_block {
+            // Descending: inserting a coercion shifts only the sites after it,
+            // and those are already done.
+            sites.sort_by(|a, b| b.0.cmp(&a.0));
+            let func = match module.functions.get_mut(&func_id) {
+                Some(f) => f,
+                None => continue,
+            };
+            let mut next = func.next_reg_id;
+            for reg in func.register_types.keys() {
+                next = next.max(reg.0 + 1);
+            }
+            for (index, specialized_id) in sites {
+                let ptys = match param_tys.get(&specialized_id) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let args: Vec<IrId> = match func
+                    .cfg
+                    .blocks
+                    .get(&block_id)
+                    .and_then(|b| b.instructions.get(index))
+                {
+                    Some(IrInstruction::CallDirect { args, .. }) => args.clone(),
+                    _ => continue,
+                };
+                let mut coercions: Vec<IrInstruction> = Vec::new();
+                let mut new_args = args.clone();
+                for (i, arg) in args.iter().enumerate() {
+                    if ptys.get(i) != Some(&IrType::I64) {
+                        continue;
+                    }
+                    match func.register_types.get(arg) {
+                        Some(IrType::F64) => {
+                            let bits = IrId::new(next);
+                            next += 1;
+                            coercions.push(IrInstruction::BitCast {
+                                dest: bits,
+                                src: *arg,
+                                ty: IrType::I64,
+                            });
+                            func.register_types.insert(bits, IrType::I64);
+                            new_args[i] = bits;
                         }
+                        Some(IrType::F32) => {
+                            let wide = IrId::new(next);
+                            next += 1;
+                            let bits = IrId::new(next);
+                            next += 1;
+                            coercions.push(IrInstruction::Cast {
+                                dest: wide,
+                                src: *arg,
+                                from_ty: IrType::F32,
+                                to_ty: IrType::F64,
+                            });
+                            coercions.push(IrInstruction::BitCast {
+                                dest: bits,
+                                src: wide,
+                                ty: IrType::I64,
+                            });
+                            func.register_types.insert(wide, IrType::F64);
+                            func.register_types.insert(bits, IrType::I64);
+                            new_args[i] = bits;
+                        }
+                        _ => {}
                     }
                 }
+                let block = match func.cfg.blocks.get_mut(&block_id) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                if let Some(IrInstruction::CallDirect {
+                    func_id: callee,
+                    type_args,
+                    args,
+                    ..
+                }) = block.instructions.get_mut(index)
+                {
+                    *callee = specialized_id;
+                    type_args.clear();
+                    *args = new_args;
+                    self.stats.call_sites_rewritten += 1;
+                }
+                for (k, inst) in coercions.into_iter().enumerate() {
+                    block.instructions.insert(index + k, inst);
+                }
             }
+            func.next_reg_id = next;
         }
     }
 }
