@@ -74,7 +74,7 @@ fi
 }
 
 # Package roots that only exist on one Haxe target.
-TARGET_PKGS="php|js|cs|java|python|lua|flash|neko|hl|eval|cpp|jvm"
+TARGET_PKGS="php|js|cs|java|python|lua|flash|neko|hl|eval|cpp|jvm|cppia|hlc|nodejs|interp"
 
 # Fail loudly if the fixtures are missing. Without them every test compiles
 # without unit.Test and the run reports a confident 0%, which looks like a
@@ -296,8 +296,24 @@ import re
 # rayzor's own preprocessor decides what to compile.
 targets = set(target_pkgs.split('|'))
 def branch_is_ours(cond):
-    words = set(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', cond))
-    return not (words and words <= targets)
+    # We are none of the targets, so evaluate the condition with every target
+    # name false and see what it says. `#if cpp` is dead, `#if !cpp` is LIVE --
+    # the old "every word names a target" test called both dead, and called
+    # `#if (cpp && !cppia)` LIVE because `cppia` was missing from the list.
+    # A condition mentioning anything else (a define, a version check) is not
+    # decidable here and stays live: guessing wrong would drop tests that apply.
+    expr = cond.strip()
+    if not expr:
+        return True
+    py = re.sub(r'&&', ' and ', re.sub(r'\|\|', ' or ', expr))
+    py = re.sub(r'!(?=[A-Za-z_(])', ' not ', py)
+    names = set(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', py)) - {'and', 'or', 'not'}
+    if not names or not names <= targets:
+        return True
+    try:
+        return bool(eval(py, {'__builtins__': {}}, {n: False for n in names}))
+    except Exception:
+        return True
 
 live = [True] * len(lines)
 stack = []            # (this_branch_live, any_branch_taken_yet)
