@@ -52,7 +52,7 @@
     <main style="padding:40px 0 96px;min-width:0">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Getting started</div>
       <h1 id="quickstart" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600">Quick start</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Picking what you want — a fast dev loop, a shippable binary, a portable artifact — means picking a command.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Each task below has its own command.</p>
 
       <div style="margin-top:32px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;color:#C9CCD2">
         <div><span style="color:#F97316">$</span> curl -fsSL https://rayzor.tech/install.sh | sh</div>
@@ -174,18 +174,18 @@ const NAV = [
   { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
 ];
 const MODES = [
-  { want: "Run code while developing", cmd: "rayzor run main.hx", what: "Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM" },
+  { want: "Run code while developing", cmd: "rayzor run main.hx", what: "Runs immediately, then compiles and optimizes whatever gets hot" },
   { want: "Type-check only", cmd: "rayzor check main.hx", what: "Parse and type-check, no codegen" },
-  { want: "Ship a native binary", cmd: "rayzor aot main.hx -o app", what: "Whole program through LLVM, linked against the runtime" },
+  { want: "Ship a native binary", cmd: "rayzor aot main.hx -o app", what: "Whole program compiled ahead of time, linked against the runtime" },
   { want: "Ship one portable artifact", cmd: "rayzor bundle main.hx", what: "Serialized MIR in a single .rzb, run later with rayzor run" },
   { want: "Target the browser or WASI", cmd: "rayzor build --target wasm", what: "WebAssembly module; --browser also emits an HTML harness" },
   { want: "Inspect the pipeline", cmd: "rayzor compile --stage mir", what: "Stop at any stage — ast, tast, hir, mir, native — and print it" }
 ];
 const PRESETS = [
   { name: "script", for: "CLI tools and one-shot scripts — instant startup, no promotion" },
-  { name: "application", for: "Desktop apps and web servers — balanced, includes LLVM (default)" },
+  { name: "application", for: "Desktop apps and web servers — balanced (default)" },
   { name: "server", for: "Long-running services — aggressive optimization" },
-  { name: "benchmark", for: "Performance testing — immediate bailout, manual LLVM upgrade" },
+  { name: "benchmark", for: "Performance testing — compiles at once, fully optimized within warm-up" },
   { name: "development", for: "Debugging — verbose logging" },
   { name: "embedded", for: "Constrained environments — interpreter only" }
 ];

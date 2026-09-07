@@ -52,12 +52,15 @@ Options:
 
 ### Optimization Levels
 
-| Level | Passes | Use Case |
-| ----- | ------ | -------- |
-| O0 | Inlining, DCE, SRA, CopyProp | Fast compilation, debug builds |
-| O1 | O0 + basic CSE | Balanced |
-| O2 | O1 + full CSE, LICM | Production (default) |
-| O3 | O2 + aggressive inlining, LLVM | Maximum performance |
+| Level | What you get | Use case |
+| ----- | ------------ | -------- |
+| O0 | Least optimization, quickest to compile | Debug builds |
+| O1 | Light optimization | Balanced |
+| O2 | Full optimization | Production (default) |
+| O3 | O2, tuned harder — slower to compile | Maximum performance |
+
+Which passes run at each level is in
+[ARCHITECTURE](../../architecture/ARCHITECTURE.md).
 
 ### Tree-Shaking
 

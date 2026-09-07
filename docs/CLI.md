@@ -19,7 +19,7 @@ irm https://rayzor.tech/install.ps1 | iex          # Windows
 ```
 
 Lands in `~/.rayzor/bin` — add it to your `PATH` if the installer says so. The
-download is self-contained: nothing else to install, no LLVM on the side.
+download is self-contained: nothing else to install.
 
 ```bash
 rayzor info                      # confirm the install
@@ -67,7 +67,7 @@ Cross-compiling and stripping:
 ```bash
 rayzor aot main.hx -o app --target aarch64-unknown-linux-gnu
 rayzor aot main.hx -o app --strip --strip-symbols
-rayzor aot main.hx --emit llvm-ir -o app.ll   # exe | obj | llvm-ir | llvm-bc | asm
+rayzor aot main.hx --emit obj -o app.o        # exe (default) | obj | asm
 ```
 
 `rayzor build` with no argument resolves an explicit `.hxml`, else `rayzor.toml`,
@@ -84,9 +84,9 @@ rayzor run --no-cache            # ignore the cache (it is on by default)
 | Preset | For |
 |---|---|
 | `script` | one-shot scripts — instant startup, no promotion |
-| `application` | apps and servers — balanced, includes LLVM (**default**) |
+| `application` | apps and servers — balanced (**default**) |
 | `server` | long-running services — aggressive optimization |
-| `benchmark` | performance testing — immediate bailout |
+| `benchmark` | performance testing — compiles at once, fully optimized within warm-up |
 | `development` | debugging — verbose logging |
 | `embedded` | constrained targets — interpreter only |
 

@@ -21,9 +21,9 @@
 ## Overview
 
 Rayzor is a Haxe compiler written in Rust that generates native code. It runs
-your program immediately in a MIR interpreter and promotes hot functions through
-Cranelift to LLVM, so you get startup without a compile wait and steady-state
-speed without giving it up.
+your program immediately and compiles hot functions as they prove themselves, so
+you get startup without a compile wait and steady-state speed without giving it
+up.
 
 - **Native code generation** — Cranelift and LLVM backends, plus WebAssembly and
   a C99 route that needs no LLVM
@@ -51,8 +51,8 @@ rayzor aot hello.hx -o hello   # native binary
 rayzor bundle hello.hx -o app.rzb
 ```
 
-The download is self-contained — no LLVM to install alongside it. Building from
-source is in [Contributing](#contributing).
+The download is self-contained. Building from source is in
+[Contributing](#contributing).
 
 Setup and everyday commands: **[docs/CLI.md](docs/CLI.md)**.
 

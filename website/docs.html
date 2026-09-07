@@ -190,7 +190,7 @@
     <main style="padding:40px 0 96px;min-width:0" class="dcr11">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Getting started</div>
       <h1 id="quickstart" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr12">Quick start</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Picking what you want — a fast dev loop, a shippable binary, a portable artifact — means picking a command.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Rayzor compiles Haxe 4.x to native code. Each task below has its own command.</p>
 
       <div style="margin-top:32px;border:1px solid #22242A;border-radius:12px;background:#0E1013;padding:22px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:2;color:#C9CCD2">
         <div><span style="color:#F97316">$</span> curl -fsSL https://rayzor.tech/install.sh | sh</div>
@@ -208,7 +208,7 @@
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
             <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Run code while developing</div>
             <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor run main.hx</div>
-            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Runs immediately, then compiles and optimizes whatever gets hot</div>
           </div>
         
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
@@ -220,7 +220,7 @@
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
             <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Ship a native binary</div>
             <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316">rayzor aot main.hx -o app</div>
-            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Whole program through LLVM, linked against the runtime</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Whole program compiled ahead of time, linked against the runtime</div>
           </div>
         
           <div style="display:grid;grid-template-columns:1fr 1.05fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr7">
@@ -254,7 +254,7 @@
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">application</span>
-            <span style="font-size:14px;color:#8A9099;line-height:1.5">Desktop apps and web servers — balanced, includes LLVM (default)</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Desktop apps and web servers — balanced (default)</span>
           </div>
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
@@ -264,7 +264,7 @@
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:120px;flex:none">benchmark</span>
-            <span style="font-size:14px;color:#8A9099;line-height:1.5">Performance testing — immediate bailout, manual LLVM upgrade</span>
+            <span style="font-size:14px;color:#8A9099;line-height:1.5">Performance testing — compiles at once, fully optimized within warm-up</span>
           </div>
         
           <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21" class="dcr14">
