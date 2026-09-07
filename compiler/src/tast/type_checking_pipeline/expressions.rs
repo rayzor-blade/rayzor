@@ -3,7 +3,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Check an expression and return its type
     pub fn check_expression(&mut self, expr: &TypedExpression) -> Result<TypeId, String> {
         match &expr.kind {
@@ -902,7 +901,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(result_type)
     }
 
-
     /// Check a binary operation expression (extracted to reduce stack frame size)
     #[inline(never)]
     pub(crate) fn check_binary_op_expr(
@@ -1073,7 +1071,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check a function call expression (extracted to reduce stack frame size)
     #[inline(never)]
     pub(crate) fn check_function_call_expr(
@@ -1172,7 +1169,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
         Ok(())
     }
-
 
     /// Check a method call expression (extracted to reduce stack frame size)
     #[inline(never)]
@@ -1304,7 +1300,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check a switch expression (extracted to reduce stack frame size)
     #[inline(never)]
     pub(crate) fn check_switch_expr(
@@ -1386,7 +1381,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
         Ok(())
     }
-
 
     /// Check a map literal expression (extracted to reduce stack frame size)
     #[inline(never)]

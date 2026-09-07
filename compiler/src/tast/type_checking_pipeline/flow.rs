@@ -4,7 +4,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Run flow-sensitive safety analysis on the typed file
     pub(crate) fn run_flow_analysis(&mut self, typed_file: &TypedFile) -> Result<(), String> {
         // Initialize flow guard if not already done
@@ -45,14 +44,16 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Run Send/Sync validation for thread safety
     ///
     /// Validates that:
     /// - Thread::spawn captures only Send types
     /// - Channel<T> has T: Send
     /// - Arc<T> has T: Send + Sync
-    pub(crate) fn run_send_sync_validation(&mut self, typed_file: &TypedFile) -> Result<(), String> {
+    pub(crate) fn run_send_sync_validation(
+        &mut self,
+        typed_file: &TypedFile,
+    ) -> Result<(), String> {
         // Create the validator
         let validator = SendSyncValidator::new(
             self.type_table,
@@ -83,7 +84,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Emit a Send/Sync validation error as a diagnostic
     pub(crate) fn emit_send_sync_error(&mut self, error: SendSyncError) {
         self.emit_error(TypeCheckError {
@@ -99,7 +99,6 @@ impl<'a> TypeCheckingPhase<'a> {
         });
     }
 
-
     /// Convert flow safety results to diagnostics
     pub(crate) fn emit_flow_safety_diagnostics(&mut self, results: &FlowSafetyResults) {
         // Emit errors
@@ -112,7 +111,6 @@ impl<'a> TypeCheckingPhase<'a> {
             self.emit_flow_safety_warning(warning);
         }
     }
-
 
     /// Emit a flow safety error as a diagnostic
     pub(crate) fn emit_flow_safety_error(&mut self, error: &FlowSafetyError) {
@@ -159,7 +157,6 @@ impl<'a> TypeCheckingPhase<'a> {
             }
         }
     }
-
 
     /// Emit a flow safety warning as a diagnostic
     pub(crate) fn emit_flow_safety_warning(&mut self, warning: &FlowSafetyError) {

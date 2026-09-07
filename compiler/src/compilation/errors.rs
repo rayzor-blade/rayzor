@@ -3,7 +3,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// When `RAYZOR_DUMP_JIT_MAP=1`, write `/tmp/rayzor_file_table.csv`
     /// containing `file_id,path` rows for every file seen by the compiler.
     /// Pairs with `/tmp/rayzor_jit_symbols.csv` (whose `file_id` column
@@ -31,7 +30,6 @@ impl CompilationUnit {
             Err(e) => eprintln!("[jit-map] failed to write {}: {}", path, e),
         }
     }
-
 
     /// Extract the type name from an unresolved type error message
     pub(crate) fn extract_type_name_from_error(&self, message: &str) -> Option<String> {
@@ -92,7 +90,6 @@ impl CompilationUnit {
         type_name
     }
 
-
     /// Print compilation errors with formatted diagnostics to stderr.
     /// Uses the diagnostics crate's ErrorFormatter for consistent formatting.
     pub fn print_compilation_errors(&self, errors: &[CompilationError]) {
@@ -111,7 +108,6 @@ impl CompilationUnit {
             eprint!("{}", formatted);
         }
     }
-
 
     /// Print diagnostics from MIR lowering using the diagnostics formatter.
     /// The source map is built with the user file at FileId 0 to match the
@@ -147,7 +143,6 @@ impl CompilationUnit {
             eprint!("{}", formatted);
         }
     }
-
 
     /// Construct a SourceMap that registers every Haxe file the
     /// current compilation knows about, **at the same file_id** the

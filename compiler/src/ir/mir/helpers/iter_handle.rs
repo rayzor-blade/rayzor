@@ -102,9 +102,7 @@ impl<'a> HirToMirContext<'a> {
                 .and_then(|s| self.symbol_table.get_symbol(s))
                 .and_then(|s| self.string_interner.get(s.name));
             match name {
-                Some("Iterator") | Some("KeyValueIterator") => {
-                    return Some(IterProtocol::Iterator)
-                }
+                Some("Iterator") | Some("KeyValueIterator") => return Some(IterProtocol::Iterator),
                 Some("Iterable") => return Some(IterProtocol::Iterable),
                 _ => {}
             }
@@ -1015,7 +1013,10 @@ impl<'a> HirToMirContext<'a> {
                 _ => return None,
             };
             let elem_kind = &self.type_table.get(elem)?.kind;
-            if matches!(elem_kind, TypeKind::TypeParameter { .. } | TypeKind::Dynamic) {
+            if matches!(
+                elem_kind,
+                TypeKind::TypeParameter { .. } | TypeKind::Dynamic
+            ) {
                 return None;
             }
             return Some(self.convert_type(elem));
@@ -1028,9 +1029,13 @@ impl<'a> HirToMirContext<'a> {
     pub(super) fn iter_elem_from_i64(&mut self, value: IrId, target: &IrType) -> Option<IrId> {
         match target {
             IrType::I64 => Some(value),
-            IrType::I32 | IrType::I16 | IrType::I8 | IrType::U8 | IrType::U16 | IrType::U32 | IrType::Bool => {
-                self.builder.build_cast(value, IrType::I64, target.clone())
-            }
+            IrType::I32
+            | IrType::I16
+            | IrType::I8
+            | IrType::U8
+            | IrType::U16
+            | IrType::U32
+            | IrType::Bool => self.builder.build_cast(value, IrType::I64, target.clone()),
             IrType::F64 => self.builder.build_bitcast(value, IrType::F64),
             IrType::F32 => Some(value),
             _ => self.builder.build_bitcast(value, target.clone()),

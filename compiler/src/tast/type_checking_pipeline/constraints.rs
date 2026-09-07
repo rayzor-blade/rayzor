@@ -3,9 +3,12 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Validate that a type satisfies a constraint type (e.g., T:Comparable<T>)
-    pub(crate) fn validate_type_constraint(&self, type_id: TypeId, constraint_type_id: TypeId) -> bool {
+    pub(crate) fn validate_type_constraint(
+        &self,
+        type_id: TypeId,
+        constraint_type_id: TypeId,
+    ) -> bool {
         if type_id == constraint_type_id {
             return true;
         }
@@ -25,7 +28,6 @@ impl<'a> TypeCheckingPhase<'a> {
         false
     }
 
-
     pub(crate) fn is_abstract_type(&self, type_id: TypeId) -> bool {
         let type_table = self.type_checker.type_table.borrow();
         type_table.get(type_id).map_or(false, |ti| {
@@ -33,9 +35,12 @@ impl<'a> TypeCheckingPhase<'a> {
         })
     }
 
-
     /// Check if a type implements an interface
-    pub(crate) fn type_implements_interface(&self, type_id: TypeId, interface_type: TypeId) -> bool {
+    pub(crate) fn type_implements_interface(
+        &self,
+        type_id: TypeId,
+        interface_type: TypeId,
+    ) -> bool {
         let type_table = self.type_checker.type_table.borrow();
 
         if let Some(type_info) = type_table.get(type_id) {
@@ -53,7 +58,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Check if a type is an interface type
     pub(crate) fn is_interface_type(&self, type_id: TypeId) -> bool {
         let type_table = self.type_checker.type_table.borrow();
@@ -63,7 +67,6 @@ impl<'a> TypeCheckingPhase<'a> {
             false
         }
     }
-
 
     /// Check if a type is comparable
     pub(crate) fn is_comparable_type(&self, type_id: TypeId) -> bool {
@@ -89,7 +92,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Check if a type has a specific method
     pub(crate) fn type_has_method(
         &self,
@@ -101,7 +103,6 @@ impl<'a> TypeCheckingPhase<'a> {
         // This would require checking the class's methods list
         false
     }
-
 
     /// Check if a type has a specific field
     pub(crate) fn type_has_field(
@@ -115,14 +116,12 @@ impl<'a> TypeCheckingPhase<'a> {
         false
     }
 
-
     /// Convert a constraint type to a readable string
     pub(crate) fn constraint_type_to_string(&self, constraint_type_id: TypeId) -> String {
         // Format the constraint type name using existing get_type_name method
         self.get_type_name(constraint_type_id)
             .unwrap_or_else(|| format!("Type#{}", constraint_type_id.as_raw()))
     }
-
 
     /// Get a human-readable name for a type
     pub(crate) fn get_type_name(&self, type_id: TypeId) -> Option<String> {

@@ -677,8 +677,7 @@ impl<'a> HirToMirContext<'a> {
                                 probe_param_types,
                                 probe_args,
                             );
-                            if let Some(boxed) = self.box_raw_optional_result(raw, expr.ty, probe)
-                            {
+                            if let Some(boxed) = self.box_raw_optional_result(raw, expr.ty, probe) {
                                 return Some(boxed);
                             }
                         }

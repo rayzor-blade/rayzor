@@ -1018,16 +1018,15 @@ impl<'a> HirToMirContext<'a> {
                             arg_regs.push(arg_reg);
                         }
                     }
-                    let param_types: Vec<crate::ir::IrType> = arg_regs
-                        .iter()
-                        .map(|r| {
-                            self.builder
-                                .get_register_type(*r)
-                                .unwrap_or(crate::ir::IrType::Ptr(Box::new(
-                                    crate::ir::IrType::Void,
-                                )))
-                        })
-                        .collect();
+                    let param_types: Vec<crate::ir::IrType> =
+                        arg_regs
+                            .iter()
+                            .map(|r| {
+                                self.builder.get_register_type(*r).unwrap_or(
+                                    crate::ir::IrType::Ptr(Box::new(crate::ir::IrType::Void)),
+                                )
+                            })
+                            .collect();
                     let stub_id = self.register_stdlib_mir_forward_ref(
                         &ctor_key,
                         param_types,

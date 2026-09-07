@@ -364,8 +364,17 @@ impl<'a> AstLowering<'a> {
         };
 
         if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
-            let qn = self.context.symbol_table.get_symbol(interface_symbol).and_then(|s| s.qualified_name).and_then(|q| self.context.string_interner.get(q)).unwrap_or("-");
-            eprintln!("[sym] lower iface {} -> {interface_symbol:?} qn={qn}", interface_decl.name);
+            let qn = self
+                .context
+                .symbol_table
+                .get_symbol(interface_symbol)
+                .and_then(|s| s.qualified_name)
+                .and_then(|q| self.context.string_interner.get(q))
+                .unwrap_or("-");
+            eprintln!(
+                "[sym] lower iface {} -> {interface_symbol:?} qn={qn}",
+                interface_decl.name
+            );
         }
         // Enter interface scope with name
         let interface_scope = self

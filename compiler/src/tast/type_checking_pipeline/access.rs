@@ -4,7 +4,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Emit a type error as a diagnostic
     /// Check if a field access is valid
     pub(crate) fn check_field_access(
@@ -137,7 +136,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check if a field is accessible from the current context
     pub(crate) fn check_field_accessibility(
         &mut self,
@@ -202,7 +200,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         Ok(())
     }
-
 
     /// Validate field visibility based on access context
     pub(crate) fn validate_field_visibility(
@@ -349,7 +346,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Validate package-level access for internal visibility
     pub(crate) fn validate_package_level_access(
         &mut self,
@@ -465,7 +461,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Extract package information from a typed file
     pub(crate) fn extract_package_from_file(
         &self,
@@ -483,7 +478,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Get the name of the current class context
     pub(crate) fn get_current_class_name(&self) -> InternedString {
         if let Some((_, current_class_symbol)) = self.current_method_context {
@@ -497,9 +491,12 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Check if a class is a subclass of another class
-    pub(crate) fn is_subclass_of(&self, potential_subclass: SymbolId, potential_superclass: SymbolId) -> bool {
+    pub(crate) fn is_subclass_of(
+        &self,
+        potential_subclass: SymbolId,
+        potential_superclass: SymbolId,
+    ) -> bool {
         if let Some(subclass_def) = self.find_class_by_symbol(potential_subclass) {
             if let Some(super_type_id) = subclass_def.super_class {
                 // Get the super class symbol from the type
@@ -515,7 +512,6 @@ impl<'a> TypeCheckingPhase<'a> {
         false
     }
 
-
     /// Get class symbol from a type ID (helper for inheritance checking)
     pub(crate) fn get_class_symbol_from_type(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.type_checker.type_table.borrow();
@@ -528,7 +524,6 @@ impl<'a> TypeCheckingPhase<'a> {
             None
         }
     }
-
 
     /// Find a field by symbol ID
     pub(crate) fn find_field_by_symbol(&self, field_symbol: SymbolId) -> Option<&TypedField> {
@@ -552,7 +547,6 @@ impl<'a> TypeCheckingPhase<'a> {
         None
     }
 
-
     /// Find a class definition by symbol ID
     pub(crate) fn find_class_by_symbol(&self, symbol_id: SymbolId) -> Option<&TypedClass> {
         if let Some(typed_file_ptr) = self.current_typed_file {
@@ -567,7 +561,6 @@ impl<'a> TypeCheckingPhase<'a> {
             None
         }
     }
-
 
     /// Check if a method access is valid (static vs instance)
     pub(crate) fn check_method_static_access(
@@ -629,7 +622,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         Ok(())
     }
-
 
     /// Validate method visibility based on access context
     pub(crate) fn validate_method_visibility(

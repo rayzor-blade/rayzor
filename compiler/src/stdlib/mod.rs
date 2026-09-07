@@ -28,9 +28,9 @@
 //! - I/O operations (print, trace)
 
 pub mod array;
-pub mod map_iter;
 pub mod bytes;
 pub mod ereg;
+pub mod map_iter;
 pub mod memory;
 pub mod runtime_mapping;
 pub mod stdtypes;

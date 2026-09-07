@@ -92,7 +92,11 @@ impl<'a> HirToMirContext<'a> {
         };
         let mut params = Vec::with_capacity(param_count);
         for i in 0..param_count {
-            match self.builder.current_function().and_then(|f| f.get_param_reg(i)) {
+            match self
+                .builder
+                .current_function()
+                .and_then(|f| f.get_param_reg(i))
+            {
                 Some(reg) => params.push(reg),
                 None => {
                     restore(self);
@@ -119,7 +123,8 @@ impl<'a> HirToMirContext<'a> {
                     vec![IrType::I64],
                     ptr_u8.clone(),
                 );
-                self.builder.build_call_direct(box_fn, vec![v64], ptr_u8.clone())?
+                self.builder
+                    .build_call_direct(box_fn, vec![v64], ptr_u8.clone())?
             } else {
                 boxed
             };
@@ -138,7 +143,8 @@ impl<'a> HirToMirContext<'a> {
             .map(|f| f.signature.return_type.clone())
             .unwrap_or(IrType::I64);
         if matches!(ret_ir, IrType::Void) {
-            self.builder.build_call_direct(extern_id, args, IrType::Void);
+            self.builder
+                .build_call_direct(extern_id, args, IrType::Void);
             self.builder.build_return(None);
         } else {
             let result = self
@@ -233,7 +239,11 @@ impl<'a> HirToMirContext<'a> {
         };
         let mut params = Vec::with_capacity(param_count + 1);
         for i in 1..=param_count + 1 {
-            match self.builder.current_function().and_then(|f| f.get_param_reg(i)) {
+            match self
+                .builder
+                .current_function()
+                .and_then(|f| f.get_param_reg(i))
+            {
                 Some(reg) => params.push(reg),
                 None => {
                     restore(self);
@@ -258,7 +268,9 @@ impl<'a> HirToMirContext<'a> {
                         vec![ptr_u8.clone(), key_ir.clone()],
                         IrType::U64,
                     );
-                    let raw = self.builder.build_call_direct(get_fn, vec![this, k], IrType::U64)?;
+                    let raw = self
+                        .builder
+                        .build_call_direct(get_fn, vec![this, k], IrType::U64)?;
                     let exists_name: &'static str = match class_fqn.rsplit('.').next() {
                         Some("StringMap") => "haxe_stringmap_exists",
                         Some("IntMap") => "haxe_intmap_exists",
@@ -270,11 +282,13 @@ impl<'a> HirToMirContext<'a> {
                         IrType::Bool,
                     );
                     let present =
-                        self.builder.build_call_direct(exists_fn, vec![this, k], IrType::Bool)?;
+                        self.builder
+                            .build_call_direct(exists_fn, vec![this, k], IrType::Bool)?;
                     let box_block = self.builder.create_block()?;
                     let null_block = self.builder.create_block()?;
                     let join_block = self.builder.create_block()?;
-                    self.builder.build_cond_branch(present, box_block, null_block)?;
+                    self.builder
+                        .build_cond_branch(present, box_block, null_block)?;
                     self.builder.switch_to_block(box_block);
                     let boxed = match value_kind {
                         "ref" => self.builder.build_bitcast(raw, ptr_u8.clone())?,
@@ -285,7 +299,8 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::F64],
                                 ptr_u8.clone(),
                             );
-                            self.builder.build_call_direct(box_fn, vec![f], ptr_u8.clone())?
+                            self.builder
+                                .build_call_direct(box_fn, vec![f], ptr_u8.clone())?
                         }
                         "bool" => {
                             let b = self.builder.build_cast(raw, IrType::U64, IrType::Bool)?;
@@ -294,7 +309,8 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::Bool],
                                 ptr_u8.clone(),
                             );
-                            self.builder.build_call_direct(box_fn, vec![b], ptr_u8.clone())?
+                            self.builder
+                                .build_call_direct(box_fn, vec![b], ptr_u8.clone())?
                         }
                         _ => {
                             let bits = self.builder.build_cast(raw, IrType::U64, IrType::I64)?;
@@ -303,7 +319,8 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::I64],
                                 ptr_u8.clone(),
                             );
-                            self.builder.build_call_direct(box_fn, vec![bits], ptr_u8.clone())?
+                            self.builder
+                                .build_call_direct(box_fn, vec![bits], ptr_u8.clone())?
                         }
                     };
                     self.builder.build_branch(join_block)?;
@@ -313,8 +330,10 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_branch(join_block)?;
                     self.builder.switch_to_block(join_block);
                     let result = self.builder.build_phi(join_block, ptr_u8.clone())?;
-                    self.builder.add_phi_incoming(join_block, result, box_block, boxed);
-                    self.builder.add_phi_incoming(join_block, result, null_block, null);
+                    self.builder
+                        .add_phi_incoming(join_block, result, box_block, boxed);
+                    self.builder
+                        .add_phi_incoming(join_block, result, null_block, null);
                     Some(Some(result))
                 }
                 "set" => {
@@ -325,7 +344,8 @@ impl<'a> HirToMirContext<'a> {
                         vec![ptr_u8.clone(), key_ir.clone(), IrType::U64],
                         IrType::Void,
                     );
-                    self.builder.build_call_direct(set_fn, vec![this, k, v], IrType::Void);
+                    self.builder
+                        .build_call_direct(set_fn, vec![this, k, v], IrType::Void);
                     Some(None)
                 }
                 "exists" | "remove" => {
@@ -335,7 +355,11 @@ impl<'a> HirToMirContext<'a> {
                         vec![ptr_u8.clone(), key_ir.clone()],
                         IrType::Bool,
                     );
-                    Some(Some(self.builder.build_call_direct(f, vec![this, k], IrType::Bool)?))
+                    Some(Some(self.builder.build_call_direct(
+                        f,
+                        vec![this, k],
+                        IrType::Bool,
+                    )?))
                 }
                 "clear" => {
                     let f = self.get_or_register_extern_function(
@@ -352,7 +376,11 @@ impl<'a> HirToMirContext<'a> {
                         vec![ptr_u8.clone()],
                         IrType::String,
                     );
-                    Some(Some(self.builder.build_call_direct(f, vec![this], IrType::String)?))
+                    Some(Some(self.builder.build_call_direct(
+                        f,
+                        vec![this],
+                        IrType::String,
+                    )?))
                 }
                 _ => {
                     // keys / iterator: the mapped wrapper's ArrayIterator, as a handle.
@@ -362,9 +390,9 @@ impl<'a> HirToMirContext<'a> {
                         ptr_void.clone(),
                     );
                     let this_v = self.builder.build_bitcast(this, ptr_void.clone())?;
-                    let it = self
-                        .builder
-                        .build_call_direct(wrapper, vec![this_v], ptr_void.clone())?;
+                    let it =
+                        self.builder
+                            .build_call_direct(wrapper, vec![this_v], ptr_void.clone())?;
                     let source = crate::ir::mir::helpers::IterSource::StdlibIterator {
                         has_next: "ArrayIterator_hasNext".to_string(),
                         has_next_is_mir: true,

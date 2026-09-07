@@ -441,8 +441,11 @@ impl<'a> AstLowering<'a> {
         name: InternedString,
         qualified_name: &str,
     ) -> crate::tast::SymbolId {
-        let is_interface =
-            self.context.namespace_resolver.declared_kind(qualified_name) == Some("interface");
+        let is_interface = self
+            .context
+            .namespace_resolver
+            .declared_kind(qualified_name)
+            == Some("interface");
         if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
             eprintln!("[sym] import-placeholder {qualified_name} interface={is_interface}");
         }
@@ -462,13 +465,21 @@ impl<'a> AstLowering<'a> {
         // A typeless placeholder leaves `this` untyped once the class itself is
         // lowered against it, so the placeholder carries its type from the start.
         let kind = if is_interface {
-            TypeKind::Interface { symbol_id: sym, type_args: Vec::new() }
+            TypeKind::Interface {
+                symbol_id: sym,
+                type_args: Vec::new(),
+            }
         } else {
-            TypeKind::Class { symbol_id: sym, type_args: Vec::new() }
+            TypeKind::Class {
+                symbol_id: sym,
+                type_args: Vec::new(),
+            }
         };
         let ty = self.context.type_table.borrow_mut().create_type(kind);
         self.context.symbol_table.update_symbol_type(sym, ty);
-        self.context.symbol_table.register_type_symbol_mapping(ty, sym);
+        self.context
+            .symbol_table
+            .register_type_symbol_mapping(ty, sym);
         sym
     }
 

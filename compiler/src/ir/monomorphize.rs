@@ -349,16 +349,15 @@ impl Monomorphizer {
                             // `eq(12, t.get())` over `T:(Float)` reads Int off
                             // the literal while the call returns float bits,
                             // and the tag that comes out compares them unequal.
-                            let ty = match crate::ir::inlining::concrete_arg_type(
-                                context_func,
-                                args[i],
-                            ) {
-                                Some(ty) => ty,
-                                None => {
-                                    conflict = true;
-                                    break;
-                                }
-                            };
+                            let ty =
+                                match crate::ir::inlining::concrete_arg_type(context_func, args[i])
+                                {
+                                    Some(ty) => ty,
+                                    None => {
+                                        conflict = true;
+                                        break;
+                                    }
+                                };
                             match &agreed {
                                 Some(prev) if *prev != ty => conflict = true,
                                 Some(_) => {}
@@ -451,7 +450,9 @@ impl Monomorphizer {
         // types alone can put a concrete type on a register the ABI still
         // passes as bits.
         for param in &specialized.signature.parameters {
-            specialized.register_types.insert(param.reg, param.ty.clone());
+            specialized
+                .register_types
+                .insert(param.reg, param.ty.clone());
         }
 
         // Substitute types in CFG instructions
@@ -845,7 +846,9 @@ impl Monomorphizer {
         // types alone can put a concrete type on a register the ABI still
         // passes as bits.
         for param in &specialized.signature.parameters {
-            specialized.register_types.insert(param.reg, param.ty.clone());
+            specialized
+                .register_types
+                .insert(param.reg, param.ty.clone());
         }
 
         // Substitute types in locals
@@ -895,7 +898,11 @@ impl Monomorphizer {
             };
             if let Some(f) = module.functions.get(&specialized_id) {
                 param_tys.entry(specialized_id).or_insert_with(|| {
-                    f.signature.parameters.iter().map(|p| p.ty.clone()).collect()
+                    f.signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect()
                 });
             }
             for loc in locations {

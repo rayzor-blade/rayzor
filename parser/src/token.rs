@@ -92,26 +92,26 @@ pub enum TokenKind {
     KwWhile,
 
     // === Punctuation ===
-    LParen,           // (
-    RParen,           // )
-    LBrace,           // {
-    RBrace,           // }
-    LBracket,         // [
-    RBracket,         // ]
-    Dot,              // .
-    DotDotDot,        // ...
-    Comma,            // ,
-    Semicolon,        // ;
-    Colon,            // :
-    At,               // @
-    AtColon,          // @:
-    Arrow,            // ->
-    FatArrow,         // =>
-    Question,         // ?
-    QuestionDot,      // ?.
-    QuestionQuestion, // ??
+    LParen,                 // (
+    RParen,                 // )
+    LBrace,                 // {
+    RBrace,                 // }
+    LBracket,               // [
+    RBracket,               // ]
+    Dot,                    // .
+    DotDotDot,              // ...
+    Comma,                  // ,
+    Semicolon,              // ;
+    Colon,                  // :
+    At,                     // @
+    AtColon,                // @:
+    Arrow,                  // ->
+    FatArrow,               // =>
+    Question,               // ?
+    QuestionDot,            // ?.
+    QuestionQuestion,       // ??
     QuestionQuestionAssign, // ??=
-    Hash,             // #
+    Hash,                   // #
 
     // === Operators ===
     Assign,        // =

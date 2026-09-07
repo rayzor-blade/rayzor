@@ -3,7 +3,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Check if an explicit cast is valid between two types
     pub(crate) fn is_valid_explicit_cast(&self, from_type: TypeId, to_type: TypeId) -> bool {
         let type_table = self.type_checker.type_table.borrow();
@@ -89,7 +88,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Check if both types are basic types that can be cast between each other
     pub(crate) fn are_both_basic_types(&self, type1: TypeId, type2: TypeId) -> bool {
         let type_table = self.type_checker.type_table.borrow();
@@ -111,15 +109,17 @@ impl<'a> TypeCheckingPhase<'a> {
         is_basic_type(type1) && is_basic_type(type2)
     }
 
-
     /// Helper to get string from interner
     pub(crate) fn get_string(&self, interned: super::InternedString) -> &str {
         self.string_interner.get(interned).unwrap_or("<unknown>")
     }
 
-
     /// Check if a method signature matches the provided argument types
-    pub(crate) fn check_signature_compatibility(&self, param_types: &[TypeId], arg_types: &[TypeId]) -> bool {
+    pub(crate) fn check_signature_compatibility(
+        &self,
+        param_types: &[TypeId],
+        arg_types: &[TypeId],
+    ) -> bool {
         if param_types.len() != arg_types.len() {
             return false;
         }
@@ -156,7 +156,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         true
     }
-
 
     /// Check method overloads to find a matching signature
     pub(crate) fn check_method_overloads(

@@ -361,7 +361,9 @@ impl<'a> AstLowering<'a> {
     ) -> BTreeMap<String, (Expr, Expr)> {
         let mut uses = BTreeMap::new();
         for (i, elem) in elements.iter().enumerate() {
-            let BlockElement::Expr(e) = elem else { continue };
+            let BlockElement::Expr(e) = elem else {
+                continue;
+            };
             let ExprKind::Var {
                 name,
                 type_hint: None,
@@ -436,7 +438,10 @@ fn first_map_use<'e>(e: &'e Expr, name: &str) -> Option<(&'e Expr, &'e Expr)> {
     let is_var = |x: &Expr| matches!(&x.kind, ExprKind::Ident(n) if n == name);
     match &e.kind {
         ExprKind::Call { expr, args } => {
-            if let ExprKind::Field { expr: recv, field, .. } = &expr.kind {
+            if let ExprKind::Field {
+                expr: recv, field, ..
+            } = &expr.kind
+            {
                 if field == "set" && args.len() == 2 && is_var(recv) {
                     return Some((&args[0], &args[1]));
                 }
@@ -510,7 +515,11 @@ fn first_map_use<'e>(e: &'e Expr, name: &str) -> Option<(&'e Expr, &'e Expr)> {
             finally_block,
         } => first_map_use(expr, name)
             .or_else(|| catches.iter().find_map(|c| first_map_use(&c.body, name)))
-            .or_else(|| finally_block.as_deref().and_then(|x| first_map_use(x, name))),
+            .or_else(|| {
+                finally_block
+                    .as_deref()
+                    .and_then(|x| first_map_use(x, name))
+            }),
         ExprKind::Function(f) => f.body.as_deref().and_then(|x| first_map_use(x, name)),
         ExprKind::Arrow { expr, .. } => first_map_use(expr, name),
         ExprKind::ArrayComprehension { expr, .. } => first_map_use(expr, name),

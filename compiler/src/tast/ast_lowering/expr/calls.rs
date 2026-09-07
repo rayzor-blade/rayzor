@@ -49,10 +49,9 @@ impl<'a> AstLowering<'a> {
         match &expr.kind {
             ExprKind::Ident(name) if name == "_" => Some(Pattern::Underscore),
             ExprKind::Null => Some(Pattern::Null),
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Bool(_) => Some(Pattern::Const(expr.clone())),
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Bool(_) => {
+                Some(Pattern::Const(expr.clone()))
+            }
             ExprKind::Ident(_) | ExprKind::Field { .. } => {
                 Some(Pattern::Var(dotted_path(expr)?.join(".")))
             }
@@ -542,11 +541,35 @@ impl<'a> AstLowering<'a> {
         // Set qualified name based on receiver's class to help MIR disambiguation
         if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
             let m = self.context.string_interner.get(method_name).unwrap_or("?");
-            let k = self.context.type_table.borrow().get(receiver.expr_type).map(|t| format!("{:?}", t.kind));
-            eprintln!("[sym] member-synth {m} recv={} class={:?}", k.unwrap_or_default().chars().take(80).collect::<String>(), self.get_class_name_for_type(receiver.expr_type));
-            for cand in self.context.symbol_table.find_symbols(|s| s.name == method_name).into_iter().take(8) {
-                let qn = cand.qualified_name.and_then(|q| self.context.string_interner.get(q)).unwrap_or("-");
-                eprintln!("[sym]   cand {:?} kind={:?} qn={qn} type_valid={} scope={:?}", cand.id, cand.kind, cand.type_id.is_valid(), cand.scope_id);
+            let k = self
+                .context
+                .type_table
+                .borrow()
+                .get(receiver.expr_type)
+                .map(|t| format!("{:?}", t.kind));
+            eprintln!(
+                "[sym] member-synth {m} recv={} class={:?}",
+                k.unwrap_or_default().chars().take(80).collect::<String>(),
+                self.get_class_name_for_type(receiver.expr_type)
+            );
+            for cand in self
+                .context
+                .symbol_table
+                .find_symbols(|s| s.name == method_name)
+                .into_iter()
+                .take(8)
+            {
+                let qn = cand
+                    .qualified_name
+                    .and_then(|q| self.context.string_interner.get(q))
+                    .unwrap_or("-");
+                eprintln!(
+                    "[sym]   cand {:?} kind={:?} qn={qn} type_valid={} scope={:?}",
+                    cand.id,
+                    cand.kind,
+                    cand.type_id.is_valid(),
+                    cand.scope_id
+                );
             }
         }
         let new_symbol = self.context.symbol_table.create_function(method_name);
@@ -2294,7 +2317,10 @@ impl<'a> AstLowering<'a> {
         }
         let tt = self.context.type_table.borrow();
         let is_param = |t: TypeId| {
-            matches!(tt.get(t).map(|i| &i.kind), Some(TypeKind::TypeParameter { .. }))
+            matches!(
+                tt.get(t).map(|i| &i.kind),
+                Some(TypeKind::TypeParameter { .. })
+            )
         };
         let generic = match tt.get(typed.expr_type).map(|i| &i.kind) {
             Some(TypeKind::Function { params, .. }) => {
@@ -2417,7 +2443,10 @@ impl<'a> AstLowering<'a> {
         else {
             return Vec::new();
         };
-        let crate::tast::core::TypeKind::TypeAlias { type_args: params, .. } = &decl.kind else {
+        let crate::tast::core::TypeKind::TypeAlias {
+            type_args: params, ..
+        } = &decl.kind
+        else {
             return Vec::new();
         };
         params
@@ -2439,7 +2468,12 @@ impl<'a> AstLowering<'a> {
         if bindings.is_empty() {
             return ty;
         }
-        let kind = self.context.type_table.borrow().get(ty).map(|i| i.kind.clone());
+        let kind = self
+            .context
+            .type_table
+            .borrow()
+            .get(ty)
+            .map(|i| i.kind.clone());
         let sub = |ids: &[TypeId]| -> Vec<TypeId> {
             ids.iter()
                 .map(|t| self.substitute_alias_args(*t, bindings))
@@ -2515,7 +2549,11 @@ impl<'a> AstLowering<'a> {
                         optional: f.optional,
                     })
                     .collect();
-                if rebuilt.iter().zip(&fields).all(|(a, b)| a.type_id == b.type_id) {
+                if rebuilt
+                    .iter()
+                    .zip(&fields)
+                    .all(|(a, b)| a.type_id == b.type_id)
+                {
                     return ty;
                 }
                 TypeKind::Anonymous { fields: rebuilt }

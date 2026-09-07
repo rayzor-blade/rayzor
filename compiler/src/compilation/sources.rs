@@ -3,9 +3,12 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Parse a file with the compilation unit's preprocessor defines.
-    pub(crate) fn parse_file(&self, filename: &str, source: &str) -> Result<parser::HaxeFile, String> {
+    pub(crate) fn parse_file(
+        &self,
+        filename: &str,
+        source: &str,
+    ) -> Result<parser::HaxeFile, String> {
         let config = self.preprocessor_config();
         let file = parser::haxe_parser::parse_haxe_file_with_config(
             filename, source, true, true, &config,
@@ -19,7 +22,6 @@ impl CompilationUnit {
         }
         Ok(file)
     }
-
 
     /// Load standard library files
     /// This should be called FIRST, before any user files are added
@@ -87,18 +89,20 @@ impl CompilationUnit {
         Ok(())
     }
 
-
     /// Set source paths for user code (for on-demand import loading)
     /// These paths are checked first when resolving imports
     pub fn set_source_paths(&mut self, paths: Vec<PathBuf>) {
         self.namespace_resolver.set_source_paths(paths);
     }
 
-
     /// Pre-register type declarations from a file without full compilation
     /// This is the first pass that registers class/interface/enum names in the namespace
     /// so they can be referenced by other files during full compilation
-    pub(crate) fn pre_register_file_types(&mut self, filename: &str, source: &str) -> Result<(), String> {
+    pub(crate) fn pre_register_file_types(
+        &mut self,
+        filename: &str,
+        source: &str,
+    ) -> Result<(), String> {
         use crate::tast::ast_lowering::AstLowering;
 
         let ast_file = self
@@ -125,7 +129,6 @@ impl CompilationUnit {
 
         Ok(())
     }
-
 
     /// Register only enum declarations from source into the symbol table.
     ///
@@ -173,7 +176,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Combined pre-register types + enum registration from a single parse.
     /// Eliminates the double-parse that occurred when pre_register_file_types
@@ -227,7 +229,6 @@ impl CompilationUnit {
         Ok(())
     }
 
-
     /// Add a user source file to the compilation unit
     pub fn add_file(&mut self, source: &str, file_path: &str) -> Result<(), String> {
         let haxe_file = self
@@ -237,7 +238,6 @@ impl CompilationUnit {
         self.user_files.push(haxe_file);
         Ok(())
     }
-
 
     /// Add a file from filesystem path
     /// This resolves the file's path and loads it, making it easier to work with
@@ -254,7 +254,6 @@ impl CompilationUnit {
 
         self.add_file(&source, file_path_str)
     }
-
 
     /// Add all .hx files from a directory (recursively)
     /// This is useful for loading entire source trees
@@ -292,7 +291,6 @@ impl CompilationUnit {
 
         Ok(added_count)
     }
-
 
     /// Add an additional source path for import resolution (e.g. from an rpkg package).
     pub fn add_source_path(&mut self, path: PathBuf) {

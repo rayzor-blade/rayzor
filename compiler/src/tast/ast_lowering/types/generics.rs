@@ -162,16 +162,17 @@ impl<'a> AstLowering<'a> {
         }
         let key_repr = self.map_key_repr(type_args[0]);
         let key_is_param = matches!(
-            self.context.type_table.borrow().get(key_repr).map(|t| &t.kind),
+            self.context
+                .type_table
+                .borrow()
+                .get(key_repr)
+                .map(|t| &t.kind),
             Some(crate::tast::core::TypeKind::TypeParameter { .. })
         );
         if !key_is_param {
             return None;
         }
-        let imap = self
-            .context
-            .string_interner
-            .intern("haxe.Constraints.IMap");
+        let imap = self.context.string_interner.intern("haxe.Constraints.IMap");
         let bare = self.context.string_interner.intern("IMap");
         let sym = self
             .context

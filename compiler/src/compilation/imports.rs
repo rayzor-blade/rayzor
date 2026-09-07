@@ -3,7 +3,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Extract all class references from a Haxe AST file.
     /// This includes explicit imports, using statements, new expressions, and type annotations.
     pub(crate) fn extract_all_dependencies(ast: &parser::HaxeFile) -> Vec<String> {
@@ -602,7 +601,6 @@ impl CompilationUnit {
         result
     }
 
-
     /// Load imports efficiently by pre-collecting all dependencies and compiling in topological order.
     /// This avoids the fail-retry pattern that causes exponential recompilation.
     pub fn load_imports_efficiently(&mut self, imports: &[String]) -> Result<(), String> {
@@ -705,7 +703,10 @@ impl CompilationUnit {
                 deps.into_iter().partition(|d| d.starts_with("new:"));
             constructs.insert(
                 qualified_path.clone(),
-                ctor_marks.iter().map(|d| d["new:".len()..].to_string()).collect(),
+                ctor_marks
+                    .iter()
+                    .map(|d| d["new:".len()..].to_string())
+                    .collect(),
             );
             // Queue dependencies for processing
             for dep in &deps {
@@ -1007,7 +1008,6 @@ impl CompilationUnit {
         Ok(())
     }
 
-
     /// Try to compile a single import file. Returns true on success, false on failure.
     pub(crate) fn try_compile_import(
         &mut self,
@@ -1275,7 +1275,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Try to load an import file from BLADE cache.
     /// Returns true if cache hit (MIR loaded + symbols registered), false if miss.
     pub(crate) fn try_load_import_from_cache(&mut self, filename: &str, source: &str) -> bool {
@@ -1389,13 +1388,11 @@ impl CompilationUnit {
         true
     }
 
-
     /// Load a single file on-demand for import resolution (legacy - uses retry pattern)
     /// Prefer load_imports_efficiently for batch loading
     pub fn load_import_file(&mut self, qualified_path: &str) -> Result<(), String> {
         self.load_import_file_recursive(qualified_path, 0)
     }
-
 
     /// Internal recursive function for loading files with dependency resolution
     /// Max depth prevents infinite loops in circular dependencies
@@ -1764,7 +1761,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Extract type name from UnresolvedType error messages
     /// Returns Some(type_name) if this is an UnresolvedType error, None otherwise
     pub(crate) fn extract_unresolved_type_from_error(error_msg: &str) -> Option<String> {
@@ -1784,7 +1780,6 @@ impl CompilationUnit {
         }
         None
     }
-
 
     /// Check if a type name looks like a generic type parameter
     /// Returns true for single letters (T, K, V) or common parameter patterns
@@ -1806,16 +1801,13 @@ impl CompilationUnit {
         matches!(type_name, "Key" | "Value" | "Item" | "Element")
     }
 
-
     pub(crate) fn is_stdtypes_prelude_type_name(type_name: &str) -> bool {
         is_stdtypes_ambient_name(type_name)
     }
 
-
     pub(crate) fn is_bare_stdtypes_prelude_dependency(dep: &str) -> bool {
         !dep.contains('.') && Self::is_stdtypes_prelude_type_name(dep)
     }
-
 
     /// Every `import.hx` that applies to this compilation, outermost first.
     ///
@@ -1874,7 +1866,6 @@ impl CompilationUnit {
             .collect()
     }
 
-
     /// The types an `import.hx` names, so they can be loaded.
     ///
     /// An import.hx exists to name types nothing else in the program mentions,
@@ -1910,7 +1901,6 @@ impl CompilationUnit {
         names
     }
 
-
     /// Load global import.hx files
     /// These are processed AFTER stdlib but BEFORE user files
     /// They provide global imports available to all user code
@@ -1930,7 +1920,6 @@ impl CompilationUnit {
 
         Ok(())
     }
-
 
     /// Resolve an import path to a filesystem path
     /// For example: "com.example.model.User" -> "src/com/example/model/User.hx"
@@ -1958,7 +1947,6 @@ impl CompilationUnit {
         None
     }
 
-
     /// Add a file by import path (e.g., "com.example.model.User")
     /// This automatically searches source paths to find the file
     ///
@@ -1976,7 +1964,6 @@ impl CompilationUnit {
 
         self.add_file_from_path(&path)
     }
-
 
     /// Where an unqualified type could live, reading outwards through the
     /// enclosing packages.
@@ -2049,7 +2036,6 @@ impl CompilationUnit {
         }
         candidates
     }
-
 
     /// Analyze dependencies and get compilation order
     ///

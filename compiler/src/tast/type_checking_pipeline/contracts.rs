@@ -4,7 +4,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Validate that a type can be used as an exception type in catch clauses
     pub(crate) fn validate_exception_type(
         &mut self,
@@ -39,7 +38,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Validate that a type can be thrown
     pub(crate) fn validate_throwable_type(
         &mut self,
@@ -69,7 +67,6 @@ impl<'a> TypeCheckingPhase<'a> {
             Err("Undefined throwable type".to_string())
         }
     }
-
 
     /// Validate that a type is iterable (for for-in loops)
     pub(crate) fn validate_iterable_type(
@@ -117,7 +114,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Find a method with matching @:op metadata for the given operator
     /// Returns (method_symbol, abstract_symbol) if found
     pub(crate) fn find_operator_method(
@@ -161,7 +157,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         None
     }
-
 
     /// Parse operator metadata string to extract the operator type
     /// e.g. "A Add B" → Some(BinaryOperator::Add)

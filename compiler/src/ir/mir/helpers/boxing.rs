@@ -366,20 +366,20 @@ impl<'a> HirToMirContext<'a> {
             ("haxe_box_bool_ptr", IrType::Bool, b)
         } else {
             match self.builder.get_register_type(raw)? {
-            IrType::I32 => (
-                "haxe_box_int_ptr",
-                IrType::I64,
-                self.builder.build_cast(raw, IrType::I32, IrType::I64)?,
-            ),
-            IrType::I64 => ("haxe_box_int_ptr", IrType::I64, raw),
-            IrType::F64 => ("haxe_box_float_ptr", IrType::F64, raw),
-            IrType::F32 => (
-                "haxe_box_float_ptr",
-                IrType::F64,
-                self.builder.build_cast(raw, IrType::F32, IrType::F64)?,
-            ),
-            IrType::Bool => ("haxe_box_bool_ptr", IrType::Bool, raw),
-            _ => return None,
+                IrType::I32 => (
+                    "haxe_box_int_ptr",
+                    IrType::I64,
+                    self.builder.build_cast(raw, IrType::I32, IrType::I64)?,
+                ),
+                IrType::I64 => ("haxe_box_int_ptr", IrType::I64, raw),
+                IrType::F64 => ("haxe_box_float_ptr", IrType::F64, raw),
+                IrType::F32 => (
+                    "haxe_box_float_ptr",
+                    IrType::F64,
+                    self.builder.build_cast(raw, IrType::F32, IrType::F64)?,
+                ),
+                IrType::Bool => ("haxe_box_bool_ptr", IrType::Bool, raw),
+                _ => return None,
             }
         };
         let box_fn = self.get_or_register_extern_function(box_name, vec![arg_ty], ptr_u8.clone());
@@ -426,8 +426,7 @@ impl<'a> HirToMirContext<'a> {
             self.type_table.get(formal_ty).map(|t| &t.kind),
             Some(TypeKind::TypeParameter { .. })
         );
-        if !formal_is_param
-            || !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
+        if !formal_is_param || !matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_)))
         {
             return None;
         }

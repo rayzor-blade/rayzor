@@ -4,7 +4,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     // === BLADE Caching Methods ===
 
     /// Get the BLADE cache path for a source file.
@@ -91,7 +90,6 @@ impl CompilationUnit {
         Some(cache_dir.join(format!("{}.blade", module_name)))
     }
 
-
     /// This module's artifact in the standard library carried by the binary,
     /// if it holds one for the configuration being compiled.
     pub(crate) fn embedded_snapshot_entry(&self, source_path: &str) -> Option<&'static [u8]> {
@@ -109,7 +107,6 @@ impl CompilationUnit {
         let key = crate::ir::snapshot::key_for(&self.config.stdlib_cache_discriminator(), file);
         crate::ir::snapshot::installed().get(key.as_str()).copied()
     }
-
 
     /// Where a module's artifact lives in the PREPARED store: a shared cache
     /// written once by `rayzor cache warm` rather than per project.
@@ -131,7 +128,6 @@ impl CompilationUnit {
         Some(root.join(discriminator).join(file))
     }
 
-
     /// Root of the shared prepared store. `RAYZOR_PREPARED_CACHE` overrides it.
     pub fn prepared_cache_root() -> Option<PathBuf> {
         if let Some(explicit) = std::env::var_os("RAYZOR_PREPARED_CACHE") {
@@ -139,7 +135,6 @@ impl CompilationUnit {
         }
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/rayzor/blade"))
     }
-
 
     /// Compute the BLADE source fingerprint for this compilation context.
     ///
@@ -169,7 +164,6 @@ impl CompilationUnit {
         h.finish()
     }
 
-
     /// Whether a source file belongs to the standard library.
     pub(crate) fn is_stdlib_source(&self, source_path: &str) -> bool {
         let path = Path::new(source_path);
@@ -184,7 +178,6 @@ impl CompilationUnit {
                 Err(_) => false,
             })
     }
-
 
     pub(crate) fn hash_source_for_config(&self, source_path: &str, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -256,10 +249,13 @@ impl CompilationUnit {
         hasher.finish()
     }
 
-
     /// Try to load a cached MIR module from BLADE cache
     /// Returns Some(IrModule) if cache is valid, None otherwise
-    pub(crate) fn try_load_blade_cached(&self, source_path: &str, source: &str) -> Option<IrModule> {
+    pub(crate) fn try_load_blade_cached(
+        &self,
+        source_path: &str,
+        source: &str,
+    ) -> Option<IrModule> {
         if !self.config.enable_cache {
             return None;
         }
@@ -298,7 +294,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Save a MIR module to BLADE cache with optional type info and cross-reference maps
     pub(crate) fn save_blade_cached(
@@ -373,7 +368,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Build name-keyed cached maps from MIR lowering result for BLADE cache storage.
     /// Converts SymbolId/TypeId-keyed maps to name-keyed maps that survive across compilations.
@@ -683,14 +677,15 @@ impl CompilationUnit {
         }
     }
 
-
     /// Find the qualified class name that owns a given scope.
     /// Used to convert scope-based symbol lookups to name-based keys for cache.
     /// Every class member scope mapped to that class's name.
     ///
     /// A scope shared by several class symbols resolves to the one declared
     /// first, which is the class a search over the symbol table would reach.
-    pub(crate) fn class_names_by_scope(&self) -> std::collections::HashMap<ScopeId, Option<String>> {
+    pub(crate) fn class_names_by_scope(
+        &self,
+    ) -> std::collections::HashMap<ScopeId, Option<String>> {
         let mut by_scope = std::collections::HashMap::new();
         for i in 0..self.symbol_table.len() {
             let sym_id = crate::tast::SymbolId::from_raw(i as u32);
@@ -709,7 +704,6 @@ impl CompilationUnit {
         }
         by_scope
     }
-
 
     /// Extract static inline var constants from a TypedFile for BLADE cache storage.
     pub(crate) fn extract_inline_vars_from_typed_file(
@@ -840,7 +834,6 @@ impl CompilationUnit {
         entries
     }
 
-
     /// Store inline vars from BladeInlineVarEntry into the global map.
     pub(crate) fn store_inline_vars(&mut self, entries: &[crate::ir::blade::BladeInlineVarEntry]) {
         for entry in entries {
@@ -848,7 +841,6 @@ impl CompilationUnit {
             self.global_inline_vars.insert(key, entry.value.clone());
         }
     }
-
 
     /// Load a BLADE cached file and return all components including type info and cached maps
     pub(crate) fn try_load_blade_cached_full(
@@ -910,7 +902,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Restore MIR-level cross-reference maps from cached data using fresh symbol IDs.
     /// Rebuild the MIR-level maps a cached module refers to, and report how
@@ -1189,7 +1180,6 @@ impl CompilationUnit {
         dropped
     }
 
-
     /// Try to load a cached MIR module from a BLADE file
     ///
     /// Returns Some(IrModule) if cache is valid, None if cache doesn't exist or is stale
@@ -1278,7 +1268,6 @@ impl CompilationUnit {
         Some(mir_module)
     }
 
-
     /// Save a compiled MIR module to the BLADE cache
     pub fn save_to_cache(&self, source_path: &Path, module: &IrModule) -> Result<(), String> {
         if !self.config.enable_cache {
@@ -1332,7 +1321,6 @@ impl CompilationUnit {
         Ok(())
     }
 
-
     /// Clear all cached BLADE files
     pub fn clear_cache(&self) -> Result<(), String> {
         let cache_dir = self.config.get_cache_dir();
@@ -1345,7 +1333,6 @@ impl CompilationUnit {
         }
         Ok(())
     }
-
 
     /// Get cache statistics
     pub fn get_cache_stats(&self) -> CacheStats {

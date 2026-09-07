@@ -74,11 +74,16 @@ impl<'a> HirToMirContext<'a> {
 
             if std::env::var_os("RAYZOR_IFACE_DIAG").is_some() && *is_method && !args.is_empty() {
                 let recv = self.resolve_through_aliases(args[0].ty);
-                let kind = self.type_table.get(recv).map(|t| format!("{:?}", t.kind)).unwrap_or_default();
+                let kind = self
+                    .type_table
+                    .get(recv)
+                    .map(|t| format!("{:?}", t.kind))
+                    .unwrap_or_default();
                 let sym_kind = match self.type_table.get(recv).map(|t| &t.kind) {
-                    Some(TypeKind::Class { symbol_id, .. }) => {
-                        self.symbol_table.get_symbol(*symbol_id).map(|s| format!("{:?}", s.kind))
-                    }
+                    Some(TypeKind::Class { symbol_id, .. }) => self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .map(|s| format!("{:?}", s.kind)),
                     _ => None,
                 };
                 let callee = self

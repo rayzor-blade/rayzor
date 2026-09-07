@@ -43,9 +43,13 @@ impl<'a> HirToMirContext<'a> {
     /// The box kind of a map container's value type: its last type argument.
     /// `erased` when unknown or a type parameter, which keeps the int box.
     fn map_value_kind(&self, value_type: Option<TypeId>) -> &'static str {
-        let Some(ty) = value_type else { return "erased" };
+        let Some(ty) = value_type else {
+            return "erased";
+        };
         let resolved = self.resolve_through_aliases(ty);
-        let Some(info) = self.type_table.get(resolved) else { return "erased" };
+        let Some(info) = self.type_table.get(resolved) else {
+            return "erased";
+        };
         let last = match &info.kind {
             TypeKind::Class { type_args, .. } | TypeKind::Interface { type_args, .. } => {
                 type_args.last().copied()
@@ -192,19 +196,23 @@ impl<'a> HirToMirContext<'a> {
                 let mname = iface_method_names.get(i)?.as_deref()?;
                 let key = self.stdlib_mapping.class_key(fqn)?;
                 let (sig, call) = self.stdlib_mapping.find_by_name(key, mname)?;
-                (!sig.is_static && !sig.is_constructor)
-                    .then(|| (fqn.to_string(), mname.to_string(), call.runtime_name, call.param_count))
+                (!sig.is_static && !sig.is_constructor).then(|| {
+                    (
+                        fqn.to_string(),
+                        mname.to_string(),
+                        call.runtime_name,
+                        call.param_count,
+                    )
+                })
             });
             if let Some((fqn, mname, runtime_name, argc)) = mapped {
-                if let Some(thunk) =
-                    self.ensure_extern_mapped_dispatch_thunk(
-                        &fqn,
-                        &mname,
-                        runtime_name,
-                        argc,
-                        value_kind,
-                    )
-                {
+                if let Some(thunk) = self.ensure_extern_mapped_dispatch_thunk(
+                    &fqn,
+                    &mname,
+                    runtime_name,
+                    argc,
+                    value_kind,
+                ) {
                     let fn_ref = self.builder.build_function_ref(thunk)?;
                     let offset_val = self
                         .builder
@@ -431,12 +439,9 @@ impl<'a> HirToMirContext<'a> {
             // No (class, iface) vtable here does not mean no implementation: an
             // imported class has none in this context, and the builder resolves
             // its slots by name.
-            return match self.wrap_in_interface_fat_ptr_for(
-                value_reg,
-                value_type,
-                class_sym,
-                iface_sym,
-            ) {
+            return match self
+                .wrap_in_interface_fat_ptr_for(value_reg, value_type, class_sym, iface_sym)
+            {
                 Some(wrapped) => (wrapped, true),
                 None => (value_reg, false),
             };

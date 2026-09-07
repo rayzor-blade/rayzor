@@ -51,8 +51,8 @@ pub struct TypeCheckingPhase<'a> {
 
 // `super::node` in the modules below named `tast::node` before this file
 // became a directory; keep that path meaning what it did.
-pub(crate) use crate::tast::node;
 pub(crate) use crate::tast::namespace;
+pub(crate) use crate::tast::node;
 pub(crate) use crate::tast::symbols::SymbolKind;
 
 mod access;
@@ -96,7 +96,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Set the namespace resolver for package access validation
     pub fn set_namespace_resolver(&mut self, namespace_resolver: &'a NamespaceResolver) {
         self.package_access_validator = Some(PackageAccessValidator::new(
@@ -106,12 +105,10 @@ impl<'a> TypeCheckingPhase<'a> {
         ));
     }
 
-
     /// Enable or disable flow-sensitive analysis
     pub fn set_flow_analysis(&mut self, enabled: bool) {
         self.enable_flow_analysis = enabled;
     }
-
 
     /// Initialize TypeFlowGuard for flow-sensitive analysis
     fn initialize_flow_guard(&mut self) {
@@ -122,7 +119,6 @@ impl<'a> TypeCheckingPhase<'a> {
             ));
         }
     }
-
 
     /// Run type checking on a typed file
     pub fn check_file(&mut self, typed_file: &mut TypedFile) -> Result<(), String> {
@@ -173,7 +169,6 @@ impl<'a> TypeCheckingPhase<'a> {
         }
     }
 
-
     /// Check all type declarations for validity
     fn check_type_declarations(&mut self, typed_file: &TypedFile) -> Result<(), String> {
         // Check for duplicate type names
@@ -212,7 +207,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check an interface for type correctness
     fn check_interface(&mut self, interface: &TypedInterface) -> Result<(), String> {
         // Check method signatures
@@ -222,7 +216,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         Ok(())
     }
-
 
     /// Check a class for type correctness
     fn check_class(&mut self, class: &TypedClass) -> Result<(), String> {
@@ -262,13 +255,11 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check an enum for type correctness
     fn check_enum(&mut self, _enum_decl: &TypedEnum) -> Result<(), String> {
         // TODO: Check that enum variant parameter types are valid
         Ok(())
     }
-
 
     /// Check module-level fields
     fn check_module_fields(&mut self, _typed_file: &TypedFile) -> Result<(), String> {
@@ -277,7 +268,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 }
-
 
 /// Run type checking on a typed file with full diagnostic support
 pub fn type_check_with_diagnostics(

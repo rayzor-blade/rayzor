@@ -45,7 +45,9 @@
 //! ```
 
 use crate::ir::mir_builder::MirBuilder;
-use crate::stdlib::{array, channel, memory, stdtypes, string, sync, thread, vec, vec_u8, map_iter};
+use crate::stdlib::{
+    array, channel, map_iter, memory, stdtypes, string, sync, thread, vec, vec_u8,
+};
 use crate::stdlib::{MethodSignature, RuntimeFunctionCall, StdlibMapping};
 
 /// Trait for compiler plugins that provide stdlib method mappings.

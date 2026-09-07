@@ -17,7 +17,6 @@ fn strip_numeric_noise(text: &str) -> String {
     body.replace('_', "")
 }
 
-
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {

@@ -287,7 +287,10 @@ impl<'a> AstLowering<'a> {
                     .lookup_symbol(ScopeId::first(), interface_name)
                     .map(|s| (s.id, s.kind.clone(), s.package_id.is_none()));
                 if std::env::var_os("RAYZOR_SYM_DEBUG").is_some() {
-                    eprintln!("[sym] pre-register iface {} existing={existing:?}", interface_decl.name);
+                    eprintln!(
+                        "[sym] pre-register iface {} existing={existing:?}",
+                        interface_decl.name
+                    );
                 }
                 let root_taken = match existing {
                     Some((id, crate::tast::SymbolKind::Interface, unpackaged)) => {

@@ -4,7 +4,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Check a field type
     pub(crate) fn check_field_type(
         &mut self,
@@ -54,7 +53,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check a method signature
     pub(crate) fn check_method_signature(
         &mut self,
@@ -66,7 +64,6 @@ impl<'a> TypeCheckingPhase<'a> {
         // This validates that the method signature itself is well-formed
         Ok(())
     }
-
 
     /// Check a method implementation
     pub(crate) fn check_method_implementation(
@@ -95,7 +92,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         Ok(())
     }
-
 
     /// Check a method body with return type validation
     pub(crate) fn check_method_body(
@@ -126,7 +122,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         Ok(())
     }
-
 
     /// Verify that a class correctly implements an interface
     pub(crate) fn verify_interface_implementation(
@@ -236,7 +231,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Verify that overridden methods have compatible signatures with parent class methods
     pub(crate) fn verify_inheritance_signatures(
         &mut self,
@@ -342,7 +336,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(())
     }
 
-
     /// Check if an overriding method is compatible with the parent method
     pub(crate) fn check_override_compatibility(
         &mut self,
@@ -393,7 +386,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(true)
     }
 
-
     /// Check if a class method's signature matches an interface method's signature
     pub(crate) fn method_signatures_match(
         &mut self,
@@ -433,7 +425,6 @@ impl<'a> TypeCheckingPhase<'a> {
         Ok(!matches!(compatibility, TypeCompatibility::Incompatible))
     }
 
-
     /// Format a method signature for display
     pub(crate) fn format_method_signature(&self, method: &TypedMethodSignature) -> String {
         let params = method
@@ -453,7 +444,6 @@ impl<'a> TypeCheckingPhase<'a> {
         format!("function {}({}): {}", method_name, params, return_type)
     }
 
-
     /// Format a function signature for display
     pub(crate) fn format_function_signature(&self, func: &TypedFunction) -> String {
         let params = func
@@ -472,7 +462,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         format!("function {}({}): {}", func_name, params, return_type)
     }
-
 
     /// Format a type for display
     pub(crate) fn format_type(&self, type_id: TypeId) -> String {

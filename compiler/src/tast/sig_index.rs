@@ -121,7 +121,8 @@ impl StaticSigIndex {
         let (_, bare) = class_name.rsplit_once('.')?;
         let p = self.known_files.get(bare)?;
         let suffix = format!("{}.hx", class_name.replace('.', "/"));
-        p.ends_with(std::path::Path::new(&suffix)).then(|| p.clone())
+        p.ends_with(std::path::Path::new(&suffix))
+            .then(|| p.clone())
     }
 
     /// Declared constructor arity for a class indexed under EXACTLY this name.

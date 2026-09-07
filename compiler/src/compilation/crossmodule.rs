@@ -3,7 +3,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Post-load fixup: resolve stale cross-module function references in all import modules.
     /// During renumbering, some refs couldn't be resolved because the target module hadn't
     /// been loaded yet. Now all modules are loaded and stdlib_function_name_map is complete.
@@ -409,7 +408,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Post-load fixup: rewrite stale constructor func_ids in
     /// `import_constructor_name_map`.
     ///
@@ -449,7 +447,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Post-load fixup: rewrite stale method func_ids in
     /// `stdlib_function_map` (SymbolId → IrFunctionId) by reverse-mapping
@@ -509,7 +506,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Renumber import MIR function IDs to avoid collisions and push to import_mir_modules
     pub(crate) fn renumber_and_push_import_mir(&mut self, mut import_mir: IrModule) {

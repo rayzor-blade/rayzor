@@ -1552,9 +1552,7 @@ pub extern "C" fn haxe_array_to_string_i64(arr: *const HaxeArray) -> *mut HaxeSt
 /// `toString` for an array whose element type is statically `Bool`.
 #[no_mangle]
 pub extern "C" fn haxe_array_to_string_bool(arr: *const HaxeArray) -> *mut HaxeString {
-    unsafe {
-        array_to_string_typed(arr, |v| if v != 0 { "true" } else { "false" }.to_string())
-    }
+    unsafe { array_to_string_typed(arr, |v| if v != 0 { "true" } else { "false" }.to_string()) }
 }
 
 /// Shared body for the typed array formatters: every slot rendered by the

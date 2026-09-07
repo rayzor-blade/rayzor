@@ -3,7 +3,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Compile a single file using shared state (string interner, symbol table, namespace resolver, etc.)
     /// This ensures symbols from different files can see each other
     ///
@@ -50,7 +49,6 @@ impl CompilationUnit {
             skip_stdlib_merge,
         )
     }
-
 
     pub(crate) fn compile_ast_with_shared_state(
         &mut self,
@@ -1002,7 +1000,10 @@ impl CompilationUnit {
                     // the symbol manifest produces exactly that for a method
                     // whose class is also compiled here. An extern keeps its own
                     // name, so nothing non-empty answers to it and it is left be.
-                    let identity = func.qualified_name.clone().unwrap_or_else(|| func.name.clone());
+                    let identity = func
+                        .qualified_name
+                        .clone()
+                        .unwrap_or_else(|| func.name.clone());
                     if func.cfg.blocks.is_empty()
                         || func.cfg.blocks.values().all(|b| b.instructions.is_empty())
                     {
@@ -1380,7 +1381,6 @@ impl CompilationUnit {
         Ok(typed_file)
     }
 
-
     /// Compile a single file using shared state (backward-compatible wrapper).
     /// This is used for the main/final user file — stdlib merge runs.
     pub(crate) fn compile_file_with_shared_state(
@@ -1390,7 +1390,6 @@ impl CompilationUnit {
     ) -> Result<TypedFile, Vec<CompilationError>> {
         self.compile_file_with_shared_state_ex(filename, source, false, false)
     }
-
 
     /// Compile using an already-parsed AST (avoids redundant re-parsing).
     pub(crate) fn compile_pre_parsed_file(
@@ -1406,7 +1405,6 @@ impl CompilationUnit {
         self.compile_ast_with_shared_state(&ast_file.filename, source, ast_file, false, false)
     }
 
-
     pub(crate) fn macro_expansion_may_apply(&self, ast_file: &parser::HaxeFile) -> bool {
         haxe_file_source_has_macro_hook(ast_file)
             || self.user_files.iter().any(haxe_file_source_has_macro_hook)
@@ -1419,7 +1417,6 @@ impl CompilationUnit {
                 .iter()
                 .any(haxe_file_source_has_macro_hook)
     }
-
 
     pub(crate) fn compile_user_ast_collecting_errors(
         &mut self,
@@ -1532,11 +1529,9 @@ impl CompilationUnit {
         }
     }
 
-
     pub fn typecheck_timings(&self) -> TypecheckStageTimings {
         self.typecheck_timings
     }
-
 
     /// Lower all files (stdlib + user) to TAST with full pipeline analysis
     ///

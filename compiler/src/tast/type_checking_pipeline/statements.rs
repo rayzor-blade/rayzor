@@ -3,7 +3,6 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     /// Check a statement
     pub fn check_statement(&mut self, stmt: &TypedStatement) -> Result<(), String> {
         match stmt {

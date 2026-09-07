@@ -48,10 +48,8 @@ impl OptimizationPass for DevirtualizationPass {
 
         let func_ids: Vec<IrFunctionId> = module.functions.keys().copied().collect();
         for func_id in func_ids {
-            let r = devirtualize_function(
-                module.functions.get_mut(&func_id).unwrap(),
-                &param_counts,
-            );
+            let r =
+                devirtualize_function(module.functions.get_mut(&func_id).unwrap(), &param_counts);
             result = result.combine(r);
         }
 
@@ -173,14 +171,7 @@ fn devirtualize_function(
     let mut devirtualized = 0;
 
     for &block_id in &block_ids {
-        let old = std::mem::take(
-            &mut function
-                .cfg
-                .blocks
-                .get_mut(&block_id)
-                .unwrap()
-                .instructions,
-        );
+        let old = std::mem::take(&mut function.cfg.blocks.get_mut(&block_id).unwrap().instructions);
         let mut rewritten = Vec::with_capacity(old.len());
         for inst in old {
             let (dest, func_ptr, args, arg_ownership, tail) = match &inst {

@@ -436,7 +436,12 @@ impl<'a> HirToMirContext<'a> {
         let param_types: Vec<IrType> = match self.external_function_param_types.get(&func_id) {
             Some(types) => types.clone(),
             None => match self.builder.module.functions.get(&func_id) {
-                Some(f) => f.signature.parameters.iter().map(|p| p.ty.clone()).collect(),
+                Some(f) => f
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| p.ty.clone())
+                    .collect(),
                 None => return,
             },
         };
@@ -444,10 +449,16 @@ impl<'a> HirToMirContext<'a> {
         for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
             // A generic formal survives as `TypeVar` where the callee's own
             // signature is known, and as the erased I64 otherwise.
-            if !matches!(param_types.get(i), Some(IrType::I64) | Some(IrType::TypeVar(_))) {
+            if !matches!(
+                param_types.get(i),
+                Some(IrType::I64) | Some(IrType::TypeVar(_))
+            ) {
                 continue;
             }
-            if !matches!(self.builder.get_register_type(*arg_reg), Some(IrType::Ptr(_))) {
+            if !matches!(
+                self.builder.get_register_type(*arg_reg),
+                Some(IrType::Ptr(_))
+            ) {
                 continue;
             }
             let Some(Some(hir_ty)) = arg_types.get(i).copied() else {

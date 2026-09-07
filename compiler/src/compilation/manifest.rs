@@ -4,7 +4,6 @@
 use super::*;
 
 impl CompilationUnit {
-
     // === BLADE Symbol Loading Methods ===
 
     /// Load pre-compiled stdlib symbols from .bsym manifest
@@ -41,7 +40,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Register built-in global symbols like 'trace' that aren't in the BLADE manifest
     pub(crate) fn register_builtin_globals(&mut self) {
@@ -126,7 +124,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Register all symbols from a loaded manifest
     pub(crate) fn register_symbols_from_manifest(&mut self, manifest: &BladeSymbolManifest) {
         let mut total_classes = 0;
@@ -190,7 +187,6 @@ impl CompilationUnit {
             total_classes, total_enums, total_aliases, total_abstracts, total_methods);
     }
 
-
     /// Index a packaged manifest type under its short name for signature
     /// resolution. First registration wins, so the mapping is stable per run.
     pub(crate) fn index_manifest_short_name(
@@ -206,9 +202,11 @@ impl CompilationUnit {
         }
     }
 
-
     /// Mint a TypeParameter symbol and TypeId for each declared name.
-    pub(crate) fn register_manifest_type_params(&mut self, names: &[String]) -> BTreeMap<String, TypeId> {
+    pub(crate) fn register_manifest_type_params(
+        &mut self,
+        names: &[String],
+    ) -> BTreeMap<String, TypeId> {
         let mut params = BTreeMap::new();
         for name in names {
             let interned = self.string_interner.intern(name);
@@ -223,7 +221,6 @@ impl CompilationUnit {
         params
     }
 
-
     /// Register a class from BLADE symbol info
     /// Publish a class's identity: symbol, scope, class type, aliases,
     /// short-name index and type parameters.
@@ -232,7 +229,10 @@ impl CompilationUnit {
     /// be declared before any signature is resolved — which is what stops a
     /// signature naming a sibling from restoring as a placeholder purely
     /// because that sibling was declared later.
-    pub(crate) fn declare_class_from_blade(&mut self, class_info: &BladeClassInfo) -> DeclaredClass {
+    pub(crate) fn declare_class_from_blade(
+        &mut self,
+        class_info: &BladeClassInfo,
+    ) -> DeclaredClass {
         let short_name = self.string_interner.intern(&class_info.name);
         let qualified_name = if class_info.package.is_empty() {
             class_info.name.clone()
@@ -310,7 +310,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Register a class's members, once every declaration in the unit exists.
     pub(crate) fn define_class_members_from_blade(
         &mut self,
@@ -384,7 +383,6 @@ impl CompilationUnit {
             class_scope
         );
     }
-
 
     /// Register a method from BLADE info into a class scope
     pub(crate) fn register_method_from_blade(
@@ -469,7 +467,6 @@ impl CompilationUnit {
         method_symbol
     }
 
-
     /// Register a field from BLADE info into a class scope
     pub(crate) fn register_field_from_blade(
         &mut self,
@@ -552,7 +549,6 @@ impl CompilationUnit {
 
         field_symbol
     }
-
 
     /// Register an enum from BLADE symbol info
     pub(crate) fn register_enum_from_blade(&mut self, enum_info: &BladeEnumInfo) -> SymbolId {
@@ -674,12 +670,14 @@ impl CompilationUnit {
         symbol_id
     }
 
-
     /// Pre-register type declarations from default stdlib files (e.g. StdTypes.hx).
     /// This is lightweight: it parses the files and registers enum/class symbols
     /// into the symbol table without full TAST lowering, preserving lazy stdlib performance.
     /// Register a type alias from BLADE symbol info
-    pub(crate) fn register_type_alias_from_blade(&mut self, alias_info: &BladeTypeAliasInfo) -> SymbolId {
+    pub(crate) fn register_type_alias_from_blade(
+        &mut self,
+        alias_info: &BladeTypeAliasInfo,
+    ) -> SymbolId {
         let short_name = self.string_interner.intern(&alias_info.name);
         let qualified_name = if alias_info.package.is_empty() {
             alias_info.name.clone()
@@ -747,9 +745,11 @@ impl CompilationUnit {
         symbol_id
     }
 
-
     /// Register an abstract type from BLADE symbol info
-    pub(crate) fn register_abstract_from_blade(&mut self, abstract_info: &BladeAbstractInfo) -> SymbolId {
+    pub(crate) fn register_abstract_from_blade(
+        &mut self,
+        abstract_info: &BladeAbstractInfo,
+    ) -> SymbolId {
         let short_name = self.string_interner.intern(&abstract_info.name);
         let qualified_name = if abstract_info.package.is_empty() {
             abstract_info.name.clone()
@@ -837,7 +837,6 @@ impl CompilationUnit {
         symbol_id
     }
 
-
     /// Parse a type string (e.g., "Array<Int>", "String", "Null<Float>") and return a TypeId
     /// Resolve a type the manifest recorded.
     ///
@@ -888,7 +887,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// A declared type, or `Dynamic` where the source annotated none.
     pub(crate) fn resolve_blade_type_or_dynamic(&mut self, ty: Option<&bsym::BladeType>) -> TypeId {
         match ty {
@@ -896,7 +894,6 @@ impl CompilationUnit {
             None => self.type_table.borrow().dynamic_type(),
         }
     }
-
 
     pub(crate) fn resolve_blade_path(
         &mut self,
@@ -995,7 +992,6 @@ impl CompilationUnit {
             .borrow_mut()
             .create_class_type(symbol_id, args)
     }
-
 
     pub(crate) fn parse_type_string(&mut self, type_str: &str) -> TypeId {
         let type_str = type_str.trim();
@@ -1129,7 +1125,6 @@ impl CompilationUnit {
             .create_type(TypeKind::Placeholder { name })
     }
 
-
     /// Parse a comma-separated list of types, handling nested generics
     pub(crate) fn parse_type_list(&mut self, types_str: &str) -> Vec<TypeId> {
         let mut result = Vec::new();
@@ -1165,7 +1160,6 @@ impl CompilationUnit {
 
         result
     }
-
 
     /// Look up a type symbol by name (checks short name in global scope)
     pub(crate) fn lookup_type_symbol(&self, name: &str) -> Option<SymbolId> {
@@ -1203,7 +1197,6 @@ impl CompilationUnit {
         // the manifest index rather than the root scope.
         self.manifest_types_by_short_name.get(&interned).copied()
     }
-
 
     /// Register type system symbols from BladeTypeInfo (for cache restore).
     /// Returns a mapping of class names to their fresh IDs for map reconstruction.

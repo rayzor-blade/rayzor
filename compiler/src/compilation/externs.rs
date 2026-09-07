@@ -3,24 +3,20 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Get extern function → JS module name mappings (from @:jsImport classes).
     pub fn get_extern_js_module_map(&self) -> &BTreeMap<String, String> {
         &self.extern_js_module_map
     }
 
-
     pub fn get_qualified_method_map(&self) -> &BTreeMap<String, String> {
         &self.qualified_method_map
     }
-
 
     /// Get class allocation sizes keyed by class name.
     /// Used by WASM bindgen to generate JS constructors that call malloc(size).
     pub fn get_class_alloc_sizes_by_name(&self) -> &BTreeMap<String, u64> {
         &self.import_class_alloc_sizes_by_name
     }
-
 
     /// Get HDLL function pointers for JIT linking.
     ///
@@ -29,7 +25,6 @@ impl CompilationUnit {
     pub fn get_hdll_symbols(&self) -> &[(String, *const u8)] {
         &self.hdll_symbols
     }
-
 
     /// Register extern class methods from a TypedFile as plugin mappings.
     ///
@@ -55,7 +50,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     pub(crate) fn register_extern_methods_from_typed_file(&mut self, typed_file: &TypedFile) {
         use crate::compiler_plugin::NativePlugin;
@@ -284,7 +278,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Map a Haxe TypeId to an IrTypeDescriptor u8 value for MethodDescEntry.
     pub(crate) fn haxe_type_to_descriptor(&self, type_id: TypeId) -> u8 {
         use crate::tast::TypeKind;
@@ -298,7 +291,6 @@ impl CompilationUnit {
             _ => 9,                      // PtrVoid for class types, etc.
         }
     }
-
 
     /// Map a Haxe return/param TypeId to a `native_type` tag as decoded by
     /// `compiler_plugin::native_type_to_descriptor` (0=Void 1=I64 2=F64 3=PtrVoid
@@ -318,7 +310,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Register an external compiler plugin.
     ///
     /// This allows native packages (loaded via dlopen) to provide method mappings
@@ -331,14 +322,12 @@ impl CompilationUnit {
         self.compiler_plugin_registry.register(plugin);
     }
 
-
     /// Add external runtime symbols for JIT linking.
     ///
     /// These are merged with HDLL symbols and made available to the JIT backend.
     pub fn add_external_symbols(&mut self, symbols: Vec<(String, *const u8)>) {
         self.hdll_symbols.extend(symbols);
     }
-
 
     /// Scan parsed user files for `@:hlNative` metadata and load corresponding HDLL libraries.
     ///
@@ -425,7 +414,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Extract `@:hlNative("libname")` metadata from a class's metadata list.
     ///
     /// Returns `Some(lib_name)` if `@:hlNative` is found, `None` otherwise.
@@ -445,7 +433,6 @@ impl CompilationUnit {
         }
         None
     }
-
 
     /// Search for an HDLL file in the configured search paths.
     ///

@@ -3,10 +3,12 @@
 use super::*;
 
 impl CompilationUnit {
-
     /// Check for ownership violations (use-after-move) in the TAST.
     /// Returns diagnostics that can be printed via print_mir_diagnostics.
-    pub(crate) fn check_ownership_violations(&self, typed_file: &TypedFile) -> Vec<diagnostics::Diagnostic> {
+    pub(crate) fn check_ownership_violations(
+        &self,
+        typed_file: &TypedFile,
+    ) -> Vec<diagnostics::Diagnostic> {
         use crate::semantic_graph::{MoveType, OwnershipGraph};
         use crate::tast::{ScopeId, TypedExpressionKind, TypedStatement};
 
@@ -223,7 +225,6 @@ impl CompilationUnit {
         diagnostics
     }
 
-
     /// Walk statements to populate ownership graph (moves and uses).
     pub(crate) fn populate_ownership_stmts(
         graph: &mut crate::semantic_graph::OwnershipGraph,
@@ -293,7 +294,6 @@ impl CompilationUnit {
             }
         }
     }
-
 
     /// Walk expressions to record moves (function call args) and uses (variable refs).
     pub(crate) fn populate_ownership_expr(
@@ -389,9 +389,12 @@ impl CompilationUnit {
         }
     }
 
-
     /// Get variable name from SymbolId via symbol table.
-    pub(crate) fn get_symbol_name(&self, symbol: crate::tast::SymbolId, _typed_file: &TypedFile) -> String {
+    pub(crate) fn get_symbol_name(
+        &self,
+        symbol: crate::tast::SymbolId,
+        _typed_file: &TypedFile,
+    ) -> String {
         if let Some(sym) = self.symbol_table.get_symbol(symbol) {
             if let Some(name) = self.string_interner.get(sym.name) {
                 if !name.is_empty() {

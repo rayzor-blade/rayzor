@@ -646,7 +646,6 @@ impl CompilationUnit {
         }
     }
 
-
     /// Build the preprocessor config with extra_defines from compilation config.
     /// All file parsing should use this to ensure #if wasm etc. work consistently.
     fn preprocessor_config(&self) -> parser::preprocessor::PreprocessorConfig {
@@ -676,13 +675,11 @@ impl CompilationUnit {
         config
     }
 
-
     /// Get the MIR modules that were generated during compilation.
     /// Returns a vector of MIR modules corresponding to the compiled files.
     pub fn get_mir_modules(&self) -> Vec<std::sync::Arc<crate::ir::IrModule>> {
         self.mir_modules.clone()
     }
-
 
     /// Finalize cross-module MIR references after all imports and user files
     /// have been lowered. Artifact builders such as AOT clone MIR directly
@@ -694,14 +691,12 @@ impl CompilationUnit {
         self.fixup_stale_method_ids();
     }
 
-
     /// Get the stdlib typed files that were loaded during compilation
     /// Returns a reference to the vector of TypedFiles from stdlib loading
     pub fn get_stdlib_typed_files(&self) -> &[TypedFile] {
         &self.loaded_stdlib_typed_files
     }
 }
-
 
 /// Cache statistics
 #[derive(Debug, Default)]

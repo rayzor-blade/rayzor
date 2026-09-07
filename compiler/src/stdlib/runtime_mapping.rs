@@ -519,11 +519,19 @@ impl StdlibMapping {
             ),
             ("Array", "iterator", "haxe.iterators.ArrayIterator"),
             ("haxe.ds.StringMap", "keys", "haxe.iterators.ArrayIterator"),
-            ("haxe.ds.StringMap", "iterator", "haxe.iterators.ArrayIterator"),
+            (
+                "haxe.ds.StringMap",
+                "iterator",
+                "haxe.iterators.ArrayIterator",
+            ),
             ("haxe.ds.IntMap", "keys", "haxe.iterators.ArrayIterator"),
             ("haxe.ds.IntMap", "iterator", "haxe.iterators.ArrayIterator"),
             ("haxe.ds.ObjectMap", "keys", "haxe.iterators.ArrayIterator"),
-            ("haxe.ds.ObjectMap", "iterator", "haxe.iterators.ArrayIterator"),
+            (
+                "haxe.ds.ObjectMap",
+                "iterator",
+                "haxe.iterators.ArrayIterator",
+            ),
             (
                 "Array",
                 "keyValueIterator",

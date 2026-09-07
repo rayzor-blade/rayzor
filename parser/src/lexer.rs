@@ -190,7 +190,11 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     if self.peek() == b'=' {
                         self.advance();
-                        Ok(Token::new(TokenKind::QuestionQuestionAssign, start, self.pos))
+                        Ok(Token::new(
+                            TokenKind::QuestionQuestionAssign,
+                            start,
+                            self.pos,
+                        ))
                     } else {
                         Ok(Token::new(TokenKind::QuestionQuestion, start, self.pos))
                     }

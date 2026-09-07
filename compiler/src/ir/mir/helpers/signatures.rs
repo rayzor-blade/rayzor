@@ -582,9 +582,12 @@ impl<'a> HirToMirContext<'a> {
                         // forward-ref thunks that dedupe at merge.
                         if let Some(class_fqn) = self.new_arg_class_fqn(arg_expr) {
                             if let Some(class_sym) = self.lookup_class_symbol_by_name(&class_fqn) {
-                                if let Some(wrapped) =
-                                    self.wrap_in_interface_fat_ptr_for(arg_reg, arg_expr.ty, class_sym, iface_sym)
-                                {
+                                if let Some(wrapped) = self.wrap_in_interface_fat_ptr_for(
+                                    arg_reg,
+                                    arg_expr.ty,
+                                    class_sym,
+                                    iface_sym,
+                                ) {
                                     self.interface_wrapped_args.insert(wrapped);
                                     return wrapped;
                                 }
@@ -604,9 +607,12 @@ impl<'a> HirToMirContext<'a> {
                             .or_else(|| self.map_container_class_symbol(resolved_arg))
                             .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
                         if let Some(class_sym) = class_sym {
-                            if let Some(wrapped) =
-                                self.wrap_in_interface_fat_ptr_for(arg_reg, arg_expr.ty, class_sym, iface_sym)
-                            {
+                            if let Some(wrapped) = self.wrap_in_interface_fat_ptr_for(
+                                arg_reg,
+                                arg_expr.ty,
+                                class_sym,
+                                iface_sym,
+                            ) {
                                 // The fat pointer may escape through the callee (pushed
                                 // into a long-lived Array<I>), so marking it escaped keeps
                                 // callers from pushing it to `temp_heap_values` and freeing
@@ -673,9 +679,12 @@ impl<'a> HirToMirContext<'a> {
                                     self.lookup_class_symbol_by_name(&class_fqn)
                                 {
                                     self.interface_vtables.remove(&(class_sym, iface_sym));
-                                    if let Some(wrapped) = self
-                                        .wrap_in_interface_fat_ptr_for(arg_reg, arg_expr.ty, class_sym, iface_sym)
-                                    {
+                                    if let Some(wrapped) = self.wrap_in_interface_fat_ptr_for(
+                                        arg_reg,
+                                        arg_expr.ty,
+                                        class_sym,
+                                        iface_sym,
+                                    ) {
                                         self.interface_wrapped_args.insert(wrapped);
                                         return wrapped;
                                     }
@@ -699,9 +708,12 @@ impl<'a> HirToMirContext<'a> {
                                 .or_else(|| self.recover_arg_concrete_class(arg_expr, arg_reg));
                             if let Some(class_sym) = class_sym {
                                 self.interface_vtables.remove(&(class_sym, iface_sym));
-                                if let Some(wrapped) =
-                                    self.wrap_in_interface_fat_ptr_for(arg_reg, arg_expr.ty, class_sym, iface_sym)
-                                {
+                                if let Some(wrapped) = self.wrap_in_interface_fat_ptr_for(
+                                    arg_reg,
+                                    arg_expr.ty,
+                                    class_sym,
+                                    iface_sym,
+                                ) {
                                     self.interface_wrapped_args.insert(wrapped);
                                     return wrapped;
                                 }

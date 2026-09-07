@@ -802,9 +802,7 @@ impl MacroContext {
                     return Err(MacroError::NeedsTyper { location });
                 };
                 let spelling = typer.get().type_display(id);
-                if spelling.is_empty()
-                    || spelling.contains(['<', '{', '(', '>', '-'])
-                {
+                if spelling.is_empty() || spelling.contains(['<', '{', '(', '>', '-']) {
                     return Ok(MacroValue::Null);
                 }
                 let mut pack: Vec<&str> = spelling.split('.').collect();
@@ -820,7 +818,10 @@ impl MacroContext {
                     )),
                 );
                 obj.insert("name".to_string(), MacroValue::String(name.into()));
-                obj.insert("params".to_string(), MacroValue::Array(Arc::new(Vec::new())));
+                obj.insert(
+                    "params".to_string(),
+                    MacroValue::Array(Arc::new(Vec::new())),
+                );
                 obj.insert("sub".to_string(), MacroValue::Null);
                 Ok(MacroValue::Object(Arc::new(obj)))
             }

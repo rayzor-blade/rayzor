@@ -3,12 +3,10 @@
 use super::*;
 
 impl<'a> TypeCheckingPhase<'a> {
-
     pub fn emit_error(&mut self, error: TypeCheckError) {
         let diagnostic = self.diagnostic_emitter.emit_diagnostic(error);
         self.diagnostics.push(diagnostic);
     }
-
 
     /// Emit an enhanced type error with context-aware suggestions
     pub fn emit_enhanced_type_error(
@@ -42,7 +40,6 @@ impl<'a> TypeCheckingPhase<'a> {
 
         self.emit_error(error);
     }
-
 
     /// Emit a constraint violation error
     pub fn emit_constraint_violation(

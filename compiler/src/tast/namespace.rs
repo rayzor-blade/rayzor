@@ -311,8 +311,7 @@ impl NamespaceResolver {
                     let full_path = base.join(&module_path);
                     if full_path.exists() {
                         if let Ok(content) = std::fs::read_to_string(&full_path) {
-                            let declares =
-                                Self::declaring_keyword(&content, sub_type).is_some();
+                            let declares = Self::declaring_keyword(&content, sub_type).is_some();
                             if declares {
                                 if check_loaded && self.is_file_loaded(&full_path) {
                                     return None;

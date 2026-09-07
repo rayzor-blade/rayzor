@@ -415,9 +415,7 @@ impl InliningPass {
                                             sub_map.insert(type_param.name.clone(), arg_ty);
                                             erased_tp_slots.push(i);
                                         }
-                                        Some(bound) if *bound == arg_ty => {
-                                            erased_tp_slots.push(i)
-                                        }
+                                        Some(bound) if *bound == arg_ty => erased_tp_slots.push(i),
                                         _ => {}
                                     }
                                 }
