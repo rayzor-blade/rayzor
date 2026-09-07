@@ -128,7 +128,7 @@
     <div style="max-width:700px">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Targets</div>
       <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">Desktop, server, and the browser.</h2>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">One codebase, one runtime, four places to put it. WebAssembly is built the same way as the native output, and ships as a core module, a WASI P2 component, or a browser bundle.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">One codebase, one runtime, four places to put it. WebAssembly is a first-class target: it is built by the same compiler and the same optimizations as the native output, and ships as a core module, a WASI P2 component, or a browser bundle.</p>
     </div>
     <div style="margin-top:44px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px">
       <sc-for list="{{ targets }}" as="t" hint-placeholder-count="4">

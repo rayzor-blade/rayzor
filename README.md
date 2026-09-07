@@ -25,8 +25,10 @@ your program immediately and compiles hot functions as they prove themselves, so
 you get startup without a compile wait and steady-state speed without giving it
 up.
 
-- **Native code generation**: Cranelift and LLVM backends, plus WebAssembly and
-  a C99 route that needs no LLVM
+- **Native code generation**: Cranelift and LLVM backends, and a C99 route that
+  needs no LLVM
+- **WebAssembly as a first-class target**: core modules, WASI P2 components and a
+  browser harness, from the same optimized program as the native output
 - **Tiered execution**: five tiers, promoted per function on profile data
 - **Ownership-based memory**: compile-time drop insertion, no garbage collector
 - **Incremental compilation**: a per-module cache and a single-file `.rzb`
