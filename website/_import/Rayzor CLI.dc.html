@@ -53,7 +53,17 @@
     <main style="padding:40px 0 96px;min-width:0">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Reference</div>
       <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600">CLI reference</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>. Run <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt; --help</span> for the authoritative flag list — this page explains what the commands are for.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>, and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">--help</span> has the full flag list. This page is the short path: setup, then the commands you use daily.</p>
+
+      <h2 id="setup" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Setup</h2>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">git clone https://github.com/rayzor-blade/rayzor.git
+cd rayzor
+cargo build --release
+rayzor info                    # confirm the build</div>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
+      <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
+cd my-app
+rayzor run                     # entry point from the manifest</div>
 
       <h2 id="modes" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
       <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command. Picking a mode means picking a command.</p>
@@ -80,7 +90,7 @@
           </div>
         </sc-for>
       </div>
-      <p style="margin:24px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099"><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">--tier-thresholds &lt;I/W/H[/B]&gt;</span> overrides a preset's thresholds directly.</p>
+      <p style="margin:24px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099">Threshold tuning, stage inspection and the <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">RAYZOR_*</span> variables live in <a href="https://github.com/rayzor-blade/rayzor/blob/main/docs/CONTRIBUTING.md" style="color:#F97316;text-decoration:none">CONTRIBUTING</a>.</p>
 
       <h2 id="commands" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Commands</h2>
 
@@ -143,17 +153,6 @@ opt-level = </span><span style="color:#E8B84B">2
       </div>
       <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:700px">A project depending on native plugins must declare both the class paths and the native libraries; a consumer with only one of the two fails to resolve at run time.</p>
 
-      <h2 id="env" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Environment variables</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Mostly for debugging the compiler itself.</p>
-      <div style="margin-top:22px;display:grid;gap:2px">
-        <sc-for list="{{ env }}" as="e" hint-placeholder-count="8">
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">{{ e.name }}</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">{{ e.what }}</span>
-          </div>
-        </sc-for>
-      </div>
-
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap">
         <div>
           <div style="font-size:16px;font-weight:600">How the compiler works inside</div>
@@ -184,10 +183,10 @@ opt-level = </span><span style="color:#E8B84B">2
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280}}">
 const NAV = [
-  { title: "Start", items: [["Quick start", "Rayzor Docs.dc.html#quickstart"], ["Compilation modes", "#modes"], ["Tiering", "Rayzor Docs.dc.html#tiers"]] },
+  { title: "Start", items: [["Setup", "#setup"], ["Daily loop", "#modes"], ["Tiering", "Rayzor Docs.dc.html#tiers"]] },
   { title: "Concepts", items: [["Architecture", "Rayzor Architecture.dc.html"], ["SIMD", "Rayzor Architecture.dc.html#simd"], ["Concurrency", "Rayzor Concurrency.dc.html"], ["Memory model", "Rayzor Docs.dc.html#memory"]] },
-  { title: "Reference", items: [["CLI reference", "#overview", 1], ["Project manifest", "#manifest"], ["Environment variables", "#env"], ["The rayzor package", "Rayzor Architecture.dc.html#stdlib"]] },
-  { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
+  { title: "Reference", items: [["CLI reference", "#overview", 1], ["Project manifest", "#manifest"], ["The rayzor package", "Rayzor Architecture.dc.html#stdlib"]] },
+  { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor/blob/main/docs/CONTRIBUTING.md"]] }
 ];
 const MODES = [
   { want: "Run code while developing", cmd: "rayzor run main.hx", what: "Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM" },
@@ -195,7 +194,7 @@ const MODES = [
   { want: "Ship a native binary", cmd: "rayzor aot main.hx -o app", what: "Whole program through LLVM, linked against the runtime" },
   { want: "Ship one portable artifact", cmd: "rayzor bundle main.hx -o app.rzb", what: "Serialized MIR in a single file, run later with rayzor run" },
   { want: "Target the browser or WASI", cmd: "rayzor build --target wasm", what: "WebAssembly module; --browser also emits an HTML harness" },
-  { want: "Inspect the pipeline", cmd: "rayzor compile main.hx --stage mir", what: "Stop at any stage and print it" }
+  { want: "Start a project", cmd: "rayzor init --name my-app", what: "Scaffolds src/Main.hx and rayzor.toml" }
 ];
 const PRESETS = [
   { name: "script", for: "CLI tools and one-shot scripts — instant startup, no promotion" },
@@ -212,17 +211,10 @@ const COMMANDS = [
     usage: "rayzor run [FILE] [OPTIONS] [-- PROGRAM_ARGS...]",
     flags: [
       { flag: "--preset <NAME>", what: "Tier policy. Default application" },
-      { flag: "--tier <0-3>", what: "Starting tier" },
-      { flag: "--llvm", what: "Enable LLVM tier 3" },
-      { flag: "--tier-thresholds <I/W/H[/B]>", what: "Override promotion thresholds, e.g. 1/15/5" },
-      { flag: "--tier-sample-rate <N>", what: "Profiling sample rate" },
-      { flag: "--tier-start-interpreted <bool>\n--tier-promotion <bool>", what: "Override the resolved tier config" },
-      { flag: "--preset-override-toml", what: "Let --preset win over the manifest's [tier]" },
-      { flag: "--no-cache, --cache-dir <DIR>", what: "Control the BLADE cache (on by default)" },
+      { flag: "--no-cache, --cache-dir <DIR>", what: "Control the module cache (on by default)" },
       { flag: "--release", what: "Use target/release paths" },
       { flag: "--rpkg <FILE>", what: "Load an .rpkg package (repeatable)" },
       { flag: "--native-lib <FILE>", what: "Load a native plugin dylib directly, without a manifest" },
-      { flag: "--safety-warnings on|off", what: "Use-after-move and related diagnostics. Default on" },
       { flag: "--wasm", what: "Compile to WASM and run it in the embedded wasmtime sandbox" },
       { flag: "-i, --interactive", what: "Open the TUI after execution (scroll, search)" },
       { flag: "--stats, -v", what: "Compilation statistics, verbose output" }
@@ -238,7 +230,6 @@ const COMMANDS = [
       { flag: "--target <TRIPLE>\n--sysroot <DIR>, --linker <PATH>", what: "Cross-compilation" },
       { flag: "--strip", what: "Tree-shake unreachable code" },
       { flag: "--strip-symbols", what: "Strip debug symbols from the binary" },
-      { flag: "--runtime-dir <DIR>", what: "Where to find librayzor_runtime.a" },
       { flag: "--no-cache, --cache-dir <DIR>", what: "BLADE cache control" }
     ]
   },
@@ -271,18 +262,6 @@ const COMMANDS = [
     flags: []
   },
   {
-    id: "cmd-compile", name: "rayzor compile", tagline: "stop at a stage",
-    body: "The cheapest way to see what each IR level actually holds. --show-ir prints the intermediate representation; -o writes it to a file.",
-    usage: "rayzor compile main.hx --stage ast|tast|hir|mir|native",
-    flags: []
-  },
-  {
-    id: "cmd-dump", name: "rayzor dump", tagline: "read the MIR",
-    body: "--diff shows the MIR before and after optimization — the fastest way to see what a pass did. --cfg-only prints the control flow graph without instructions, --format dot emits Graphviz, -i opens the interactive viewer.",
-    usage: "rayzor dump main.hx [--function NAME] [--diff] [--format text|dot] [-i]",
-    flags: []
-  },
-  {
     id: "cmd-cache", name: "rayzor cache", tagline: "BLADE module cache",
     body: "warm pre-compiles the standard library so the first real build does not pay for it.",
     usage: "rayzor cache stats | list | warm | clear",
@@ -301,30 +280,11 @@ const COMMANDS = [
     flags: []
   },
   {
-    id: "cmd-debug", name: "rayzor debug", tagline: "investigative toolkit",
-    body: "compare restores the working tree on exit, including on failure.",
-    usage: "rayzor debug run       # forensic run, crash handlers pre-armed\nrayzor debug bench     # run N times, per-run metrics plus aggregate stats\nrayzor debug compare   # A/B two git refs, report the median delta\nrayzor debug resolve   # hex PCs from a crash dump → Haxe functions and lines\nrayzor debug lldb      # launch under lldb\nrayzor debug server    # live metrics over HTTP with a browser dashboard",
-    flags: []
-  },
-  {
-    id: "cmd-others", name: "others", tagline: "REPL, symbols, editor integration",
+    id: "cmd-others", name: "others", tagline: "REPL and editor integration",
     body: "",
-    usage: "rayzor jit main.hx     # JIT with an interactive REPL\nrayzor preblade        # extract stdlib symbols to .bsym\nrayzor lsp             # Language Server, for editor integration\nrayzor info [--features] [--tiers]",
+    usage: "rayzor jit main.hx     # JIT with an interactive REPL\nrayzor lsp             # Language Server, for editor integration\nrayzor info [--features] [--tiers]",
     flags: []
   }
-];
-const ENV = [
-  { name: "RAYZOR_STD_PATH", what: "Override the standard library location" },
-  { name: "RAYZOR_RAW_MIR=1", what: "Skip all optimization passes in rayzor dump" },
-  { name: "RAYZOR_PASS_DEBUG=1", what: "Run MIR passes one at a time, reporting what each changed" },
-  { name: "RAYZOR_DISABLE_PASSES=<names>", what: "Disable named MIR passes (bundle path) — bisect a miscompile" },
-  { name: "RAYZOR_NO_SRA=1, RAYZOR_NO_PHI_SRA=1", what: "Disable scalar replacement, or only its phi-aware part" },
-  { name: "RAYZOR_NO_FMA=1", what: "Disable FMA fusion in instruction lowering" },
-  { name: "RAYZOR_LLVM_OPT=<0-3>", what: "Override the LLVM optimization level" },
-  { name: "RAYZOR_DUMP_CLIF=1", what: "Print Cranelift IR" },
-  { name: "RAYZOR_DUMP_LLVM_IR=1", what: "Print LLVM IR around optimization" },
-  { name: "RAYZOR_DUMP_FN_PTRS=1", what: "Print the resolved function pointer table" },
-  { name: "RAYZOR_STRICT_MOVE_CHECK=1", what: "Make the interpreter strict about move violations" }
 ];
 
 class Component extends DCLogic {
@@ -337,7 +297,7 @@ class Component extends DCLogic {
           style: "padding:5px 0;color:" + (active ? "#F97316" : "#9AA0AA") + ";font-weight:" + (active ? "500" : "400")
         }))
       })),
-      modes: MODES, presets: PRESETS, env: ENV,
+      modes: MODES, presets: PRESETS,
       commands: COMMANDS.map(c => ({ ...c, hasFlags: c.flags.length > 0 }))
     };
   }

@@ -52,7 +52,7 @@ rayzor aot hello.hx -o hello   # native binary via LLVM
 rayzor bundle hello.hx -o app.rzb
 ```
 
-Full command and flag reference: **[docs/CLI.md](docs/CLI.md)**.
+Setup and everyday commands: **[docs/CLI.md](docs/CLI.md)**.
 
 ---
 
@@ -156,7 +156,8 @@ In progress: standard library coverage and optimization tuning.
 ## Documentation
 
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** — pipeline, IRs, passes, tiers, runtime
-- **[CLI reference](docs/CLI.md)** — commands, compilation modes, manifest, environment variables
+- **[CLI](docs/CLI.md)** — setup, everyday commands, manifest
+- **[Contributing](docs/CONTRIBUTING.md)** — diagnostics: stage dumps, MIR, pass bisection, `RAYZOR_*`
 - **[Memory management](docs/architecture/MEMORY_MANAGEMENT.md)** — ownership, lifetimes, drops
 - **[BLADE format](docs/architecture/BLADE_FORMAT_SPEC.md)** · **[RZB format](docs/architecture/RZB_FORMAT_SPEC.md)**
 - **[Backlog](docs/architecture/BACKLOG.md)** — feature tracking
@@ -211,6 +212,9 @@ cargo build
 cargo test
 ./run_haxe_tests.sh      # Haxe end-to-end suite
 ```
+
+The diagnostic toolkit — stage dumps, MIR reading, pass bisection, the
+`RAYZOR_*` variables — is in **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)**.
 
 Start with the [architecture doc](docs/architecture/ARCHITECTURE.md). Two
 conventions worth knowing before your first patch: symbol ids are per-compilation-context, so only fully-qualified names may

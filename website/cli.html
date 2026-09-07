@@ -129,9 +129,9 @@
           <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:#5B616B;margin-bottom:10px">Start</div>
           <div style="display:grid;gap:2px">
             
-              <a href="/docs.html#quickstart" style="padding:5px 0;color:#9AA0AA;font-weight:400">Quick start</a>
+              <a href="#setup" style="padding:5px 0;color:#9AA0AA;font-weight:400">Setup</a>
             
-              <a href="#modes" style="padding:5px 0;color:#9AA0AA;font-weight:400">Compilation modes</a>
+              <a href="#modes" style="padding:5px 0;color:#9AA0AA;font-weight:400">Daily loop</a>
             
               <a href="/docs.html#tiers" style="padding:5px 0;color:#9AA0AA;font-weight:400">Tiering</a>
             
@@ -161,8 +161,6 @@
             
               <a href="#manifest" style="padding:5px 0;color:#9AA0AA;font-weight:400">Project manifest</a>
             
-              <a href="#env" style="padding:5px 0;color:#9AA0AA;font-weight:400">Environment variables</a>
-            
               <a href="/architecture.html#stdlib" style="padding:5px 0;color:#9AA0AA;font-weight:400">The rayzor package</a>
             
           </div>
@@ -174,7 +172,7 @@
             
               <a href="/" style="padding:5px 0;color:#9AA0AA;font-weight:400">Home</a>
             
-              <a href="https://github.com/rayzor-blade/rayzor" style="padding:5px 0;color:#9AA0AA;font-weight:400">Contributing</a>
+              <a href="https://github.com/rayzor-blade/rayzor/blob/main/docs/CONTRIBUTING.md" style="padding:5px 0;color:#9AA0AA;font-weight:400">Contributing</a>
             
           </div>
         </div>
@@ -184,7 +182,17 @@
     <main style="padding:40px 0 96px;min-width:0" class="dcr9">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Reference</div>
       <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600" class="dcr10">CLI reference</h1>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>. Run <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt; --help</span> for the authoritative flag list — this page explains what the commands are for.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>, and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">--help</span> has the full flag list. This page is the short path: setup, then the commands you use daily.</p>
+
+      <h2 id="setup" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Setup</h2>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">git clone https://github.com/rayzor-blade/rayzor.git
+cd rayzor
+cargo build --release
+rayzor info                    # confirm the build</div>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
+      <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
+cd my-app
+rayzor run                     # entry point from the manifest</div>
 
       <h2 id="modes" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Compilation modes</h2>
       <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">The same MIR goes through a different backend depending on the command. Picking a mode means picking a command.</p>
@@ -224,9 +232,9 @@
           </div>
         
           <div style="display:grid;grid-template-columns:1fr 1.1fr 1.3fr;border-top:1px solid #1A1C21;background:#0E1013" class="dcr5">
-            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Inspect the pipeline</div>
-            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;overflow-wrap:break-word">rayzor compile main.hx --stage mir</div>
-            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Stop at any stage and print it</div>
+            <div style="padding:14px 18px;font-size:14px;color:#C9CCD2">Start a project</div>
+            <div style="padding:14px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;overflow-wrap:break-word">rayzor init --name my-app</div>
+            <div style="padding:14px 18px;font-size:13.5px;line-height:1.55;color:#8A9099">Scaffolds src/Main.hx and rayzor.toml</div>
           </div>
         
       </div>
@@ -266,7 +274,7 @@
           </div>
         
       </div>
-      <p style="margin:24px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099"><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">--tier-thresholds &lt;I/W/H[/B]&gt;</span> overrides a preset's thresholds directly.</p>
+      <p style="margin:24px 0 0;padding:14px 18px;border:1px solid #1A1C21;border-radius:10px;background:#0E1013;font-size:13.5px;line-height:1.6;color:#8A9099">Threshold tuning, stage inspection and the <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">RAYZOR_*</span> variables live in <a href="https://github.com/rayzor-blade/rayzor/blob/main/docs/CONTRIBUTING.md" style="color:#F97316;text-decoration:none">CONTRIBUTING</a>.</p>
 
       <h2 id="commands" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Commands</h2>
 
@@ -287,39 +295,8 @@
                 </div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--tier &lt;0-3&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Starting tier</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--llvm</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Enable LLVM tier 3</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--tier-thresholds &lt;I/W/H[/B]&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Override promotion thresholds, e.g. 1/15/5</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--tier-sample-rate &lt;N&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Profiling sample rate</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--tier-start-interpreted &lt;bool&gt;
---tier-promotion &lt;bool&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Override the resolved tier config</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--preset-override-toml</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Let --preset win over the manifest's [tier]</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
                   <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--no-cache, --cache-dir &lt;DIR&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Control the BLADE cache (on by default)</span>
+                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Control the module cache (on by default)</span>
                 </div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -335,11 +312,6 @@
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
                   <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--native-lib &lt;FILE&gt;</span>
                   <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Load a native plugin dylib directly, without a manifest</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--safety-warnings on|off</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Use-after-move and related diagnostics. Default on</span>
                 </div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -395,11 +367,6 @@
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
                   <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--strip-symbols</span>
                   <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Strip debug symbols from the binary</span>
-                </div>
-              
-                <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--runtime-dir &lt;DIR&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Where to find librayzor_runtime.a</span>
                 </div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -490,26 +457,6 @@
           
         </div>
       
-        <div id="cmd-compile" style="margin-top:40px;scroll-margin-top:84px">
-          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
-            <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor compile</h3>
-            <span style="font-size:15px;color:#9AA0AA">stop at a stage</span>
-          </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">The cheapest way to see what each IR level actually holds. --show-ir prints the intermediate representation; -o writes it to a file.</p>
-          <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor compile main.hx --stage ast|tast|hir|mir|native</div>
-          
-        </div>
-      
-        <div id="cmd-dump" style="margin-top:40px;scroll-margin-top:84px">
-          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
-            <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor dump</h3>
-            <span style="font-size:15px;color:#9AA0AA">read the MIR</span>
-          </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">--diff shows the MIR before and after optimization — the fastest way to see what a pass did. --cfg-only prints the control flow graph without instructions, --format dot emits Graphviz, -i opens the interactive viewer.</p>
-          <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor dump main.hx [--function NAME] [--diff] [--format text|dot] [-i]</div>
-          
-        </div>
-      
         <div id="cmd-cache" style="margin-top:40px;scroll-margin-top:84px">
           <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor cache</h3>
@@ -542,29 +489,13 @@ rayzor init --from-hxml build.hxml</div>
           
         </div>
       
-        <div id="cmd-debug" style="margin-top:40px;scroll-margin-top:84px">
-          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
-            <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor debug</h3>
-            <span style="font-size:15px;color:#9AA0AA">investigative toolkit</span>
-          </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">compare restores the working tree on exit, including on failure.</p>
-          <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor debug run       # forensic run, crash handlers pre-armed
-rayzor debug bench     # run N times, per-run metrics plus aggregate stats
-rayzor debug compare   # A/B two git refs, report the median delta
-rayzor debug resolve   # hex PCs from a crash dump → Haxe functions and lines
-rayzor debug lldb      # launch under lldb
-rayzor debug server    # live metrics over HTTP with a browser dashboard</div>
-          
-        </div>
-      
         <div id="cmd-others" style="margin-top:40px;scroll-margin-top:84px">
           <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">others</h3>
-            <span style="font-size:15px;color:#9AA0AA">REPL, symbols, editor integration</span>
+            <span style="font-size:15px;color:#9AA0AA">REPL and editor integration</span>
           </div>
           <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty"></p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor jit main.hx     # JIT with an interactive REPL
-rayzor preblade        # extract stdlib symbols to .bsym
 rayzor lsp             # Language Server, for editor integration
 rayzor info [--features] [--tiers]</div>
           
@@ -609,67 +540,6 @@ opt-level = </span><span style="color:#E8B84B">2
       </div>
       <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:700px">A project depending on native plugins must declare both the class paths and the native libraries; a consumer with only one of the two fails to resolve at run time.</p>
 
-      <h2 id="env" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Environment variables</h2>
-      <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">Mostly for debugging the compiler itself.</p>
-      <div style="margin-top:22px;display:grid;gap:2px">
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_STD_PATH</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Override the standard library location</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_RAW_MIR=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Skip all optimization passes in rayzor dump</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_PASS_DEBUG=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Run MIR passes one at a time, reporting what each changed</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_DISABLE_PASSES=&lt;names&gt;</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Disable named MIR passes (bundle path) — bisect a miscompile</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_NO_SRA=1, RAYZOR_NO_PHI_SRA=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Disable scalar replacement, or only its phi-aware part</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_NO_FMA=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Disable FMA fusion in instruction lowering</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_LLVM_OPT=&lt;0-3&gt;</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Override the LLVM optimization level</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_DUMP_CLIF=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Print Cranelift IR</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_DUMP_LLVM_IR=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Print LLVM IR around optimization</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_DUMP_FN_PTRS=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Print the resolved function pointer table</span>
-          </div>
-        
-          <div style="display:grid;grid-template-columns:250px minmax(0,1fr);gap:20px;padding:12px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">RAYZOR_STRICT_MOVE_CHECK=1</span>
-            <span style="font-size:13.5px;line-height:1.55;color:#8A9099">Make the interpreter strict about move violations</span>
-          </div>
-        
-      </div>
-
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap" class="dcr13">
         <div>
           <div style="font-size:16px;font-weight:600">How the compiler works inside</div>
@@ -697,17 +567,11 @@ opt-level = </span><span style="color:#E8B84B">2
           
             <a href="#cmd-check" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor check</a>
           
-            <a href="#cmd-compile" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor compile</a>
-          
-            <a href="#cmd-dump" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor dump</a>
-          
             <a href="#cmd-cache" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor cache</a>
           
             <a href="#cmd-init" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor init</a>
           
             <a href="#cmd-rpkg" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor rpkg</a>
-          
-            <a href="#cmd-debug" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">rayzor debug</a>
           
             <a href="#cmd-others" style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6F757E" class="dch4">others</a>
           

@@ -1,26 +1,60 @@
-# Rayzor CLI Reference
+# Rayzor CLI
 
-Every command below is `rayzor <command>`. Run `rayzor <command> --help` for the
-authoritative flag list — this document explains what the commands are *for*.
+`rayzor <command> --help` has the full flag list. This page is the short path:
+setup, then the commands you use daily.
 
-For how the compiler works internally, see
-[Architecture](architecture/ARCHITECTURE.md).
+Compiler diagnostics — `dump`, `debug`, stage inspection, the `RAYZOR_*`
+variables — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Compilation modes
+## Setup
 
-Rayzor compiles the same MIR through different backends depending on what you
-are doing. Picking a mode means picking a command.
+```bash
+git clone https://github.com/rayzor-blade/rayzor.git
+cd rayzor
+cargo build --release
+rayzor info                      # confirm the build
+```
 
-| You want to | Command | What happens |
-|---|---|---|
-| Run code while developing | `rayzor run main.hx` | Tiered JIT: starts interpreted, promotes hot functions to Cranelift, then LLVM |
-| Type-check only | `rayzor check main.hx` | Parse and type-check, no codegen |
-| Ship a native binary | `rayzor aot main.hx -o app` | Whole program through LLVM, linked against the runtime |
-| Ship one portable artifact | `rayzor bundle main.hx -o app.rzb` | Serialized MIR in a single file, run later with `rayzor run app.rzb` |
-| Target the browser or WASI | `rayzor build --target wasm` | WebAssembly module |
-| Inspect the pipeline | `rayzor compile main.hx --stage mir` | Stop at any stage and print it |
+Needs LLVM 21 — [CONTRIBUTING.md](CONTRIBUTING.md#llvm) if `cargo build` cannot find it.
+
+## First project
+
+```bash
+rayzor init --name my-app        # src/Main.hx + rayzor.toml
+cd my-app
+rayzor run                       # entry point from the manifest
+```
+
+```bash
+rayzor init --name lib --template lib          # app | lib | benchmark | empty
+rayzor init --name ws --workspace --members a,b
+rayzor init --from-hxml build.hxml             # convert an existing Haxe build
+```
+
+---
+
+## Daily loop
+
+```bash
+rayzor run                       # run the manifest's entry point
+rayzor run main.hx               # run one file
+rayzor run -- --port 8080        # args after -- go to your program
+rayzor check main.hx             # type-check, no codegen
+rayzor run --stats               # where compile time went
+rayzor run -i                    # TUI afterwards: scroll, search
+```
+
+## Shipping
+
+```bash
+rayzor aot main.hx -o app        # native binary
+rayzor bundle main.hx -o app.rzb # one portable file
+rayzor run app.rzb               # ...run it later, no compile step
+rayzor build --target wasm       # browser / WASI
+rayzor build --target wasm --browser   # + an HTML harness
+```
 
 ```mermaid
 flowchart LR
@@ -32,189 +66,67 @@ flowchart LR
     BUN -.->|"rayzor run app.rzb"| RUN
 ```
 
-### Tiering, in one paragraph
+Cross-compiling and stripping:
 
-`rayzor run` starts in the MIR interpreter so execution begins immediately, and
-promotes a function to a compiled tier once it has run enough times. Presets pick
-the thresholds for you; `--tier-thresholds` overrides them directly. A preset is
-a policy, not a backend: `script` never promotes, `embedded` stays interpreted,
-`benchmark` bails out to compiled code immediately.
+```bash
+rayzor aot main.hx -o app --target aarch64-unknown-linux-gnu
+rayzor aot main.hx -o app --strip --strip-symbols
+rayzor aot main.hx --emit llvm-ir -o app.ll   # exe | obj | llvm-ir | llvm-bc | asm
+```
 
-| Preset | Intended for |
+`rayzor build` with no argument resolves an explicit `.hxml`, else `rayzor.toml`,
+else the manifest's `hxml = "build.hxml"` delegation. `--dry-run` prints the plan.
+
+## Startup speed
+
+```bash
+rayzor run --preset script       # instant start, never promotes
+rayzor cache warm                # pre-compile the stdlib once
+rayzor run --no-cache            # ignore the cache (it is on by default)
+```
+
+| Preset | For |
 |---|---|
-| `script` | CLI tools and one-shot scripts — instant startup, no promotion |
-| `application` | Desktop apps and web servers — balanced, includes LLVM (**default**) |
-| `server` | Long-running services — aggressive optimization |
-| `benchmark` | Performance testing — immediate bailout, manual LLVM upgrade |
-| `development` | Debugging — verbose logging |
-| `embedded` | Constrained environments — interpreter only |
+| `script` | one-shot scripts — instant startup, no promotion |
+| `application` | apps and servers — balanced, includes LLVM (**default**) |
+| `server` | long-running services — aggressive optimization |
+| `benchmark` | performance testing — immediate bailout |
+| `development` | debugging — verbose logging |
+| `embedded` | constrained targets — interpreter only |
 
----
+`run` starts interpreted and promotes a function once it has run enough times; a
+preset picks that policy, not a backend.
 
-## Commands
-
-### `rayzor run` — execute with tiered JIT
+## Packages
 
 ```bash
-rayzor run [FILE] [OPTIONS] [-- PROGRAM_ARGS...]
+rayzor rpkg pack                 # build an .rpkg
+rayzor rpkg add ./thing.rpkg     # add to this project
+rayzor run --rpkg ./thing.rpkg   # ...or load one directly
+rayzor run --native-lib ./libplugin.dylib
 ```
 
-`FILE` may be a `.hx` source file or a prebuilt `.rzb` bundle. Omit it and the
-entry point comes from `rayzor.toml`. Arguments after `--` are passed to the
-Haxe program, not to the compiler.
+`.rpkg` carries Haxe sources and optionally native dylibs. `rpkg strip` cuts one
+down to a single platform; `inspect`, `install`, `remove`, `list` do what they say.
 
-| Flag | Effect |
-|---|---|
-| `--preset <NAME>` | Tier policy (table above). Default `application` |
-| `--tier <0-3>` | Starting tier |
-| `--llvm` | Enable LLVM tier 3 |
-| `--tier-thresholds <I/W/H[/B]>` | Override promotion thresholds, e.g. `1/15/5` |
-| `--tier-sample-rate <N>` | Profiling sample rate |
-| `--tier-start-interpreted <bool>`, `--tier-promotion <bool>` | Override the resolved tier config |
-| `--preset-override-toml` | Let `--preset` win over the manifest's `[tier]` |
-| `--no-cache`, `--cache-dir <DIR>` | Control the BLADE cache (**on by default**) |
-| `--release` | Use `target/release` paths |
-| `--rpkg <FILE>` | Load an `.rpkg` package (repeatable) |
-| `--native-lib <FILE>` | Load a native plugin dylib directly, without a manifest |
-| `--safety-warnings on\|off` | Use-after-move and related diagnostics. Default `on` |
-| `--wasm` | Compile to WASM and run it in the embedded wasmtime sandbox |
-| `-i`, `--interactive` | Open the TUI after execution (scroll, search) |
-| `--stats`, `-v` | Compilation statistics, verbose output |
-
-### `rayzor aot` — native executable via LLVM
+## Editors
 
 ```bash
-rayzor aot [FILES...] -o app
-```
-
-| Flag | Effect |
-|---|---|
-| `--emit <FORMAT>` | `exe` (default), `obj`, `llvm-ir`, `llvm-bc`, `asm` |
-| `-O, --opt-level <0-3>` | Optimization level. Default `2` |
-| `--target <TRIPLE>`, `--sysroot <DIR>`, `--linker <PATH>` | Cross-compilation |
-| `--strip` | Tree-shake unreachable code |
-| `--strip-symbols` | Strip debug symbols from the binary |
-| `--runtime-dir <DIR>` | Where to find `librayzor_runtime.a` |
-| `--no-cache`, `--cache-dir <DIR>` | BLADE cache control |
-
-### `rayzor bundle` — single-file `.rzb`
-
-```bash
-rayzor bundle [FILES...] -o app.rzb
-```
-
-Serializes every compiled module into one file so startup skips compilation.
-Run it with `rayzor run app.rzb`.
-
-| Flag | Effect |
-|---|---|
-| `-O, --opt-level <0-3>` | Optimization level. Default `2` |
-| `--strip` | Tree-shake unreachable code |
-| `--no-compress` | Disable zstd compression |
-| `--no-cache`, `--cache-dir <DIR>` | BLADE cache control |
-
-### `rayzor build` — build from a manifest or HXML
-
-```bash
-rayzor build [FILE]
-```
-
-Resolution order: an explicit `.hxml` file, else `rayzor.toml` in the current
-directory, else the manifest's `hxml = "build.hxml"` delegation.
-
-| Flag | Effect |
-|---|---|
-| `--target native\|wasm\|wasm-wasi` | Output target. Default `native` |
-| `--browser` | Also emit a browser HTML harness (with `--target wasm`) |
-| `--opt-level <0-3>` | MIR optimization level. Default `2` |
-| `-o <PATH>`, `--strip`, `--dry-run`, `-v` | Output path, symbol stripping, plan-only, verbose |
-
-### `rayzor check` — type-check
-
-```bash
-rayzor check main.hx [--show-types] [--format text|json|pretty]
-```
-
-### `rayzor compile` — stop at a stage
-
-```bash
-rayzor compile main.hx --stage ast|tast|hir|mir|native
-```
-
-Useful for seeing what each stage produced; `--show-ir` prints the
-intermediate representation, `-o` writes it to a file.
-
-### `rayzor dump` — read the MIR
-
-```bash
-rayzor dump main.hx [--function NAME] [--diff] [--format text|dot] [-i]
-```
-
-`--diff` shows the MIR before and after optimization, which is the fastest way
-to see what a pass did. `--cfg-only` prints the control flow graph without
-instructions; `--format dot` emits Graphviz; `-i` opens the interactive viewer.
-
-### `rayzor cache` — BLADE module cache
-
-```bash
-rayzor cache stats | list | warm | clear
-```
-
-`warm` pre-compiles the standard library so the first real build does not pay
-for it.
-
-### `rayzor init` — scaffold a project
-
-```bash
-rayzor init --name my-app [--template app|lib|benchmark|empty]
-rayzor init --name my-workspace --workspace --members a,b
-rayzor init --from-hxml build.hxml
-```
-
-### `rayzor rpkg` — packages
-
-```bash
-rayzor rpkg pack | inspect | install | add | remove | list | strip
-```
-
-`.rpkg` packages carry Haxe sources and, optionally, native dylibs. `strip`
-reduces a package to a single platform's native library.
-
-### `rayzor debug` — investigative toolkit
-
-```bash
-rayzor debug run     # forensic run, crash handlers pre-armed
-rayzor debug bench   # run N times, per-run metrics plus aggregate stats
-rayzor debug compare # A/B two git refs, report the median delta
-rayzor debug resolve # hex PCs from a crash dump → Haxe functions and lines
-rayzor debug lldb    # launch under lldb
-rayzor debug server  # live metrics over HTTP with a browser dashboard
-```
-
-`compare` restores the working tree on exit, including on failure.
-
-### Others
-
-```bash
-rayzor jit main.hx          # JIT with an interactive REPL
-rayzor preblade             # extract stdlib symbols to .bsym
-rayzor lsp                  # Language Server, for editor integration
-rayzor info [--features] [--tiers]
+rayzor lsp                       # Language Server
+rayzor jit main.hx               # interactive REPL
 ```
 
 ---
 
-## Project manifest (`rayzor.toml`)
+## `rayzor.toml`
 
 ```toml
 [project]
 name = "my-app"
-version = "0.1.0"
 entry = "src/Main.hx"
 
 [build]
 class-paths = ["src"]
-opt-level = 2
 preset = "application"
 output = "build/my-app"
 
@@ -222,17 +134,14 @@ output = "build/my-app"
 enabled = true
 ```
 
-A workspace lists its members instead:
+Workspace:
 
 ```toml
 [workspace]
 members = ["game", "engine", "tools/level-editor"]
-
-[workspace.cache]
-dir = ".rayzor/cache"
 ```
 
-An existing HXML build can be delegated to rather than ported:
+Delegate to an existing HXML build instead of porting it:
 
 ```toml
 [project]
@@ -240,26 +149,9 @@ name = "legacy-app"
 hxml = "build.hxml"
 ```
 
-A project that depends on native plugins must declare **both** the class paths
-and the native libraries; a consumer with only one of the two will fail to
-resolve at run time.
+Using native plugins? Declare **both** the class paths and the native libraries —
+with only one, consumers fail to resolve at run time.
 
 ---
 
-## Environment variables
-
-Mostly for debugging the compiler itself.
-
-| Variable | Effect |
-|---|---|
-| `RAYZOR_STD_PATH` | Override the standard library location |
-| `RAYZOR_RAW_MIR=1` | Skip all optimization passes in `rayzor dump` |
-| `RAYZOR_PASS_DEBUG=1` | Run MIR passes one at a time, reporting what each changed |
-| `RAYZOR_DISABLE_PASSES=<names>` | Disable named MIR passes (bundle path) — bisect a miscompile |
-| `RAYZOR_NO_SRA=1`, `RAYZOR_NO_PHI_SRA=1` | Disable scalar replacement, or only its phi-aware part |
-| `RAYZOR_NO_FMA=1` | Disable FMA fusion in instruction lowering |
-| `RAYZOR_LLVM_OPT=<0-3>` | Override the LLVM optimization level |
-| `RAYZOR_DUMP_CLIF=1` | Print Cranelift IR |
-| `RAYZOR_DUMP_LLVM_IR=1` | Print LLVM IR around optimization |
-| `RAYZOR_DUMP_FN_PTRS=1` | Print the resolved function pointer table |
-| `RAYZOR_STRICT_MOVE_CHECK=1` | Make the interpreter strict about move violations |
+Internals: [Architecture](architecture/ARCHITECTURE.md).
