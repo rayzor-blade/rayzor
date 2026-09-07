@@ -4147,7 +4147,7 @@ pub extern "C" fn haxe_objectmap_to_string_typed(
             .map(|(k, v)| {
                 format!(
                     "{} => {}",
-                    map_slot_to_string(*k as u64, key_tag),
+                    map_slot_to_string(*k, key_tag),
                     map_slot_to_string(*v, val_tag)
                 )
             })

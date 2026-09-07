@@ -909,7 +909,7 @@ impl Monomorphizer {
         for ((func_id, block_id), mut sites) in by_block {
             // Descending: inserting a coercion shifts only the sites after it,
             // and those are already done.
-            sites.sort_by(|a, b| b.0.cmp(&a.0));
+            sites.sort_by_key(|a| std::cmp::Reverse(a.0));
             let func = match module.functions.get_mut(&func_id) {
                 Some(f) => f,
                 None => continue,
