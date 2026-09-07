@@ -56,7 +56,7 @@
       <span>Haxe 4.x, natively →</span>
     </a>
     <h1 style="margin:0;font-size:100px;line-height:0.94;letter-spacing:-0.045em;font-weight:600">Instant Haxe.<br><span style="color:#F97316">Native performance.</span></h1>
-    <p style="margin:28px auto 0;max-width:580px;font-size:19px;line-height:1.55;color:#9AA0AA;text-wrap:pretty">A Haxe compiler with a tiered JIT, Cranelift and LLVM backends, and no garbage collector.</p>
+    <p style="margin:28px auto 0;max-width:580px;font-size:19px;line-height:1.55;color:#9AA0AA;text-wrap:pretty">A Haxe compiler that starts instantly, gets faster as it runs, and has no garbage collector.</p>
     <div style="display:flex;gap:12px;margin:32px 0 0;justify-content:center;flex-wrap:wrap">
       <a href="#install" style="padding:13px 22px;border-radius:10px;background:#F97316;color:#0A0B0D;font-size:15px;font-weight:600" style-hover="background:#FB8B3C">Get started</a>
       <a href="https://github.com/rayzor-blade/rayzor" style="display:inline-flex;align-items:center;gap:9px;padding:13px 22px;border-radius:10px;border:1px solid #2A2D35;color:#E9EAEE;font-size:15px;font-weight:500" style-hover="border-color:#4A4E58"><svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>GitHub</a>
@@ -67,7 +67,7 @@
         <div style="flex:1"></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr">
-        <pre style="margin:0;padding:26px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.8;color:#C9CCD2;white-space:pre-wrap;overflow-wrap:break-word;border-right:1px solid #1A1C21"><span style="color:#5B616B">// hot loop promoted to LLVM after ~1k calls
+        <pre style="margin:0;padding:26px 24px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.8;color:#C9CCD2;white-space:pre-wrap;overflow-wrap:break-word;border-right:1px solid #1A1C21"><span style="color:#5B616B">// hot loop compiled after ~1k calls
 </span><span style="color:#F97316">class</span> Particles {
   <span style="color:#F97316">static function</span> <span style="color:#7FD1C0">update</span>(p:Array&lt;Particle&gt;, dt:<span style="color:#7FD1C0">Float</span>) {
     <span style="color:#F97316">for</span> (i <span style="color:#F97316">in</span> <span style="color:#E8B84B">0</span>...p.length) {
@@ -91,8 +91,8 @@
           <div style="color:#4E535B;margin-bottom:6px">$ rayzor run Particles.hx</div>
           <div style="color:#9AA0AA">tier 0 · interp<span style="color:#6F757E">   first output at 38ms</span></div>
           <div style="color:#9AA0AA">profile<span style="color:#6F757E">          update() hot — 1,024 calls</span></div>
-          <div style="color:#7FD1C0">tier 1 · cranelift<span style="color:#6F757E">   compiled in 4.2ms</span></div>
-          <div style="color:#7FD1C0">tier 3 · llvm<span style="color:#6F757E">    compiled in 61ms, -O2</span></div>
+          <div style="color:#7FD1C0">tier 1 · compiled<span style="color:#6F757E">   compiled in 4.2ms</span></div>
+          <div style="color:#7FD1C0">tier 3 · optimized<span style="color:#6F757E">    compiled in 61ms, -O2</span></div>
           <div style="color:#F97316">steady state<span style="color:#6F757E">     3.1× interpreter throughput</span></div>
         </div>
       </div>
@@ -107,7 +107,7 @@
       </div>
       <div style="padding:34px 28px;border-right:1px solid #1A1C21">
         <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">Tiered</div>
-        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">interpreter → Cranelift → LLVM, promoted per function on profile data</div>
+        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">starts interpreting at once, then compiles each function as it proves hot</div>
       </div>
       <div style="padding:34px 28px;border-right:1px solid #1A1C21">
         <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">Hot reload</div>
@@ -115,11 +115,11 @@
       </div>
       <div style="padding:34px 28px;border-right:1px solid #1A1C21">
         <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">0 GC</div>
-        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">drops inserted at compile time from last-use and escape analysis</div>
+        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">memory is freed at points the compiler works out while building your program</div>
       </div>
       <div style="padding:34px 0 34px 28px">
-        <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">3 backends</div>
-        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">Cranelift and LLVM for native, plus WebAssembly — one optimized SSA behind all three</div>
+        <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">Native + wasm</div>
+        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">native binaries and WebAssembly, optimized once and shared by both</div>
       </div>
     </div>
   </section>
@@ -177,7 +177,7 @@
     <div style="max-width:640px">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Memory</div>
       <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">No collector. No pauses.</h2>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">The compiler decides when every value is freed, from last-use and escape analysis. You reach for annotations only where aliasing actually matters.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">The compiler decides when every value is freed, by working out where it is last used. You reach for annotations only where sharing actually matters.</p>
     </div>
     <div style="margin-top:44px;display:grid;grid-template-columns:1.05fr 1fr;gap:0;border:1px solid #22242A;border-radius:14px;background:#0E1013;overflow:hidden">
       <pre style="margin:0;padding:30px 32px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.85;color:#C9CCD2;overflow:auto;border-right:1px solid #1A1C21"><span style="color:#E8B84B">@:move</span> <span style="color:#F97316">class</span> Texture {
@@ -298,7 +298,7 @@
       <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Point Rayzor at a <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">.hx</span> file, or hand it the <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">build.hxml</span> you already have.</p>
       <div style="margin-top:28px;display:grid">
         <div style="display:flex;gap:14px;padding:14px 0;border-top:1px solid #1A1C21"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;width:64px;flex:none">run</span><span style="font-size:14px;color:#8A9099">tiered JIT, cache on by default</span></div>
-        <div style="display:flex;gap:14px;padding:14px 0;border-top:1px solid #1A1C21"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;width:64px;flex:none">aot</span><span style="font-size:14px;color:#8A9099">whole program through LLVM to a native binary</span></div>
+        <div style="display:flex;gap:14px;padding:14px 0;border-top:1px solid #1A1C21"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;width:64px;flex:none">aot</span><span style="font-size:14px;color:#8A9099">whole program compiled ahead of time to a native binary</span></div>
         <div style="display:flex;gap:14px;padding:14px 0;border-top:1px solid #1A1C21"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;width:64px;flex:none">bundle</span><span style="font-size:14px;color:#8A9099">one portable <span style="font-family:'JetBrains Mono',monospace">.rzb</span> that skips compilation</span></div>
         <div style="display:flex;gap:14px;padding:14px 0;border-top:1px solid #1A1C21;border-bottom:1px solid #1A1C21"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#F97316;width:64px;flex:none">build</span><span style="font-size:14px;color:#8A9099">native, wasm or wasm-wasi from a manifest</span></div>
       </div>
@@ -496,8 +496,6 @@ const WORKLOADS = [
 const RUNS = {
   nbody: [
     { name: "Rayzor · tiered", comp: 23.94, exec: 555.09, rz: 1 },
-    { name: "Rayzor · LLVM", comp: 49.37, exec: 513.99, rz: 1 },
-    { name: "Rayzor · Cranelift", comp: 26.98, exec: 624.52, rz: 1 },
     { name: "hxcpp", comp: 97.48, exec: 598.24 },
     { name: "Haxe/JVM", comp: 468.41, exec: 771.75 },
     { name: "HashLink/C", comp: 1487.66, exec: 1208.80 },
@@ -505,49 +503,25 @@ const RUNS = {
   ],
   mandelbrot: [
     { name: "Rayzor · tiered", comp: 26.20, exec: 294.39, rz: 1 },
-    { name: "Rayzor · LLVM", comp: 45.37, exec: 293.75, rz: 1 },
-    { name: "Rayzor · Cranelift", comp: 30.93, exec: 317.65, rz: 1 },
     { name: "hxcpp", comp: 150.79, exec: 1093.22 },
     { name: "Haxe/JVM", comp: 543.82, exec: 763.88 },
     { name: "HashLink", comp: 207.22, exec: 31329.84 }
   ],
   fibonacci: [
     { name: "Rayzor · tiered", comp: 16.43, exec: 315.34, rz: 1 },
-    { name: "Rayzor · LLVM", comp: 20.49, exec: 315.24, rz: 1 },
-    { name: "Rayzor · Cranelift", comp: 14.53, exec: 368.03, rz: 1 },
     { name: "hxcpp", comp: 146.49, exec: 187.69 },
     { name: "Haxe/JVM", comp: 521.89, exec: 396.09 },
     { name: "HashLink/C", comp: 1921.11, exec: 216.77 },
     { name: "HashLink", comp: 198.48, exec: 1594.34 }
   ]
 };
-const LEGACY_BARS = {
-  fibonacci: [
-    { name: "rayzor-llvm", gain: "1.00×", w: "69%", color: "#F97316", note: "MCJIT, peak throughput" },
-    { name: "rayzor-cranelift", gain: "1.18×", w: "81%", color: "#C2601B", note: "MIR (O2) → Cranelift JIT" },
-    { name: "rayzor-precompiled", gain: "1.21×", w: "84%", color: "#8A5326", note: ".rzb load + JIT, no parsing" },
-    { name: "rayzor-tiered", gain: "1.44×", w: "100%", color: "#3A3E46", note: "interpreter start, tier-up included" }
-  ],
-  mandelbrot: [
-    { name: "rayzor-llvm", gain: "1.00×", w: "66%", color: "#F97316", note: "MCJIT, peak throughput" },
-    { name: "rayzor-cranelift", gain: "1.31×", w: "86%", color: "#C2601B", note: "MIR (O2) → Cranelift JIT" },
-    { name: "rayzor-precompiled", gain: "1.33×", w: "88%", color: "#8A5326", note: ".rzb load + JIT, no parsing" },
-    { name: "rayzor-tiered", gain: "1.52×", w: "100%", color: "#3A3E46", note: "interpreter start, tier-up included" }
-  ],
-  nbody: [
-    { name: "rayzor-llvm", gain: "1.00×", w: "73%", color: "#F97316", note: "MCJIT, peak throughput" },
-    { name: "rayzor-cranelift", gain: "1.09×", w: "80%", color: "#C2601B", note: "MIR (O2) → Cranelift JIT" },
-    { name: "rayzor-precompiled", gain: "1.12×", w: "82%", color: "#8A5326", note: ".rzb load + JIT, no parsing" },
-    { name: "rayzor-tiered", gain: "1.37×", w: "100%", color: "#3A3E46", note: "interpreter start, tier-up included" }
-  ]
-};
 const SEQ = [
   { label: "tier 0 · interp", value: "first output at 38ms", color: "#9AA0AA" },
   { label: "profile", value: "update() hot — 1,024 calls", color: "#9AA0AA" },
-  { label: "tier 1 · cranelift", value: "compiled in 4.2ms", color: "#7FD1C0" },
-  { label: "tier 3 · llvm", value: "compiled in 61ms, -O2", color: "#7FD1C0" },
+  { label: "tier 1 · compiled", value: "compiled in 4.2ms", color: "#7FD1C0" },
+  { label: "tier 3 · optimized", value: "compiled in 61ms, -O2", color: "#7FD1C0" },
   { label: "steady state", value: "3.1× interpreter throughput", color: "#F97316" },
-  { label: "memory", value: "0 GC pauses · 41 drops inserted", color: "#F97316" }
+  { label: "memory", value: "0 GC pauses · 41 frees, all placed at build time", color: "#F97316" }
 ];
 
 const POLICY = [
@@ -556,7 +530,7 @@ const POLICY = [
   { n: "03", title: "Analysis is shared", body: "Dominance, loop structure and escape info are computed once and reused by every pass that needs them." },
   { n: "04", title: "Same source, same binary", body: "MIR collections are ordered on purpose, so codegen is reproducible build after build." },
   { n: "05", title: "Don't redo work", body: "Parsing, type checking, module caching and bundling all skip what hasn't changed. Caching is on by default." },
-  { n: "06", title: "Optimize once", body: "Every backend reads the same SSA, so a pass written for the JIT also speeds up your native binary and your wasm module." }
+  { n: "06", title: "Optimize once", body: "Every target is built from the same optimized program, so an improvement to one speeds up your native binary and your wasm module too." }
 ];
 
 const AUDIENCE = [
@@ -601,10 +575,10 @@ const SOON = [
 ];
 
 const TARGETS = [
-  { title: "Linux", badge: "x86_64 · aarch64", badgeColor: "#9AA0AA", body: "Native binaries through LLVM, or the Cranelift JIT while you work. Threads, sockets and the full runtime, plus NUMA-aware worker pinning on servers.", cmd: "rayzor aot main.hx -o app" },
+  { title: "Linux", badge: "x86_64 · aarch64", badgeColor: "#9AA0AA", body: "Native binaries to ship, and an instant run-from-source loop while you work. Threads, sockets and the full runtime, plus NUMA-aware worker pinning on servers.", cmd: "rayzor aot main.hx -o app" },
   { title: "macOS", badge: "aarch64 · x86_64", badgeColor: "#9AA0AA", body: "The same native path on Apple silicon and Intel, with a worker pool that adapts to the machine instead of fighting it.", cmd: "rayzor aot main.hx -o app" },
   { title: "Windows", badge: "x86_64 · MSVC", badgeColor: "#9AA0AA", body: "Native binaries through the MSVC toolchain, with the same tiered JIT and the same runtime you develop against elsewhere.", cmd: "rayzor aot main.hx -o app.exe" },
-  { title: "WebAssembly", badge: "first-class target", badgeColor: "#F97316", body: "Core modules, WASI P2 components, and a browser harness — the same MIR through the same optimization passes as the native backends.", cmd: "rayzor build --target wasm --browser" }
+  { title: "WebAssembly", badge: "first-class target", badgeColor: "#F97316", body: "Core modules, WASI P2 components, and a browser harness — the same program and the same optimizations as the native backends.", cmd: "rayzor build --target wasm --browser" }
 ];
 const CROSS_FLAGS = ["--target <triple>", "--sysroot <dir>", "--linker <path>", "--target wasm-wasi"];
 

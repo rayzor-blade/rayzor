@@ -55,8 +55,8 @@ const SITE = {
   keywords:
     "Haxe, Haxe runtime, Haxe compiler, native Haxe, fast Haxe, JIT compilation, tiered JIT, WebAssembly, AOT compiler, ownership memory, no garbage collector, SIMD",
   features: [
-    "Tiered JIT: interpreter, Cranelift and LLVM, promoted per function",
-    "Ahead-of-time native binaries through LLVM",
+    "Tiered JIT: starts interpreting, compiles each function as it gets hot",
+    "Ahead-of-time native binaries",
     "WebAssembly core modules and WASI P2 components",
     "Ownership-based memory management with no garbage collector",
     "SIMD types with operator overloading",
@@ -905,9 +905,10 @@ class DCLogic {
 // Display names, in the order the chart lists them. A target missing from a
 // results file is simply absent from that chart.
 const CHART_TARGETS = [
+  // The landing page reports the tiered run — what someone gets by typing
+  // `rayzor run` — against the other Haxe targets. Per-backend numbers are a
+  // contributor measurement and live with the benchmark results themselves.
   ["rayzor-tiered", "Rayzor · tiered", true],
-  ["rayzor-llvm", "Rayzor · LLVM", true],
-  ["rayzor-cranelift", "Rayzor · Cranelift", true],
   ["haxe-cpp", "hxcpp", false],
   ["haxe-jvm", "Haxe/JVM", false],
   ["haxe-hashlink-c", "HashLink/C", false],
