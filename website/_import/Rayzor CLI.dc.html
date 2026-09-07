@@ -55,11 +55,12 @@
       <h1 id="overview" style="margin:14px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.035em;font-weight:600">CLI reference</h1>
       <p style="margin:18px 0 0;font-size:17px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">Every command is <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">rayzor &lt;command&gt;</span>, and <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">--help</span> has the full flag list. This page is the short path: setup, then the commands you use daily.</p>
 
-      <h2 id="setup" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Setup</h2>
-      <div style="margin-top:22px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">git clone https://github.com/rayzor-blade/rayzor.git
-cd rayzor
-cargo build --release
-rayzor info                    # confirm the build</div>
+      <h2 id="setup" style="margin:52px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Install</h2>
+      <div style="margin-top:22px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">curl -fsSL https://rayzor.tech/install.sh | sh     # macOS, Linux, WSL
+irm https://rayzor.tech/install.ps1 | iex          # Windows
+
+rayzor info                                        # confirm the install</div>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained — nothing else to install, no LLVM on the side.</p>
       <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
       <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
 cd my-app
@@ -183,7 +184,7 @@ opt-level = </span><span style="color:#E8B84B">2
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280}}">
 const NAV = [
-  { title: "Start", items: [["Setup", "#setup"], ["Daily loop", "#modes"], ["Tiering", "Rayzor Docs.dc.html#tiers"]] },
+  { title: "Start", items: [["Install", "#setup"], ["Daily loop", "#modes"], ["Tiering", "Rayzor Docs.dc.html#tiers"]] },
   { title: "Concepts", items: [["Architecture", "Rayzor Architecture.dc.html"], ["SIMD", "Rayzor Architecture.dc.html#simd"], ["Concurrency", "Rayzor Concurrency.dc.html"], ["Memory model", "Rayzor Docs.dc.html#memory"]] },
   { title: "Reference", items: [["CLI reference", "#overview", 1], ["Project manifest", "#manifest"], ["The rayzor package", "Rayzor Architecture.dc.html#stdlib"]] },
   { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor/blob/main/docs/CONTRIBUTING.md"]] }

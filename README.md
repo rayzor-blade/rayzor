@@ -42,15 +42,17 @@ none is planned.
 ## Quick start
 
 ```bash
-git clone https://github.com/rayzor-blade/rayzor.git
-cd rayzor
-cargo build --release
+curl -fsSL https://rayzor.tech/install.sh | sh   # macOS, Linux, WSL
+irm https://rayzor.tech/install.ps1 | iex        # Windows
 
 rayzor run hello.hx            # execute with tiered JIT
 rayzor check hello.hx          # type-check only
-rayzor aot hello.hx -o hello   # native binary via LLVM
+rayzor aot hello.hx -o hello   # native binary
 rayzor bundle hello.hx -o app.rzb
 ```
+
+The download is self-contained — no LLVM to install alongside it. Building from
+source is in [Contributing](#contributing).
 
 Setup and everyday commands: **[docs/CLI.md](docs/CLI.md)**.
 

@@ -1,23 +1,29 @@
 # Rayzor CLI
 
 `rayzor <command> --help` has the full flag list. This page is the short path:
-setup, then the commands you use daily.
+install, then the commands you use daily.
 
 Compiler diagnostics — `dump`, `debug`, stage inspection, the `RAYZOR_*`
 variables — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Setup
+## Install
 
 ```bash
-git clone https://github.com/rayzor-blade/rayzor.git
-cd rayzor
-cargo build --release
-rayzor info                      # confirm the build
+curl -fsSL https://rayzor.tech/install.sh | sh     # macOS, Linux, WSL
 ```
 
-Needs LLVM 21 — [CONTRIBUTING.md](CONTRIBUTING.md#llvm) if `cargo build` cannot find it.
+```powershell
+irm https://rayzor.tech/install.ps1 | iex          # Windows
+```
+
+Lands in `~/.rayzor/bin` — add it to your `PATH` if the installer says so. The
+download is self-contained: nothing else to install, no LLVM on the side.
+
+```bash
+rayzor info                      # confirm the install
+```
 
 ## First project
 
@@ -54,16 +60,6 @@ rayzor bundle main.hx -o app.rzb # one portable file
 rayzor run app.rzb               # ...run it later, no compile step
 rayzor build --target wasm       # browser / WASI
 rayzor build --target wasm --browser   # + an HTML harness
-```
-
-```mermaid
-flowchart LR
-    SRC["main.hx"] --> MIR["MIR"]
-    MIR --> RUN["rayzor run<br/>tiered JIT"]
-    MIR --> AOT["rayzor aot<br/>LLVM to native"]
-    MIR --> BUN["rayzor bundle<br/>.rzb"]
-    MIR --> WASM["rayzor build --target wasm<br/>.wasm"]
-    BUN -.->|"rayzor run app.rzb"| RUN
 ```
 
 Cross-compiling and stripping:

@@ -15,7 +15,7 @@ immediately, and only what proves hot pays compilation cost.
 ## The pipeline
 
 ```mermaid
-flowchart TD
+graph TD
     SRC["Haxe source"] --> PRE["Preprocessor<br/>conditional compilation"]
     PRE --> RD["Recursive-descent parser"]
     RD -.->|"on parse error"| NOM["Legacy nom parser<br/>recovery"]
@@ -175,7 +175,7 @@ These are not stylistic — each one exists because the later pass cannot see wh
 it needs otherwise.
 
 ```mermaid
-flowchart LR
+graph LR
     IN["Inlining"] -. "exposes Alloc+GEP" .-> SRA["SRA"]
     GLC["GlobalLoadCaching"] -. "dedups metadata loads" .-> BCE["BCE"]
     BCE -. "emits invariant data_ptr load" .-> LICM["LICM"]
@@ -197,7 +197,7 @@ HIR-level drop analysis only sees direct `new`, so this MIR pass catches factory
 functions that return heap pointers.
 
 ```mermaid
-flowchart TD
+graph TD
     A["Alloc $p<br/>(or malloc / type_create_instance / anon_new)"] --> D["build_derived_set:<br/>follow GEP · Cast · BitCast · SsaBarrier · Copy · Select"]
     D --> Q{"Any derived pointer escapes?"}
     Q -->|"yes"| N["No Free — someone else owns it"]
@@ -242,7 +242,7 @@ Five tiers. The interpreter is tier 0, the next three rungs are Cranelift, and
 **`Maximum` is LLVM**.
 
 ```mermaid
-flowchart LR
+graph LR
     T0["Interpreted<br/>interpreter · MIR O0"] -->|"interpreter_threshold"| T1["Baseline<br/>Cranelift none · O0"]
     T1 -->|"warm_threshold"| T2["Standard<br/>Cranelift speed · O1"]
     T2 -->|"hot_threshold"| T3["Optimized<br/>Cranelift speed · O2"]
