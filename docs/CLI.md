@@ -3,8 +3,8 @@
 `rayzor <command> --help` has the full flag list. This page is the short path:
 install, then the commands you use daily.
 
-Compiler diagnostics — `dump`, `debug`, stage inspection, the `RAYZOR_*`
-variables — are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Compiler diagnostics live in [CONTRIBUTING.md](CONTRIBUTING.md): `dump`, `debug`,
+stage inspection, and the `RAYZOR_*` variables.
 
 ---
 
@@ -18,8 +18,8 @@ curl -fsSL https://rayzor.tech/install.sh | sh     # macOS, Linux, WSL
 irm https://rayzor.tech/install.ps1 | iex          # Windows
 ```
 
-Lands in `~/.rayzor/bin` — add it to your `PATH` if the installer says so. The
-download is self-contained: nothing else to install.
+Lands in `~/.rayzor/bin`. Add that to your `PATH` if the installer says so. The
+download is self-contained, so there is nothing else to install.
 
 ```bash
 rayzor info                      # confirm the install
@@ -83,12 +83,12 @@ rayzor run --no-cache            # ignore the cache (it is on by default)
 
 | Preset | For |
 |---|---|
-| `script` | one-shot scripts — instant startup, no promotion |
-| `application` | apps and servers — balanced (**default**) |
-| `server` | long-running services — aggressive optimization |
-| `benchmark` | performance testing — compiles at once, fully optimized within warm-up |
-| `development` | debugging — verbose logging |
-| `embedded` | constrained targets — interpreter only |
+| `script` | One-shot scripts. Starts instantly, never promotes |
+| `application` | Apps and servers. Balanced (**default**) |
+| `server` | Long-running services. Optimizes aggressively |
+| `benchmark` | Performance testing. Compiles at once, fully optimized within warm-up |
+| `development` | Debugging. Verbose logging |
+| `embedded` | Constrained targets. Interpreter only |
 
 `run` starts interpreted and promotes a function once it has run enough times; a
 preset picks that policy, not a backend.
@@ -145,8 +145,8 @@ name = "legacy-app"
 hxml = "build.hxml"
 ```
 
-Using native plugins? Declare **both** the class paths and the native libraries —
-with only one, consumers fail to resolve at run time.
+Using native plugins? Declare **both** the class paths and the native libraries.
+With only one, consumers fail to resolve at run time.
 
 ---
 

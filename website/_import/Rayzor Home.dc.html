@@ -26,7 +26,7 @@
 
   <div style="border-bottom:1px solid #1A1C21;background:#0C0D10">
     <div style="max-width:1200px;margin:0 auto;padding:11px 32px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13.5px;color:#9AA0AA">
-      <span>Tiered JIT, ownership memory, and no GC — the architecture doc explains how.</span>
+      <span>Tiered JIT, ownership memory, and no GC. The architecture doc explains how.</span>
       <a href="Rayzor Docs.dc.html" style="font-family:'JetBrains Mono',monospace;font-size:12px">Read it →</a>
     </div>
   </div>
@@ -90,7 +90,7 @@
           </div>
           <div style="color:#4E535B;margin-bottom:6px">$ rayzor run Particles.hx</div>
           <div style="color:#9AA0AA">tier 0 · interp<span style="color:#6F757E">   first output at 38ms</span></div>
-          <div style="color:#9AA0AA">profile<span style="color:#6F757E">          update() hot — 1,024 calls</span></div>
+          <div style="color:#9AA0AA">profile<span style="color:#6F757E">          update() hot, 1,024 calls</span></div>
           <div style="color:#7FD1C0">tier 1 · compiled<span style="color:#6F757E">   compiled in 4.2ms</span></div>
           <div style="color:#7FD1C0">tier 3 · optimized<span style="color:#6F757E">    compiled in 61ms, -O2</span></div>
           <div style="color:#F97316">steady state<span style="color:#6F757E">     3.1× interpreter throughput</span></div>
@@ -103,7 +103,7 @@
     <div style="max-width:1200px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:repeat(5,minmax(0,1fr))">
       <div style="padding:34px 28px 34px 0;border-right:1px solid #1A1C21">
         <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">&lt;50ms</div>
-        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">to first output — the interpreter runs before anything is compiled</div>
+        <div style="margin-top:6px;font-size:13.5px;line-height:1.5;color:#8A9099">to first output. The interpreter runs before anything is compiled</div>
       </div>
       <div style="padding:34px 28px;border-right:1px solid #1A1C21">
         <div style="font-size:32px;font-weight:600;letter-spacing:-0.03em;color:#F97316">Tiered</div>
@@ -128,7 +128,7 @@
     <div style="max-width:700px">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Targets</div>
       <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">Desktop, server, and the browser.</h2>
-      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">One codebase, one runtime, four places to put it. WebAssembly is not an afterthought here — it goes through the same optimized MIR as the native backends and ships as a core module, a WASI P2 component, or a browser bundle.</p>
+      <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">One codebase, one runtime, four places to put it. WebAssembly is built the same way as the native output, and ships as a core module, a WASI P2 component, or a browser bundle.</p>
     </div>
     <div style="margin-top:44px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px">
       <sc-for list="{{ targets }}" as="t" hint-placeholder-count="4">
@@ -154,7 +154,7 @@
     <div style="max-width:760px">
       <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Policy</div>
       <h2 style="margin:16px 0 0;font-size:46px;line-height:1.05;letter-spacing:-0.03em;font-weight:600">Haxe is a systems language.<br>We compile it like one.</h2>
-      <p style="margin:20px 0 0;font-size:17.5px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Haxe already has the type system, the macros and the ergonomics. What it hasn't had is a compiler that goes straight to machine code, frees memory without a collector, and optimizes once for every backend. That's what Rayzor does — with the Haxe you already write.</p>
+      <p style="margin:20px 0 0;font-size:17.5px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Haxe already has the type system, the macros and the ergonomics. What it hasn't had is a compiler that goes straight to machine code, frees memory without a collector, and optimizes once for every backend. Rayzor does that, with the Haxe you already write.</p>
     </div>
     <div style="margin-top:52px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;border-top:1px solid #1A1C21">
       <sc-for list="{{ policy }}" as="p" hint-placeholder-count="6">
@@ -169,7 +169,7 @@
     </div>
     <div style="margin-top:36px;display:flex;flex-direction:column;gap:12px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0E1013">
       <span style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#F97316">Not a goal</span>
-      <p style="margin:0;font-size:15px;line-height:1.65;color:#8A9099;max-width:760px;text-wrap:pretty">Transpilation. The official Haxe compiler is very good at emitting JavaScript, Python and PHP — Rayzor has no such target and won't. Use the official compiler when you ship source, Rayzor when you ship machine code.</p>
+      <p style="margin:0;font-size:15px;line-height:1.65;color:#8A9099;max-width:760px;text-wrap:pretty">Transpilation. The official Haxe compiler is very good at emitting JavaScript, Python and PHP. Rayzor has no such target and won't. Use the official compiler when you ship source, Rayzor when you ship machine code.</p>
     </div>
   </section>
 
@@ -211,7 +211,7 @@
         </div>
         <div style="padding:26px 30px">
           <div style="display:flex;align-items:baseline;gap:12px"><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#F97316">@:safety</span><span style="font-size:15px;font-weight:600">Adopt it incrementally</span></div>
-          <p style="margin:8px 0 0;font-size:14px;line-height:1.6;color:#8A9099">Strict mode requires every class to be annotated; non-strict wraps the rest in <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#C9CCD2">Rc</span> — so ownership is never a rewrite you do first.</p>
+          <p style="margin:8px 0 0;font-size:14px;line-height:1.6;color:#8A9099">Strict mode requires every class to be annotated; non-strict wraps the rest in <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#C9CCD2">Rc</span>, so ownership is never a rewrite you do first.</p>
         </div>
       </div>
     </div>
@@ -222,8 +222,8 @@
       <div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Benchmarks</div>
         <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">One pipeline,<br>optimized once.</h2>
-        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Same Haxe source on every target. Rayzor is faster than HashLink outright, faster than the JVM without paying its startup, and faster than hxcpp on floating-point work — and it gets there in tens of milliseconds of compile time, not hundreds.</p>
-        <p style="margin:16px 0 0;font-size:16px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">That compile column is the part you feel all day. No C++ toolchain to set up, no JVM to warm, no separate build step before you can run — <span style="font-family: &quot;JetBrains Mono&quot;, monospace; font-size: 14px; color: rgb(201, 204, 210);">rayzor run</span> starts executing while the optimizer is still working. And it's a cold number: the BLADE cache keeps every unchanged module compiled, so the second build compilation is instant.</p>
+        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Same Haxe source on every target. Rayzor is faster than HashLink outright, faster than the JVM without paying its startup, and faster than hxcpp on floating-point work. Compile time is tens of milliseconds, not hundreds.</p>
+        <p style="margin:16px 0 0;font-size:16px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">That compile column is the part you feel all day. No C++ toolchain to set up, no JVM to warm, no separate build step before you can run. <span style="font-family: &quot;JetBrains Mono&quot;, monospace; font-size: 14px; color: rgb(201, 204, 210);">rayzor run</span> starts executing while the optimizer is still working. And it's a cold number: the BLADE cache keeps every unchanged module compiled, so the second build compilation is instant.</p>
         <p style="margin:16px 0 0;font-size:14px;line-height:1.6;color:#6F757E;text-wrap:pretty">15 warmup iterations, 10 measured, mean reported. AMD EPYC, linux x86_64, 2026-08-15.</p>
         <a href="https://rayzor.tech/benchmarks/" style="display:inline-block;margin-top:22px;font-family:'JetBrains Mono',monospace;font-size:12.5px">Full results, regenerated by CI ↗</a>
       </div>
@@ -264,7 +264,7 @@
           </sc-if>
           <span style="margin-left:auto">lower is better</span>
         </div>
-        <p style="margin:18px 0 0;padding-top:16px;border-top:1px solid #1A1C21;font-size:11.5px;line-height:1.7;color:#5B616B;font-family:'JetBrains Mono',monospace">{{ metricNote }}<br>axis clips at 4× the fastest — ▸ marks a bar past the edge, real value labeled</p>
+        <p style="margin:18px 0 0;padding-top:16px;border-top:1px solid #1A1C21;font-size:11.5px;line-height:1.7;color:#5B616B;font-family:'JetBrains Mono',monospace">{{ metricNote }}<br>axis clips at 4× the fastest. ▸ marks a bar past the edge, real value labeled</p>
       </div>
     </div>
   </section>
@@ -274,8 +274,8 @@
       <div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">SIMD</div>
         <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">Vectors are a type,<br>not an intrinsic.</h2>
-        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">The <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">SIMD*</span> family is first-class Haxe — 128- and 256-bit, float and integer lanes — with tuple and array literals, real operator overloads, and a full math surface: dot, normalize, magnitude, lerp. It lowers to NEON, SSE2 or WASM SIMD128, with a scalar fallback where none exists.</p>
-        <p style="margin:16px 0 0;font-size:15px;line-height:1.6;color:#6F757E;text-wrap:pretty">The interpreter handles vector types, and functions that use SIMD are promoted on first call — so vector work runs compiled from the start without giving up instant startup.</p>
+        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">The <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#C9CCD2">SIMD*</span> family covers 128- and 256-bit, float and integer lanes, with tuple and array literals, real operator overloads, and a full math surface: dot, normalize, magnitude, lerp. It lowers to NEON, SSE2 or WASM SIMD128, with a scalar fallback where none exists.</p>
+        <p style="margin:16px 0 0;font-size:15px;line-height:1.6;color:#6F757E;text-wrap:pretty">The interpreter handles vector types, and functions that use SIMD are promoted on first call, so vector work runs compiled from the start and startup stays instant.</p>
         <a href="Rayzor Architecture.dc.html#simd" style="display:inline-block;margin-top:22px;font-family:'JetBrains Mono',monospace;font-size:12.5px">How it lowers ↗</a>
       </div>
       <div style="border:1px solid #22242A;border-radius:14px;background:#0E1013;overflow:hidden">
@@ -365,8 +365,8 @@
         <div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#F97316">Case study · Nue</div>
           <h2 style="margin:16px 0 0;font-size:44px;line-height:1.06;letter-spacing:-0.03em;font-weight:600">An LLM inference engine,<br>written in Haxe.</h2>
-          <p style="margin:20px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Nue runs local language models on the Rayzor runtime. The tokenizer, the quantized matmul kernels, the KV cache and the scheduler are all written in Haxe — a workload people normally assume you have to write in C or Rust.</p>
-          <p style="margin:16px 0 0;font-size:16px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Every kernel is benchmarked against the Rust version it replaces. When Haxe is slower, that's treated as something to fix in the kernel, the thread pool or the compiler — not a reason to drop back to Rust.</p>
+          <p style="margin:20px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Nue runs local language models on the Rayzor runtime. The tokenizer, the quantized matmul kernels, the KV cache and the scheduler are all written in Haxe.</p>
+          <p style="margin:16px 0 0;font-size:16px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">Every kernel is benchmarked against the Rust version it replaces. When Haxe is slower, that's treated as something to fix in the kernel, the thread pool or the compiler, not a reason to drop back to Rust.</p>
           <a href="https://github.com/rayzor-blade/rayzor/tree/main/nue" style="display:inline-flex;align-items:center;gap:9px;margin-top:24px;padding:11px 20px;border-radius:10px;border:1px solid #2A2D35;color:#E9EAEE;font-size:14px;font-weight:500" style-hover="border-color:#F97316"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>Browse nue/ in the repo</a>
           <div style="margin-top:26px;display:flex;flex-wrap:wrap;gap:7px">
             <sc-for list="{{ nueTags }}" as="t" hint-placeholder-count="4">
@@ -403,7 +403,7 @@
                 <span style="text-align:right;color:#6F757E">{{ p.rust }}</span>
               </sc-for>
             </div>
-            <p style="margin:20px 0 0;padding-top:16px;border-top:1px solid #1A1C21;font-size:12.5px;line-height:1.6;color:#6F757E;text-wrap:pretty">Parity is met and beaten on k-quant; INT8 sits within 5% and is closing. FFI is reserved for platform APIs — AMX, CoreML, VNNI — never for kernels Haxe could write.</p>
+            <p style="margin:20px 0 0;padding-top:16px;border-top:1px solid #1A1C21;font-size:12.5px;line-height:1.6;color:#6F757E;text-wrap:pretty">Parity is met and beaten on k-quant; INT8 sits within 5% and is closing. FFI is reserved for platform APIs such as AMX, CoreML and VNNI, never for kernels Haxe could write.</p>
           </div>
         </div>
       </div>
@@ -417,7 +417,7 @@
           <span style="width:6px;height:6px;border-radius:50%;background:#0A0B0D"></span>In progress
         </div>
         <h2 style="margin:20px 0 0;font-size:40px;line-height:1.08;letter-spacing:-0.03em;font-weight:600">Bring your own frontend.</h2>
-        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">We're working on consuming the official Haxe compiler's output directly and lowering it into Rayzor MIR. Keep the frontend you already trust — full Haxe 4.x, every macro, every library — and get native codegen, ownership and the tiered runtime underneath it.</p>
+        <p style="margin:18px 0 0;font-size:17px;line-height:1.6;color:#9AA0AA;text-wrap:pretty">We're working on consuming the official Haxe compiler's output directly and lowering it into Rayzor MIR. You would keep the frontend you already use, with every macro and library, and get native codegen, ownership and the tiered runtime underneath it.</p>
         <p style="margin:16px 0 0;font-size:15px;line-height:1.6;color:#6F757E;text-wrap:pretty">No rewrite, no second dialect. The same build you run today, ending in machine code.</p>
         <a href="https://github.com/rayzor-blade/rayzor/discussions" style="display:inline-block;margin-top:24px;font-family:'JetBrains Mono',monospace;font-size:12.5px">Follow the discussion ↗</a>
       </div>
@@ -478,7 +478,7 @@ const OS = {
   unix: {
     label: "macOS & Linux",
     cmd: "curl -fsSL https://rayzor.tech/install.sh | sh",
-    note: "Installs to ~/.rayzor/bin. The download is self-contained — nothing else needs installing."
+    note: "Installs to ~/.rayzor/bin. The download is self-contained. Nothing else needs installing."
   },
   win: {
     label: "Windows",
@@ -517,7 +517,7 @@ const RUNS = {
 };
 const SEQ = [
   { label: "tier 0 · interp", value: "first output at 38ms", color: "#9AA0AA" },
-  { label: "profile", value: "update() hot — 1,024 calls", color: "#9AA0AA" },
+  { label: "profile", value: "update() hot, 1,024 calls", color: "#9AA0AA" },
   { label: "tier 1 · compiled", value: "compiled in 4.2ms", color: "#7FD1C0" },
   { label: "tier 3 · optimized", value: "compiled in 61ms, -O2", color: "#7FD1C0" },
   { label: "steady state", value: "3.1× interpreter throughput", color: "#F97316" },
@@ -525,7 +525,7 @@ const SEQ = [
 ];
 
 const POLICY = [
-  { n: "01", title: "Correctness first", body: "An optimization ships after it's proven correct. Drop insertion and inline are guarantees, not hints, so they run at every level — including -O0." },
+  { n: "01", title: "Correctness first", body: "An optimization ships after it's proven correct. Drop insertion and inline are guarantees, not hints, so they run at every level, including -O0." },
   { n: "02", title: "No garbage collector", body: "The compiler works out when to free things. No pauses in the middle of a frame, and you can annotate one class at a time." },
   { n: "03", title: "Analysis is shared", body: "Dominance, loop structure and escape info are computed once and reused by every pass that needs them." },
   { n: "04", title: "Same source, same binary", body: "MIR collections are ordered on purpose, so codegen is reproducible build after build." },
@@ -539,7 +539,7 @@ const AUDIENCE = [
     body: "Long-running processes where a collector pause is a latency spike you can't explain to anyone. Memory is freed by analysis, so tail latency is a property of your code, not the runtime's mood.",
     points: [
       "The server preset optimizes aggressively for processes that stay up",
-      "Real OS threads with Channel, Select, Mutex and Arc — not a green-thread emulation",
+      "Real OS threads with Channel, Select, Mutex and Arc, not a green-thread emulation",
       "Ship one native binary, or one .rzb that skips compilation at startup"
     ],
     tags: ["rayzor aot", "--preset server", "Channel<T>", "0 GC pauses"]
@@ -550,8 +550,8 @@ const AUDIENCE = [
     points: [
       "@:move and @:arc where aliasing matters; everything else stays ordinary Haxe",
       "SIMD4f with operator overloads for transforms, physics and batch math",
-      "@:shader classes compile straight to WGSL — write shaders in Haxe, not a second language",
-      "@:cstruct gives flat, headerless layouts for C ABI compatibility — bind only what you must"
+      "@:shader classes compile straight to WGSL, so shaders are Haxe too",
+      "@:cstruct gives flat, headerless layouts for C ABI compatibility. Bind only what you must"
     ],
     tags: ["SIMD4f", "@:shader → WGSL", "@:move", "@:cstruct"]
   },
@@ -560,7 +560,7 @@ const AUDIENCE = [
     body: "The parts that usually push people out of Haxe and into C: vector types, thread pools that don't re-spawn, and control over which core does what.",
     points: [
       "128- and 256-bit vectors with widening dot-accumulate for quantized kernels",
-      "SpinPool keeps workers alive and chunk-steals — dispatch costs a few atomic stores",
+      "SpinPool keeps workers alive and chunk-steals, so dispatch costs a few atomic stores",
       "WorkerPool pins one worker per NUMA node so memory lands first-touch on the right controller"
     ],
     tags: ["SIMD8i32", "SpinPool", "WorkerPool", "CpuTopology"]
@@ -568,7 +568,7 @@ const AUDIENCE = [
 ];
 
 const SOON = [
-  { stage: "haxe", what: "Your existing build, run by the official compiler — same class paths, same macros", color: "#9AA0AA" },
+  { stage: "haxe", what: "Your existing build, run by the official compiler. Same class paths, same macros", color: "#9AA0AA" },
   { stage: "typed output", what: "Its typed output read directly, instead of Rayzor re-parsing your source", color: "#9AA0AA" },
   { stage: "→ MIR", what: "Lowered into the same SSA every Rayzor backend already consumes", color: "#F97316" },
   { stage: "native", what: "Ownership analysis, the optimization pipeline and the tiered runtime, unchanged", color: "#F97316" }
@@ -578,7 +578,7 @@ const TARGETS = [
   { title: "Linux", badge: "x86_64 · aarch64", badgeColor: "#9AA0AA", body: "Native binaries to ship, and an instant run-from-source loop while you work. Threads, sockets and the full runtime, plus NUMA-aware worker pinning on servers.", cmd: "rayzor aot main.hx -o app" },
   { title: "macOS", badge: "aarch64 · x86_64", badgeColor: "#9AA0AA", body: "The same native path on Apple silicon and Intel, with a worker pool that adapts to the machine instead of fighting it.", cmd: "rayzor aot main.hx -o app" },
   { title: "Windows", badge: "x86_64 · MSVC", badgeColor: "#9AA0AA", body: "Native binaries through the MSVC toolchain, with the same tiered JIT and the same runtime you develop against elsewhere.", cmd: "rayzor aot main.hx -o app.exe" },
-  { title: "WebAssembly", badge: "first-class target", badgeColor: "#F97316", body: "Core modules, WASI P2 components, and a browser harness — the same program and the same optimizations as the native backends.", cmd: "rayzor build --target wasm --browser" }
+  { title: "WebAssembly", badge: "first-class target", badgeColor: "#F97316", body: "Core modules, WASI P2 components, and a browser harness, from the same program and the same optimizations as the native backends.", cmd: "rayzor build --target wasm --browser" }
 ];
 const CROSS_FLAGS = ["--target <triple>", "--sysroot <dir>", "--linker <path>", "--target wasm-wasi"];
 

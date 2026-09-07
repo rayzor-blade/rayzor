@@ -51,10 +51,10 @@ FFI, plus pure Haxe classes that provide a high-level API on top.
 
 ```
 rayzor-gpu.rpkg
-  rayzor/gpu/GPUCompute.hx      (extern class — low-level FFI)
-  rayzor/gpu/GpuBuffer.hx       (extern class — low-level FFI)
-  rayzor/gpu/Tensor.hx          (pure Haxe — high-level API)
-  rayzor/gpu/nn/Linear.hx       (pure Haxe — neural net layer)
+  rayzor/gpu/GPUCompute.hx      (extern class, low-level FFI)
+  rayzor/gpu/GpuBuffer.hx       (extern class, low-level FFI)
+  rayzor/gpu/Tensor.hx          (pure Haxe, high-level API)
+  rayzor/gpu/nn/Linear.hx       (pure Haxe, neural net layer)
   macos-aarch64/librayzor_gpu.dylib
   linux-x86_64/librayzor_gpu.so
   method_table                   (serialized FFI descriptors)
@@ -288,7 +288,7 @@ At load time, Rayzor picks the dylib matching the current OS and architecture.
 
 We recommend [cross](https://github.com/cross-rs/cross) for cross-compiling
 native rpkg libraries. `cross` uses pre-built Docker images with the correct
-toolchains — no manual sysroot setup needed:
+toolchains, with no manual sysroot setup:
 
 ```bash
 cargo install cross --git https://github.com/cross-rs/cross
@@ -297,7 +297,7 @@ cargo install cross --git https://github.com/cross-rs/cross
 Build for each platform, then pack into one rpkg:
 
 ```bash
-# macOS targets (native — cross doesn't support macOS as a target)
+# macOS targets (native, since cross doesn't support macOS as a target)
 cargo build -p rayzor-gpu --features webgpu-backend --release --target aarch64-apple-darwin
 cargo build -p rayzor-gpu --features webgpu-backend --release --target x86_64-apple-darwin
 
@@ -335,7 +335,7 @@ rayzor rpkg strip rayzor-gpu.rpkg -o rayzor-gpu-slim.rpkg
 rayzor rpkg strip rayzor-gpu.rpkg --os linux --arch x86_64 -o rayzor-gpu-linux.rpkg
 ```
 
-This is useful for deployment — ship the universal rpkg to CI, then strip per
+This is useful for deployment. Ship the universal rpkg to CI, then strip per
 target before bundling into your application.
 
 ## Package Format Reference

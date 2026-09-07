@@ -57,7 +57,7 @@ Options:
 | O0 | Least optimization, quickest to compile | Debug builds |
 | O1 | Light optimization | Balanced |
 | O2 | Full optimization | Production (default) |
-| O3 | O2, tuned harder — slower to compile | Maximum performance |
+| O3 | O2, tuned harder. Slower to compile | Maximum performance |
 
 Which passes run at each level is in
 [ARCHITECTURE](../../architecture/ARCHITECTURE.md).

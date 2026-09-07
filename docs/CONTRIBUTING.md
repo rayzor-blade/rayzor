@@ -17,12 +17,12 @@ cargo test
 bash haxe-conformance/run.sh     # official Haxe conformance corpus
 ```
 
-<a id="llvm"></a>Needs LLVM 21 via `LLVM_SYS_211_PREFIX` — see
-[README](../README.md#contributing) for both link shapes and why CI builds each.
+<a id="llvm"></a>Needs LLVM 21 via `LLVM_SYS_211_PREFIX`. The
+[README](../README.md#contributing) has both link shapes and why CI builds each.
 
 Two conventions worth knowing before a first patch: symbol ids are
 per-compilation-context, so only fully-qualified names may cross module
-boundaries; and MIR collections are ordered deliberately — do not swap a
+boundaries; and MIR collections are ordered deliberately, so do not swap a
 `BTreeMap` for a `HashMap`.
 
 ---
@@ -39,7 +39,7 @@ rayzor compile main.hx --stage mir --show-ir
 ```bash
 rayzor dump main.hx                    # optimized (O2)
 rayzor dump main.hx -O0                # before the optimizer
-rayzor dump main.hx --diff             # before vs after — what a pass did
+rayzor dump main.hx --diff             # before vs after, showing what a pass did
 rayzor dump main.hx --function advance # one function
 rayzor dump main.hx --cfg-only         # blocks and edges, no instructions
 rayzor dump main.hx --format dot | dot -Tpng -o cfg.png
@@ -47,7 +47,7 @@ rayzor dump main.hx -i                 # interactive viewer
 ```
 
 `rayzor dump` shows MIR **before** codegen and renumbers block labels. When the
-backend disagrees with it, print what codegen actually received instead — see
+backend disagrees with it, print what codegen actually received instead. See
 [DEBUGGING_MIR.md](architecture/DEBUGGING_MIR.md).
 
 ## Investigate a crash or a regression

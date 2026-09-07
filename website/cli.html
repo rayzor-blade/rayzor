@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Rayzor CLI — Commands, flags and environment</title>
-    <meta name="description" content="Every Rayzor command, flag and environment variable: run, build, aot, bundle and the debug toolkit, with the optimization presets each one accepts.">
+    <title>Rayzor CLI: install and everyday commands</title>
+    <meta name="description" content="Install rayzor and get going: run, check, build, aot and bundle, the project manifest, and the presets that decide how much it optimizes.">
     <meta name="keywords" content="Haxe, Haxe runtime, Haxe compiler, native Haxe, fast Haxe, JIT compilation, tiered JIT, WebAssembly, AOT compiler, ownership memory, no garbage collector, SIMD">
     <meta name="robots" content="index, follow, max-image-preview:large">
     <meta name="theme-color" content="#f97316">
@@ -16,8 +16,8 @@
     <meta property="og:url" content="https://rayzor.tech/cli.html">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Rayzor">
-    <meta property="og:title" content="Rayzor CLI — Commands, flags and environment">
-    <meta property="og:description" content="Every Rayzor command, flag and environment variable: run, build, aot, bundle and the debug toolkit, with the optimization presets each one accepts.">
+    <meta property="og:title" content="Rayzor CLI: install and everyday commands">
+    <meta property="og:description" content="Install rayzor and get going: run, check, build, aot and bundle, the project manifest, and the presets that decide how much it optimizes.">
     <meta property="og:image" content="https://rayzor.tech/ograph-image.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
@@ -26,8 +26,8 @@
     <meta name="twitter:card" content="summary_large_image">
     <meta property="twitter:domain" content="rayzor.tech">
     <meta property="twitter:url" content="https://rayzor.tech/cli.html">
-    <meta name="twitter:title" content="Rayzor CLI — Commands, flags and environment">
-    <meta name="twitter:description" content="Every Rayzor command, flag and environment variable: run, build, aot, bundle and the debug toolkit, with the optimization presets each one accepts.">
+    <meta name="twitter:title" content="Rayzor CLI: install and everyday commands">
+    <meta name="twitter:description" content="Install rayzor and get going: run, check, build, aot and bundle, the project manifest, and the presets that decide how much it optimizes.">
     <meta name="twitter:image" content="https://rayzor.tech/ograph-image.png">
     <meta name="twitter:image:width" content="1200">
     <meta name="twitter:image:height" content="630">
@@ -189,7 +189,7 @@
 irm https://rayzor.tech/install.ps1 | iex          # Windows
 
 rayzor info                                        # confirm the install</div>
-      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained — nothing else to install.</p>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained. Nothing else to install.</p>
       <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
       <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
 cd my-app
@@ -246,32 +246,32 @@ rayzor run                     # entry point from the manifest</div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">script</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">CLI tools and one-shot scripts — instant startup, no promotion</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">CLI tools and one-shot scripts. Starts instantly, never promotes</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">application</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Desktop apps and web servers — balanced (default)</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Desktop apps and web servers. Balanced (default)</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">server</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Long-running services — aggressive optimization</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Long-running services. Optimizes aggressively</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">benchmark</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Performance testing — compiles at once, fully optimized within warm-up</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Performance testing. Compiles at once, fully optimized within warm-up</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">development</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Debugging — verbose logging</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Debugging. Verbose logging</span>
           </div>
         
           <div style="display:grid;grid-template-columns:130px minmax(0,1fr);gap:20px;padding:13px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
             <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316">embedded</span>
-            <span style="font-size:14px;line-height:1.55;color:#8A9099">Constrained environments — interpreter only</span>
+            <span style="font-size:14px;line-height:1.55;color:#8A9099">Constrained environments. Interpreter only</span>
           </div>
         
       </div>
@@ -346,7 +346,7 @@ rayzor run                     # entry point from the manifest</div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
                   <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#E8B84B;overflow-wrap:break-word">--emit &lt;FORMAT&gt;</span>
-                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">exe (default), obj, asm — --help lists the rest</span>
+                  <span style="font-size:13.5px;line-height:1.55;color:#8A9099">exe (default), obj, asm. --help lists the rest</span>
                 </div>
               
                 <div style="display:grid;grid-template-columns:230px minmax(0,1fr);gap:20px;padding:11px 0;border-top:1px solid #1A1C21;align-items:baseline" class="dcr5">
@@ -473,7 +473,7 @@ rayzor run                     # entry point from the manifest</div>
             <h3 style="margin:0;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.01em;color:#F97316">rayzor init</h3>
             <span style="font-size:15px;color:#9AA0AA">scaffold a project</span>
           </div>
-          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Templates for an app, a library, a benchmark or an empty project — plus workspaces and adoption of an existing HXML build.</p>
+          <p style="margin:12px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:700px;text-wrap:pretty">Templates for an app, a library, a benchmark or an empty project, plus workspaces and adoption of an existing HXML build.</p>
           <div style="margin-top:16px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app [--template app|lib|benchmark|empty]
 rayzor init --name my-workspace --workspace --members a,b
 rayzor init --from-hxml build.hxml</div>

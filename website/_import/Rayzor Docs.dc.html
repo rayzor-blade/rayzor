@@ -109,7 +109,7 @@
           <p style="margin:10px 0 0;font-size:13.5px;line-height:1.6;color:#8A9099">Haxe sources plus optional native libraries. <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px">strip</span> reduces it to one platform.</p>
         </div>
       </div>
-      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id — not by a redundant relink of identical sources.</p>
+      <p style="margin:18px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">The cache is invalidated by source content, compiler version, and a content-derived compiler cache ABI id, not by a redundant relink of identical sources.</p>
 
       <h2 id="manifest" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Project manifest</h2>
       <p style="margin:18px 0 0;font-size:16px;line-height:1.65;color:#9AA0AA;max-width:680px">A project is described by a <span style="font-family:'JetBrains Mono',monospace;font-size:14.5px;color:#C9CCD2">rayzor.toml</span> at its root.</p>
@@ -128,18 +128,9 @@ opt-level = </span><span style="color:#E8B84B">2
 <span style="color:#7FD1C0">[cache]
 </span><span style="color:#C9CCD2">enabled = </span><span style="color:#E8B84B">true</span></div>
       </div>
-      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">An existing HXML build can be delegated to rather than ported — set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
+      <p style="margin:18px 0 0;font-size:15px;line-height:1.65;color:#9AA0AA;max-width:680px;text-wrap:pretty">An existing HXML build can be delegated to rather than ported. Set <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">hxml = "build.hxml"</span> under <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">[project]</span>. A workspace lists <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">members</span> instead.</p>
       <p style="margin:14px 0 0;font-size:14px;line-height:1.65;color:#6F757E;max-width:680px">A project depending on native plugins must declare both the class paths and the native libraries; only one of the two fails to resolve at run time.</p>
 
-      <h2 id="debug" style="margin:56px 0 0;font-size:28px;letter-spacing:-0.02em;font-weight:600;padding-bottom:14px;border-bottom:1px solid #1A1C21">Debug toolkit</h2>
-      <div style="margin-top:22px;display:grid;gap:2px">
-        <sc-for list="{{ debug }}" as="d" hint-placeholder-count="6">
-          <div style="display:flex;gap:20px;align-items:baseline;padding:13px 0;border-top:1px solid #1A1C21">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#F97316;width:190px;flex:none">{{ d.cmd }}</span>
-            <span style="font-size:14px;color:#8A9099;line-height:1.5">{{ d.what }}</span>
-          </div>
-        </sc-for>
-      </div>
 
       <div style="margin-top:64px;padding:26px 28px;border:1px solid #22242A;border-radius:12px;background:#0C0D10;display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap">
         <div>
@@ -159,7 +150,6 @@ opt-level = </span><span style="color:#E8B84B">2
         <a href="#memory" style="color:#8A9099" style-hover="color:#E9EAEE">Memory model</a>
         <a href="#artifacts" style="color:#8A9099" style-hover="color:#E9EAEE">Artifacts</a>
         <a href="#manifest" style="color:#8A9099" style-hover="color:#E9EAEE">Project manifest</a>
-        <a href="#debug" style="color:#8A9099" style-hover="color:#E9EAEE">Debug toolkit</a>
       </div>
     </aside>
   </div>
@@ -170,7 +160,7 @@ opt-level = </span><span style="color:#E8B84B">2
 const NAV = [
   { title: "Start", items: [["Quick start", "#quickstart", 1], ["Compilation modes", "#modes"], ["Tiering", "#tiers"]] },
   { title: "Concepts", items: [["Architecture", "Rayzor Architecture.dc.html"], ["SIMD", "Rayzor Architecture.dc.html#simd"], ["Concurrency", "Rayzor Concurrency.dc.html"], ["Memory model", "#memory"], ["Artifacts", "#artifacts"]] },
-  { title: "Reference", items: [["Project manifest", "#manifest"], ["Debug toolkit", "#debug"], ["CLI reference", "Rayzor CLI.dc.html"], ["Environment variables", "Rayzor CLI.dc.html#env"]] },
+  { title: "Reference", items: [["Project manifest", "#manifest"], ["CLI reference", "Rayzor CLI.dc.html"], ["Environment variables", "Rayzor CLI.dc.html#env"]] },
   { title: "Project", items: [["Home", "Rayzor Home.dc.html"], ["Contributing", "https://github.com/rayzor-blade/rayzor"]] }
 ];
 const MODES = [
@@ -178,24 +168,15 @@ const MODES = [
   { want: "Type-check only", cmd: "rayzor check main.hx", what: "Parse and type-check, no codegen" },
   { want: "Ship a native binary", cmd: "rayzor aot main.hx -o app", what: "Whole program compiled ahead of time, linked against the runtime" },
   { want: "Ship one portable artifact", cmd: "rayzor bundle main.hx", what: "Serialized MIR in a single .rzb, run later with rayzor run" },
-  { want: "Target the browser or WASI", cmd: "rayzor build --target wasm", what: "WebAssembly module; --browser also emits an HTML harness" },
-  { want: "Inspect the pipeline", cmd: "rayzor compile --stage mir", what: "Stop at any stage — ast, tast, hir, mir, native — and print it" }
+  { want: "Target the browser or WASI", cmd: "rayzor build --target wasm", what: "WebAssembly module; --browser also emits an HTML harness" }
 ];
 const PRESETS = [
-  { name: "script", for: "CLI tools and one-shot scripts — instant startup, no promotion" },
-  { name: "application", for: "Desktop apps and web servers — balanced (default)" },
-  { name: "server", for: "Long-running services — aggressive optimization" },
-  { name: "benchmark", for: "Performance testing — compiles at once, fully optimized within warm-up" },
-  { name: "development", for: "Debugging — verbose logging" },
-  { name: "embedded", for: "Constrained environments — interpreter only" }
-];
-const DEBUG = [
-  { cmd: "rayzor debug run", what: "Forensic run with crash handlers pre-armed" },
-  { cmd: "rayzor debug bench", what: "Run N times, per-run metrics plus aggregate stats" },
-  { cmd: "rayzor debug compare", what: "A/B two git refs and report the median delta; restores the tree on exit" },
-  { cmd: "rayzor debug resolve", what: "Hex PCs from a crash dump → Haxe functions and lines" },
-  { cmd: "rayzor debug server", what: "Live metrics over HTTP with a browser dashboard" },
-  { cmd: "rayzor dump --diff", what: "MIR before and after optimization — the fastest way to see what a pass did" }
+  { name: "script", for: "CLI tools and one-shot scripts. Starts instantly, never promotes" },
+  { name: "application", for: "Desktop apps and web servers. Balanced (default)" },
+  { name: "server", for: "Long-running services. Optimizes aggressively" },
+  { name: "benchmark", for: "Performance testing. Compiles at once, fully optimized within warm-up" },
+  { name: "development", for: "Debugging. Verbose logging" },
+  { name: "embedded", for: "Constrained environments. Interpreter only" }
 ];
 
 class Component extends DCLogic {
@@ -208,7 +189,7 @@ class Component extends DCLogic {
           style: "padding:5px 0;color:" + (active ? "#F97316" : "#9AA0AA") + ";font-weight:" + (active ? "500" : "400")
         }))
       })),
-      modes: MODES, presets: PRESETS, debug: DEBUG
+      modes: MODES, presets: PRESETS
     };
   }
 }

@@ -83,7 +83,7 @@ const PAGES = [
     canonical: "/docs.html",
     title: "Rayzor Docs — Compilation modes, tiering and memory",
     description:
-      "Rayzor compiles Haxe 4.x to native code. Pick a compilation mode, understand tier promotion, and read the memory model, artifacts and debug toolkit.",
+      "Rayzor compiles Haxe 4.x to native code. Pick a compilation mode, understand tier promotion, and read the memory model and artifacts.",
   },
   {
     src: "Rayzor Architecture.dc.html",
@@ -98,9 +98,9 @@ const PAGES = [
     src: "Rayzor CLI.dc.html",
     out: "cli.html",
     canonical: "/cli.html",
-    title: "Rayzor CLI — Commands, flags and environment",
+    title: "Rayzor CLI: install and everyday commands",
     description:
-      "Every Rayzor command, flag and environment variable: run, build, aot, bundle and the debug toolkit, with the optimization presets each one accepts.",
+      "Install rayzor and get going: run, check, build, aot and bundle, the project manifest, and the presets that decide how much it optimizes.",
   },
   {
     src: "Rayzor Concurrency.dc.html",
@@ -108,7 +108,7 @@ const PAGES = [
     canonical: "/concurrency.html",
     title: "Rayzor Concurrency — Threads, channels and worker pools",
     description:
-      "Real OS threads with channels, select, mutexes and atomics — with the sharing rules checked at compile time, plus NUMA-aware worker pools and spin pools.",
+      "Real OS threads with channels, select, mutexes and atomics. The sharing rules are checked at compile time, and worker pools are NUMA-aware.",
   },
 ];
 

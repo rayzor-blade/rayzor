@@ -60,7 +60,7 @@
 irm https://rayzor.tech/install.ps1 | iex          # Windows
 
 rayzor info                                        # confirm the install</div>
-      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained — nothing else to install.</p>
+      <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Lands in <span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#C9CCD2">~/.rayzor/bin</span>. The download is self-contained. Nothing else to install.</p>
       <p style="margin:16px 0 0;font-size:15px;line-height:1.65;color:#8A9099;max-width:680px">Then scaffold a project and run it:</p>
       <div style="margin-top:12px;border:1px solid #22242A;border-radius:10px;background:#0E1013;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.9;white-space:pre-wrap;overflow-wrap:break-word;color:#C9CCD2">rayzor init --name my-app      # src/Main.hx + rayzor.toml
 cd my-app
@@ -198,12 +198,12 @@ const MODES = [
   { want: "Start a project", cmd: "rayzor init --name my-app", what: "Scaffolds src/Main.hx and rayzor.toml" }
 ];
 const PRESETS = [
-  { name: "script", for: "CLI tools and one-shot scripts — instant startup, no promotion" },
-  { name: "application", for: "Desktop apps and web servers — balanced (default)" },
-  { name: "server", for: "Long-running services — aggressive optimization" },
-  { name: "benchmark", for: "Performance testing — compiles at once, fully optimized within warm-up" },
-  { name: "development", for: "Debugging — verbose logging" },
-  { name: "embedded", for: "Constrained environments — interpreter only" }
+  { name: "script", for: "CLI tools and one-shot scripts. Starts instantly, never promotes" },
+  { name: "application", for: "Desktop apps and web servers. Balanced (default)" },
+  { name: "server", for: "Long-running services. Optimizes aggressively" },
+  { name: "benchmark", for: "Performance testing. Compiles at once, fully optimized within warm-up" },
+  { name: "development", for: "Debugging. Verbose logging" },
+  { name: "embedded", for: "Constrained environments. Interpreter only" }
 ];
 const COMMANDS = [
   {
@@ -226,7 +226,7 @@ const COMMANDS = [
     body: "The whole program compiled ahead of time and linked against the runtime.",
     usage: "rayzor aot [FILES...] -o app",
     flags: [
-      { flag: "--emit <FORMAT>", what: "exe (default), obj, asm — --help lists the rest" },
+      { flag: "--emit <FORMAT>", what: "exe (default), obj, asm. --help lists the rest" },
       { flag: "-O, --opt-level <0-3>", what: "Optimization level. Default 2" },
       { flag: "--target <TRIPLE>\n--sysroot <DIR>, --linker <PATH>", what: "Cross-compilation" },
       { flag: "--strip", what: "Tree-shake unreachable code" },
@@ -270,7 +270,7 @@ const COMMANDS = [
   },
   {
     id: "cmd-init", name: "rayzor init", tagline: "scaffold a project",
-    body: "Templates for an app, a library, a benchmark or an empty project — plus workspaces and adoption of an existing HXML build.",
+    body: "Templates for an app, a library, a benchmark or an empty project, plus workspaces and adoption of an existing HXML build.",
     usage: "rayzor init --name my-app [--template app|lib|benchmark|empty]\nrayzor init --name my-workspace --workspace --members a,b\nrayzor init --from-hxml build.hxml",
     flags: []
   },
