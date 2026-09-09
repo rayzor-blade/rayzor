@@ -558,6 +558,60 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// `Std.string(v)` where `v`'s declared type brings its own `toString`.
+    ///
+    /// This runs before every other call probe because the stdlib mapping
+    /// answers `Std.string` from the runtime tag of a boxed value, and an
+    /// abstract over Int is an Int there: `Std.string((1 : Foo))` printed 1
+    /// rather than what `Foo.toString` says. A type with no `toString` of its
+    /// own resolves nothing here and takes the ordinary path.
+    pub(crate) fn try_user_to_string_call(
+        &mut self,
+        expr: &HirExpr,
+        fell_through: &mut bool,
+    ) -> Option<IrId> {
+        let HirExprKind::Call {
+            callee,
+            args,
+            is_method,
+            ..
+        } = &expr.kind
+        else {
+            unreachable!("try_user_to_string_call on a non-Call expression")
+        };
+        let name_symbol = match &callee.kind {
+            HirExprKind::Variable { symbol, .. } => Some(*symbol),
+            HirExprKind::Field { field, .. } => Some(*field),
+            _ => None,
+        };
+        let name = name_symbol
+            .and_then(|s| self.symbol_table.get_symbol(s))
+            .and_then(|s| self.string_interner.get(s.name));
+        if name != Some("string") {
+            *fell_through = true;
+            return None;
+        }
+        let arg = match (args.len(), is_method) {
+            (2, true) => &args[1],
+            (1, _) => &args[0],
+            _ => {
+                *fell_through = true;
+                return None;
+            }
+        };
+        let resolved = self
+            .user_tostring_symbol(arg.ty)
+            .and_then(|sym| self.function_map.get(&sym).copied());
+        let Some(func_id) = resolved else {
+            *fell_through = true;
+            return None;
+        };
+        let arg_reg = self.lower_expression(arg)?;
+        let string_ptr = IrType::Ptr(Box::new(IrType::String));
+        self.builder
+            .build_call_direct(func_id, vec![arg_reg], string_ptr)
+    }
+
     pub(crate) fn try_std_string_call(
         &mut self,
         expr: &HirExpr,

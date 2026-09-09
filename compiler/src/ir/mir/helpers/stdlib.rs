@@ -366,6 +366,37 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_call_direct(func, call_args, string_ptr)
     }
 
+    /// The `toString` a class or abstract declares itself.
+    ///
+    /// An abstract keeps its methods on its own HIR declaration, so a scan
+    /// that only walks classes misses `Foo.toString` and leaves the value to
+    /// be printed by its underlying representation.
+    pub(crate) fn user_tostring_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let owner = self.type_table.get(type_id).and_then(|ti| match &ti.kind {
+            TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. } => {
+                Some(*symbol_id)
+            }
+            _ => None,
+        })?;
+        for (_tid, decl) in self.current_hir_types.iter() {
+            let (sym, methods) = match decl {
+                HirTypeDecl::Class(c) => (c.symbol_id, &c.methods),
+                HirTypeDecl::Abstract(a) => (a.symbol_id, &a.methods),
+                _ => continue,
+            };
+            if sym != owner {
+                continue;
+            }
+            return methods
+                .iter()
+                .find(|m| {
+                    !m.is_static && self.string_interner.get(m.function.name) == Some("toString")
+                })
+                .map(|m| m.function.symbol_id);
+        }
+        None
+    }
+
     pub(crate) fn try_call_tostring(
         &mut self,
         obj_reg: IrId,
