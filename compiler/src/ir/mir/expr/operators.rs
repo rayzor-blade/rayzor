@@ -212,7 +212,19 @@ impl<'a> HirToMirContext<'a> {
                 Some(result_reg)
             }
             _ => {
-                let operand_reg = self.lower_expression(operand)?;
+                let mut operand_reg = self.lower_expression(operand)?;
+                let result_type = self.convert_type(expr.ty);
+                if matches!(op, HirUnaryOp::Neg) && result_type.is_float() {
+                    let operand_type = self
+                        .builder
+                        .get_register_type(operand_reg)
+                        .unwrap_or_else(|| self.convert_type(operand.ty));
+                    if operand_type != result_type {
+                        operand_reg =
+                            self.builder
+                                .build_cast(operand_reg, operand_type, result_type)?;
+                    }
+                }
                 let result_reg = self
                     .builder
                     .build_unop(self.convert_unary_op(*op), operand_reg)?;
@@ -465,6 +477,57 @@ impl<'a> HirToMirContext<'a> {
                 let eq = self.builder.build_call_direct(
                     eq_func,
                     vec![tp_i64, tag, dyn_reg],
+                    IrType::Bool,
+                )?;
+                if matches!(op, HirBinaryOp::Eq) {
+                    return Some(eq);
+                }
+                let ffalse = self.builder.build_const(IrValue::Bool(false))?;
+                return self.builder.build_cmp(CompareOp::Eq, eq, ffalse);
+            }
+
+            // The same split, with the tag known statically: a concretely
+            // typed operand against a Dynamic box. Comparing the registers
+            // instead would compare a value against a box ADDRESS, so a boxed
+            // "hello" never equals the literal.
+            let scalar_tag = |me: &mut Self, e: &HirExpr| -> Option<i32> {
+                let raw = me.convert_type(e.ty);
+                match me.resolve_expr_ir_type(e, raw) {
+                    IrType::String => Some(5),
+                    IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => Some(5),
+                    IrType::Bool => Some(2),
+                    IrType::F32 | IrType::F64 => Some(4),
+                    ty if ty.is_integer() => Some(1),
+                    _ => None,
+                }
+            };
+            let dyn_vs_concrete = if is_dyn(self, rhs.ty) && !is_dyn(self, lhs.ty) {
+                scalar_tag(self, lhs).map(|tag| (tag, true))
+            } else if is_dyn(self, lhs.ty) && !is_dyn(self, rhs.ty) {
+                scalar_tag(self, rhs).map(|tag| (tag, false))
+            } else {
+                None
+            };
+            if let Some((tag, concrete_is_lhs)) = dyn_vs_concrete {
+                let lhs_reg = self.lower_expression(lhs)?;
+                let rhs_reg = self.lower_expression(rhs)?;
+                let (concrete_reg, dyn_reg) = if concrete_is_lhs {
+                    (lhs_reg, rhs_reg)
+                } else {
+                    (rhs_reg, lhs_reg)
+                };
+                // Floats reach the i64 slot by bitcast, as tag 4 reads them back.
+                let concrete_i64 = self.erase_reflect_compare_arg(concrete_reg);
+                let tag = self.builder.build_const(IrValue::I32(tag))?;
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let eq_func = self.get_or_register_extern_function(
+                    "haxe_dynamic_equals_typed",
+                    vec![IrType::I64, IrType::I32, ptr_void],
+                    IrType::Bool,
+                );
+                let eq = self.builder.build_call_direct(
+                    eq_func,
+                    vec![concrete_i64, tag, dyn_reg],
                     IrType::Bool,
                 )?;
                 if matches!(op, HirBinaryOp::Eq) {
