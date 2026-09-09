@@ -242,6 +242,8 @@ pub struct HirToMirContext<'a> {
     /// `(this, ...args)`. These thunks use `(env, this, ...args)` and forward to
     /// the real method, ignoring `env`.
     vtable_dispatch_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
+    /// Erased-ABI adapters for a plain function used as a closure value.
+    closure_value_adapters: BTreeMap<IrFunctionId, IrFunctionId>,
 
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
@@ -1338,6 +1340,7 @@ impl<'a> HirToMirContext<'a> {
             constructor_reflect_wrappers: BTreeMap::new(),
             method_ref_thunks: BTreeMap::new(),
             vtable_dispatch_thunks: BTreeMap::new(),
+            closure_value_adapters: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             constructor_owner_map: BTreeMap::new(),
             current_hir_types: hir_types,

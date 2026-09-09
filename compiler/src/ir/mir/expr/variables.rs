@@ -107,6 +107,11 @@ impl<'a> HirToMirContext<'a> {
             // wraps the bare function in exactly that {fn_ptr, env_ptr=null}
             // layout; a raw fn_addr would instead be read as those two fields
             // out of the function's own code.
+            // CallIndirect prepends an env and types every slot i64; a plain
+            // function has neither. Reference an adapter that speaks that ABI.
+            if let Some(adapter) = self.ensure_closure_value_adapter(func_id) {
+                return self.builder.build_function_ref(adapter);
+            }
             return self.builder.build_function_ref(func_id);
         }
         // A bodyless mapped static (`Reflect.compare`) has no function of its
