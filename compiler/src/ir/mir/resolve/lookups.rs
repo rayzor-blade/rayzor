@@ -1881,6 +1881,24 @@ impl<'a> HirToMirContext<'a> {
         resolved
     }
 
+    /// Storage behind an abstract, used after resolving its own accessors.
+    pub(crate) fn resolve_storage_type(&self, type_id: TypeId) -> TypeId {
+        let mut current = self.resolve_through_aliases(type_id);
+        let mut seen = BTreeSet::new();
+        while seen.insert(current) {
+            match self.type_table.get(current).map(|t| &t.kind) {
+                Some(TypeKind::Abstract {
+                    underlying: Some(inner),
+                    ..
+                }) => {
+                    current = self.resolve_through_aliases(*inner);
+                }
+                _ => break,
+            }
+        }
+        current
+    }
+
     pub(crate) fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
         let type_table = self.type_table;
         let mut current = type_id;

@@ -126,8 +126,6 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(boxed);
                             }
 
-                            let field_in_class = self.field_exists_in_any_class(field);
-
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                             let unbox_func = self.get_or_register_extern_function(
                                 "haxe_unbox_reference_ptr",
@@ -138,7 +136,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_call_direct(unbox_func, vec![obj], ptr_u8)?;
 
-                            if field_in_class {
+                            if self.field_exists_in_any_class(field) {
                                 return self.lower_field_access_for_class(
                                     unboxed_obj,
                                     field,
@@ -150,25 +148,17 @@ impl<'a> HirToMirContext<'a> {
                             return self.raw_anon_reflect_field_read(unboxed_obj, field, field_ty);
                         }
                     }
-                    // Also check for I64 - this is a raw pointer from Array element access
+                    // Dynamic values have no statically known class layout. Field
+                    // names alone cannot select one: unrelated classes and anonymous
+                    // objects commonly share names such as `value` and `name`.
                     if matches!(&obj_ir_type, Some(IrType::I64)) {
-                        let field_in_class = self.field_exists_in_any_class(field);
-                        if field_in_class {
+                        if self.field_exists_in_any_class(field) {
                             return self.lower_field_access_for_class(obj, field, field_ty);
                         }
                         return self.dynamic_reflect_field_read(obj, field, field_ty);
                     }
-                    // Ptr(U8) from stdlib method returns (e.g., MutexGuard_get) is a raw
-                    // class pointer, NOT a boxed DynamicValue. Check class fields first.
                     if matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8))
                     {
-                        let field_in_class = self.field_exists_in_any_class(field);
-                        if field_in_class {
-                            return self.lower_field_access_for_class(obj, field, field_ty);
-                        }
-                        // Raw Ptr(U8) is NOT boxed — call haxe_reflect_field directly
-                        // without the haxe_unbox_reference_ptr step that
-                        // dynamic_reflect_field_read would apply.
                         return self.raw_anon_reflect_field_read(obj, field, field_ty);
                     }
 
@@ -182,52 +172,7 @@ impl<'a> HirToMirContext<'a> {
                         self.builder
                             .build_call_direct(unbox_func_id, vec![obj], ptr_u8.clone())?;
 
-                    // For a Dynamic receiver the field symbol may be a freshly
-                    // created placeholder, so fall back to a name lookup.
-                    let (actual_type, _resolved_field) = if let Some(&(class_type_id, _field_idx)) =
-                        self.field_index_map.get(&field)
-                    {
-                        (class_type_id, field)
-                    } else {
-                        // Dynamic field access can create a fresh symbol, so match
-                        // by name when the SymbolId is not in field_index_map.
-                        let field_name = self.symbol_table.get_symbol(field).map(|s| s.name);
-
-                        if let Some(name) = field_name {
-                            let mut found = None;
-                            for (sym, &(class_ty, _idx)) in &self.field_index_map {
-                                if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
-                                    if sym_info.name == name {
-                                        let resolved_field_ty = sym_info.type_id;
-                                        found = Some((class_ty, *sym, resolved_field_ty));
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if let Some((class_ty, resolved_sym, resolved_field_ty)) = found {
-                                return self.lower_field_access(
-                                    unboxed_obj,
-                                    resolved_sym,
-                                    class_ty,
-                                    resolved_field_ty,
-                                );
-                            } else {
-                                // The name match failed, so no class has this
-                                // field: only anonymous objects reach here.
-                                return self.dynamic_reflect_field_read(
-                                    unboxed_obj,
-                                    field,
-                                    field_ty,
-                                );
-                            }
-                        } else {
-                            (receiver_ty, field)
-                        }
-                    };
-
-                    // Field unresolved — fall through to normal handling.
-                    (unboxed_obj, actual_type)
+                    return self.raw_anon_reflect_field_read(unboxed_obj, field, field_ty);
                 } else {
                     (obj, receiver_ty)
                 }
@@ -571,7 +516,7 @@ impl<'a> HirToMirContext<'a> {
         // An anonymous receiver (or a typedef alias to one) reads through
         // rayzor_anon_get_field_by_index.
         {
-            let mut resolved_receiver_ty = self.resolve_through_aliases(receiver_ty);
+            let mut resolved_receiver_ty = self.resolve_storage_type(receiver_ty);
             let type_table = self.type_table;
             let mut is_anon = matches!(
                 type_table.get(resolved_receiver_ty).map(|t| &t.kind),
@@ -1466,6 +1411,43 @@ impl<'a> HirToMirContext<'a> {
         // The element type is the map's value type.
         if self.map_index_info(object.ty).is_some() {
             return self.load_map_index_with_regs(obj_reg, idx_reg, object.ty);
+        }
+
+        if matches!(
+            self.type_table
+                .get(self.resolve_through_aliases(object.ty))
+                .map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) {
+            let result_ty = self.convert_type(expr.ty);
+            let tag = match &result_ty {
+                IrType::I32 | IrType::I64 => 1,
+                IrType::F32 | IrType::F64 => 2,
+                IrType::Bool => 3,
+                IrType::String => 5,
+                _ => 0,
+            };
+            let tag_reg = self.builder.build_const(IrValue::I32(tag))?;
+            let index = self.builder.build_cast(
+                idx_reg,
+                self.builder.get_register_type(idx_reg)?,
+                IrType::I64,
+            )?;
+            let function = self.get_or_register_extern_function(
+                "haxe_array_get_erased",
+                vec![
+                    IrType::Ptr(Box::new(IrType::Void)),
+                    IrType::I64,
+                    IrType::I32,
+                ],
+                IrType::I64,
+            );
+            let value = self.builder.build_call_direct(
+                function,
+                vec![obj_reg, index, tag_reg],
+                IrType::I64,
+            )?;
+            return self.coerce_from_i64(value, expr.ty);
         }
 
         self.lower_index_access(obj_reg, idx_reg, expr.ty)

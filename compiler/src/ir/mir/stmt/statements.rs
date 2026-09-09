@@ -63,7 +63,14 @@ impl<'a> HirToMirContext<'a> {
                                             Some(call_args.len()),
                                             None,
                                         )
-                                        .map(|(class_name, _, _)| class_name.to_string())
+                                        .and_then(
+                                            |(class_name, method_name, _)| {
+                                                self.static_factory_return_class(
+                                                    class_name,
+                                                    method_name,
+                                                )
+                                            },
+                                        )
                                     } else {
                                         None
                                     }

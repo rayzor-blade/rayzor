@@ -151,17 +151,26 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
-    /// Class to dispatch against for the value `dispatching_class.method(..)`
-    /// returns. Answered by the mapping's declared return classes; a method
-    /// with no declared return class returns its own value's class unchanged.
-    pub(crate) fn get_return_class_hint<'b>(
-        &self,
-        dispatching_class: &'b str,
+    /// Carry only declared return classes onto runtime results. A Dynamic
+    /// result (Reflect.field, Meta.getType, etc.) is not an instance of the
+    /// class that owns the method.
+    pub(crate) fn record_stdlib_return_hint(
+        &mut self,
+        result: IrId,
+        return_type: TypeId,
+        dispatching_class: &str,
         method: &str,
-    ) -> &'b str {
-        self.stdlib_mapping
+    ) {
+        if let Some(class) = self
+            .stdlib_mapping
             .class_key(dispatching_class)
             .and_then(|key| self.stdlib_mapping.return_class(key, method))
-            .unwrap_or(dispatching_class)
+        {
+            self.register_class_hints.insert(result, class.to_string());
+        } else if let Some(class) = self.static_factory_return_class(dispatching_class, method) {
+            self.register_class_hints.insert(result, class);
+        } else {
+            self.set_class_hint_for_return(result, return_type);
+        }
     }
 }

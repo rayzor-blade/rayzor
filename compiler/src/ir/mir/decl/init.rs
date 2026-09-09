@@ -587,6 +587,8 @@ impl<'a> HirToMirContext<'a> {
             name: enum_name,
             type_id: sym_type_id,
             runtime_type_id: enum_runtime_id,
+            instance_methods: Vec::new(),
+            static_fields: Vec::new(),
             definition: IrTypeDefinition::Enum {
                 variants,
                 discriminant_type: IrType::I32,

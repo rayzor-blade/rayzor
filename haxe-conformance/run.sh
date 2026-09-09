@@ -42,6 +42,8 @@ CASE_RE="extends[[:space:]]+(unit\\.)?Test\\b|extends[[:space:]]+utest\\.Test\\b
 suite_on() { case ",$SUITES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 WORK="${WORK:-${TMPDIR:-/tmp}/rayzor_conformance}"
 LIMIT="${LIMIT:-0}"
+# Optional regular expression over case names for reproducible focused runs.
+CASE_FILTER="${CASE_FILTER:-}"
 TIMEOUT="${TIMEOUT:-60}"
 OUT="${OUT:-$WORK/report.tsv}"
 RAYZOR="${RAYZOR:-$REPO/target/release/rayzor}"
@@ -175,6 +177,7 @@ list_cases() {
     fi
   } | while IFS= read -r p; do
     b="$(basename "$p" .hx)"
+    [[ -z "$CASE_FILTER" || "$b" =~ $CASE_FILTER ]] || continue
     case "$NOT_A_CASE" in *" $b "*) continue ;; esac
     grep -qE "$CASE_RE" "$p" && printf '%s\n' "$p"
   done
@@ -433,6 +436,10 @@ PYGEN
     # over the generic exit code, which is what every one of these used to be.
     [[ -z "$det" ]] && det=$(grep -oE 'rayzor: `[^`]+` was never compiled' "$log" \
                              | head -1 | sed -E 's/rayzor: `(.*)` was never compiled/uncompiled \1/')
+    if [[ -z "$det" ]] && grep -q 'rayzor: native crash' "$log"; then
+      det=$(grep -m1 'rayzor: native crash' "$log" \
+        | sed -E 's/.* in ([^[]*) \[Cranelift\].*/native crash in \1/' | cut -c1-120)
+    fi
     [[ -z "$det" ]] && det=$(grep -iE 'error|panic|signal' "$log" | head -1 | cut -c1-90)
     [[ -z "$det" ]] && det="exit $code"
     # Any death by signal is a crash: the watchdog reports them the way a shell

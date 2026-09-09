@@ -42,6 +42,8 @@ pub struct CraneliftBackend {
     /// for the JIT-symbol-map dump (RAYZOR_DUMP_JIT_MAP=1). Prefers
     /// `IrFunction.qualified_name` and falls back to `IrFunction.name`.
     funcid_display_name: BTreeMap<FuncId, String>,
+    code_sizes: BTreeMap<FuncId, usize>,
+    crash_registered: BTreeMap<FuncId, usize>,
 
     /// (file_id, line, column) per Cranelift FuncId — sourced from
     /// `IrFunction.source_location` at declare time. Dumped alongside
@@ -393,6 +395,8 @@ impl CraneliftBackend {
             function_map: BTreeMap::new(),
             stub_name_data: BTreeMap::new(),
             funcid_display_name: BTreeMap::new(),
+            code_sizes: BTreeMap::new(),
+            crash_registered: BTreeMap::new(),
             funcid_source_loc: BTreeMap::new(),
             backend_id,
             dumped_funcids: BTreeMap::new(),
@@ -1292,6 +1296,18 @@ impl CraneliftBackend {
     /// repeated calls (tier-up's per-function finalise path) only emit new
     /// rows.
     fn maybe_dump_jit_symbols(&mut self) {
+        for &fid in &self.defined_functions {
+            let addr = self.module.get_finalized_function(fid) as usize;
+            if self.crash_registered.get(&fid) != Some(&addr) {
+                if let (Some(size), Some(name)) = (
+                    self.code_sizes.get(&fid),
+                    self.funcid_display_name.get(&fid),
+                ) {
+                    rayzor_runtime::crash_diagnostics::register_code(addr, *size, name);
+                    self.crash_registered.insert(fid, addr);
+                }
+            }
+        }
         if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
         }
@@ -2085,6 +2101,9 @@ impl CraneliftBackend {
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| format!("Failed to define trap stub: {}", e))?;
         self.defined_functions.insert(func_id);
+        if let Some(code) = self.ctx.compiled_code() {
+            self.code_sizes.insert(func_id, code.code_buffer().len());
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -2542,11 +2561,18 @@ impl CraneliftBackend {
                 self.ctx.func.display()
             );
         }
-        // Verify the function before defining (debug builds only)
-        // This catches IR errors early but adds compilation overhead
-        #[cfg(debug_assertions)]
-        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            return Err(format!("Verifier errors in {}: {}", function.name, errors));
+        // Refusing malformed CLIF costs more than it saves in release: several
+        // functions the verifier rejects lower and run correctly today, and a
+        // stub in their place aborts the program. Debug builds still reject,
+        // and RAYZOR_VERIFY_CLIF=1 asks for the same in release.
+        if cfg!(debug_assertions)
+            || std::env::var_os("RAYZOR_VERIFY_CLIF").as_deref() == Some(std::ffi::OsStr::new("1"))
+        {
+            if let Err(errors) =
+                cranelift_codegen::verify_function(&self.ctx.func, self.module.isa())
+            {
+                return Err(format!("Verifier errors in {}: {}", function.name, errors));
+            }
         }
 
         // Define the function in the module. Cranelift can still panic while
@@ -2603,6 +2629,9 @@ impl CraneliftBackend {
             function.name, mir_func_id, func_id
         );
 
+        if let Some(code) = self.ctx.compiled_code() {
+            self.code_sizes.insert(func_id, code.code_buffer().len());
+        }
         // Clear the context for next function
         self.module.clear_context(&mut self.ctx);
 
@@ -4061,6 +4090,33 @@ impl CraneliftBackend {
                     }
                 }
 
+                // Erased closure signatures can widen primitive arguments.
+                // Normalize the values to the declared ABI just as direct calls do.
+                for (value, param) in call_args.iter_mut().zip(&sig.params) {
+                    let actual = builder.func.dfg.value_type(*value);
+                    let expected = param.value_type;
+                    if actual != expected {
+                        *value = if actual.is_int() && expected.is_int() {
+                            if actual.bits() < expected.bits() {
+                                if actual == types::I8 {
+                                    builder.ins().uextend(expected, *value)
+                                } else {
+                                    builder.ins().sextend(expected, *value)
+                                }
+                            } else {
+                                builder.ins().ireduce(expected, *value)
+                            }
+                        } else if actual.is_int() && expected.is_float() {
+                            builder.ins().fcvt_from_sint(expected, *value)
+                        } else if actual == types::F32 && expected == types::F64 {
+                            builder.ins().fpromote(expected, *value)
+                        } else if actual == types::F64 && expected == types::F32 {
+                            builder.ins().fdemote(expected, *value)
+                        } else {
+                            *value
+                        };
+                    }
+                }
                 let sig_ref = builder.import_signature(sig);
 
                 // Emit the indirect call instruction
@@ -5774,10 +5830,10 @@ impl CraneliftBackend {
                 layout.frame.size.max(1),
                 layout.frame.align.trailing_zeros().min(3) as u8,
             ));
-            for (value, offset, ty) in &stores {
+            for (value, offset, _ty) in &stores {
                 builder
                     .ins()
-                    .stack_store(*ty, *value, frame, *offset as i32);
+                    .stack_store(types::I64, *value, frame, *offset as i32);
             }
             let frame_addr = builder.ins().stack_addr(types::I64, frame, 0);
 
@@ -5905,10 +5961,27 @@ impl CraneliftBackend {
         Ok(())
     }
 
+    pub(super) fn register_runtime_metadata_from_module(module: &IrModule) {
+        for (key, json) in &module.metadata.attributes {
+            if let Some((id, kind)) = key
+                .strip_prefix("runtime_meta:")
+                .and_then(|k| k.split_once(':'))
+            {
+                if let Ok(id) = id.parse::<u32>() {
+                    rayzor_runtime::type_system::register_runtime_metadata(id, kind, json);
+                }
+            }
+        }
+    }
+
     /// Register class RTTI by walking MIR module type definitions directly.
     pub fn register_class_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
+        for module in modules {
+            Self::register_runtime_metadata_from_module(module);
+        }
+
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::register_class_from_mir;
+        use rayzor_runtime::type_system::register_class_with_methods_from_mir;
 
         // The registry is keyed by the deterministic runtime_type_id (below), but
         // super_type_id is stored on the typedef as a RAW TypeId. Build a global
@@ -5945,7 +6018,7 @@ impl CraneliftBackend {
                         .filter(|f| f.name != "__type_id")
                         .map(|f| Self::ir_type_to_param_type(&f.ty))
                         .collect();
-                    let static_fields: Vec<String> = Vec::new();
+                    let static_fields = &typedef.static_fields;
                     // Map the super's raw TypeId to its deterministic registry id.
                     let super_type_id = typedef
                         .super_type_id
@@ -5960,13 +6033,14 @@ impl CraneliftBackend {
                         .runtime_type_id
                         .map(|h| h as u32)
                         .unwrap_or(typedef.type_id.0);
-                    register_class_from_mir(
+                    register_class_with_methods_from_mir(
                         rtti_key,
                         &typedef.name,
                         super_type_id,
                         &instance_fields,
                         &instance_field_types,
                         &static_fields,
+                        &typedef.instance_methods,
                     );
                 }
             }

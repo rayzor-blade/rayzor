@@ -905,6 +905,7 @@ mod tests {
                 to_string: dummy_to_string,
                 enum_info: None,
                 class_info: Some(Box::leak(Box::new(crate::type_system::ClassInfo {
+                    instance_methods: &[],
                     name: "UserClass",
                     super_type_id: None,
                     instance_fields: Box::leak(vec!["__type_id"].into_boxed_slice()),

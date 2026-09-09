@@ -254,9 +254,12 @@ impl<'a> HirToMirContext<'a> {
                         // returned class (Array.iterator() -> ArrayIterator, so
                         // .hasNext()/.next() reach ArrayIterator's methods).
                         if let Some(result_reg) = final_result {
-                            let return_class = self.get_return_class_hint(class_name, method_name);
-                            self.register_class_hints
-                                .insert(result_reg, return_class.to_string());
+                            self.record_stdlib_return_hint(
+                                result_reg,
+                                expr.ty,
+                                class_name,
+                                method_name,
+                            );
                             if let Some(h) = self.wrap_stdlib_iter_result(result_reg, expr.ty) {
                                 return Some(h);
                             }
@@ -1639,9 +1642,7 @@ impl<'a> HirToMirContext<'a> {
                 )
             };
             if let Some(result_reg) = final_result {
-                let return_class = self.get_return_class_hint(class_name, method_name);
-                self.register_class_hints
-                    .insert(result_reg, return_class.to_string());
+                self.record_stdlib_return_hint(result_reg, expr.ty, class_name, method_name);
                 if let Some(h) = self.wrap_stdlib_iter_result(result_reg, expr.ty) {
                     return Some(h);
                 }

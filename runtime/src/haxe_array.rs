@@ -1704,3 +1704,70 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
         }
     }
 }
+
+/// String search compares contents; the generic search compares raw slots.
+#[no_mangle]
+pub unsafe extern "C" fn haxe_array_string_index_of(
+    arr: *const HaxeArray,
+    value: *const HaxeString,
+    from: i64,
+    reverse: i32,
+) -> i64 {
+    if arr.is_null() || (*arr).len == 0 {
+        return -1;
+    }
+    let array = &*arr;
+    let len = array.len as i64;
+    let start = if from < 0 { (len + from).max(0) } else { from };
+    let mut i = if reverse != 0 {
+        start.min(len - 1)
+    } else {
+        start
+    };
+    while i >= 0 && i < len {
+        let element = *(array.ptr as *const *const HaxeString).add(i as usize);
+        if crate::haxe_string::haxe_string_compare(element, value) == 0 {
+            return i;
+        }
+        i += if reverse != 0 { -1 } else { 1 };
+    }
+    -1
+}
+
+/// Index an erased array. JSON/runtime metadata boxes both the array and its
+/// elements; ordinary Haxe arrays carry raw slots. The array tag distinguishes
+/// these representations before any data-buffer load.
+#[no_mangle]
+pub extern "C" fn haxe_array_get_erased(array: *mut u8, index: i64, target: i32) -> u64 {
+    use crate::type_system::*;
+    if array.is_null() || index < 0 {
+        return 0;
+    }
+    unsafe {
+        let boxed = std::ptr::read_unaligned(array as *const u32) == TYPE_ARRAY.0;
+        let array = if boxed {
+            (*(array as *const DynamicValue)).value_ptr
+        } else {
+            array
+        };
+        if array.is_null() {
+            return 0;
+        }
+        let array = &*(array as *const HaxeArray);
+        if index as usize >= array.len {
+            return 0;
+        }
+        let value = std::ptr::read_unaligned(array.ptr.add(index as usize * 8) as *const u64);
+        if !boxed || value == 0 {
+            return value;
+        }
+        let value = value as *mut u8;
+        match target {
+            1 => haxe_unbox_int_ptr(value) as u64,
+            2 => haxe_unbox_float_ptr(value).to_bits(),
+            3 => haxe_unbox_bool_ptr(value) as u64,
+            5 => haxe_unbox_reference_ptr(value) as u64,
+            _ => value as u64,
+        }
+    }
+}

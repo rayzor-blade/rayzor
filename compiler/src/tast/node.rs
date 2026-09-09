@@ -1780,17 +1780,18 @@ impl PropertyAccessInfo {
     /// Whether the property occupies a slot in its class's instance layout.
     ///
     /// Every site that assigns field indices asks this one question, so the
-    /// layouts they build agree. Two shapes take a slot: a `default` getter,
-    /// which reads the slot directly, and `@:isVar`, which gives an accessor
-    /// pair one to work over.
-    ///
-    /// This is NARROWER than Haxe's physical-field rule, which also counts a
-    /// `default` or `null` SETTER: `var x(get, null)` is physical in Haxe and
-    /// takes no slot here. Widening this predicate moves the instance layout
-    /// of every class holding such a property, so it is a layout change in
-    /// its own right — not a comment fix.
+    /// layouts they build agree. Either accessor using `default` or `null`
+    /// requires a slot, as does `@:isVar` on a computed property.
     pub fn has_backing_storage(&self) -> bool {
-        self.is_var || matches!(self.getter, PropertyAccessor::Default)
+        self.is_var
+            || matches!(
+                self.getter,
+                PropertyAccessor::Default | PropertyAccessor::Null
+            )
+            || matches!(
+                self.setter,
+                PropertyAccessor::Default | PropertyAccessor::Null
+            )
     }
 }
 

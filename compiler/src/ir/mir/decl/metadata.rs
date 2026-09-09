@@ -190,12 +190,40 @@ impl<'a> HirToMirContext<'a> {
         let typedef = IrTypeDef {
             id: typedef_id,
             name: self
-                .string_interner
-                .get(class.name)
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+                .or_else(|| self.string_interner.get(class.name))
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,
             runtime_type_id: class_runtime_id,
+            instance_methods: class
+                .methods
+                .iter()
+                .filter(|m| !m.is_static)
+                .filter_map(|m| self.string_interner.get(m.function.name).map(str::to_owned))
+                .collect(),
+            static_fields: class
+                .fields
+                .iter()
+                .filter(|f| {
+                    f.is_static
+                        && f.property_access
+                            .as_ref()
+                            .is_none_or(|p| p.has_backing_storage())
+                })
+                .filter_map(|f| self.string_interner.get(f.name).map(str::to_owned))
+                .chain(
+                    class
+                        .methods
+                        .iter()
+                        .filter(|m| m.is_static)
+                        .filter_map(|m| {
+                            self.string_interner.get(m.function.name).map(str::to_owned)
+                        }),
+                )
+                .collect(),
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
@@ -700,6 +728,8 @@ impl<'a> HirToMirContext<'a> {
                 .to_string(),
             type_id,
             runtime_type_id: interface_runtime_id,
+            instance_methods: Vec::new(),
+            static_fields: Vec::new(),
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
@@ -732,6 +762,8 @@ impl<'a> HirToMirContext<'a> {
                 .to_string(),
             type_id,
             runtime_type_id: None,
+            instance_methods: Vec::new(),
+            static_fields: Vec::new(),
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Get underlying type
             },
@@ -833,6 +865,8 @@ impl<'a> HirToMirContext<'a> {
                         .to_string(),
                     type_id,
                     runtime_type_id: None,
+                    instance_methods: Vec::new(),
+                    static_fields: Vec::new(),
                     definition: IrTypeDefinition::Struct {
                         fields: ir_fields,
                         packed: false,
@@ -858,6 +892,8 @@ impl<'a> HirToMirContext<'a> {
                 .to_string(),
             type_id,
             runtime_type_id: None,
+            instance_methods: Vec::new(),
+            static_fields: Vec::new(),
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Convert aliased TypeId to IrType
             },

@@ -140,6 +140,8 @@ pub struct ClassInfo {
     /// `Reflect.field` to box the raw 8-byte slot value into a
     /// `DynamicValue` of the correct tag.
     pub instance_field_types: &'static [ParamType],
+    /// Own instance methods; these do not occupy object slots.
+    pub instance_methods: &'static [&'static str],
     /// Static fields (own class only)
     pub static_fields: &'static [&'static str],
 }
@@ -459,6 +461,26 @@ pub fn register_class_from_mir(
     instance_field_types: &[ParamType],
     static_fields: &[String],
 ) {
+    register_class_with_methods_from_mir(
+        type_id,
+        name,
+        super_type_id,
+        instance_fields,
+        instance_field_types,
+        static_fields,
+        &[],
+    );
+}
+
+pub fn register_class_with_methods_from_mir(
+    type_id: u32,
+    name: &str,
+    super_type_id: Option<u32>,
+    instance_fields: &[String],
+    instance_field_types: &[ParamType],
+    static_fields: &[String],
+    instance_methods: &[String],
+) {
     let class_name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
 
     let instance_fields_static: &'static [&'static str] = Box::leak(
@@ -495,6 +517,13 @@ pub fn register_class_from_mir(
         super_type_id,
         instance_fields: instance_fields_static,
         instance_field_types: instance_field_types_static,
+        instance_methods: Box::leak(
+            instance_methods
+                .iter()
+                .map(|name| -> &'static str { Box::leak(name.clone().into_boxed_str()) })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
         static_fields: static_fields_static,
     }));
 
@@ -608,7 +637,22 @@ pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
     if let Some(registry) = guard.as_ref() {
         if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
             if let Some(class_info) = &type_info.class_info {
-                return unsafe { build_string_array(class_info.instance_fields) };
+                let mut names = class_info.instance_fields.to_vec();
+                let mut current = Some(*class_info);
+                let mut visited = HashSet::new();
+                while let Some(info) = current {
+                    for name in info.instance_methods {
+                        if !names.contains(name) {
+                            names.push(name);
+                        }
+                    }
+                    current = info
+                        .super_type_id
+                        .filter(|id| visited.insert(*id))
+                        .and_then(|id| registry.get(&TypeId(id)))
+                        .and_then(|info| info.class_info);
+                }
+                return unsafe { build_string_array(&names) };
             }
         }
     }
@@ -3669,6 +3713,53 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
          (slot {slot}) — the receiver is not a registered class instance, or \
          its object header was overwritten"
     ));
+}
+
+/// Boxed metadata objects, kept alive for the lifetime of the loaded program.
+static RUNTIME_METADATA: RwLock<Option<HashMap<(u32, String), usize>>> = RwLock::new(None);
+
+pub fn register_runtime_metadata(type_id: u32, kind: &str, json: &str) {
+    let string = crate::haxe_string::HaxeString {
+        ptr: json.as_ptr() as *mut u8,
+        len: json.len(),
+        cap: 0,
+    };
+    let value = crate::json::haxe_json_parse(&string as *const _ as *const u8);
+    RUNTIME_METADATA
+        .write()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert((type_id, kind.to_owned()), value as usize);
+}
+
+fn runtime_metadata(type_id: i64, kind: &str) -> *mut u8 {
+    if let Some(value) = RUNTIME_METADATA
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|map| map.get(&(type_id as u32, kind.to_owned())).copied())
+    {
+        return value as *mut u8;
+    }
+    let empty = b"{}";
+    let string = crate::haxe_string::HaxeString {
+        ptr: empty.as_ptr() as *mut u8,
+        len: 2,
+        cap: 0,
+    };
+    crate::json::haxe_json_parse(&string as *const _ as *const u8)
+}
+#[no_mangle]
+pub extern "C" fn haxe_meta_get_type(type_id: i64) -> *mut u8 {
+    runtime_metadata(type_id, "type")
+}
+#[no_mangle]
+pub extern "C" fn haxe_meta_get_fields(type_id: i64) -> *mut u8 {
+    runtime_metadata(type_id, "fields")
+}
+#[no_mangle]
+pub extern "C" fn haxe_meta_get_statics(type_id: i64) -> *mut u8 {
+    runtime_metadata(type_id, "statics")
 }
 
 #[cfg(test)]

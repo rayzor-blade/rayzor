@@ -198,6 +198,23 @@ impl CompilationUnit {
             if !macro_diagnostics.is_empty() {
                 self.print_mir_diagnostics(&macro_diagnostics);
             }
+            let macro_errors: Vec<CompilationError> = expansion
+                .diagnostics
+                .iter()
+                .filter(|diag| matches!(diag.severity, crate::macro_system::MacroSeverity::Error))
+                .map(|diag| CompilationError {
+                    message: format!("[E0700] {}", diag.message),
+                    location: diag.location,
+                    category: ErrorCategory::MacroExpansionError,
+                    suggestion: None,
+                    related_errors: Vec::new(),
+                })
+                .collect();
+            if !macro_errors.is_empty() {
+                // Definitions are stripped by expansion. Lowering the failed
+                // call afterwards would replace its cause with a name error.
+                return Err(macro_errors);
+            }
             if expansion.expansions_count > 0 {
                 debug!(
                     "Macro expansion: {} macros expanded in {}",
@@ -1306,6 +1323,16 @@ impl CompilationUnit {
         } // end if !is_stdlib_file (stdlib merge + renumbering)
         file_merge_ms =
             finish_profile_ms(&mut self.typecheck_timings.stdlib_merge_ms, t_stdlib_merge);
+
+        super::runtime_metadata::attach(&mut mir_module, ast_file, source).map_err(|message| {
+            vec![CompilationError {
+                message,
+                location: SourceLocation::unknown(),
+                category: ErrorCategory::TypeError,
+                suggestion: None,
+                related_errors: Vec::new(),
+            }]
+        })?;
 
         // Dump MIR after stdlib merge so wrapper bodies are visible
         if std::env::var("RAYZOR_DUMP_MIR").is_ok() {

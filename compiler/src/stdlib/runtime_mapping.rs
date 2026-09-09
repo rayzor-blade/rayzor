@@ -4244,6 +4244,12 @@ impl StdlibMapping {
             // Type.getEnum(e:EnumValue):Enum<Dynamic> — compiler injects enum type_id
             map_method!(static "Type", "getEnum" => "haxe_type_get_enum", params: 1, returns: primitive,
                 types: &[I64, I32] => I64),
+            map_method!(static "haxe.rtti.Meta", "getType" => "haxe_meta_get_type", params: 1, returns: primitive,
+                types: &[I64] => PtrVoid),
+            map_method!(static "haxe.rtti.Meta", "getFields" => "haxe_meta_get_fields", params: 1, returns: primitive,
+                types: &[I64] => PtrVoid),
+            map_method!(static "haxe.rtti.Meta", "getStatics" => "haxe_meta_get_statics", params: 1, returns: primitive,
+                types: &[I64] => PtrVoid),
             // Type.getClassName(c:Class<Dynamic>):String
             map_method!(static "Type", "getClassName" => "haxe_type_get_class_name", params: 1, returns: complex,
                 types: &[I64] => PtrString),

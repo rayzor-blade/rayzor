@@ -46,6 +46,48 @@ impl<'a> HirToMirContext<'a> {
             .get_symbol(*symbol)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("?");
+        if matches!(vname, "contains" | "indexOf" | "lastIndexOf") && *is_method && args.len() >= 2
+        {
+            let string_elements = self.type_table.get(args[0].ty).is_some_and(|t| {
+                matches!(&t.kind, TypeKind::Array { element_type }
+                    if self.convert_type(*element_type) == IrType::String)
+            });
+            if string_elements {
+                let arr = self.lower_expression(&args[0])?;
+                let value = self.lower_expression(&args[1])?;
+                let from = if let Some(arg) = args.get(2) {
+                    self.lower_expression(arg)?
+                } else {
+                    self.builder
+                        .build_const(IrValue::I64(if vname == "lastIndexOf" { -1 } else { 0 }))?
+                };
+                let reverse = self
+                    .builder
+                    .build_const(IrValue::I32(i32::from(vname == "lastIndexOf")))?;
+                let function = self.get_or_register_extern_function(
+                    "haxe_array_string_index_of",
+                    vec![
+                        IrType::Ptr(Box::new(IrType::U8)),
+                        IrType::String,
+                        IrType::I64,
+                        IrType::I32,
+                    ],
+                    IrType::I64,
+                );
+                let index = self.builder.build_call_direct(
+                    function,
+                    vec![arr, value, from, reverse],
+                    IrType::I64,
+                )?;
+                return if vname == "contains" {
+                    let zero = self.builder.build_const(IrValue::I64(0))?;
+                    self.builder.build_cmp(CompareOp::Ge, index, zero)
+                } else {
+                    Some(index)
+                };
+            }
+        }
+
         // Array<Float>.push on WASM32 (Variable-callee shape, where the
         // receiver is desugared to args[0] and the value to args[1]).
         // The generic `array_push` MIR wrapper takes an I64 value param,

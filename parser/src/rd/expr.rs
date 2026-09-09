@@ -1432,6 +1432,30 @@ impl<'a, 'b> RdParser<'a, 'b> {
     /// here doesn't need to know about or-patterns.
     fn parse_case_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
         match self.stream.peek().kind {
+            TokenKind::LParen => {
+                let saved = self.stream.save();
+                self.stream.advance();
+                if let Ok(pattern) = self.parse_case_pattern() {
+                    if self.stream.eat(TokenKind::RParen).is_some() {
+                        return Ok(pattern);
+                    }
+                }
+                self.stream.restore(saved);
+                let expr = self.parse_expression()?;
+                if let ExprKind::TypeCheck {
+                    expr: inner,
+                    type_hint,
+                } = &expr.kind
+                {
+                    if let ExprKind::Ident(var) = &inner.kind {
+                        return Ok(Pattern::Type {
+                            var: var.clone(),
+                            type_hint: type_hint.clone(),
+                        });
+                    }
+                }
+                Ok(Pattern::Const(expr))
+            }
             // Underscore wildcard: `case _:`
             TokenKind::Ident if self.stream.current_text() == "_" => {
                 self.stream.advance();

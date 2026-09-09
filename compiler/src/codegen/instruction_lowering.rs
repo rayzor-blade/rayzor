@@ -447,6 +447,25 @@ impl CraneliftBackend {
         operand: IrId,
     ) -> Result<Value, String> {
         let val = *self.value_map.get(&operand).ok_or("Operand not found")?;
+        let val = if matches!(op, UnaryOp::Neg | UnaryOp::FNeg) && ty.is_float() {
+            let float_ty = if *ty == IrType::F32 {
+                types::F32
+            } else {
+                types::F64
+            };
+            let actual = builder.func.dfg.value_type(val);
+            if actual.is_int() {
+                builder.ins().fcvt_from_sint(float_ty, val)
+            } else if actual == types::F32 && float_ty == types::F64 {
+                builder.ins().fpromote(float_ty, val)
+            } else if actual == types::F64 && float_ty == types::F32 {
+                builder.ins().fdemote(float_ty, val)
+            } else {
+                val
+            }
+        } else {
+            val
+        };
 
         let value = match op {
             UnaryOp::Neg => {
@@ -979,6 +998,25 @@ impl CraneliftBackend {
         operand: IrId,
     ) -> Result<Value, String> {
         let val = *value_map.get(&operand).ok_or("Operand not found")?;
+        let val = if matches!(op, UnaryOp::Neg | UnaryOp::FNeg) && ty.is_float() {
+            let float_ty = if *ty == IrType::F32 {
+                types::F32
+            } else {
+                types::F64
+            };
+            let actual = builder.func.dfg.value_type(val);
+            if actual.is_int() {
+                builder.ins().fcvt_from_sint(float_ty, val)
+            } else if actual == types::F32 && float_ty == types::F64 {
+                builder.ins().fpromote(float_ty, val)
+            } else if actual == types::F64 && float_ty == types::F32 {
+                builder.ins().fdemote(float_ty, val)
+            } else {
+                val
+            }
+        } else {
+            val
+        };
 
         let value = match op {
             UnaryOp::Neg => {

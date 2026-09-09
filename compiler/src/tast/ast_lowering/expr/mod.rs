@@ -677,6 +677,36 @@ impl<'a> AstLowering<'a> {
                             right: Box::new(value_expr),
                         }
                     }
+                    parser::AssignOp::AddAssign
+                    | parser::AssignOp::SubAssign
+                    | parser::AssignOp::MulAssign
+                    | parser::AssignOp::DivAssign
+                    | parser::AssignOp::ModAssign
+                        if matches!(
+                            self.context
+                                .type_table
+                                .borrow()
+                                .get(target_expr.expr_type)
+                                .map(|t| &t.kind),
+                            Some(TypeKind::Abstract { .. })
+                        ) =>
+                    {
+                        // Preserve the operator until HIR overload resolution. An
+                        // op= overload may mutate its receiver and return Void.
+                        let operator = match op {
+                            parser::AssignOp::AddAssign => BinaryOperator::AddAssign,
+                            parser::AssignOp::SubAssign => BinaryOperator::SubAssign,
+                            parser::AssignOp::MulAssign => BinaryOperator::MulAssign,
+                            parser::AssignOp::DivAssign => BinaryOperator::DivAssign,
+                            parser::AssignOp::ModAssign => BinaryOperator::ModAssign,
+                            _ => unreachable!(),
+                        };
+                        TypedExpressionKind::BinaryOp {
+                            left: Box::new(target_expr),
+                            operator,
+                            right: Box::new(value_expr),
+                        }
+                    }
                     _ => {
                         // Compound assignment: target op= value
                         // This needs to be: target = target op value
@@ -2319,6 +2349,14 @@ impl<'a> AstLowering<'a> {
             parser::ExprKind::Int(n) => n.to_string(),
             parser::ExprKind::Float(f) => f.to_string(),
             parser::ExprKind::Bool(b) => b.to_string(),
+            parser::ExprKind::Assign { left, op, right } => {
+                format!(
+                    "{} {:?} {}",
+                    self.expr_to_string(left),
+                    op,
+                    self.expr_to_string(right)
+                )
+            }
             parser::ExprKind::Binary { left, op, right } => {
                 format!(
                     "{} {:?} {}",

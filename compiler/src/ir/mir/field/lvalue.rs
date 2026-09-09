@@ -182,16 +182,19 @@ impl<'a> HirToMirContext<'a> {
                     if !self.is_inside_own_accessor(obj_reg, *setter_method_name) =>
                 {
                     let setter_func_id = self
-                        .function_map
-                        .iter()
-                        .find(|(sym_id, _)| {
-                            if let Some(symbol) = self.symbol_table.get_symbol(**sym_id) {
-                                symbol.name == *setter_method_name
-                            } else {
-                                false
-                            }
-                        })
-                        .map(|(_, func_id)| *func_id);
+                        .resolve_method_function_id(object.ty, *setter_method_name)
+                        .or_else(|| {
+                            self.function_map
+                                .iter()
+                                .find(|(sym_id, _)| {
+                                    if let Some(symbol) = self.symbol_table.get_symbol(**sym_id) {
+                                        symbol.name == *setter_method_name
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .map(|(_, func_id)| *func_id)
+                        });
 
                     if let Some(func_id) = setter_func_id {
                         // Setters take (this, value) and return the value set.
@@ -326,7 +329,7 @@ impl<'a> HirToMirContext<'a> {
         // Anonymous types (or typedef aliases to one) store by sorted
         // field index through rayzor_anon_set_field_by_index.
         {
-            let resolved_obj_ty = self.resolve_through_aliases(object.ty);
+            let resolved_obj_ty = self.resolve_storage_type(object.ty);
             let is_anon = {
                 let type_table = self.type_table;
                 if let Some(ty_info) = type_table.get(resolved_obj_ty) {

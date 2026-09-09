@@ -512,10 +512,12 @@ impl<'a> HirToMirContext<'a> {
                                         // on the value disambiguate: Mutex.lock() yields a
                                         // MutexGuard, which then resolves .get()/.unlock().
                                         if let Some(result_reg) = final_result {
-                                            let return_class =
-                                                self.get_return_class_hint(class_name, method_name);
-                                            self.register_class_hints
-                                                .insert(result_reg, return_class.to_string());
+                                            self.record_stdlib_return_hint(
+                                                result_reg,
+                                                expr.ty,
+                                                class_name,
+                                                method_name,
+                                            );
                                             if let Some(h) =
                                                 self.wrap_stdlib_iter_result(result_reg, expr.ty)
                                             {

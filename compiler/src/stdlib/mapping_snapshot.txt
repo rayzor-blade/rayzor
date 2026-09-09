@@ -305,6 +305,9 @@ haxe.iterators.ArrayIterator hasNext static=false ctor=false params=0 -> ArrayIt
 haxe.iterators.ArrayIterator next static=false ctor=false params=0 -> ArrayIterator_next
 haxe.iterators.ArrayKeyValueIterator hasNext static=false ctor=false params=0 -> ArrayKeyValueIterator_hasNext
 haxe.iterators.ArrayKeyValueIterator next static=false ctor=false params=0 -> ArrayKeyValueIterator_next
+haxe.rtti.Meta getFields static=true ctor=false params=1 -> haxe_meta_get_fields
+haxe.rtti.Meta getStatics static=true ctor=false params=1 -> haxe_meta_get_statics
+haxe.rtti.Meta getType static=true ctor=false params=1 -> haxe_meta_get_type
 haxe.zip.Compress close static=false ctor=false params=0 -> rayzor_compress_close
 haxe.zip.Compress execute static=false ctor=false params=4 -> rayzor_compress_execute
 haxe.zip.Compress new static=true ctor=true params=1 -> rayzor_compress_new

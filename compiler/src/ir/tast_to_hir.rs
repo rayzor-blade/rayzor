@@ -202,6 +202,9 @@ impl<'a> TastToHirContext<'a> {
             // so that abstract @:op resolves regardless of which file declared it.
             for abstract_def in &file.abstracts {
                 for method in &abstract_def.methods {
+                    if method.body.is_empty() {
+                        continue;
+                    }
                     for (op_str, _params) in &method.metadata.operator_metadata {
                         if let Some(op) = Self::parse_operator_from_metadata(op_str) {
                             let key = Self::op_key_for_binary(&op);
@@ -220,6 +223,17 @@ impl<'a> TastToHirContext<'a> {
     fn op_key_for_binary(op: &BinaryOperator) -> String {
         match op {
             BinaryOperator::Add => "Add",
+            BinaryOperator::Ushr => "Ushr",
+            BinaryOperator::Shr => "Shr",
+            BinaryOperator::Shl => "Shl",
+            BinaryOperator::BitXor => "BitXor",
+            BinaryOperator::BitOr => "BitOr",
+            BinaryOperator::BitAnd => "BitAnd",
+            BinaryOperator::ModAssign => "ModAssign",
+            BinaryOperator::DivAssign => "DivAssign",
+            BinaryOperator::MulAssign => "MulAssign",
+            BinaryOperator::SubAssign => "SubAssign",
+            BinaryOperator::AddAssign => "AddAssign",
             BinaryOperator::Sub => "Sub",
             BinaryOperator::Mul => "Mul",
             BinaryOperator::Div => "Div",
@@ -2318,13 +2332,42 @@ impl<'a> TastToHirContext<'a> {
                 if let Some((method_symbol, _owner_symbol, is_class)) =
                     op_method.filter(|_| !skip_simd_vector_arith)
                 {
+                    let method_info = self.symbol_table.get_symbol(method_symbol);
+                    let is_static = method_info.is_some_and(|m| {
+                        m.flags.contains(crate::tast::symbols::SymbolFlags::STATIC)
+                    });
+                    let result_type = method_info
+                        .and_then(|m| {
+                            let table = self.type_table.borrow();
+                            table.get(m.type_id).and_then(|t| match &t.kind {
+                                TypeKind::Function { return_type, .. } => Some(*return_type),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or(expr.expr_type);
+                    if is_static {
+                        let synthesized = TypedExpression {
+                            expr_type: result_type,
+                            kind: TypedExpressionKind::StaticMethodCall {
+                                class_symbol: _owner_symbol,
+                                method_symbol,
+                                arguments: vec![(**left).clone(), (**right).clone()],
+                                type_arguments: vec![],
+                            },
+                            usage: expr.usage,
+                            lifetime_id: expr.lifetime_id,
+                            source_location: expr.source_location,
+                            metadata: expr.metadata.clone(),
+                        };
+                        return self.lower_expression(&synthesized);
+                    }
                     if !is_class {
                         // Abstract: try inline first (existing path); fall through if not inlinable.
                         if let Some(inlined) = self.try_inline_abstract_method(
                             left,
                             method_symbol,
                             &[(**right).clone()],
-                            expr.expr_type,
+                            result_type,
                             expr.source_location,
                         ) {
                             return inlined;
@@ -2341,22 +2384,6 @@ impl<'a> TastToHirContext<'a> {
                     // type matches the LHS. The TAST type-checker may have left
                     // `expr.expr_type` as a primitive default since it doesn't know
                     // class @:op return types yet.
-                    let result_type = {
-                        let type_table = self.type_table.borrow();
-                        let lhs_is_user = type_table
-                            .get(left.expr_type)
-                            .map(|t| {
-                                matches!(t.kind, TypeKind::Class { .. } | TypeKind::Abstract { .. })
-                            })
-                            .unwrap_or(false);
-                        drop(type_table);
-                        if lhs_is_user {
-                            left.expr_type
-                        } else {
-                            expr.expr_type
-                        }
-                    };
-
                     let synthesized = TypedExpression {
                         expr_type: result_type,
                         kind: TypedExpressionKind::MethodCall {
@@ -2372,6 +2399,30 @@ impl<'a> TastToHirContext<'a> {
                         metadata: expr.metadata.clone(),
                     };
                     return self.lower_expression(&synthesized);
+                }
+
+                let base_op = match operator {
+                    BinaryOperator::AddAssign => Some(BinaryOperator::Add),
+                    BinaryOperator::SubAssign => Some(BinaryOperator::Sub),
+                    BinaryOperator::MulAssign => Some(BinaryOperator::Mul),
+                    BinaryOperator::DivAssign => Some(BinaryOperator::Div),
+                    BinaryOperator::ModAssign => Some(BinaryOperator::Mod),
+                    _ => None,
+                };
+                if let Some(base_op) = base_op {
+                    let mut binary = expr.clone();
+                    binary.kind = TypedExpressionKind::BinaryOp {
+                        left: left.clone(),
+                        operator: base_op,
+                        right: right.clone(),
+                    };
+                    let mut assignment = expr.clone();
+                    assignment.kind = TypedExpressionKind::BinaryOp {
+                        left: left.clone(),
+                        operator: BinaryOperator::Assign,
+                        right: Box::new(binary),
+                    };
+                    return self.lower_expression(&assignment);
                 }
 
                 // Check if this is an assignment operator
@@ -4857,6 +4908,9 @@ impl<'a> TastToHirContext<'a> {
                 continue;
             }
             for method in &abstract_def.methods {
+                if method.body.is_empty() {
+                    continue;
+                }
                 for (op_str, _params) in &method.metadata.operator_metadata {
                     if let Some(parsed_op) = Self::parse_operator_from_metadata(op_str) {
                         if std::mem::discriminant(&parsed_op) == std::mem::discriminant(operator) {
@@ -4885,6 +4939,17 @@ impl<'a> TastToHirContext<'a> {
             // Match against known binary operators
             match operator {
                 "Add" => Some(BinaryOperator::Add),
+                "Ushr" => Some(BinaryOperator::Ushr),
+                "Shr" => Some(BinaryOperator::Shr),
+                "Shl" => Some(BinaryOperator::Shl),
+                "BitXor" => Some(BinaryOperator::BitXor),
+                "BitOr" => Some(BinaryOperator::BitOr),
+                "BitAnd" => Some(BinaryOperator::BitAnd),
+                "ModAssign" => Some(BinaryOperator::ModAssign),
+                "DivAssign" => Some(BinaryOperator::DivAssign),
+                "MulAssign" => Some(BinaryOperator::MulAssign),
+                "SubAssign" => Some(BinaryOperator::SubAssign),
+                "AddAssign" => Some(BinaryOperator::AddAssign),
                 "Sub" => Some(BinaryOperator::Sub),
                 "Mul" => Some(BinaryOperator::Mul),
                 "Div" => Some(BinaryOperator::Div),
@@ -5044,38 +5109,38 @@ impl<'a> TastToHirContext<'a> {
         None
     }
 
-    /// Try to inline a static abstract method call (e.g., Color.fromInt(1))
-    /// Returns Some(inlined_expr) if successful, None otherwise
-    /// Whether an expression tree holds a lambda anywhere inside it.
+    /// Whether an expression needs ordinary lowering to preserve its scope
+    /// or constructor semantics.
     ///
     /// Inlining rewrites parameter references by walking the tree; a lambda's
     /// body is not walked, so anything it captures would be left pointing at
     /// the inlined-away function's scope.
-    fn contains_function_literal(expr: &TypedExpression) -> bool {
+    fn requires_scoped_lowering(expr: &TypedExpression) -> bool {
         use crate::tast::node::TypedExpressionKind as K;
         match &expr.kind {
             K::FunctionLiteral { .. } => true,
-            K::New { arguments, .. } => arguments.iter().any(Self::contains_function_literal),
+            // New must pass through ordinary lowering: abstract constructors
+            // compute their underlying value there. The expression substitution
+            // path emits a raw HIR New and loses that constructor body.
+            K::New { .. } => true,
             K::MethodCall {
                 receiver,
                 arguments,
                 ..
             } => {
-                Self::contains_function_literal(receiver)
-                    || arguments.iter().any(Self::contains_function_literal)
+                Self::requires_scoped_lowering(receiver)
+                    || arguments.iter().any(Self::requires_scoped_lowering)
             }
             K::StaticMethodCall { arguments, .. } | K::FunctionCall { arguments, .. } => {
-                arguments.iter().any(Self::contains_function_literal)
+                arguments.iter().any(Self::requires_scoped_lowering)
             }
             K::BinaryOp { left, right, .. } => {
-                Self::contains_function_literal(left) || Self::contains_function_literal(right)
+                Self::requires_scoped_lowering(left) || Self::requires_scoped_lowering(right)
             }
-            K::UnaryOp { operand, .. } => Self::contains_function_literal(operand),
-            K::Cast { expression, .. } => Self::contains_function_literal(expression),
-            K::FieldAccess { object, .. } => Self::contains_function_literal(object),
-            K::ArrayLiteral { elements, .. } => {
-                elements.iter().any(Self::contains_function_literal)
-            }
+            K::UnaryOp { operand, .. } => Self::requires_scoped_lowering(operand),
+            K::Cast { expression, .. } => Self::requires_scoped_lowering(expression),
+            K::FieldAccess { object, .. } => Self::requires_scoped_lowering(object),
+            K::ArrayLiteral { elements, .. } => elements.iter().any(Self::requires_scoped_lowering),
             _ => false,
         }
     }
@@ -5207,7 +5272,7 @@ impl<'a> TastToHirContext<'a> {
         // there ("Captured variable `c` not found in scope"). Lower the call
         // for real instead; the parameter then exists where the closure looks
         // for it.
-        if return_expr.is_some_and(Self::contains_function_literal) {
+        if return_expr.is_some_and(Self::requires_scoped_lowering) {
             return None;
         }
 
@@ -5246,6 +5311,25 @@ impl<'a> TastToHirContext<'a> {
         &mut self,
         class_type: TypeId,
         arguments: &[TypedExpression],
+        result_type: TypeId,
+    ) -> Option<HirExpr> {
+        if !matches!(
+            self.type_table.borrow().get(class_type).map(|t| &t.kind),
+            Some(TypeKind::Abstract { .. })
+        ) {
+            return None;
+        }
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(|arg| self.lower_expression(arg))
+            .collect();
+        self.expand_abstract_constructor_with_args(class_type, &arguments, result_type)
+    }
+
+    fn expand_abstract_constructor_with_args(
+        &mut self,
+        class_type: TypeId,
+        arguments: &[HirExpr],
         result_type: TypeId,
     ) -> Option<HirExpr> {
         let current_file = self.current_file?;
@@ -5294,8 +5378,7 @@ impl<'a> TastToHirContext<'a> {
         }
         let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
         for (param, arg) in ctor.parameters.iter().zip(arguments.iter()) {
-            let lowered = self.lower_expression(arg);
-            param_map.insert(param.symbol_id, lowered);
+            param_map.insert(param.symbol_id, arg.clone());
         }
 
         // The body computes the UNDERLYING value, not the abstract: `this = f * 2`
@@ -5739,6 +5822,36 @@ impl<'a> TastToHirContext<'a> {
                     right.expr_type,
                 );
 
+                if *operator == BinaryOperator::Assign {
+                    let lhs = match &lowered_left.kind {
+                        HirExprKind::Variable { symbol, .. } => Some(HirLValue::Variable(*symbol)),
+                        HirExprKind::Field { object, field } => Some(HirLValue::Field {
+                            object: object.clone(),
+                            field: *field,
+                        }),
+                        HirExprKind::Index { object, index } => Some(HirLValue::Index {
+                            object: object.clone(),
+                            index: index.clone(),
+                        }),
+                        _ => None,
+                    };
+                    if let Some(lhs) = lhs {
+                        return HirExpr::new(
+                            HirExprKind::Block(HirBlock {
+                                statements: vec![HirStatement::Assign {
+                                    lhs,
+                                    rhs: lowered_right,
+                                    op: None,
+                                }],
+                                expr: Some(Box::new(lowered_left)),
+                                scope: self.current_scope,
+                            }),
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                    }
+                }
                 HirExpr::new(
                     HirExprKind::Binary {
                         op: self.convert_binary_op(operator),
@@ -5771,6 +5884,88 @@ impl<'a> TastToHirContext<'a> {
                 )
             }
 
+            TypedExpressionKind::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let condition = self.inline_expression_deep(
+                    condition,
+                    this_replacement,
+                    param_map,
+                    condition.expr_type,
+                );
+                let then_expr = self.inline_expression_deep(
+                    then_expr,
+                    this_replacement,
+                    param_map,
+                    then_expr.expr_type,
+                );
+                let else_expr = else_expr
+                    .as_ref()
+                    .map(|value| {
+                        self.inline_expression_deep(
+                            value,
+                            this_replacement,
+                            param_map,
+                            value.expr_type,
+                        )
+                    })
+                    .unwrap_or_else(|| self.make_null_literal());
+                HirExpr::new(
+                    HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_expr: Box::new(then_expr),
+                        else_expr: Box::new(else_expr),
+                    },
+                    expr.expr_type,
+                    self.current_lifetime,
+                    expr.source_location,
+                )
+            }
+
+            // Aggregate initializers can reference the constructor's parameters
+            // just like arithmetic. Ordinary lowering here loses those bindings.
+            TypedExpressionKind::ObjectLiteral { fields, .. } => HirExpr::new(
+                HirExprKind::ObjectLiteral {
+                    fields: fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.name.clone(),
+                                self.inline_expression_deep(
+                                    &field.value,
+                                    this_replacement,
+                                    param_map,
+                                    field.value.expr_type,
+                                ),
+                            )
+                        })
+                        .collect(),
+                },
+                expr.expr_type,
+                self.current_lifetime,
+                expr.source_location,
+            ),
+            TypedExpressionKind::ArrayLiteral { elements } => HirExpr::new(
+                HirExprKind::Array {
+                    elements: elements
+                        .iter()
+                        .map(|element| {
+                            self.inline_expression_deep(
+                                element,
+                                this_replacement,
+                                param_map,
+                                element.expr_type,
+                            )
+                        })
+                        .collect(),
+                },
+                expr.expr_type,
+                self.current_lifetime,
+                expr.source_location,
+            ),
+
             // For New expressions, recursively inline constructor arguments
             TypedExpressionKind::New {
                 class_type,
@@ -5792,6 +5987,14 @@ impl<'a> TastToHirContext<'a> {
                 } else {
                     *class_type
                 };
+
+                if let Some(value) = self.expand_abstract_constructor_with_args(
+                    fixed_class_type,
+                    &lowered_args,
+                    expected_type,
+                ) {
+                    return value;
+                }
 
                 // Use class_name from TAST if available, otherwise extract from TypeId
                 let class_name = tast_class_name.or_else(|| {

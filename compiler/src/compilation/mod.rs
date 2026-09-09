@@ -547,6 +547,7 @@ mod externs;
 mod imports;
 mod manifest;
 mod ownership;
+mod runtime_metadata;
 mod sources;
 
 /// The name of a type parameter a manifest type refers to, if that is all it

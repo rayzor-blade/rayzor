@@ -128,6 +128,14 @@ pub struct IrTypeDef {
     #[serde(default)]
     pub runtime_type_id: Option<u32>,
 
+    /// Own method names, separate from physical object slots.
+    #[serde(default)]
+    pub instance_methods: Vec<String>,
+
+    /// Own static variables and methods exposed by Type.getClassFields.
+    #[serde(default)]
+    pub static_fields: Vec<String>,
+
     /// Type definition
     pub definition: IrTypeDefinition,
 

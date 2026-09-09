@@ -844,6 +844,7 @@ fn ensure_jemalloc() {}
 
 fn main() {
     ensure_jemalloc();
+    rayzor_runtime::crash_diagnostics::install();
     #[cfg(feature = "profile")]
     unsafe {
         rayzor_runtime::ensure_alloc_dump_hooks();

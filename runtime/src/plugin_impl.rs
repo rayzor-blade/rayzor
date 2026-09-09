@@ -179,6 +179,14 @@ register_symbol!("haxe_array_splice", crate::haxe_array::haxe_array_splice);
 
 // Search & Query
 register_symbol!(
+    "haxe_array_get_erased",
+    crate::haxe_array::haxe_array_get_erased
+);
+register_symbol!(
+    "haxe_array_string_index_of",
+    crate::haxe_array::haxe_array_string_index_of
+);
+register_symbol!(
     "haxe_array_index_of",
     crate::haxe_array::haxe_array_index_of
 );
@@ -2162,3 +2170,13 @@ impl rayzor_plugin::RuntimePlugin for RayzorRuntimePlugin {
             .collect()
     }
 }
+
+register_symbol!("haxe_meta_get_type", crate::type_system::haxe_meta_get_type);
+register_symbol!(
+    "haxe_meta_get_fields",
+    crate::type_system::haxe_meta_get_fields
+);
+register_symbol!(
+    "haxe_meta_get_statics",
+    crate::type_system::haxe_meta_get_statics
+);

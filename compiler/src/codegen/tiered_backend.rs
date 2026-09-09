@@ -2855,8 +2855,9 @@ impl TieredBackend {
 
     /// Register class RTTI from a single MIR module's type definitions.
     fn register_class_rtti_from_module(module: &IrModule) {
+        CraneliftBackend::register_runtime_metadata_from_module(module);
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::register_class_from_mir;
+        use rayzor_runtime::type_system::register_class_with_methods_from_mir;
 
         // Map raw TypeId → deterministic registry id so the registered super
         // pointer matches the registry key (see cranelift_backend for rationale).
@@ -2889,7 +2890,7 @@ impl TieredBackend {
                     .filter(|f| f.name != "__type_id")
                     .map(|f| CraneliftBackend::ir_type_to_param_type(&f.ty))
                     .collect();
-                let static_fields: Vec<String> = Vec::new();
+                let static_fields = &typedef.static_fields;
 
                 let super_type_id = typedef
                     .super_type_id
@@ -2902,13 +2903,14 @@ impl TieredBackend {
                     .runtime_type_id
                     .map(|h| h as u32)
                     .unwrap_or(typedef.type_id.0);
-                register_class_from_mir(
+                register_class_with_methods_from_mir(
                     rtti_key,
                     &typedef.name,
                     super_type_id,
                     &instance_fields,
                     &instance_field_types,
                     &static_fields,
+                    &typedef.instance_methods,
                 );
             }
         }

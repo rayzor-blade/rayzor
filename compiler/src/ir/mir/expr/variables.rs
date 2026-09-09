@@ -90,6 +90,10 @@ impl<'a> HirToMirContext<'a> {
                         }) as i64;
                 return self.builder.build_const(IrValue::I64(runtime_type_id));
             }
+            if sym.kind == SymbolKind::Interface {
+                let id = self.deterministic_iface_or_enum_type_id(sym.id, "iface")?;
+                return self.builder.build_const(IrValue::I64(id as i64));
+            }
             if sym.kind == SymbolKind::Enum {
                 let runtime_type_id = self.enum_runtime_id(sym.id) as i64;
                 return self.builder.build_const(IrValue::I64(runtime_type_id));
