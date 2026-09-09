@@ -445,6 +445,8 @@ impl<'a> TypeResolver<'a> {
                 self.collect_type_refs_from_parser_type(right, deps, declared_names);
             }
             ParserType::Wildcard { .. } => {}
+            // A `@:const` argument is a value, not a name to resolve.
+            ParserType::Const { .. } => {}
         }
     }
 
@@ -999,6 +1001,8 @@ impl<'a> TypeResolver<'a> {
                 // Wildcard types become Dynamic
                 Ok(self.type_table.borrow().dynamic_type())
             }
+            // A `@:const` argument occupies the slot without naming a type.
+            ParserType::Const { .. } => Ok(self.type_table.borrow().dynamic_type()),
         }
     }
 

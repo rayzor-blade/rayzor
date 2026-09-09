@@ -533,6 +533,7 @@ impl<'a> AstLowering<'a> {
                     || self.type_might_reference_undefined_params(right)
             }
             Type::Wildcard { .. } => false,
+            Type::Const { .. } => false,
         }
     }
 

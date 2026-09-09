@@ -568,6 +568,9 @@ pub enum Type {
     },
     /// Wildcard type: `?` (used in type parameters)
     Wildcard { span: Span },
+    /// A constant standing in a type position: the `12` of `X<'foo', 12>`,
+    /// which a `@:const` type parameter binds as a value.
+    Const { value: Box<Expr>, span: Span },
 }
 
 /// Type path

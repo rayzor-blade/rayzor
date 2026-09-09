@@ -319,12 +319,48 @@ impl<'a, 'b> RdParser<'a, 'b> {
         })
     }
 
+    /// A literal in type-argument position, or None when a real type follows.
+    pub(crate) fn parse_const_type_arg(&mut self) -> Result<Option<Type>, ParseError> {
+        let token = self.stream.peek();
+        let is_const = matches!(
+            token.kind,
+            TokenKind::IntLit
+                | TokenKind::FloatLit
+                | TokenKind::StringLit
+                | TokenKind::RegexLit
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+        ) || (token.kind == TokenKind::Minus
+            && matches!(
+                self.stream.peek_at(1).kind,
+                TokenKind::IntLit | TokenKind::FloatLit
+            ));
+        if !is_const {
+            return Ok(None);
+        }
+        let start = token.span.start;
+        // The atom only: `parse_expression` would read `Something<10> = null`
+        // as a comparison and swallow the closing `>`.
+        let value = self.parse_unary()?;
+        let end = value.span.end;
+        Ok(Some(Type::Const {
+            value: Box::new(value),
+            span: Span::new(start, end),
+        }))
+    }
+
     fn parse_type_param_args(&mut self) -> Result<Vec<Type>, ParseError> {
         self.stream.expect(TokenKind::Lt)?;
         let mut args = Vec::new();
 
         while !self.stream.at_closing_gt() && !self.stream.is_eof() {
-            args.push(self.parse_type()?);
+            // A `@:const` type parameter takes a constant, not a type:
+            // `new X<'foo', 12>()`. Parsing it as a type fails on the literal.
+            if let Some(constant) = self.parse_const_type_arg()? {
+                args.push(constant);
+            } else {
+                args.push(self.parse_type()?);
+            }
             if !self.stream.at_closing_gt() {
                 self.stream.eat(TokenKind::Comma);
             }
@@ -393,6 +429,7 @@ impl Type {
             Type::Parenthesis { span, .. } => *span,
             Type::Intersection { span, .. } => *span,
             Type::Wildcard { span } => *span,
+            Type::Const { span, .. } => *span,
         }
     }
 }

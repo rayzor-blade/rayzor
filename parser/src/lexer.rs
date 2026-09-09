@@ -157,6 +157,15 @@ impl<'a> Lexer<'a> {
 
             // Dot — could be . or ...
             b'.' => {
+                // `.34` is a float in Haxe; the leading digit is optional.
+                if self.peek().is_ascii_digit() {
+                    while self.pos < self.source.len()
+                        && (self.source[self.pos].is_ascii_digit() || self.source[self.pos] == b'_')
+                    {
+                        self.pos += 1;
+                    }
+                    return self.finish_number(start, true);
+                }
                 if self.peek() == b'.' && self.peek_at(1) == b'.' {
                     self.pos += 2;
                     Ok(Token::new(TokenKind::DotDotDot, start, self.pos))
@@ -509,6 +518,12 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        self.finish_number(start, is_float)
+    }
+
+    /// Exponent, numeric suffix and the int/float verdict, shared by a
+    /// number that began with a digit and one that began with `.`.
+    fn finish_number(&mut self, start: usize, mut is_float: bool) -> Result<Token, LexError> {
         // Optional exponent: e/E [+/-] digits. Valid after a bare integer
         // (`1e5`, `1e-5`) OR after a fractional part (`1.0e5`). The
         // exponent digits MUST follow — otherwise the `e` is an

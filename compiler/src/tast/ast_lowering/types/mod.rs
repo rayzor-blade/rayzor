@@ -529,6 +529,9 @@ impl<'a> AstLowering<'a> {
                 // Wildcard types are used in type parameters, return Unknown type
                 Ok(self.context.type_table.borrow().unknown_type())
             }
+            // A `@:const` argument names no type; the value it binds is not
+            // modelled yet, so the slot resolves as unknown.
+            Type::Const { .. } => Ok(self.context.type_table.borrow().unknown_type()),
         }
     }
 

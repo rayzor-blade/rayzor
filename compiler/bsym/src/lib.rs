@@ -909,6 +909,9 @@ fn type_to_blade(ty: &parser::Type) -> BladeType {
             right: Box::new(type_to_blade(right)),
         },
         parser::Type::Wildcard { .. } => BladeType::Wildcard,
+        // A `@:const` argument carries a value, which the symbol table has
+        // no place for; the slot it occupies is what matters here.
+        parser::Type::Const { .. } => BladeType::Wildcard,
     }
 }
 /// Extract every declaration in a standard library rooted at `stdlib_root`.

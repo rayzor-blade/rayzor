@@ -754,6 +754,7 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
                 }
             }
             Type::Wildcard { .. } => {}
+            Type::Const { .. } => {}
         }
     }
 

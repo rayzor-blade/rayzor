@@ -208,7 +208,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+    pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
 
         // Expression-level metadata: `@:privateAccess obj.field`. Haxe allows
@@ -1851,7 +1851,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::Lt)?;
         let mut args = Vec::new();
         while !self.stream.at_closing_gt() && !self.stream.is_eof() {
-            args.push(self.parse_type()?);
+            // `new X<'foo', 12>()` passes constants where types normally go.
+            if let Some(constant) = self.parse_const_type_arg()? {
+                args.push(constant);
+            } else {
+                args.push(self.parse_type()?);
+            }
             if !self.stream.at_closing_gt() {
                 self.stream.eat(TokenKind::Comma);
             }
