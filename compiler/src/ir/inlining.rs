@@ -596,10 +596,33 @@ impl InliningPass {
             // Handle terminator
             let new_terminator = match &old_block.terminator {
                 IrTerminator::Return { value } => {
-                    // Collect return value for merging at continuation block.
-                    if let (Some(_dest), Some(val)) = (call_site.dest, value) {
-                        let mapped_val = *reg_map.get(val).unwrap_or(val);
-                        return_phi_incoming.push((new_block_id, mapped_val));
+                    // Every return block becomes a predecessor of the
+                    // continuation, so every one of them owes it a value. A
+                    // valueless return off the end of a value-returning body
+                    // (`switch` whose cases all return) would otherwise leave
+                    // the merged register undefined along that edge.
+                    if call_site.dest.is_some() {
+                        let incoming = match value {
+                            Some(val) => *reg_map.get(val).unwrap_or(val),
+                            None => {
+                                let filler = IrId::new(*next_reg_id);
+                                *next_reg_id += 1;
+                                let ty = callee.signature.return_type.clone();
+                                // Undef and Void are not constants any backend
+                                // can emit; a null word stands in for them.
+                                let value = match ty.default_value() {
+                                    IrValue::Undef | IrValue::Void => IrValue::Null,
+                                    representable => representable,
+                                };
+                                new_instructions.push(IrInstruction::Const {
+                                    dest: filler,
+                                    value,
+                                });
+                                caller.register_types.insert(filler, ty);
+                                filler
+                            }
+                        };
+                        return_phi_incoming.push((new_block_id, incoming));
                     }
                     IrTerminator::Branch {
                         target: continuation_block,
