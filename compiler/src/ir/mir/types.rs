@@ -424,6 +424,62 @@ impl<'a> HirToMirContext<'a> {
     /// scalar's bits, as a plain Int passed there does.
     /// `arg_types` are the HIR types aligned with `arg_regs` (None for a
     /// receiver that has no HIR expression).
+    /// Hand an imported callee's erased slot raw bits, not a box address.
+    ///
+    /// A function whose return type is INFERRED from `Map.get` records
+    /// `Dynamic` rather than `Null<Int>`, so the Optional unboxing above does
+    /// not recognise it and the erased slot carries the box ADDRESS -- which
+    /// the callee prints as a huge integer. Only the runtime knows what the
+    /// box holds, so it decides: an Int or Bool comes back as its value, and
+    /// anything genuinely a reference keeps its address.
+    ///
+    /// This is confined to IMPORTED callees, whose erased slots follow the
+    /// raw-bits convention. A local generic still reaches the monomorphizer,
+    /// which needs to see the box to keep `Dynamic == Dynamic` structural.
+    pub(crate) fn normalize_dynamic_args_for_erased_formals(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut [IrId],
+        arg_types: &[Option<crate::tast::TypeId>],
+        skip_first: bool,
+    ) {
+        let Some(param_types) = self.external_function_param_types.get(&func_id).cloned() else {
+            return;
+        };
+        let start = if skip_first { 1 } else { 0 };
+        for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
+            if !matches!(param_types.get(i), Some(IrType::I64)) {
+                continue;
+            }
+            if !matches!(
+                self.builder.get_register_type(*arg_reg),
+                Some(IrType::Ptr(_))
+            ) {
+                continue;
+            }
+            let Some(Some(hir_ty)) = arg_types.get(i).copied() else {
+                continue;
+            };
+            if !matches!(
+                self.type_table.get(hir_ty).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            ) {
+                continue;
+            }
+            let unbox = self.get_or_register_extern_function(
+                "haxe_unbox_scalar_or_addr",
+                vec![IrType::Ptr(Box::new(IrType::U8))],
+                IrType::I64,
+            );
+            if let Some(raw) = self
+                .builder
+                .build_call_direct(unbox, vec![*arg_reg], IrType::I64)
+            {
+                *arg_reg = raw;
+            }
+        }
+    }
+
     pub(crate) fn unbox_optional_args_for_erased_formals(
         &mut self,
         func_id: IrFunctionId,
@@ -477,6 +533,7 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        self.normalize_dynamic_args_for_erased_formals(func_id, arg_regs, arg_types, skip_first);
     }
 
     /// Like convert_type but returns TypeVar for TypeParameter types that match
