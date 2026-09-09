@@ -1330,8 +1330,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         i += 1;
                     }
                     let ident = &inner[ident_start..i];
+                    // `$this` is the keyword, not a name to look up: an
+                    // abstract's `'A($this)'` interpolates its underlying
+                    // value, and a class's interpolates the instance.
+                    let kind = if ident == "this" {
+                        ExprKind::This
+                    } else {
+                        ExprKind::Ident(ident.to_string())
+                    };
                     parts.push(StringPart::Interpolation(Expr {
-                        kind: ExprKind::Ident(ident.to_string()),
+                        kind,
                         span: Span::new(base_offset + ident_start, base_offset + i),
                     }));
                 } else {

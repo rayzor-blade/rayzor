@@ -761,8 +761,14 @@ fn interpolated_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResul
             }
 
             let (rest, id) = preceded(char('$'), identifier).parse(remaining)?;
+            // `$this` is the keyword, not a name to look up.
+            let kind = if id == "this" {
+                ExprKind::This
+            } else {
+                ExprKind::Ident(id)
+            };
             parts.push(StringPart::Interpolation(Expr {
-                kind: ExprKind::Ident(id),
+                kind,
                 span: Span::default(), // Will be fixed
             }));
             remaining = rest;
