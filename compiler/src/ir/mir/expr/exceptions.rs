@@ -438,6 +438,9 @@ impl<'a> HirToMirContext<'a> {
         // (exit_block, {var -> value}) captured at every path that reaches
         // the continuation, used to build the merge phis below.
         let mut tc_exits: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
+        // `try` is an EXPRESSION in Haxe: whichever path runs, its value is
+        // the result. Recorded per exiting path, merged at the continuation.
+        let mut value_exits: Vec<(IrBlockId, Option<IrId>)> = Vec::new();
 
         let normal_path_block = self.builder.create_block()?;
         let landing_pad_block = self.builder.create_block()?;
@@ -472,7 +475,7 @@ impl<'a> HirToMirContext<'a> {
 
         // --- normal_path: execute try body ---
         self.builder.switch_to_block(normal_path_block);
-        self.lower_expression(try_expr);
+        let try_value = self.lower_expression(try_expr);
 
         let pop_fn = self.get_or_register_extern_function(
             "rayzor_exception_pop_handler",
@@ -489,6 +492,7 @@ impl<'a> HirToMirContext<'a> {
         if !self.is_terminated() {
             if let Some(blk) = self.builder.current_block() {
                 tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
+                value_exits.push((blk, try_value));
             }
         }
         self.builder.build_branch(continuation_block);
@@ -604,7 +608,7 @@ impl<'a> HirToMirContext<'a> {
                     self.symbol_map.insert(*s, *reg);
                 }
                 self.symbol_map.insert(handler.exception_var, exception_id);
-                self.lower_expression(&handler.body);
+                let handler_value = self.lower_expression(&handler.body);
 
                 if let Some(finally_body) = &finally_expr {
                     self.lower_expression(finally_body);
@@ -612,6 +616,7 @@ impl<'a> HirToMirContext<'a> {
                 if !self.is_terminated() {
                     if let Some(blk) = self.builder.current_block() {
                         tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
+                        value_exits.push((blk, handler_value));
                     }
                 }
                 self.builder.build_branch(continuation_block);
@@ -630,6 +635,8 @@ impl<'a> HirToMirContext<'a> {
                 if !self.is_terminated() {
                     if let Some(blk) = self.builder.current_block() {
                         tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
+                        // No catch matched, so this path carries no value.
+                        value_exits.push((blk, None));
                     }
                 }
                 self.builder.build_branch(continuation_block);
@@ -688,6 +695,36 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.insert(*s, phi_reg);
             }
         }
-        None // try/catch as statement has no return value
+        // A path that carries no value of its own -- the fallthrough where no
+        // catch matched -- contributes the type's default, so the phi is
+        // complete on every incoming edge.
+        let result_ty = self.convert_type(expr.ty);
+        if matches!(result_ty, IrType::Void) || value_exits.is_empty() {
+            return None;
+        }
+        let mut incoming = Vec::with_capacity(value_exits.len());
+        for (blk, value) in &value_exits {
+            match value {
+                Some(reg) => incoming.push((*blk, *reg)),
+                None => {
+                    let default = match result_ty.default_value() {
+                        IrValue::Undef | IrValue::Void => IrValue::Null,
+                        representable => representable,
+                    };
+                    self.builder.switch_to_block(*blk);
+                    match self.builder.build_const(default) {
+                        Some(reg) => incoming.push((*blk, reg)),
+                        None => return None,
+                    }
+                }
+            }
+        }
+        self.builder.switch_to_block(continuation_block);
+        let phi = self.builder.build_phi(continuation_block, result_ty)?;
+        for (blk, reg) in incoming {
+            self.builder
+                .add_phi_incoming(continuation_block, phi, blk, reg);
+        }
+        Some(phi)
     }
 }
