@@ -100,6 +100,41 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Infer the type of an expression based on its kind
+    /// `Array<S>` for `array.map(f)`, taking S from the callback's return.
+    fn mapped_array_result(
+        &mut self,
+        method_symbol: SymbolId,
+        receiver: &TypedExpression,
+        arguments: &[TypedExpression],
+    ) -> Option<TypeId> {
+        let name = self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.context.string_interner.get(s.name))?;
+        if name != "map" || arguments.len() != 1 {
+            return None;
+        }
+        let type_table = self.context.type_table.borrow();
+        if !matches!(
+            type_table.get(receiver.expr_type).map(|t| &t.kind),
+            Some(crate::tast::core::TypeKind::Array { .. })
+        ) {
+            return None;
+        }
+        let returns = match type_table.get(arguments[0].expr_type).map(|t| &t.kind) {
+            Some(crate::tast::core::TypeKind::Function { return_type, .. }) => *return_type,
+            _ => return None,
+        };
+        drop(type_table);
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_array_type(returns),
+        )
+    }
+
     pub(crate) fn infer_expression_type(
         &mut self,
         kind: &TypedExpressionKind,
@@ -575,8 +610,18 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::MethodCall {
                 receiver,
                 method_symbol,
+                arguments,
                 ..
             } => {
+                // `array.map(f)` is `Array<S>` where S is what f RETURNS. The
+                // method's own signature says Array<T>, the source element
+                // type, because the callback is not known where that is built
+                // -- and a wrong element type reaches `join`, which reads a
+                // String element as an Int and prints its address.
+                if let Some(mapped) = self.mapped_array_result(*method_symbol, receiver, arguments)
+                {
+                    return Ok(mapped);
+                }
                 // Extract return type from method signature and substitute type parameters
                 self.infer_method_call_return_type(*method_symbol, receiver.expr_type)
             }
