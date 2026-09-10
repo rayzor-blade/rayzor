@@ -1801,6 +1801,8 @@ impl StdlibMapping {
             map_method!(instance "String", "substr" => "haxe_string_substr_ptr", params: 2, returns: primitive,
                 types: &[PtrString, I32, I32] => PtrString),
             // substring uses MIR wrapper that forwards to haxe_string_substring_ptr
+            map_method!(instance "String", "substring" => "String_substring_1", params: 1, mir_wrapper,
+                types: &[PtrString, I32] => PtrString),
             map_method!(instance "String", "substring" => "String_substring", params: 2, mir_wrapper,
                 types: &[PtrString, I32, I32] => PtrString),
             // toLowerCase/toUpperCase use pointer-returning wrapper functions (not out-param style)

@@ -116,6 +116,7 @@ String length static=false ctor=false params=0 -> haxe_string_length
 String split static=false ctor=false params=1 -> haxe_string_split_array
 String substr static=false ctor=false params=1 -> String_substr_1
 String substr static=false ctor=false params=2 -> haxe_string_substr_ptr
+String substring static=false ctor=false params=1 -> String_substring_1
 String substring static=false ctor=false params=2 -> String_substring
 String toLowerCase static=false ctor=false params=0 -> haxe_string_lower
 String toString static=false ctor=false params=0 -> haxe_string_copy

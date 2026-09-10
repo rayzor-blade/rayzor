@@ -24,6 +24,7 @@ pub fn build_string_type(builder: &mut MirBuilder) {
     // MIR wrappers for charAt and substring
     build_string_charat_wrapper(builder);
     build_string_substring_wrapper(builder);
+    build_string_substring_1_wrapper(builder);
     // substr has 1-arg and 2-arg forms. The 2-arg form is mapped directly
     // to haxe_string_substr_ptr in runtime_mapping. The 1-arg form needs
     // a wrapper that defaults length to (string.length - pos).
@@ -443,6 +444,46 @@ fn build_string_substr_1_wrapper(builder: &mut MirBuilder) {
         .get_function_by_name("haxe_string_substr_ptr")
         .expect("haxe_string_substr_ptr not found");
     let result = builder.call(extern_id, vec![s, pos, remaining]).unwrap();
+
+    builder.ret(Some(result));
+}
+
+/// Build: fn String_substring_1(s: *String, startIndex: i32) -> *String
+/// MIR wrapper for the one-argument `substring`, whose end is the string's
+/// LENGTH. Leaving the optional parameter at 0 made Haxe's swap rule read
+/// `substring(6)` as `substring(0, 6)` — the wrong half of the string.
+fn build_string_substring_1_wrapper(builder: &mut MirBuilder) {
+    let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("String_substring_1")
+        .param("s", string_ptr_ty.clone())
+        .param("start_index", i32_ty.clone())
+        .returns(string_ptr_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let s = builder.get_param(0);
+    let start_index = builder.get_param(1);
+
+    let length_id = builder
+        .get_function_by_name("haxe_string_length")
+        .expect("haxe_string_length not found");
+    let length = builder.call(length_id, vec![s]).unwrap();
+    let end_index = builder.cast(length, IrType::I64, i32_ty);
+
+    let extern_id = builder
+        .get_function_by_name("haxe_string_substring_ptr")
+        .expect("haxe_string_substring_ptr not found");
+    let result = builder
+        .call(extern_id, vec![s, start_index, end_index])
+        .unwrap();
 
     builder.ret(Some(result));
 }
