@@ -282,6 +282,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let name = self.stream.current_text().to_string();
         self.stream.advance();
 
+        // `enum abstract Message<TBody>(Int)` takes type parameters the same
+        // way a plain abstract does.
+        let type_params = self.parse_type_params()?;
+
         let underlying = if self.stream.at(TokenKind::LParen) {
             self.stream.advance();
             let ty = self.parse_type()?;
@@ -299,7 +303,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             access: None,
             modifiers: Vec::new(),
             name,
-            type_params: Vec::new(),
+            type_params,
             underlying,
             from,
             to,

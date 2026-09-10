@@ -166,6 +166,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
     /// missing its arrow — a parse error, but the disambiguation needs
     /// to know there was a name).
     fn parse_param_type_entry(&mut self) -> Result<(bool, Type), ParseError> {
+        // `?name:Type` — an optional NAMED parameter. Without the name check
+        // the `?` reads as `?Type` and the `:` that follows has no place.
+        let start = self.stream.current_offset();
+        let optional_named = self.stream.at(TokenKind::Question)
+            && self.stream.peek_at(1).kind == TokenKind::Ident
+            && self.stream.peek_at(2).kind == TokenKind::Colon;
+        if optional_named {
+            self.stream.advance(); // `?`
+        }
         let was_named =
             self.stream.at(TokenKind::Ident) && self.stream.peek_at(1).kind == TokenKind::Colon;
         if was_named {
@@ -173,6 +182,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
             self.stream.advance(); // `:`
         }
         let ty = self.parse_type()?;
+        let ty = if optional_named {
+            let span = Span::new(start, ty.span().end);
+            Type::Optional {
+                inner: Box::new(ty),
+                span,
+            }
+        } else {
+            ty
+        };
         Ok((was_named, ty))
     }
 
