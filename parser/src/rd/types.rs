@@ -47,6 +47,29 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_basic_type(&mut self) -> Result<Type, ParseError> {
         let start = self.stream.current_offset();
 
+        // A spliced type inside a reification: `macro : $tp<Int>`. The name
+        // stands for whatever the macro binds, so it is carried as a path and
+        // its type arguments read the ordinary way.
+        if self.stream.at(TokenKind::DollarIdent) {
+            let name = self.stream.current_text().to_string();
+            self.stream.advance();
+            let params = if self.stream.at(TokenKind::Lt) {
+                self.parse_type_param_args()?
+            } else {
+                Vec::new()
+            };
+            let end = self.stream.current_offset();
+            return Ok(Type::Path {
+                path: TypePath {
+                    package: Vec::new(),
+                    name,
+                    sub: None,
+                },
+                params,
+                span: Span::new(start, end),
+            });
+        }
+
         // Optional type: `?Int`
         if self.stream.eat(TokenKind::Question).is_some() {
             let inner = self.parse_basic_type()?;

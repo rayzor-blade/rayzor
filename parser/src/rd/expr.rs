@@ -682,6 +682,59 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         span: Span::new(start, end),
                     });
                 }
+                // Class reification: `macro class Name<T> { members }` builds a
+                // TypeDefinition. Its body is ordinary class syntax that the
+                // expression grammar cannot read, and the members can use
+                // spellings (`final x = 0`, `<@:foo T>`, `<T = String>`) the
+                // declaration parser does not accept either, so the span is
+                // taken whole and left to the reification engine.
+                if self.stream.at(TokenKind::KwClass) {
+                    self.stream.advance();
+                    if self.stream.at(TokenKind::Ident) {
+                        self.stream.advance();
+                    }
+                    if self.stream.at(TokenKind::Lt) {
+                        let mut depth = 0usize;
+                        loop {
+                            let kind = self.stream.peek().kind;
+                            if self.stream.is_eof() {
+                                break;
+                            }
+                            if kind == TokenKind::Lt {
+                                depth += 1;
+                            } else if kind == TokenKind::Gt {
+                                depth -= 1;
+                                self.stream.advance();
+                                if depth == 0 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            self.stream.advance();
+                        }
+                    }
+                    let mut depth = 0usize;
+                    while !self.stream.is_eof() {
+                        let kind = self.stream.peek().kind;
+                        self.stream.advance();
+                        if kind == TokenKind::LBrace {
+                            depth += 1;
+                        } else if kind == TokenKind::RBrace {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    let end = self.stream.current_offset();
+                    return Ok(Expr {
+                        kind: ExprKind::Macro(Box::new(Expr {
+                            kind: ExprKind::Ident("__macro_class__".to_string()),
+                            span: Span::new(start, end),
+                        })),
+                        span: Span::new(start, end),
+                    });
+                }
                 let inner = self.parse_expression()?;
                 let end = inner.span.end;
                 Ok(Expr {
