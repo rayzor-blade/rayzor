@@ -2315,6 +2315,19 @@ pub extern "C" fn haxe_std_int(x: f64) -> i64 {
     x.trunc() as i64
 }
 
+/// Whether a `Null<T>` box holds null. A BOX's address is never zero, so
+/// comparing the pointer answers false for a boxed null; only its tag says.
+#[no_mangle]
+pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
+    if ptr.is_null() {
+        return true;
+    }
+    match dynamic_value_if_boxed(ptr) {
+        Some(d) => d.type_id == TYPE_NULL || d.value_ptr.is_null(),
+        None => false,
+    }
+}
+
 /// Parse a String to an Int
 /// Implements Std.parseInt(x:String):Null<Int>
 /// Returns the parsed value, or i64::MIN as a sentinel for null

@@ -1041,6 +1041,45 @@ impl<'a> HirToMirContext<'a> {
             let comparing_to_null = matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
                 && (matches!(lhs.kind, HirExprKind::Null) || matches!(rhs.kind, HirExprKind::Null));
 
+            // A boxed `Null<T>` compared against the literal: its ADDRESS is
+            // never zero, so the pointer comparison below always answers
+            // "not null". The tag is what carries it.
+            if comparing_to_null {
+                let value_expr = if matches!(lhs.kind, HirExprKind::Null) {
+                    rhs
+                } else {
+                    lhs
+                };
+                // Only a `Null<primitive>` is a BOX. `Null<SomeClass>` is the
+                // object pointer itself, with no header to read, so it keeps
+                // the pointer comparison.
+                let boxed = match self.type_table.get(value_expr.ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => {
+                        self.optional_inner_is_boxable_primitive(*inner_type)
+                    }
+                    Some(TypeKind::Dynamic) => true,
+                    _ => false,
+                };
+                if boxed {
+                    let reg = self.lower_expression(value_expr)?;
+                    if matches!(self.builder.get_register_type(reg), Some(IrType::Ptr(_))) {
+                        let is_null_fn = self.get_or_register_extern_function(
+                            "haxe_dynamic_is_null",
+                            vec![IrType::Ptr(Box::new(IrType::U8))],
+                            IrType::Bool,
+                        );
+                        let is_null =
+                            self.builder
+                                .build_call_direct(is_null_fn, vec![reg], IrType::Bool)?;
+                        if matches!(op, HirBinaryOp::Eq) {
+                            return Some(is_null);
+                        }
+                        let no = self.builder.build_const(IrValue::Bool(false))?;
+                        return self.builder.build_cmp(CompareOp::Eq, is_null, no);
+                    }
+                }
+            }
+
             if !comparing_to_null && (lhs_is_dyn || rhs_is_dyn) && !(lhs_is_dyn && rhs_is_dyn) {
                 let is_arith = matches!(
                     op,
