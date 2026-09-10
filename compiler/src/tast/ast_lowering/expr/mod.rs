@@ -1342,7 +1342,7 @@ impl<'a> AstLowering<'a> {
                     // Lower as switch expression
                     let mut typed_cases = Vec::with_capacity(cases.len());
                     for case in cases {
-                        let typed_case = self.lower_switch_case_expression(case)?;
+                        let typed_case = self.lower_switch_case_expression(case, expr)?;
                         typed_cases.push(typed_case);
                     }
 
@@ -1363,7 +1363,7 @@ impl<'a> AstLowering<'a> {
                     // For now, we'll lower it as a switch expression but mark it as void type
                     let mut typed_cases = Vec::with_capacity(cases.len());
                     for case in cases {
-                        let typed_case = self.lower_switch_case(case)?;
+                        let typed_case = self.lower_switch_case(case, expr)?;
                         typed_cases.push(typed_case);
                     }
 

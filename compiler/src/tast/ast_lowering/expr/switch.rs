@@ -15,12 +15,145 @@ use std::rc::Rc;
 use tracing::warn;
 
 impl<'a> AstLowering<'a> {
+    /// The wildcard-plus-guard case an extractor becomes.
+    fn build_extractor_case(
+        &mut self,
+        case: &parser::Case,
+        extractor_guard: TypedExpression,
+        as_expression: bool,
+    ) -> Result<TypedSwitchCase, LoweringError> {
+        let case_scope = self
+            .context
+            .scope_tree
+            .create_scope(Some(self.context.current_scope));
+        let prev_scope = self.context.current_scope;
+        self.context.current_scope = case_scope;
+
+        // A `case` guard of its own still applies, on top of the extraction.
+        let guard = match case.guard.as_ref() {
+            Some(own) => {
+                let own = self.lower_expression(own)?;
+                let ty = self.context.type_table.borrow().bool_type();
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::BinaryOp {
+                        left: Box::new(extractor_guard),
+                        operator: BinaryOperator::And,
+                        right: Box::new(own),
+                    },
+                    expr_type: ty,
+                    usage: VariableUsage::Borrow,
+                    lifetime_id: LifetimeId::from_raw(1),
+                    source_location: self.context.span_to_location(&case.span),
+                    metadata: ExpressionMetadata::default(),
+                })
+            }
+            None => Some(extractor_guard),
+        };
+
+        let body_expr = self.lower_expression(&case.body)?;
+        self.context.current_scope = prev_scope;
+        let body = TypedStatement::Expression {
+            expression: body_expr,
+            source_location: self.context.span_to_location(&case.span),
+        };
+        let _ = as_expression;
+        Ok(TypedSwitchCase {
+            case_value: TypedExpression {
+                kind: TypedExpressionKind::Null,
+                expr_type: self.context.type_table.borrow().dynamic_type(),
+                usage: VariableUsage::Borrow,
+                lifetime_id: LifetimeId::from_raw(1),
+                source_location: self.context.span_to_location(&case.span),
+                metadata: ExpressionMetadata::default(),
+            },
+            extra_case_values: Vec::new(),
+            guard,
+            body,
+            source_location: self.context.span_to_location(&case.span),
+        })
+    }
+
+    /// `_` inside an extractor stands for the value being switched on.
+    fn substitute_extractor_placeholder(
+        expr: &parser::Expr,
+        subject: &parser::Expr,
+    ) -> parser::Expr {
+        use parser::ExprKind as K;
+        let replaced = match &expr.kind {
+            K::Ident(name) if name == "_" => return subject.clone(),
+            K::Binary { left, op, right } => K::Binary {
+                left: Box::new(Self::substitute_extractor_placeholder(left, subject)),
+                op: *op,
+                right: Box::new(Self::substitute_extractor_placeholder(right, subject)),
+            },
+            K::Unary { op, expr: inner } => K::Unary {
+                op: *op,
+                expr: Box::new(Self::substitute_extractor_placeholder(inner, subject)),
+            },
+            K::Paren(inner) => K::Paren(Box::new(Self::substitute_extractor_placeholder(
+                inner, subject,
+            ))),
+            K::Field {
+                expr: obj,
+                field,
+                is_optional,
+            } => K::Field {
+                expr: Box::new(Self::substitute_extractor_placeholder(obj, subject)),
+                field: field.clone(),
+                is_optional: *is_optional,
+            },
+            K::Call { expr: callee, args } => K::Call {
+                expr: Box::new(Self::substitute_extractor_placeholder(callee, subject)),
+                args: args
+                    .iter()
+                    .map(|a| Self::substitute_extractor_placeholder(a, subject))
+                    .collect(),
+            },
+            _ => return expr.clone(),
+        };
+        parser::Expr {
+            kind: replaced,
+            span: expr.span,
+        }
+    }
+
+    /// An extractor case `EXPR => VALUE` matches when EXPR, applied to the
+    /// value being switched on, equals VALUE. There is no case value to
+    /// compare against, so it becomes a wildcard guarded by that equality.
+    fn extractor_case_guard(
+        &mut self,
+        pattern: &parser::Pattern,
+        subject: &parser::Expr,
+    ) -> Option<Result<TypedExpression, LoweringError>> {
+        let parser::Pattern::Extractor { expr, value } = pattern else {
+            return None;
+        };
+        let extracted = Self::substitute_extractor_placeholder(expr, subject);
+        let condition = parser::Expr {
+            kind: parser::ExprKind::Binary {
+                left: Box::new(extracted),
+                op: parser::BinaryOp::Eq,
+                right: value.clone(),
+            },
+            span: expr.span,
+        };
+        Some(self.lower_expression(&condition))
+    }
+
     /// Lower a switch case
     /// Lower a switch case for expression context (where case body is an expression)
     pub(crate) fn lower_switch_case_expression(
         &mut self,
         case: &parser::Case,
+        subject: &parser::Expr,
     ) -> Result<TypedSwitchCase, LoweringError> {
+        if let Some(guard) = case
+            .patterns
+            .first()
+            .and_then(|p| self.extractor_case_guard(p, subject))
+        {
+            return self.build_extractor_case(case, guard?, true);
+        }
         // For switch expressions, the case body should be an expression
         let case_value = if let Some(first_pattern) = case.patterns.first() {
             // Check if this is a complex pattern that requires variable binding
@@ -115,7 +248,15 @@ impl<'a> AstLowering<'a> {
     pub(crate) fn lower_switch_case(
         &mut self,
         case: &parser::Case,
+        subject: &parser::Expr,
     ) -> Result<TypedSwitchCase, LoweringError> {
+        if let Some(guard) = case
+            .patterns
+            .first()
+            .and_then(|p| self.extractor_case_guard(p, subject))
+        {
+            return self.build_extractor_case(case, guard?, false);
+        }
         // For now, use the first pattern as the case value
         // TODO: Handle multiple patterns and guards properly
         let case_value = if let Some(first_pattern) = case.patterns.first() {
