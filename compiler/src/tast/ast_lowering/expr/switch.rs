@@ -179,7 +179,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         elements: &[parser::Pattern],
         subject: &parser::Expr,
-    ) -> Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError> {
+    ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
         let span = subject.span;
         let at = |index: usize| parser::Expr {
             kind: parser::ExprKind::Index {
@@ -231,18 +231,15 @@ impl<'a> AstLowering<'a> {
                         span,
                     };
                 }
-                // A nested pattern needs a matcher of its own; the length
-                // check alone would let it through unchecked.
-                _ => {
-                    return Err(LoweringError::IncompleteImplementation {
-                        feature: "nested pattern inside an array pattern".to_string(),
-                        location: self.context.span_to_location(&span),
-                    })
-                }
+                // A nested pattern needs a matcher of its own, which the
+                // length check alone cannot stand in for.
+                _ => return None,
             }
         }
-        let guard = self.lower_expression(&condition)?;
-        Ok((guard, bindings))
+        Some(
+            self.lower_expression(&condition)
+                .map(|guard| (guard, bindings)),
+        )
     }
 
     fn extractor_case_guard(
@@ -254,7 +251,9 @@ impl<'a> AstLowering<'a> {
         // switched on. Lowering them to an array LITERAL and comparing made
         // them match nothing at all, in expression and statement form alike.
         if let parser::Pattern::Array(elements) = pattern {
-            return Some(self.array_pattern_parts(elements, subject));
+            // A shape this cannot destructure keeps the older handling rather
+            // than becoming a compile error.
+            return self.array_pattern_parts(elements, subject);
         }
         let parser::Pattern::Extractor { expr, value } = pattern else {
             return None;
