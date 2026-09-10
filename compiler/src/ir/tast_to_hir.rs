@@ -2901,10 +2901,13 @@ impl<'a> TastToHirContext<'a> {
                             };
 
                         // Determine condition based on case type
+                        // Only a real wildcard is one. `Null` used to count
+                        // here, which made a literal `case null:` swallow every
+                        // case after it; the wildcard patterns now say
+                        // PatternPlaceholder and Null means null.
                         let is_wildcard = matches!(
                             &case.case_value.kind,
-                            TypedExpressionKind::Null
-                                | TypedExpressionKind::PatternPlaceholder { .. }
+                            TypedExpressionKind::PatternPlaceholder { .. }
                         );
 
                         // Unconditional wildcard (no guard): the body always runs,

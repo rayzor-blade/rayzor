@@ -465,7 +465,11 @@ impl<'a> AstLowering<'a> {
 
                 // Return a wildcard pattern expression
                 Ok(TypedExpression {
-                    kind: TypedExpressionKind::Null, // Placeholder for wildcard
+                    kind: TypedExpressionKind::PatternPlaceholder {
+                        pattern: pattern.clone(),
+                        source_location: SourceLocation::new(0, 0, 0, 0),
+                        variable_bindings: Vec::new(),
+                    },
                     expr_type: self.context.type_table.borrow().dynamic_type(),
                     usage: VariableUsage::Borrow,
                     lifetime_id: LifetimeId::first(),
@@ -592,20 +596,12 @@ impl<'a> AstLowering<'a> {
                 })
             }
             Pattern::Underscore => {
-                // Wildcard pattern. tast_to_hir uses TypedExpressionKind::Null as
-                // its wildcard sentinel (Pattern::Var follows the same path), so
-                // emit Null here rather than Bool(true) — using Bool(true) caused
-                // tast_to_hir to treat the wildcard as a `case true:` literal,
-                // which then lowered to `cmp eq scrutinee, true` and left the
-                // wildcard body unreachable for non-bool scrutinees.
-                Ok(TypedExpression {
-                    kind: TypedExpressionKind::Null,
-                    expr_type: self.context.type_table.borrow().dynamic_type(),
-                    usage: VariableUsage::Borrow,
-                    lifetime_id: LifetimeId::from_raw(1),
-                    source_location: SourceLocation::new(0, 0, 0, 0),
-                    metadata: ExpressionMetadata::default(),
-                })
+                // A wildcard says WILDCARD. It used to say Null, which
+                // tast_to_hir also reads as its wildcard sentinel -- so a
+                // literal `case null:` was a wildcard too and swallowed every
+                // case after it. PatternPlaceholder is the sentinel that
+                // carries the pattern it came from, leaving Null to mean null.
+                self.create_pattern_placeholder(pattern)
             }
             Pattern::Or(patterns) => {
                 // Or patterns like 1 | 2 | 3

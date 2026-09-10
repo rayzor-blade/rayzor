@@ -20,6 +20,7 @@ impl<'a> AstLowering<'a> {
         &mut self,
         case: &parser::Case,
         extractor_guard: TypedExpression,
+        bindings: Vec<(String, parser::Expr)>,
         as_expression: bool,
     ) -> Result<TypedSwitchCase, LoweringError> {
         let case_scope = self
@@ -28,6 +29,31 @@ impl<'a> AstLowering<'a> {
             .create_scope(Some(self.context.current_scope));
         let prev_scope = self.context.current_scope;
         self.context.current_scope = case_scope;
+
+        // Names the value side binds are declared in the case's own scope,
+        // ahead of the body that reads them.
+        let mut prelude = Vec::with_capacity(bindings.len());
+        for (name, accessor) in &bindings {
+            let value = self.lower_expression(accessor)?;
+            let interned = self.context.intern_string(name);
+            let symbol_id = self
+                .context
+                .symbol_table
+                .create_variable_in_scope(interned, case_scope);
+            if let Some(scope) = self.context.scope_tree.get_scope_mut(case_scope) {
+                scope.add_symbol(symbol_id, interned);
+            }
+            self.context
+                .symbol_table
+                .update_symbol_type(symbol_id, value.expr_type);
+            prelude.push(TypedStatement::VarDeclaration {
+                symbol_id,
+                var_type: value.expr_type,
+                initializer: Some(value),
+                mutability: crate::tast::symbols::Mutability::Immutable,
+                source_location: self.context.span_to_location(&case.span),
+            });
+        }
 
         // A `case` guard of its own still applies, on top of the extraction.
         let guard = match case.guard.as_ref() {
@@ -52,6 +78,29 @@ impl<'a> AstLowering<'a> {
 
         let body_expr = self.lower_expression(&case.body)?;
         self.context.current_scope = prev_scope;
+        // The bindings and the body travel as one EXPRESSION: a switch used
+        // as an expression requires every case body to be one.
+        let body_expr = if prelude.is_empty() {
+            body_expr
+        } else {
+            let body_type = body_expr.expr_type;
+            let mut statements = prelude;
+            statements.push(TypedStatement::Expression {
+                expression: body_expr,
+                source_location: self.context.span_to_location(&case.span),
+            });
+            TypedExpression {
+                kind: TypedExpressionKind::Block {
+                    statements,
+                    scope_id: case_scope,
+                },
+                expr_type: body_type,
+                usage: VariableUsage::Borrow,
+                lifetime_id: LifetimeId::from_raw(1),
+                source_location: self.context.span_to_location(&case.span),
+                metadata: ExpressionMetadata::default(),
+            }
+        };
         let body = TypedStatement::Expression {
             expression: body_expr,
             source_location: self.context.span_to_location(&case.span),
@@ -59,7 +108,11 @@ impl<'a> AstLowering<'a> {
         let _ = as_expression;
         Ok(TypedSwitchCase {
             case_value: TypedExpression {
-                kind: TypedExpressionKind::Null,
+                kind: TypedExpressionKind::PatternPlaceholder {
+                    pattern: parser::Pattern::Underscore,
+                    source_location: self.context.span_to_location(&case.span),
+                    variable_bindings: Vec::new(),
+                },
                 expr_type: self.context.type_table.borrow().dynamic_type(),
                 usage: VariableUsage::Borrow,
                 lifetime_id: LifetimeId::from_raw(1),
@@ -124,20 +177,97 @@ impl<'a> AstLowering<'a> {
         &mut self,
         pattern: &parser::Pattern,
         subject: &parser::Expr,
-    ) -> Option<Result<TypedExpression, LoweringError>> {
+    ) -> Option<Result<(TypedExpression, Vec<(String, parser::Expr)>), LoweringError>> {
         let parser::Pattern::Extractor { expr, value } = pattern else {
             return None;
         };
         let extracted = Self::substitute_extractor_placeholder(expr, subject);
-        let condition = parser::Expr {
-            kind: parser::ExprKind::Binary {
-                left: Box::new(extracted),
-                op: parser::BinaryOp::Eq,
-                right: value.clone(),
+        let span = expr.span;
+        let field = |obj: &parser::Expr, name: &str| parser::Expr {
+            kind: parser::ExprKind::Field {
+                expr: Box::new(obj.clone()),
+                field: name.to_string(),
+                is_optional: false,
             },
-            span: expr.span,
+            span,
         };
-        Some(self.lower_expression(&condition))
+
+        // `EXPR => [a, b]` and `EXPR => {f: a}` BIND out of what was
+        // extracted rather than compare against it. The names come from the
+        // value side, which the parser read as a literal.
+        match &value.kind {
+            parser::ExprKind::Array(elements)
+                if !elements.is_empty()
+                    && elements
+                        .iter()
+                        .all(|e| matches!(&e.kind, parser::ExprKind::Ident(_))) =>
+            {
+                let mut bindings = Vec::with_capacity(elements.len());
+                for (index, element) in elements.iter().enumerate() {
+                    let parser::ExprKind::Ident(name) = &element.kind else {
+                        continue;
+                    };
+                    bindings.push((
+                        name.clone(),
+                        parser::Expr {
+                            kind: parser::ExprKind::Index {
+                                expr: Box::new(extracted.clone()),
+                                index: Box::new(parser::Expr {
+                                    kind: parser::ExprKind::Int(index as i64),
+                                    span,
+                                }),
+                            },
+                            span,
+                        },
+                    ));
+                }
+                // Only an extraction of the right length matches.
+                let condition = parser::Expr {
+                    kind: parser::ExprKind::Binary {
+                        left: Box::new(field(&extracted, "length")),
+                        op: parser::BinaryOp::Eq,
+                        right: Box::new(parser::Expr {
+                            kind: parser::ExprKind::Int(elements.len() as i64),
+                            span,
+                        }),
+                    },
+                    span,
+                };
+                Some(self.lower_expression(&condition).map(|g| (g, bindings)))
+            }
+            parser::ExprKind::Object(fields)
+                if !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|f| matches!(&f.expr.kind, parser::ExprKind::Ident(_))) =>
+            {
+                let bindings = fields
+                    .iter()
+                    .filter_map(|f| match &f.expr.kind {
+                        parser::ExprKind::Ident(name) => {
+                            Some((name.clone(), field(&extracted, &f.name)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let always = parser::Expr {
+                    kind: parser::ExprKind::Bool(true),
+                    span,
+                };
+                Some(self.lower_expression(&always).map(|g| (g, bindings)))
+            }
+            _ => {
+                let condition = parser::Expr {
+                    kind: parser::ExprKind::Binary {
+                        left: Box::new(extracted),
+                        op: parser::BinaryOp::Eq,
+                        right: value.clone(),
+                    },
+                    span,
+                };
+                Some(self.lower_expression(&condition).map(|g| (g, Vec::new())))
+            }
+        }
     }
 
     /// Lower a switch case
@@ -152,7 +282,8 @@ impl<'a> AstLowering<'a> {
             .first()
             .and_then(|p| self.extractor_case_guard(p, subject))
         {
-            return self.build_extractor_case(case, guard?, true);
+            let (guard, bindings) = guard?;
+            return self.build_extractor_case(case, guard, bindings, true);
         }
         // For switch expressions, the case body should be an expression
         let case_value = if let Some(first_pattern) = case.patterns.first() {
@@ -255,7 +386,8 @@ impl<'a> AstLowering<'a> {
             .first()
             .and_then(|p| self.extractor_case_guard(p, subject))
         {
-            return self.build_extractor_case(case, guard?, false);
+            let (guard, bindings) = guard?;
+            return self.build_extractor_case(case, guard, bindings, false);
         }
         // For now, use the first pattern as the case value
         // TODO: Handle multiple patterns and guards properly
