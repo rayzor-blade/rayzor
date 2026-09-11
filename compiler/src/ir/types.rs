@@ -158,6 +158,25 @@ pub struct UnionVariant {
 }
 
 impl IrType {
+    /// How a runtime entry point taking a `type_tag` should read a value of
+    /// this type. The tag space is `ValueTag`, NOT `TypeId` -- see its docs.
+    ///
+    /// A type that is not a primitive answers `Int`, matching what both
+    /// consumers do with a tag they do not recognise.
+    pub fn value_tag(&self) -> rayzor_runtime::type_system::ValueTag {
+        use rayzor_runtime::type_system::ValueTag;
+        match self {
+            IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64 => ValueTag::Int,
+            IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64 => ValueTag::Int,
+            IrType::Bool => ValueTag::Bool,
+            IrType::F32 | IrType::F64 => ValueTag::Float,
+            IrType::String => ValueTag::String,
+            IrType::Ptr(inner) if matches!(**inner, IrType::String) => ValueTag::String,
+            IrType::Ptr(_) => ValueTag::Reference,
+            _ => ValueTag::Int,
+        }
+    }
+
     /// Get the size of the type in bytes
     pub fn size(&self) -> usize {
         match self {

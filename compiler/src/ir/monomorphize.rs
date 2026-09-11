@@ -619,7 +619,7 @@ impl Monomorphizer {
                 None => continue,
             };
 
-            let type_tag = Self::ir_type_to_type_tag(&concrete_type);
+            let type_tag = concrete_type.value_tag() as i32;
 
             for block in func.cfg.blocks.values_mut() {
                 for inst in block.instructions.iter_mut() {
@@ -640,19 +640,6 @@ impl Monomorphizer {
     /// DynamicValue, which is what a `Null<Int>` type argument lowers to.
     /// Calling either of those the other's tag makes the runtime read a box
     /// header as a HaxeString, or two string addresses as raw integers.
-    fn ir_type_to_type_tag(ty: &IrType) -> i32 {
-        match ty {
-            IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1, // TYPE_INT
-            IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64 => 1, // TYPE_INT
-            IrType::Bool => 2,                                         // TYPE_BOOL
-            IrType::F32 | IrType::F64 => 4,                            // TYPE_FLOAT
-            IrType::String => 5,                                       // TYPE_STRING
-            IrType::Ptr(inner) if matches!(**inner, IrType::String) => 5, // TYPE_STRING
-            IrType::Ptr(_) => 6,                                       // Reference/Dynamic
-            _ => 1,                                                    // Default: Int
-        }
-    }
-
     /// Propagate substitution maps transitively through call chains.
     ///
     /// When a specialized function (e.g., set__String_i32) calls another function

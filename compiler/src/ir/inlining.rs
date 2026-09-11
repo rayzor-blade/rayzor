@@ -687,7 +687,7 @@ impl InliningPass {
         if !type_sub_map.is_empty() && !callee.type_param_tag_fixups.is_empty() {
             for (fixup_reg, type_param_name) in &callee.type_param_tag_fixups {
                 if let Some(concrete_type) = type_sub_map.get(type_param_name) {
-                    let type_tag = ir_type_to_type_tag(concrete_type);
+                    let type_tag = concrete_type.value_tag() as i32;
                     let mapped_reg = reg_map.get(fixup_reg).unwrap_or(fixup_reg);
                     for block in caller.cfg.blocks.values_mut() {
                         for inst in &mut block.instructions {
@@ -1064,19 +1064,6 @@ pub(crate) fn concrete_arg_type(caller: &IrFunction, reg: IrId) -> Option<IrType
 /// which is what a `Null<Int>` type argument lowers to. Calling either of those
 /// the other's tag makes the runtime read a box header as a HaxeString, or two
 /// string addresses as raw integers.
-fn ir_type_to_type_tag(ty: &IrType) -> i32 {
-    match ty {
-        IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1,
-        IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64 => 1,
-        IrType::Bool => 2,
-        IrType::F32 | IrType::F64 => 4,
-        IrType::String => 5,
-        IrType::Ptr(inner) if matches!(**inner, IrType::String) => 5,
-        IrType::Ptr(_) => 6,
-        _ => 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

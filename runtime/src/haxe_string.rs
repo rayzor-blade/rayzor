@@ -743,15 +743,9 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 ///
 /// Returns an owned HaxeString when `s` was a boxed scalar, else None.
 unsafe fn dynamic_box_to_string(s: *const HaxeString) -> Option<*mut HaxeString> {
-    use crate::type_system::{DynamicValue, TYPE_ARRAY};
-    if (s as usize) < 0x1000 || (s as usize) & 7 != 0 {
-        return None;
-    }
-    let d = *(s as *const DynamicValue);
-    if d.type_id.0 > TYPE_ARRAY.0 {
-        return None;
-    }
-    Some(crate::type_system::haxe_std_string_ptr(s as *mut u8))
+    crate::type_system::dynamic_box_at(s as *mut u8)
+        .filter(|d| d.tag_is_builtin())
+        .map(|_| crate::type_system::haxe_std_string_ptr(s as *mut u8))
 }
 
 /// The printable bytes of a string, unwrapping a boxed Dynamic and rejecting

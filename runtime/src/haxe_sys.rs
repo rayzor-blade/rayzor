@@ -597,18 +597,16 @@ pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
 #[no_mangle]
 pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut HaxeString {
-    match type_tag {
-        // String — value is already a HaxeString pointer, return it directly
-        5 => value as *mut HaxeString,
-        // Int
-        1 => haxe_string_from_int(value),
-        // Bool
-        2 => haxe_string_from_bool(value != 0),
-        // Float — reinterpret i64 bits as f64
-        4 => haxe_string_from_float(f64::from_bits(value as u64)),
-        // Reference/Object — use dynamic dispatch
-        6 => crate::type_system::haxe_std_string_ptr(value as *mut u8),
-        // Default: treat as int
+    use crate::type_system::ValueTag;
+    match ValueTag::from_i32(type_tag) {
+        // value is already a HaxeString pointer, return it directly
+        Some(ValueTag::String) => value as *mut HaxeString,
+        Some(ValueTag::Int) => haxe_string_from_int(value),
+        Some(ValueTag::Bool) => haxe_string_from_bool(value != 0),
+        // reinterpret i64 bits as f64
+        Some(ValueTag::Float) => haxe_string_from_float(f64::from_bits(value as u64)),
+        Some(ValueTag::Reference) => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        // Unresolved, or a tag from outside the space.
         _ => haxe_string_from_int(value),
     }
 }

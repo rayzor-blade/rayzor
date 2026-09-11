@@ -57,6 +57,43 @@ pub const TYPE_ARRAY: TypeId = TypeId(7);
 // Starting ID for user-defined types (classes, enums, etc.)
 pub const TYPE_USER_START: u32 = 1000;
 
+/// How to read a type-erased 64-bit slot, for the two entry points that take a
+/// `type_tag`: `haxe_value_to_string_by_tag` and `haxe_box_typed_ptr`.
+///
+/// NOT a `TypeId`, though both travel as small integers through `i32`/`i64`
+/// slots. The two spaces disagree where they overlap -- `Int` is 1 here while
+/// `TYPE_INT` is 3, and 6 is a reference here but an anon object there -- so a
+/// value of one must never reach a reader expecting the other. A `ValueTag` is
+/// emitted by the compiler from an `IrType` and never read off a heap object;
+/// a `TypeId` is the reverse.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueTag {
+    /// The compiler could not resolve the type parameter. Both consumers fall
+    /// back to `Int`, so an un-fixed-up tag stringifies as a number.
+    Unresolved = 0,
+    Int = 1,
+    Bool = 2,
+    Float = 4,
+    String = 5,
+    /// Any pointer: class instance, enum, anon object, array.
+    Reference = 6,
+}
+
+impl ValueTag {
+    pub fn from_i32(tag: i32) -> Option<Self> {
+        match tag {
+            0 => Some(ValueTag::Unresolved),
+            1 => Some(ValueTag::Int),
+            2 => Some(ValueTag::Bool),
+            4 => Some(ValueTag::Float),
+            5 => Some(ValueTag::String),
+            6 => Some(ValueTag::Reference),
+            _ => None,
+        }
+    }
+}
+
 /// Dynamic value: tagged union of (type_id, value_ptr)
 ///
 /// This is the runtime representation of Haxe's Dynamic type.
@@ -66,6 +103,43 @@ pub const TYPE_USER_START: u32 = 1000;
 pub struct DynamicValue {
     pub type_id: TypeId,
     pub value_ptr: *mut u8,
+}
+
+impl DynamicValue {
+    /// Builtin tags, `TYPE_VOID..=TYPE_ARRAY`.
+    pub(crate) fn tag_is_builtin(&self) -> bool {
+        self.type_id.0 <= TYPE_ARRAY.0
+    }
+
+    /// A tag this runtime can name: a builtin, or a user type. The gap between
+    /// is not a valid tag, so a slot carrying one is not a box.
+    pub(crate) fn tag_is_known(&self) -> bool {
+        self.tag_is_builtin() || self.type_id.0 > 100
+    }
+
+    /// The window the numeric coercions accept. Narrower than `tag_is_known`
+    /// at both ends: it drops the compound builtins, which have no numeric
+    /// value, and the reserved tags at the top of the space.
+    pub(crate) fn tag_is_coercible(&self) -> bool {
+        let tid = self.type_id.0;
+        tid <= TYPE_STRING.0 || (tid > 100 && tid < u32::MAX - 10)
+    }
+}
+
+/// Read a pointer-shaped slot as a `DynamicValue`, if its address could be one.
+///
+/// THE single address test separating a box from a raw value in a
+/// pointer-shaped slot: a `DynamicValue` is heap-allocated and 8-aligned, an
+/// erased scalar is neither. Every reader that must tell them apart comes
+/// through here, so two readers of one value cannot disagree. The tag is NOT
+/// checked -- callers differ on which tags they accept and each applies its own
+/// `tag_is_*` predicate.
+pub(crate) fn dynamic_box_at(p: *mut u8) -> Option<DynamicValue> {
+    let addr = p as usize;
+    if addr < 0x1000 || (addr & 7) != 0 {
+        return None;
+    }
+    Some(unsafe { *(p as *const DynamicValue) })
 }
 
 /// Function pointer type for toString implementations
@@ -2716,24 +2790,11 @@ pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
     }
-    let addr = ptr as usize;
-    // DynamicValue is 16 bytes, heap-allocated, so must be aligned to 8.
-    // Raw integer values (0..small_number) are typically NOT aligned to 8 AND
-    // are small values. Heap pointers are large (> 0x1000 on all platforms).
-    if addr >= 0x1000 && (addr & 7) == 0 {
-        // Looks like a valid heap pointer — try reading as DynamicValue
-        unsafe {
-            let dynamic_ptr = ptr as *const DynamicValue;
-            let dynamic = *dynamic_ptr;
-            // Validate type_id: known primitive types or reasonable class type_id
-            let tid = dynamic.type_id.0;
-            if tid <= 5 || (tid > 100 && tid < u32::MAX - 10) {
-                return haxe_unbox_int(dynamic);
-            }
-        }
+    if let Some(d) = dynamic_box_at(ptr).filter(|d| d.tag_is_coercible()) {
+        return haxe_unbox_int(d);
     }
-    // Not a valid DynamicValue* — treat pointer value as raw integer
-    addr as i64
+    // Not a box -- the slot carries the raw value.
+    ptr as usize as i64
 }
 
 /// Unwrap a boxed scalar, or pass a non-box pointer through unchanged.
@@ -2749,18 +2810,11 @@ pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
     if ptr.is_null() {
         return 0;
     }
-    let addr = ptr as usize;
-    // A DynamicValue is heap-allocated and 8-aligned; a small erased integer is
-    // neither, and falls through to the raw-value path below.
-    if addr >= 0x1000 && (addr & 7) == 0 {
-        unsafe {
-            let dynamic = *(ptr as *const DynamicValue);
-            if dynamic.type_id == TYPE_INT || dynamic.type_id == TYPE_BOOL {
-                return haxe_unbox_int(dynamic);
-            }
-        }
+    let is_int_or_bool = |d: &DynamicValue| d.type_id == TYPE_INT || d.type_id == TYPE_BOOL;
+    if let Some(d) = dynamic_box_at(ptr).filter(is_int_or_bool) {
+        return haxe_unbox_int(d);
     }
-    addr as i64
+    ptr as usize as i64
 }
 
 /// Safely coerce a Dynamic-typed value to a float.
@@ -2770,18 +2824,10 @@ pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
     if ptr.is_null() {
         return 0.0;
     }
-    let addr = ptr as usize;
-    if addr >= 0x1000 && (addr & 7) == 0 {
-        unsafe {
-            let dynamic_ptr = ptr as *const DynamicValue;
-            let dynamic = *dynamic_ptr;
-            let tid = dynamic.type_id.0;
-            if tid <= 5 || (tid > 100 && tid < u32::MAX - 10) {
-                return haxe_unbox_float(dynamic);
-            }
-        }
+    if let Some(d) = dynamic_box_at(ptr).filter(|d| d.tag_is_coercible()) {
+        return haxe_unbox_float(d);
     }
-    addr as i64 as f64
+    ptr as usize as i64 as f64
 }
 
 /// Unbox a Float from Dynamic (takes opaque pointer to DynamicValue)
@@ -2805,21 +2851,7 @@ pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
 /// box is aligned, above the first page, and carries a known type tag. Anything
 /// else is `None`, and the caller must treat the slot as the raw value it is.
 pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
-    let addr = p as usize;
-    if addr < 0x1000 || (addr & 7) != 0 {
-        return None;
-    }
-    let d = unsafe { *(p as *const DynamicValue) };
-    let tid = d.type_id.0;
-    // Tag-plausibility window: the builtin scalars at the bottom, then
-    // everything above 100 for user/object types and the function tag at
-    // the very top. The gap between is not a valid tag.
-    let known = tid <= TYPE_ARRAY.0 || tid > 100;
-    if known {
-        Some(d)
-    } else {
-        None
-    }
+    dynamic_box_at(p).filter(|d| d.tag_is_known())
 }
 
 /// Structural equality for two boxed Dynamic values.
@@ -2955,20 +2987,20 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
 #[no_mangle]
 pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
-    match type_tag {
-        1 => {
+    match ValueTag::from_i32(type_tag) {
+        Some(ValueTag::Int) => {
             // Int: allocate and store value, same as haxe_box_int_ptr
             haxe_box_int_ptr(value)
         }
-        2 => {
+        Some(ValueTag::Bool) => {
             // Bool: box as bool
             haxe_box_bool_ptr(value != 0)
         }
-        4 => {
+        Some(ValueTag::Float) => {
             // Float: reinterpret bits as f64
             haxe_box_float_ptr(f64::from_bits(value as u64))
         }
-        5 => {
+        Some(ValueTag::String) => {
             // String: value IS a HaxeString* pointer, store directly as value_ptr
             if value == 0 {
                 let dynamic = haxe_box_null();
@@ -2982,14 +3014,12 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             let boxed = Box::new(dynamic);
             Box::into_raw(boxed) as *mut u8
         }
-        6 => {
+        Some(ValueTag::Reference) => {
             // Reference type: value is an object pointer, box with generic reference type
             haxe_box_reference_ptr(value as *mut u8, 0)
         }
-        _ => {
-            // Default: treat as Int
-            haxe_box_int_ptr(value)
-        }
+        // Unresolved, or a tag from outside the space.
+        _ => haxe_box_int_ptr(value),
     }
 }
 
@@ -3773,6 +3803,39 @@ pub extern "C" fn haxe_meta_get_fields(type_id: i64) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn haxe_meta_get_statics(type_id: i64) -> *mut u8 {
     runtime_metadata(type_id, "statics")
+}
+
+#[cfg(test)]
+mod value_tag_tests {
+    use super::*;
+
+    // The discriminants are the wire format between the compiler's
+    // `IrType::value_tag` and the two runtime entry points that take a
+    // `type_tag`. Changing one without the other silently misreads values.
+    #[test]
+    fn wire_values_are_fixed() {
+        assert_eq!(ValueTag::Unresolved as i32, 0);
+        assert_eq!(ValueTag::Int as i32, 1);
+        assert_eq!(ValueTag::Bool as i32, 2);
+        assert_eq!(ValueTag::Float as i32, 4);
+        assert_eq!(ValueTag::String as i32, 5);
+        assert_eq!(ValueTag::Reference as i32, 6);
+    }
+
+    // ValueTag and TypeId are different spaces. Where they collide, a reader
+    // that confuses them gets a wrong answer rather than a crash, so pin it.
+    #[test]
+    fn tag_space_is_not_the_type_id_space() {
+        assert_ne!(ValueTag::Int as u32, TYPE_INT.0);
+        assert_eq!(ValueTag::Int as u32, TYPE_NULL.0);
+    }
+
+    #[test]
+    fn unknown_tags_have_no_variant() {
+        assert_eq!(ValueTag::from_i32(3), None);
+        assert_eq!(ValueTag::from_i32(7), None);
+        assert_eq!(ValueTag::from_i32(-1), None);
+    }
 }
 
 #[cfg(test)]
