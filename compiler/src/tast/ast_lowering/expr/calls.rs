@@ -1957,21 +1957,24 @@ impl<'a> AstLowering<'a> {
                         }
                     } else {
                         // No static extension found, use regular method call
+                        let type_arguments =
+                            self.infer_call_type_arguments(method_symbol, &arg_exprs);
                         TypedExpressionKind::MethodCall {
                             receiver: Box::new(receiver_expr),
                             method_symbol,
                             arguments: arg_exprs,
-                            type_arguments: Vec::new(),
+                            type_arguments,
                             is_optional: is_optional_call,
                         }
                     }
                 } else {
                     // Method was found on the receiver, use it
+                    let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
                     TypedExpressionKind::MethodCall {
                         receiver: Box::new(receiver_expr),
                         method_symbol,
                         arguments: arg_exprs,
-                        type_arguments: Vec::new(),
+                        type_arguments,
                         is_optional: is_optional_call,
                     }
                 }
@@ -2255,11 +2258,13 @@ impl<'a> AstLowering<'a> {
                                 source_location: self.context.create_location(),
                                 metadata: ExpressionMetadata::default(),
                             };
+                            let type_arguments =
+                                self.infer_call_type_arguments(method_symbol, &arg_exprs);
                             TypedExpressionKind::MethodCall {
                                 receiver: Box::new(receiver),
                                 method_symbol,
                                 arguments: arg_exprs,
-                                type_arguments: Vec::new(),
+                                type_arguments,
                                 is_optional: false,
                             }
                         };
@@ -2278,10 +2283,24 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // A bare call to an inherited method lands here, as a
+                // FunctionCall over the callee symbol rather than a MethodCall.
+                let type_arguments = match &func_expr.kind {
+                    TypedExpressionKind::Variable { symbol_id } => {
+                        self.infer_call_type_arguments(*symbol_id, &arg_exprs)
+                    }
+                    TypedExpressionKind::FieldAccess { field_symbol, .. } => {
+                        self.infer_call_type_arguments(*field_symbol, &arg_exprs)
+                    }
+                    TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                        self.infer_call_type_arguments(*field_symbol, &arg_exprs)
+                    }
+                    _ => Vec::new(),
+                };
                 TypedExpressionKind::FunctionCall {
                     function: Box::new(func_expr),
                     arguments: arg_exprs,
-                    type_arguments: Vec::new(),
+                    type_arguments,
                 }
             }
         };
@@ -2561,6 +2580,102 @@ impl<'a> AstLowering<'a> {
             _ => return ty,
         };
         self.context.type_table.borrow_mut().create_type(rebuilt)
+    }
+
+    /// Type arguments for a call to a generic method, recovered by matching the
+    /// declared parameter types against the actual argument types.
+    ///
+    /// The typer is the only place this is knowable. `Array<T>` lowers to an
+    /// opaque pointer in MIR, so by then the callee's signature AND the
+    /// argument registers are both `*void` and nothing says what T was. With
+    /// no type arguments the monomorphizer skips specialization, the backend
+    /// trap-stubs the generic template, and that stub cascades to every caller.
+    ///
+    /// One type parameter only: `TypeKind::Function` does not record the order
+    /// in which a callee declares its type parameters, and MIR consumes these
+    /// positionally, so with two variables nothing here says which is which.
+    pub(crate) fn infer_call_type_arguments(
+        &self,
+        callee_symbol: SymbolId,
+        arguments: &[TypedExpression],
+    ) -> Vec<TypeId> {
+        use crate::tast::core::TypeKind;
+
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(callee_symbol)
+            .map(|s| s.type_id)
+            .filter(|t| t.is_valid())
+        else {
+            return Vec::new();
+        };
+        let table = self.context.type_table.borrow();
+        let Some(TypeKind::Function { params, .. }) = table.get(fn_type).map(|i| i.kind.clone())
+        else {
+            return Vec::new();
+        };
+
+        // Walk a declared type and the actual beside it, recording what each
+        // type variable met. Structural, so `Array<T>` against `Array<Int>`
+        // reaches T. Depth-bounded because a type can be cyclic.
+        fn unify(
+            table: &crate::tast::core::TypeTable,
+            declared: TypeId,
+            actual: TypeId,
+            depth: u32,
+            out: &mut Vec<(SymbolId, TypeId)>,
+        ) {
+            if depth > 8 {
+                return;
+            }
+            let (Some(d), Some(a)) = (table.get(declared), table.get(actual)) else {
+                return;
+            };
+            match (&d.kind, &a.kind) {
+                // An actual that is a variable, or that carries no type of its
+                // own, says nothing about T -- skip it rather than count it as
+                // disagreement. `aeq([1,2,3], xs)` where `xs` inferred as
+                // Array<Dynamic> still pins T from the first argument.
+                (TypeKind::TypeParameter { symbol_id, .. }, _) => {
+                    let uninformative = matches!(
+                        a.kind,
+                        TypeKind::TypeParameter { .. }
+                            | TypeKind::Dynamic
+                            | TypeKind::Unknown
+                            | TypeKind::Error
+                    );
+                    if !uninformative {
+                        out.push((*symbol_id, actual));
+                    }
+                }
+                (TypeKind::Array { element_type: de }, TypeKind::Array { element_type: ae }) => {
+                    unify(table, *de, *ae, depth + 1, out)
+                }
+                (
+                    TypeKind::Optional { inner_type: di, .. },
+                    TypeKind::Optional { inner_type: ai, .. },
+                ) => unify(table, *di, *ai, depth + 1, out),
+                _ => {}
+            }
+        }
+
+        let mut bindings: Vec<(SymbolId, TypeId)> = Vec::new();
+        for (declared, argument) in params.iter().zip(arguments.iter()) {
+            unify(&table, *declared, argument.expr_type, 0, &mut bindings);
+        }
+        let Some(&(first_var, first_ty)) = bindings.first() else {
+            return Vec::new();
+        };
+        // One variable, every occurrence agreeing. Anything else is left
+        // unspecialized rather than specialized wrongly.
+        if bindings
+            .iter()
+            .any(|(var, ty)| *var != first_var || *ty != first_ty)
+        {
+            return Vec::new();
+        }
+        vec![first_ty]
     }
 
     pub(crate) fn infer_method_call_return_type(

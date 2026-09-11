@@ -26,6 +26,7 @@ impl<'a> HirToMirContext<'a> {
         &mut self,
         expr: &HirExpr,
         result_type: IrType,
+        call_type_args: Vec<IrType>,
         fell_through: &mut bool,
     ) -> Option<IrId> {
         let HirExprKind::Call {
@@ -125,7 +126,12 @@ impl<'a> HirToMirContext<'a> {
                     }
                     None
                 });
-            probe!(self.try_resolved_method_call(expr, maybe_func_id, result_type.clone()));
+            probe!(self.try_resolved_method_call(
+                expr,
+                maybe_func_id,
+                result_type.clone(),
+                call_type_args.clone()
+            ));
         }
         *fell_through = true;
         None

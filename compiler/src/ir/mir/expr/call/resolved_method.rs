@@ -28,6 +28,7 @@ impl<'a> HirToMirContext<'a> {
         expr: &HirExpr,
         maybe_func_id: Option<IrFunctionId>,
         result_type: IrType,
+        call_type_args: Vec<IrType>,
         fell_through: &mut bool,
     ) -> Option<IrId> {
         let HirExprKind::Call {
@@ -551,9 +552,22 @@ impl<'a> HirToMirContext<'a> {
                 result_type.clone()
             };
 
-            let call_result =
+            // Type args the call site carries must ride along, or the
+            // monomorphizer never specializes the callee and the backend
+            // trap-stubs the generic template. A method reached through a
+            // Field callee -- which is how an inherited method is called --
+            // used to drop them here.
+            let call_result = if call_type_args.is_empty() {
                 self.builder
-                    .build_call_direct(func_id, arg_regs, actual_return_type.clone())?;
+                    .build_call_direct(func_id, arg_regs, actual_return_type.clone())?
+            } else {
+                self.builder.build_call_direct_with_type_args(
+                    func_id,
+                    arg_regs,
+                    actual_return_type.clone(),
+                    call_type_args.clone(),
+                )?
+            };
 
             // Generic stdlib methods return Ptr(U8) while the caller expects the
             // resolved T — resolve it from the receiver's type arguments and unbox.

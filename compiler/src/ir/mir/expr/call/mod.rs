@@ -156,7 +156,7 @@ impl<'a> HirToMirContext<'a> {
 
             probe!(self.try_array_runtime_call(expr));
         }
-        probe!(self.try_method_call(expr, result_type.clone()));
+        probe!(self.try_method_call(expr, result_type.clone(), converted_hir_type_args.clone()));
 
         // Enum constructors can arrive as field callees for imported
         // modules, e.g. `ForeignMetaish.U32(2048)`. Lower those here
