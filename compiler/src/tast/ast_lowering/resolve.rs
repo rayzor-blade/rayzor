@@ -347,6 +347,7 @@ impl<'a> AstLowering<'a> {
         // Recursively unwrap GenericInstance to find the base enum
         // Handles nested generics like Option<Option<Int>>
         let mut current_type_id = discriminant_type;
+        let mut abstract_symbol = None;
         let enum_symbol = loop {
             let ty = type_table.get(current_type_id)?;
             match &ty.kind {
@@ -355,10 +356,51 @@ impl<'a> AstLowering<'a> {
                     // Continue unwrapping to find the base enum
                     current_type_id = *base_type;
                 }
+                // An `enum abstract` is an Abstract whose values are STATIC
+                // FIELDS, not enum variants, so the walk above cannot find
+                // them. Without this, a bare `case A:` never resolves to the
+                // constant and becomes a capture binding, which matches
+                // anything -- every switch over an enum abstract took its
+                // first arm.
+                crate::tast::core::TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                } => {
+                    // Only when the underlying type is a primitive: then the
+                    // value IS its constant and the case is a comparison.
+                    // Over an enum underlying (`enum abstract T(Ordering)`)
+                    // the constant is an enum value the existing enum
+                    // machinery already resolves, and short-circuiting to the
+                    // abstract's field symbol makes the field unreachable.
+                    let prim = underlying.and_then(|u| type_table.get(u)).is_some_and(|u| {
+                        matches!(
+                            u.kind,
+                            crate::tast::core::TypeKind::Int
+                                | crate::tast::core::TypeKind::Float
+                                | crate::tast::core::TypeKind::String
+                                | crate::tast::core::TypeKind::Bool
+                        )
+                    });
+                    if !prim {
+                        return None;
+                    }
+                    abstract_symbol = Some(*symbol_id);
+                    break *symbol_id;
+                }
                 _ => return None,
             }
         };
         drop(type_table);
+
+        if let Some(abs) = abstract_symbol {
+            return self.class_fields.get(&abs).and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|(name, _, is_static)| *is_static && *name == constructor_name)
+                    .map(|(_, symbol, _)| *symbol)
+            });
+        }
 
         // Look up the enum's variants
         let variants = self.context.symbol_table.get_enum_variants(enum_symbol)?;
