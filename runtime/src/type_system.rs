@@ -2307,9 +2307,15 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         }));
     }
 
-    unsafe {
-        let dynamic = *(dynamic_ptr as *const DynamicValue);
+    // A Dynamic slot holding an erased primitive carries the VALUE, not a box:
+    // an array element, an iterator yield, a `Map.get` result. Reading one as a
+    // pointer is what faulted on the element's own bits, so validate the
+    // address first and stringify a non-box as the integer it is.
+    let Some(dynamic) = dynamic_box_at(dynamic_ptr) else {
+        return crate::haxe_sys::haxe_string_from_int(dynamic_ptr as usize as i64);
+    };
 
+    unsafe {
         // Handle null type
         if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {
             let s = "null";
