@@ -58,6 +58,40 @@ impl Default for PreprocessorConfig {
 /// // Result: "@:coreType abstract Void {}"
 /// // (jvm-specific metadata removed)
 /// ```
+/// The condition text of a `#if` / `#elseif`, with any trailing comment removed.
+///
+/// The rest of the directive line is NOT all condition: the stdlib and the
+/// Haxe test corpus both write `#if !hl // too many arguments in HL`, and
+/// feeding the comment to the evaluator makes the whole condition false --
+/// silently compiling the wrong branch. A `//` inside a quoted string (a
+/// define compared against a string literal) is not a comment.
+fn condition_text(rest: &str) -> &str {
+    let bytes = rest.as_bytes();
+    let mut in_string = false;
+    let mut quote = b'"';
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == quote {
+                in_string = false;
+            }
+        } else if c == b'"' || c == b'\'' {
+            in_string = true;
+            quote = c;
+        } else if c == b'/' && i + 1 < bytes.len() && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*')
+        {
+            return rest[..i].trim_end();
+        }
+        i += 1;
+    }
+    rest.trim_end()
+}
+
 pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
     let mut result = String::with_capacity(source.len());
     let lines: Vec<&str> = source.lines().collect();
@@ -76,7 +110,7 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
             i += 1;
         } else if trimmed.starts_with("#if ") {
             // Parse conditional block
-            let condition = trimmed.strip_prefix("#if ").unwrap().trim();
+            let condition = condition_text(trimmed.strip_prefix("#if ").unwrap().trim());
             let (block_lines, end_idx) = extract_conditional_block(&lines, i);
 
             // Process the conditional block and extract the appropriate branch
@@ -309,7 +343,7 @@ fn process_conditional_block<'a>(
         if trimmed.starts_with("#elseif ") {
             in_active_branch = false;
             if !condition_met {
-                let cond = trimmed.strip_prefix("#elseif ").unwrap().trim();
+                let cond = condition_text(trimmed.strip_prefix("#elseif ").unwrap().trim());
                 if evaluate_condition(cond, config) {
                     condition_met = true;
                     in_active_branch = true;
