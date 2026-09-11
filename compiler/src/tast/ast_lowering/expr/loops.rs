@@ -51,6 +51,17 @@ impl<'a> AstLowering<'a> {
                 loop_body_scope_id,
                 int_type,
             );
+            // Haxe rebinds the loop variable EACH ITERATION, so a closure made
+            // in the body captures that iteration's value. Driving the loop
+            // with `i` itself gives every closure the one counter, holding the
+            // value the loop stopped at. The counter is separate, and `i` is
+            // declared from it inside the body.
+            let counter_name = self.context.intern_string(&format!("{var}__counter"));
+            let counter_symbol = self.context.symbol_table.create_variable_with_type(
+                counter_name,
+                loop_body_scope_id,
+                int_type,
+            );
 
             // Enter the loop body scope
             let old_scope = self.context.current_scope;
@@ -63,7 +74,7 @@ impl<'a> AstLowering<'a> {
 
             // Create: var i = start
             let init_stmt = TypedStatement::VarDeclaration {
-                symbol_id: var_symbol,
+                symbol_id: counter_symbol,
                 var_type: int_type,
                 initializer: Some(start_expr),
                 source_location: SourceLocation::unknown(),
@@ -74,7 +85,7 @@ impl<'a> AstLowering<'a> {
             let var_ref = TypedExpression {
                 expr_type: int_type,
                 kind: TypedExpressionKind::Variable {
-                    symbol_id: var_symbol,
+                    symbol_id: counter_symbol,
                 },
                 usage: VariableUsage::Copy,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -118,6 +129,31 @@ impl<'a> AstLowering<'a> {
                 lifetime_id: LifetimeId::static_lifetime(),
                 source_location: SourceLocation::unknown(),
                 metadata: ExpressionMetadata::default(),
+            };
+
+            // `var i = <counter>;` ahead of the body, so each iteration binds
+            // its own `i` for any closure the body creates.
+            let counter_ref = TypedExpression {
+                expr_type: int_type,
+                kind: TypedExpressionKind::Variable {
+                    symbol_id: counter_symbol,
+                },
+                usage: VariableUsage::Copy,
+                lifetime_id: LifetimeId::static_lifetime(),
+                source_location: SourceLocation::unknown(),
+                metadata: ExpressionMetadata::default(),
+            };
+            let bind_stmt = TypedStatement::VarDeclaration {
+                symbol_id: var_symbol,
+                var_type: int_type,
+                initializer: Some(counter_ref),
+                source_location: SourceLocation::unknown(),
+                mutability: crate::tast::Mutability::Immutable,
+            };
+            let body_stmt = TypedStatement::Block {
+                statements: vec![bind_stmt, body_stmt],
+                scope_id: loop_body_scope_id,
+                source_location: SourceLocation::unknown(),
             };
 
             // Create: for (var i = start; i < end; i++) { body }

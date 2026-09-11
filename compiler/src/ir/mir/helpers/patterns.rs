@@ -90,7 +90,7 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
                 }
-                let _ = self.box_capture_binding(*symbol, value);
+                let _ = self.box_capture_binding_fresh(*symbol, value);
             }
             _ => {
                 self.bind_pattern(pattern, value);

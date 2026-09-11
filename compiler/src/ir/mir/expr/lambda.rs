@@ -45,6 +45,24 @@ impl<'a> HirToMirContext<'a> {
     /// Allocating here (rather than at the lambda expression) makes the cell
     /// dominate closures created conditionally and lets multiple closures
     /// reuse exactly the same binding.
+    /// The same, for a DECLARATION rather than an assignment. A declaration
+    /// introduces a NEW binding, so it gets a new cell: reusing one makes every
+    /// closure created by successive executions -- the iterations of a loop --
+    /// share a slot and read whatever the last one left there.
+    pub(crate) fn box_capture_binding_fresh(
+        &mut self,
+        symbol: SymbolId,
+        value: IrId,
+    ) -> Option<IrId> {
+        if !self.boxed_capture_symbols.contains(&symbol) {
+            return Some(value);
+        }
+        let cell = self.build_heap_alloc(8)?;
+        self.builder.build_store(cell, value)?;
+        self.capture_cells.insert(symbol, cell);
+        Some(cell)
+    }
+
     pub(crate) fn box_capture_binding(&mut self, symbol: SymbolId, value: IrId) -> Option<IrId> {
         if !self.boxed_capture_symbols.contains(&symbol) {
             return Some(value);
