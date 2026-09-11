@@ -341,16 +341,6 @@ for i, l in enumerate(lines):
         continue
     live[i] = all(f[0] for f in stack) if stack else True
 
-methods = []
-for i, l in enumerate(lines):
-    if not live[i]:
-        continue
-    m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', l)
-    if m and m.group(1) not in methods:
-        methods.append(m.group(1))
-if not methods:
-    sys.exit(3)
-
 start = next(i for i, l in enumerate(lines) if re.search(r'\bclass\s+%s\b' % cls, l))
 depth = 0
 opened = False
@@ -362,9 +352,29 @@ for i in range(start, len(lines)):
     if opened and depth <= 0:
         last = i
         break
+
+# Only the ENTRY class's OWN methods, and called the way they are declared.
+# Scanning the whole file also picked up `function test*` on private sibling
+# classes, interfaces and externs in the same file and called them all on the
+# entry instance -- a program Haxe itself rejects, and which rayzor instead
+# synthesises as a bodyless member and trap-stubs, so the row scored as a
+# compiler failure while measuring nothing.
+methods = []
+for i in range(start, last):
+    if not live[i]:
+        continue
+    m = re.search(r'\bfunction\s+(test[A-Za-z0-9_]*)\s*\(', lines[i])
+    if not m or any(name == m.group(1) for name, _ in methods):
+        continue
+    is_static = re.search(r'\bstatic\b', lines[i][:m.start()]) is not None
+    methods.append((m.group(1), is_static))
+if not methods:
+    sys.exit(3)
+
 main = ['    public static function main():Void {',
         '        var inst = new %s();' % cls]
-main += ['        inst.%s();' % m for m in methods]
+main += ['        %s.%s();' % (cls, name) if st else '        inst.%s();' % name
+         for name, st in methods]
 main += ['        unit.ConfCheck.summary();', '    }']
 open(dst, 'w', encoding='utf-8').write('\n'.join(lines[:last] + main + lines[last:]))
 PYGEN
