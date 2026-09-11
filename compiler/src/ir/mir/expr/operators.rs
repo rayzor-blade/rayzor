@@ -759,24 +759,25 @@ impl<'a> HirToMirContext<'a> {
                             .map(|t| is_concrete_ir_type(t))
                             .unwrap_or(false)
                     };
-                    let lhs_boxed = match &lhs.kind {
-                        HirExprKind::Variable { symbol, .. } => {
-                            self.boxed_dynamic_symbols.contains(symbol)
+                    // A register the boxing helpers produced is typed
+                    // Ptr(Dynamic). That is a POSITIVE answer; the fallbacks
+                    // below can only infer from a symbol table that covers
+                    // named locals, or from the absence of a concrete type.
+                    let marked_box = |ty: &Option<IrType>| matches!(ty, Some(IrType::Ptr(inner)) if **inner == IrType::Dynamic);
+                    let boxed_operand = |slf: &Self, expr: &HirExpr, reg| {
+                        let ty = slf.builder.get_register_type(reg);
+                        if marked_box(&ty) {
+                            return true;
                         }
-                        _ => {
-                            let ty = self.builder.get_register_type(lhs_reg);
-                            !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false)
+                        match &expr.kind {
+                            HirExprKind::Variable { symbol, .. } => {
+                                slf.boxed_dynamic_symbols.contains(symbol)
+                            }
+                            _ => !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false),
                         }
                     };
-                    let rhs_boxed = match &rhs.kind {
-                        HirExprKind::Variable { symbol, .. } => {
-                            self.boxed_dynamic_symbols.contains(symbol)
-                        }
-                        _ => {
-                            let ty = self.builder.get_register_type(rhs_reg);
-                            !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false)
-                        }
-                    };
+                    let lhs_boxed = boxed_operand(self, lhs, lhs_reg);
+                    let rhs_boxed = boxed_operand(self, rhs, rhs_reg);
                     // Eq/Ne on two pointer-shaped Dynamic operands cannot be decided
                     // here: a box and a lambda param holding a raw i64 are both
                     // Ptr(Void) and neither is tracked. The runtime validates each

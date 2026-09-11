@@ -2631,7 +2631,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             IrType::F64 => Ok(self.context.f64_type().into()),
 
             // Pointers become opaque pointers in LLVM 15+
-            IrType::Ptr(_) | IrType::Ref(_) => {
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
 

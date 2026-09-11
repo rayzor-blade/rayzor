@@ -32,6 +32,11 @@ pub enum IrType {
     F32,
     F64,
 
+    /// A boxed `DynamicValue`, as opposed to a raw value carried in a
+    /// pointer-shaped slot. The distinction is the whole point: `Ptr(Void)`
+    /// says nothing about which of the two a register holds.
+    Dynamic,
+
     /// Pointer type
     Ptr(Box<IrType>),
 
@@ -185,7 +190,7 @@ impl IrType {
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
             IrType::I64 | IrType::U64 | IrType::F64 => 8,
-            IrType::Ptr(_) | IrType::Ref(_) => std::mem::size_of::<usize>(),
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => std::mem::size_of::<usize>(),
             IrType::Array(elem_ty, count) => elem_ty.size() * count,
             IrType::Slice(_) => std::mem::size_of::<usize>() * 2, // ptr + len
             IrType::String => std::mem::size_of::<usize>() * 3,   // ptr + len + capacity
@@ -219,7 +224,7 @@ impl IrType {
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
             IrType::I64 | IrType::U64 | IrType::F64 => 8,
-            IrType::Ptr(_) | IrType::Ref(_) => std::mem::align_of::<usize>(),
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => std::mem::align_of::<usize>(),
             IrType::Array(elem_ty, _) => elem_ty.align(),
             IrType::Slice(_) | IrType::String | IrType::Any => std::mem::align_of::<usize>(),
             IrType::Function { .. } => std::mem::align_of::<usize>(),
@@ -405,6 +410,7 @@ impl fmt::Display for IrType {
             IrType::U64 => write!(f, "u64"),
             IrType::F32 => write!(f, "f32"),
             IrType::F64 => write!(f, "f64"),
+            IrType::Dynamic => write!(f, "dynamic"),
             IrType::Ptr(ty) => write!(f, "*{}", ty),
             IrType::Ref(ty) => write!(f, "&{}", ty),
             IrType::Array(ty, size) => write!(f, "[{}; {}]", ty, size),

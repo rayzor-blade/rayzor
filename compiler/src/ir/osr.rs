@@ -107,7 +107,8 @@ pub fn frame_size_of(ty: &IrType) -> usize {
         IrType::I16 | IrType::U16 => 2,
         IrType::I32 | IrType::U32 | IrType::F32 => 4,
         IrType::I64 | IrType::U64 | IrType::F64 => 8,
-        IrType::Ptr(_)
+        IrType::Dynamic
+        | IrType::Ptr(_)
         | IrType::Ref(_)
         | IrType::Slice(_)
         | IrType::String

@@ -999,7 +999,7 @@ impl<'a> HirToMirContext<'a> {
         value_ty: IrType,
         kind: PrimBoxKind,
     ) -> Option<IrId> {
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));
         let (box_fn, box_arg_ty) = match kind {
             PrimBoxKind::Int => ("haxe_box_int_ptr", IrType::I64),
             PrimBoxKind::Float => ("haxe_box_float_ptr", IrType::F64),
@@ -1010,16 +1010,17 @@ impl<'a> HirToMirContext<'a> {
         } else {
             value
         };
-        let box_id = self.get_or_register_extern_function(box_fn, vec![box_arg_ty], ptr_u8.clone());
+        let box_id =
+            self.get_or_register_extern_function(box_fn, vec![box_arg_ty], dyn_ptr.clone());
         self.builder
-            .build_call_direct(box_id, vec![widened], ptr_u8)
+            .build_call_direct(box_id, vec![widened], dyn_ptr)
     }
 
     /// Box a raw value as a DynamicValue* for functions that expect Dynamic parameters.
     /// Resolves TypeParameter types through the current class context.
     /// Returns Some(boxed_reg) on success, None if value is already Dynamic or can't be resolved.
     pub(crate) fn box_value_for_dynamic(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
-        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));
 
         // Resolve the concrete type — handles TypeParameter through class context
         let concrete_type_id = {
@@ -1080,7 +1081,7 @@ impl<'a> HirToMirContext<'a> {
         if is_enum {
             let type_id_u32 = self.runtime_type_id(concrete_type_id);
             let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
-            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));
             // Cast the raw i64 discriminant (or boxed enum ptr) to *u8
             let actual_reg_type = self
                 .builder
@@ -1090,17 +1091,17 @@ impl<'a> HirToMirContext<'a> {
                 value
             } else {
                 self.builder
-                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .build_cast(value, actual_reg_type, dyn_ptr.clone())
                     .unwrap_or(value)
             };
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_reference_ptr",
-                vec![ptr_u8.clone(), IrType::U32],
-                ptr_u8.clone(),
+                vec![dyn_ptr.clone(), IrType::U32],
+                dyn_ptr.clone(),
             );
             return self
                 .builder
-                .build_call_direct(box_func, vec![as_ptr, type_id_const], ptr_u8);
+                .build_call_direct(box_func, vec![as_ptr, type_id_const], dyn_ptr);
         }
 
         if is_function {
@@ -1118,21 +1119,21 @@ impl<'a> HirToMirContext<'a> {
                     .build_bitcast(value, IrType::I64)
                     .unwrap_or(value);
                 self.builder
-                    .build_cast(as_i64, IrType::I64, ptr_u8.clone())
+                    .build_cast(as_i64, IrType::I64, dyn_ptr.clone())
                     .unwrap_or(as_i64)
             } else {
                 self.builder
-                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .build_cast(value, actual_reg_type, dyn_ptr.clone())
                     .unwrap_or(value)
             };
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_function_ptr",
-                vec![ptr_u8.clone()],
-                ptr_u8.clone(),
+                vec![dyn_ptr.clone()],
+                dyn_ptr.clone(),
             );
             return self
                 .builder
-                .build_call_direct(box_func, vec![as_ptr], ptr_u8);
+                .build_call_direct(box_func, vec![as_ptr], dyn_ptr);
         }
 
         if is_class_like {
@@ -1149,16 +1150,16 @@ impl<'a> HirToMirContext<'a> {
                 value
             } else {
                 self.builder
-                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .build_cast(value, actual_reg_type, dyn_ptr.clone())
                     .unwrap_or(value)
             };
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_class_instance",
-                vec![ptr_u8.clone()],
-                ptr_u8.clone(),
+                vec![dyn_ptr.clone()],
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![as_ptr], ptr_u8)
+                .build_call_direct(box_func, vec![as_ptr], dyn_ptr)
         } else if is_string || matches!(&ir_type, IrType::Ptr(_)) {
             // String, plus any `Ptr` fallback that isn't class/interface/anon/array
             // (e.g. type-erased opaque pointers from extern declarations), boxes as
@@ -1173,16 +1174,16 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 // i64 → *u8 cast (for type-erased string pointers)
                 self.builder
-                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .build_cast(value, actual_reg_type, dyn_ptr.clone())
                     .unwrap_or(value)
             };
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_haxestring_ptr",
-                vec![ptr_u8.clone()],
-                ptr_u8.clone(),
+                vec![dyn_ptr.clone()],
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![as_ptr], ptr_u8)
+                .build_call_direct(box_func, vec![as_ptr], dyn_ptr)
         } else if matches!(&ir_type, IrType::I32) {
             let as_i64 = self
                 .builder
@@ -1191,35 +1192,35 @@ impl<'a> HirToMirContext<'a> {
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_int_ptr",
                 vec![IrType::I64],
-                ptr_u8.clone(),
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![as_i64], ptr_u8)
+                .build_call_direct(box_func, vec![as_i64], dyn_ptr)
         } else if matches!(&ir_type, IrType::I64) {
             // i64 — box as int (type-erased int or fallback)
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_int_ptr",
                 vec![IrType::I64],
-                ptr_u8.clone(),
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![value], ptr_u8)
+                .build_call_direct(box_func, vec![value], dyn_ptr)
         } else if matches!(&ir_type, IrType::F64) {
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_float_ptr",
                 vec![IrType::F64],
-                ptr_u8.clone(),
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![value], ptr_u8)
+                .build_call_direct(box_func, vec![value], dyn_ptr)
         } else if matches!(&ir_type, IrType::Bool) {
             let box_func = self.get_or_register_extern_function(
                 "haxe_box_bool_ptr",
                 vec![IrType::Bool],
-                ptr_u8.clone(),
+                dyn_ptr.clone(),
             );
             self.builder
-                .build_call_direct(box_func, vec![value], ptr_u8)
+                .build_call_direct(box_func, vec![value], dyn_ptr)
         } else {
             // Unknown type — can't box
             None

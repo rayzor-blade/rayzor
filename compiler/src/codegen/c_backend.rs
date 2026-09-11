@@ -1865,7 +1865,7 @@ impl CBackend {
             IrType::U64 => "u64".to_string(),
             IrType::F32 => "float".to_string(),
             IrType::F64 => "double".to_string(),
-            IrType::Ptr(_) | IrType::Ref(_) => "void*".to_string(),
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) => "void*".to_string(),
             IrType::String => "void*".to_string(),
             IrType::Any => "i64".to_string(),
             IrType::Function { .. } => "void*".to_string(),

@@ -74,6 +74,7 @@ impl MonoKey {
             IrType::F32 => "f32".to_string(),
             IrType::F64 => "f64".to_string(),
             IrType::String => "String".to_string(),
+            IrType::Dynamic => "Dynamic".to_string(),
             IrType::Ptr(inner) => format!("Ptr{}", Self::mangle_type(inner)),
             IrType::Ref(inner) => format!("Ref{}", Self::mangle_type(inner)),
             IrType::Array(elem, size) => format!("Arr{}x{}", Self::mangle_type(elem), size),

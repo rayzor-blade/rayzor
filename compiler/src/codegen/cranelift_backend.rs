@@ -468,7 +468,7 @@ impl CraneliftBackend {
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
             IrType::I64 | IrType::U64 | IrType::F64 => 8,
-            IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => {
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => {
                 self.get_pointer_size() as u64
             }
             IrType::Array(elem_ty, count) => self.get_type_size(elem_ty) * (*count as u64),
@@ -509,7 +509,9 @@ impl CraneliftBackend {
             IrType::I16 | IrType::U16 => 2,
             IrType::I32 | IrType::U32 | IrType::F32 => 4,
             IrType::I64 | IrType::U64 | IrType::F64 => 8,
-            IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => self.get_pointer_size(),
+            IrType::Dynamic | IrType::Ptr(_) | IrType::Ref(_) | IrType::Function { .. } => {
+                self.get_pointer_size()
+            }
             IrType::Array(elem_ty, _) => self.get_type_alignment(elem_ty),
             IrType::Slice(_) | IrType::String => self.get_pointer_size(), // Aligned to pointer
             IrType::Struct { fields, .. } => {
@@ -5880,7 +5882,7 @@ impl CraneliftBackend {
             IrType::F32 => Ok(types::F32),
             IrType::F64 => Ok(types::F64),
             IrType::Bool => Ok(types::I8),
-            IrType::Ptr(_) => Ok(types::I64),
+            IrType::Dynamic | IrType::Ptr(_) => Ok(types::I64),
             IrType::Ref(_) => Ok(types::I64),
             IrType::Array(..) => Ok(types::I64),
             IrType::Slice(_) => Ok(types::I64),

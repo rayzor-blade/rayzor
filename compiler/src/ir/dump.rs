@@ -619,6 +619,7 @@ pub fn dump_type(ty: &IrType) -> String {
         IrType::U64 => "u64".to_string(),
         IrType::F32 => "f32".to_string(),
         IrType::F64 => "f64".to_string(),
+        IrType::Dynamic => "dynamic".to_string(),
         IrType::Ptr(inner) => format!("*{}", dump_type(inner)),
         IrType::Ref(inner) => format!("&{}", dump_type(inner)),
         IrType::Array(elem, size) => format!("[{} x {}]", dump_type(elem), size),

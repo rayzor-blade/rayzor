@@ -66,6 +66,7 @@ impl EnvironmentLayout {
                 IrType::I64 | IrType::U64 => false, // Already 64-bit
                 // CRITICAL: Pointer and reference types are stored as I64 but
                 // should NOT be cast down - they must remain as the full 64-bit value
+                IrType::Dynamic => false,
                 IrType::Ptr(_) => false,
                 IrType::Ref(_) => false,
                 IrType::Struct { .. } => false,
