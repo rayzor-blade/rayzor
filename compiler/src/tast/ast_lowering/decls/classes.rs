@@ -322,6 +322,7 @@ impl<'a> AstLowering<'a> {
                     // two methods appear in. Recover the shape here for the
                     // case that can be read straight off the syntax.
                     self.anonymous_return_type_from_ast(func)
+                        .or_else(|| self.constructed_return_type_from_ast(func))
                         .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
                 };
                 let function_type = self
@@ -1102,24 +1103,74 @@ impl<'a> AstLowering<'a> {
     /// still being registered, so lowering here would create symbols in the
     /// wrong scope and evaluate expressions twice. Anything less direct keeps
     /// today's `Dynamic`.
-    fn anonymous_return_type_from_ast(
+    /// The return type of an un-annotated method whose returned expression is
+    /// a constructor call, directly (`return new C<T>()`) or through a local
+    /// (`var v = new C<T>(); ... return v`).
+    ///
+    /// Same reason as the anonymous-structure case above: without it a caller
+    /// written ABOVE the method sees Dynamic, so `haxe.Template`'s constructor
+    /// could not resolve `.isEmpty()` on the `List<Token>` its own
+    /// `parseTokens` returns, and the whole module failed to compile.
+    fn constructed_return_type_from_ast(
         &mut self,
         func: &parser::haxe_ast::Function,
     ) -> Option<TypeId> {
         use parser::haxe_ast::ExprKind;
 
-        fn returned_expr(expr: &parser::haxe_ast::Expr) -> Option<&parser::haxe_ast::Expr> {
+        // Only a constructor call carrying explicit type ARGUMENTS. Those are
+        // the returns whose decay to Dynamic loses an element type and with it
+        // the receiver's members. A plain `new C(...)` already resolved well
+        // enough as Dynamic, and typing it here instead is not equivalent:
+        // the class may not be fully registered at pre-registration time, and
+        // the wrong type is worse than none.
+        fn new_type(expr: &parser::haxe_ast::Expr) -> Option<parser::Type> {
             match &expr.kind {
-                ExprKind::Return(Some(inner)) => Some(inner),
+                ExprKind::New {
+                    type_path, params, ..
+                } if !params.is_empty() => Some(parser::Type::Path {
+                    path: type_path.clone(),
+                    params: params.clone(),
+                    span: expr.span,
+                }),
+                _ => None,
+            }
+        }
+
+        /// The initialiser of the last `var name = ...` the body declares.
+        fn local_init<'a>(
+            expr: &'a parser::haxe_ast::Expr,
+            name: &str,
+        ) -> Option<&'a parser::haxe_ast::Expr> {
+            match &expr.kind {
+                ExprKind::Var {
+                    name: n,
+                    expr: Some(init),
+                    ..
+                } if n == name => Some(init),
                 ExprKind::Block(elements) => {
                     elements.iter().rev().find_map(|element| match element {
-                        parser::BlockElement::Expr(e) => returned_expr(e),
+                        parser::BlockElement::Expr(e) => local_init(e, name),
                         _ => None,
                     })
                 }
                 _ => None,
             }
         }
+
+        let body = func.body.as_ref()?;
+        let returned = returned_expr(body)?;
+        let ty = match &returned.kind {
+            ExprKind::Ident(name) => new_type(local_init(body, name)?),
+            _ => new_type(returned),
+        }?;
+        self.lower_type(&ty).ok()
+    }
+
+    fn anonymous_return_type_from_ast(
+        &mut self,
+        func: &parser::haxe_ast::Function,
+    ) -> Option<TypeId> {
+        use parser::haxe_ast::ExprKind;
 
         let body = func.body.as_ref()?;
         let ExprKind::Object(fields) = &returned_expr(body)?.kind else {
@@ -1153,5 +1204,18 @@ impl<'a> AstLowering<'a> {
             &self.context.type_table,
             field_types,
         ))
+    }
+}
+
+/// The expression a function body returns, where the syntax alone shows it.
+fn returned_expr(expr: &parser::haxe_ast::Expr) -> Option<&parser::haxe_ast::Expr> {
+    use parser::haxe_ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Return(Some(inner)) => Some(inner),
+        ExprKind::Block(elements) => elements.iter().rev().find_map(|element| match element {
+            parser::BlockElement::Expr(e) => returned_expr(e),
+            _ => None,
+        }),
+        _ => None,
     }
 }
