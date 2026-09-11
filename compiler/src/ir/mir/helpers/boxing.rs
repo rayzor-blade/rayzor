@@ -836,6 +836,75 @@ impl<'a> HirToMirContext<'a> {
     /// a boxed pointer that needs to be unboxed to the actual type T.
     ///
     /// Also handles nullable types: Null<Int> (Ptr(I32)) - we need to unbox the inner type.
+    /// Unbox the return of an erased generic method, resolving T from the
+    /// receiver's type argument.
+    ///
+    /// A generic class is compiled once, so `first(): Null<T>` cannot know T:
+    /// some bodies box the stored bits with haxe_box_int_ptr, others hand the
+    /// bits back raw, and the caller cannot tell which from the type. So the
+    /// RUNTIME decides: `haxe_unbox_erased_return` unwraps either box shape
+    /// to its bits and passes anything else through unchanged. The caller's
+    /// knowledge of T is used only to shape the result register.
+    ///
+    /// One type parameter only. With two, nothing here says which one the
+    /// return is -- `BalancedTree<K,V>.get` returns V -- and shaping the bits
+    /// as the wrong one is worse than leaving them.
+    pub(crate) fn unbox_erased_generic_return(
+        &mut self,
+        call_result: IrId,
+        actual_return_type: &IrType,
+        receiver_ty: TypeId,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+        let erased = matches!(actual_return_type, IrType::Ptr(inner)
+            if matches!(inner.as_ref(), IrType::U8 | IrType::Void));
+        if !erased {
+            return Some(call_result);
+        }
+        let resolved = {
+            let type_table = self.type_table;
+            match type_table.get(receiver_ty).map(|ti| &ti.kind) {
+                Some(TypeKind::Class { type_args, .. })
+                | Some(TypeKind::GenericInstance { type_args, .. })
+                    if type_args.len() == 1 =>
+                {
+                    Some(self.convert_type(type_args[0]))
+                }
+                _ => None,
+            }
+        };
+        let Some(target) = resolved else {
+            return Some(call_result);
+        };
+        let shape_as_scalar = matches!(
+            target,
+            IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64 | IrType::Bool
+        );
+        let shape_as_pointer = matches!(target, IrType::String | IrType::Ptr(_));
+        if !shape_as_scalar && !shape_as_pointer {
+            return Some(call_result);
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let unbox = self.get_or_register_extern_function(
+            "haxe_unbox_erased_return",
+            vec![ptr_u8],
+            IrType::I64,
+        );
+        let bits = self
+            .builder
+            .build_call_direct(unbox, vec![call_result], IrType::I64)?;
+        match target {
+            IrType::I64 => Some(bits),
+            IrType::I32 | IrType::Bool => self.builder.build_cast(bits, IrType::I64, target),
+            IrType::F64 => self.builder.build_bitcast(bits, IrType::F64),
+            IrType::F32 => {
+                let f = self.builder.build_bitcast(bits, IrType::F64)?;
+                self.builder.build_cast(f, IrType::F64, IrType::F32)
+            }
+            other => self.builder.build_bitcast(bits, other),
+        }
+    }
+
     pub(crate) fn maybe_unbox_for_extern_return(
         &mut self,
         value: IrId,

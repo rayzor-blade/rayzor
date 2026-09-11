@@ -2823,6 +2823,34 @@ pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
     ptr as usize as i64
 }
 
+/// Unwrap the return of an erased generic method to the bits the caller's T
+/// expects, or pass a non-box through unchanged.
+///
+/// Two producers box `Null<T>` in two LAYOUTS. `haxe_box_int_ptr` puts the
+/// stored bits in a heap cell behind an Int tag, so the pointer is the cell's
+/// contents. `haxe_box_typed_ptr` with a Reference tag stores the pointer
+/// directly under type_id 0. Both must come out as the same value. Tag 0 is
+/// never a real type, so it identifies the second shape unambiguously; any
+/// other unrecognised first word means the slot was never a box.
+#[no_mangle]
+pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    if let Some(d) = dynamic_box_at(ptr) {
+        if d.type_id == TYPE_INT || d.type_id == TYPE_BOOL {
+            return haxe_unbox_int(d);
+        }
+        if d.type_id == TYPE_FLOAT {
+            return haxe_unbox_float(d).to_bits() as i64;
+        }
+        if d.type_id.0 == 0 || d.type_id == TYPE_STRING {
+            return d.value_ptr as i64;
+        }
+    }
+    ptr as usize as i64
+}
+
 /// Safely coerce a Dynamic-typed value to a float.
 /// Same heuristic as haxe_coerce_dynamic_to_int.
 #[no_mangle]

@@ -982,6 +982,10 @@ register_symbol!(
     crate::type_system::haxe_unbox_scalar_or_addr
 );
 register_symbol!(
+    "haxe_unbox_erased_return",
+    crate::type_system::haxe_unbox_erased_return
+);
+register_symbol!(
     "haxe_coerce_dynamic_to_float",
     crate::type_system::haxe_coerce_dynamic_to_float
 );

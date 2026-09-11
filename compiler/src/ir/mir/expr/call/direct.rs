@@ -249,7 +249,7 @@ impl<'a> HirToMirContext<'a> {
                     let result = self.builder.build_call_direct_with_type_args(
                         func_id,
                         arg_regs,
-                        actual_return_type,
+                        actual_return_type.clone(),
                         call_type_args,
                     );
                     // Generic bodies return type-erased i64: the caller's
@@ -262,11 +262,28 @@ impl<'a> HirToMirContext<'a> {
                             return self.builder.build_bitcast(reg, reg_type);
                         }
                     }
+                    if *is_method && !args.is_empty() {
+                        return self.unbox_erased_generic_return(
+                            result?,
+                            &actual_return_type,
+                            args[0].ty,
+                        );
+                    }
                     return result;
                 }
-                return self
-                    .builder
-                    .build_call_direct(func_id, arg_regs, actual_return_type);
+                let result = self.builder.build_call_direct(
+                    func_id,
+                    arg_regs,
+                    actual_return_type.clone(),
+                )?;
+                if *is_method && !args.is_empty() {
+                    return self.unbox_erased_generic_return(
+                        result,
+                        &actual_return_type,
+                        args[0].ty,
+                    );
+                }
+                return Some(result);
             }
         }
         *fell_through = true;
