@@ -29,6 +29,7 @@ mod copying;
 mod cstruct;
 mod debug_format;
 mod drops;
+mod dynamic_dispatch;
 mod enums;
 mod errors;
 mod exhaustiveness;

@@ -64,8 +64,13 @@ impl<'a> HirToMirContext<'a> {
                         );
 
                         let mut call_arg_regs = Vec::new();
-                        for arg in args {
+                        for (i, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
+                                let reg = if i == 0 {
+                                    self.unbox_dynamic_receiver(reg, arg, class_name)
+                                } else {
+                                    reg
+                                };
                                 call_arg_regs.push(reg);
                             }
                         }
@@ -123,6 +128,11 @@ impl<'a> HirToMirContext<'a> {
                         let mut param_types = Vec::new();
                         for (i, arg) in args.iter().enumerate() {
                             if let Some(reg) = self.lower_expression(arg) {
+                                let reg = if i == 0 {
+                                    self.unbox_dynamic_receiver(reg, arg, class_name)
+                                } else {
+                                    reg
+                                };
                                 let actual_ty = self.convert_type(arg.ty);
                                 let expected_ty = mir_wrapper_params
                                     .as_ref()
@@ -268,10 +278,13 @@ impl<'a> HirToMirContext<'a> {
                         return final_result;
                     }
 
-                    let arg_regs: Vec<_> = args
+                    let mut arg_regs: Vec<_> = args
                         .iter()
                         .filter_map(|a| self.lower_expression(a))
                         .collect();
+                    if let (Some(first), Some(receiver)) = (arg_regs.first_mut(), args.first()) {
+                        *first = self.unbox_dynamic_receiver(*first, receiver, class_name);
+                    }
 
                     // Raw-value params (StringMap, IntMap) are stored inline as u64 bits:
                     // no boxing, no heap allocation.
@@ -1117,8 +1130,17 @@ impl<'a> HirToMirContext<'a> {
                                         );
 
                                         let mut arg_regs = Vec::new();
-                                        for arg in args {
+                                        for (i, arg) in args.iter().enumerate() {
                                             if let Some(reg) = self.lower_expression(arg) {
+                                                let reg = if i == 0 {
+                                                    self.unbox_dynamic_receiver(
+                                                        reg,
+                                                        arg,
+                                                        class_name.as_str(),
+                                                    )
+                                                } else {
+                                                    reg
+                                                };
                                                 arg_regs.push(reg);
                                             }
                                         }
@@ -1528,6 +1550,7 @@ impl<'a> HirToMirContext<'a> {
                 Vec::new()
             } else {
                 let obj_reg = self.lower_expression(object)?;
+                let obj_reg = self.unbox_dynamic_receiver(obj_reg, object, class_name);
                 vec![obj_reg] // 'this' as first arg
             };
             for (i, arg) in args.iter().enumerate() {
@@ -1542,8 +1565,11 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or_else(|| actual_ty.clone());
 
                 // Auto-box if needed (Int -> Ptr(U8) for Deque<Int>.add()).
-                let final_reg =
-                    self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?;
+                let final_reg = match self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty)
+                {
+                    Some(boxed) => boxed,
+                    None => self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?,
+                };
                 arg_regs.push(final_reg);
             }
 

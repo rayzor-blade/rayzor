@@ -11,8 +11,9 @@
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    box_class_field_as_dynamic, get_type_info, is_class_type, lookup_class_field, DynamicValue,
-    ParamType, TypeId, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
+    box_class_field_as_dynamic, dynamic_box_at, get_type_info, haxe_box_int_ptr, is_class_type,
+    lookup_class_field, DynamicValue, ParamType, TypeId, TYPE_ARRAY, TYPE_BOOL, TYPE_FLOAT,
+    TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING, TYPE_VOID,
 };
 
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
@@ -59,6 +60,38 @@ unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
 /// Safety: the first 4 bytes of a raw anon handle (`Box<Arc<AnonObject>>`)
 /// are the low bits of a heap pointer — always a large number, never 6.
 /// So the `type_id == 6` check reliably distinguishes the two cases.
+/// What a builtin-tagged box holds, for the entries that expect an object:
+/// an array or string (which answer `length`), or a scalar (which has no
+/// fields). An anonymous object's box is unwrapped by the caller; a class
+/// box shares its first word with a raw instance and is read as one.
+enum BuiltinBox {
+    Array(*mut u8),
+    String(*mut u8),
+    Scalar,
+}
+
+fn builtin_box(ptr: *mut u8) -> Option<BuiltinBox> {
+    let d = dynamic_box_at(ptr)?;
+    match d.type_id {
+        TYPE_ARRAY => Some(BuiltinBox::Array(d.value_ptr)),
+        TYPE_STRING => Some(BuiltinBox::String(d.value_ptr)),
+        TYPE_VOID | TYPE_NULL | TYPE_BOOL | TYPE_INT | TYPE_FLOAT => Some(BuiltinBox::Scalar),
+        _ => None,
+    }
+}
+
+fn builtin_length(b: &BuiltinBox) -> Option<i64> {
+    match b {
+        BuiltinBox::Array(p) if !p.is_null() => Some(crate::haxe_array::haxe_array_length(
+            *p as *const crate::haxe_array::HaxeArray,
+        ) as i64),
+        BuiltinBox::String(p) if !p.is_null() => Some(crate::haxe_string::haxe_string_length(
+            *p as *const HaxeString,
+        ) as i64),
+        _ => None,
+    }
+}
+
 unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
     let type_id = std::ptr::read_unaligned(ptr as *const u32);
     if type_id == anon_object::TYPE_ANON_OBJECT.0 {
@@ -95,11 +128,18 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
         return false;
     }
     unsafe {
-        let actual = unwrap_anon_dynamic(obj);
         let (name_ptr, name_len) = match extract_field_name(field) {
             Some(p) => p,
             None => return false,
         };
+        if let Some(b) = builtin_box(obj) {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            return name == "length" && builtin_length(&b).is_some();
+        }
+        let actual = unwrap_anon_dynamic(obj);
         // Class-instance fast path: type_id at offset 0 maps to a
         // registered class? Walk the hierarchy via
         // `lookup_class_field`.
@@ -132,27 +172,107 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     }
     unsafe {
-        let actual = unwrap_anon_dynamic(obj);
         let (name_ptr, name_len) = match extract_field_name(field) {
             Some(p) => p,
             None => return std::ptr::null_mut(),
         };
+        if let Some(b) = builtin_box(obj) {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            return match builtin_length(&b) {
+                Some(len) if name == "length" => haxe_box_int_ptr(len),
+                _ => std::ptr::null_mut(),
+            };
+        }
+        let actual = unwrap_anon_dynamic(obj);
         let type_id_lo = read_class_type_id(actual);
         if is_class_type(type_id_lo) {
             let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
                 name_ptr,
                 name_len as usize,
             ));
-            return match lookup_class_field(type_id_lo, name) {
-                Some((offset, ty)) => {
-                    let slot_ptr = actual.add(offset) as *const u64;
-                    let value = std::ptr::read_unaligned(slot_ptr);
-                    box_class_field_as_dynamic(value, ty)
-                }
-                None => std::ptr::null_mut(),
-            };
+            return class_field_of(type_id_lo, actual, name);
         }
         anon_object::rayzor_anon_get_field(actual, name_ptr, name_len)
+    }
+}
+
+/// `obj.name` for an instance of the registered class `type_id`: the field's
+/// slot, boxed; or, for a method, a function-tagged box carrying the object
+/// (it answers `!= null` and `Reflect.isFunction`; nothing here can bind it
+/// into a callable closure); else null.
+unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
+    match lookup_class_field(type_id, name) {
+        Some((offset, ty)) => {
+            let slot_ptr = obj.add(offset) as *const u64;
+            let value = std::ptr::read_unaligned(slot_ptr);
+            box_class_field_as_dynamic(value, ty)
+        }
+        None if class_declares_method(type_id, name) => {
+            crate::type_system::haxe_box_reference_ptr(obj, TYPE_FUNCTION.0)
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Whether `name` is an instance method of the class or one of its parents.
+fn class_declares_method(start_type_id: u32, name: &str) -> bool {
+    let mut current = Some(start_type_id);
+    while let Some(tid) = current {
+        let Some(info) = get_type_info(TypeId(tid)) else {
+            return false;
+        };
+        let Some(class_info) = info.class_info.as_ref() else {
+            return false;
+        };
+        if class_info.instance_methods.contains(&name) {
+            return true;
+        }
+        current = class_info.super_type_id;
+    }
+    false
+}
+
+/// `d.field` for a Dynamic `d`: read through the box's tag.
+///
+/// A Dynamic is a `DynamicValue` box, and only its tag says what the
+/// payload is -- an array or a string answers `length` and nothing else, a
+/// scalar has no fields, an anonymous object or class instance goes to
+/// `haxe_reflect_field` on the payload. A slot that is not a box at all is
+/// taken as the object itself.
+#[no_mangle]
+pub extern "C" fn haxe_dynamic_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
+    if obj.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(d) = dynamic_box_at(obj).filter(|d| d.tag_is_known()) else {
+        return haxe_reflect_field(obj, field);
+    };
+    let name = unsafe {
+        match extract_field_name(field) {
+            Some((ptr, len)) => {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
+            }
+            None => return std::ptr::null_mut(),
+        }
+    };
+    match builtin_box(obj) {
+        Some(b) => match builtin_length(&b) {
+            Some(len) if name == "length" => haxe_box_int_ptr(len),
+            _ => std::ptr::null_mut(),
+        },
+        // An anonymous object reflects on its handle. A class instance is
+        // read by the class the box names: a runtime-implemented class (an
+        // iterator, a map) carries no header of its own to name it.
+        None if d.type_id == anon_object::TYPE_ANON_OBJECT => {
+            haxe_reflect_field(d.value_ptr, field)
+        }
+        None if is_class_type(d.type_id.0) && !d.value_ptr.is_null() => unsafe {
+            class_field_of(d.type_id.0, d.value_ptr, name)
+        },
+        None => std::ptr::null_mut(),
     }
 }
 
@@ -258,6 +378,16 @@ pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     }
     unsafe {
+        if builtin_box(obj).is_some() {
+            // Not an object: no fields, as Haxe's other targets answer.
+            let arr = std::alloc::alloc(std::alloc::Layout::new::<crate::haxe_array::HaxeArray>())
+                as *mut crate::haxe_array::HaxeArray;
+            if arr.is_null() {
+                return std::ptr::null_mut();
+            }
+            crate::haxe_array::haxe_array_new(arr, std::mem::size_of::<*mut HaxeString>());
+            return arr as *mut u8;
+        }
         let actual = unwrap_anon_dynamic(obj);
         let type_id_lo = read_class_type_id(actual);
         if is_class_type(type_id_lo) {
@@ -273,23 +403,22 @@ pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
 /// v: DynamicValue pointer
 #[no_mangle]
 pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
-    if v.is_null() {
+    // A raw scalar in a Dynamic slot (an array element, an iterator yield)
+    // is not a box and not an object; reading it as a box faulted on it.
+    let Some(dv) = dynamic_box_at(v) else {
+        return false;
+    };
+    if dv.type_id == TYPE_FUNCTION {
         return false;
     }
-    unsafe {
-        let dv = *(v as *const DynamicValue);
-        if dv.type_id == TYPE_FUNCTION {
-            return false;
-        }
-        // Anon objects, registered class instances, or other
-        // user-defined heap types all qualify. The `>= 1000`
-        // fallback covers extern abstract / interface types that
-        // aren't always in the runtime class registry but still
-        // have non-primitive type ids.
-        dv.type_id == anon_object::TYPE_ANON_OBJECT
-            || is_class_type(dv.type_id.0)
-            || dv.type_id.0 >= 1000
-    }
+    // Anon objects, registered class instances, or other
+    // user-defined heap types all qualify. The `>= 1000`
+    // fallback covers extern abstract / interface types that
+    // aren't always in the runtime class registry but still
+    // have non-primitive type ids.
+    dv.type_id == anon_object::TYPE_ANON_OBJECT
+        || is_class_type(dv.type_id.0)
+        || dv.type_id.0 >= 1000
 }
 
 /// Reflect.isFunction(v) -> Bool

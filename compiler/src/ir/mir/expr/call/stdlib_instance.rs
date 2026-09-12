@@ -274,19 +274,25 @@ impl<'a> HirToMirContext<'a> {
                                 distinct.dedup();
                                 if distinct.len() > 1 {
                                     // Nothing here can tell which class the value
-                                    // is, so the call cannot be bound; it throws
-                                    // where it is reached instead of failing the
-                                    // whole module, which `try` can catch and the
-                                    // rest of the module's code never notices.
+                                    // is; its box can. Bound at runtime by the
+                                    // tag, and a value none of them claims
+                                    // throws where it is reached rather than
+                                    // failing the whole module.
                                     let candidates = filtered_classes
                                         .iter()
                                         .map(|(class, _, _)| *class)
                                         .collect::<Vec<_>>()
                                         .join(", ");
-                                    return self.throw_unresolved_dynamic_call(&format!(
+                                    let message = format!(
                                         "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved",
                                         method_name, actual_param_count, candidates
-                                    ));
+                                    );
+                                    return self.dispatch_dynamic_call_by_tag(
+                                        args,
+                                        method_name,
+                                        &filtered_classes,
+                                        &message,
+                                    );
                                 }
                             }
 
@@ -300,10 +306,18 @@ impl<'a> HirToMirContext<'a> {
                                 );
                                 let runtime_func = runtime_call.runtime_name;
 
-                                if self
-                                    .stdlib_mapping
-                                    .class_key(class_name)
-                                    .is_some_and(|k| self.stdlib_mapping.is_mir_wrapper_class(k))
+                                // The mapping row says whether this method is a MIR
+                                // wrapper; a wrapper CLASS (String) still maps some
+                                // methods to externs, and a forward reference to one of
+                                // those is a body that never comes.
+                                if runtime_call.is_mir_wrapper
+                                    || (self
+                                        .stdlib_mapping
+                                        .class_key(class_name)
+                                        .is_some_and(|k| self.stdlib_mapping.is_mir_wrapper_class(k))
+                                        && self
+                                            .get_extern_function_signature(runtime_call.runtime_name)
+                                            .is_none())
                                 {
                                     // Use runtime_name directly as the MIR wrapper function name
                                     // (e.g., "Arc_init" not "rayzor_concurrent_Arc_init")
@@ -323,6 +337,11 @@ impl<'a> HirToMirContext<'a> {
                                     let mut receiver_failed = false;
                                     for (i, arg) in args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
+                                            let reg = if i == 0 {
+                                                self.unbox_dynamic_receiver(reg, arg, class_name)
+                                            } else {
+                                                reg
+                                            };
                                             let actual_ty = self.convert_type(arg.ty);
                                             let expected_ty = mir_wrapper_sig
                                                 .as_ref()
@@ -538,8 +557,13 @@ impl<'a> HirToMirContext<'a> {
                                     // Lower all arguments using a for loop (not a closure)
                                     // to avoid borrow conflict with stdlib_mapping
                                     let mut arg_regs = Vec::new();
-                                    for arg in args {
+                                    for (i, arg) in args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
+                                            let reg = if i == 0 {
+                                                self.unbox_dynamic_receiver(reg, arg, class_name)
+                                            } else {
+                                                reg
+                                            };
                                             arg_regs.push(reg);
                                         }
                                     }
@@ -559,11 +583,26 @@ impl<'a> HirToMirContext<'a> {
                                         return_type.clone(),
                                     );
 
-                                    return self.builder.build_call_direct(
+                                    let result = self.builder.build_call_direct(
                                         extern_func_id,
                                         arg_regs,
                                         return_type,
+                                    )?;
+                                    // Through a Dynamic receiver the result is
+                                    // Dynamic too, and a Dynamic is a box.
+                                    let expr_is_dynamic = matches!(
+                                        self.type_table.get(expr.ty).map(|t| &t.kind),
+                                        Some(TypeKind::Dynamic)
                                     );
+                                    if has_return && expr_is_dynamic {
+                                        return self.box_dispatch_result(
+                                            result,
+                                            class_name,
+                                            method_name,
+                                            runtime_call,
+                                        );
+                                    }
+                                    return Some(result);
                                 }
                             }
                             // If no mapping found, fall through to regular dispatch
@@ -699,8 +738,13 @@ impl<'a> HirToMirContext<'a> {
                                     );
 
                                     let mut arg_regs = Vec::new();
-                                    for arg in args {
+                                    for (i, arg) in args.iter().enumerate() {
                                         if let Some(reg) = self.lower_expression(arg) {
+                                            let reg = if i == 0 {
+                                                self.unbox_dynamic_receiver(reg, arg, &mono_class)
+                                            } else {
+                                                reg
+                                            };
                                             arg_regs.push(reg);
                                         }
                                     }

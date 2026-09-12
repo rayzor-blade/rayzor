@@ -22,6 +22,41 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// `cast d` with `d:Dynamic`: take the value out of its box by the
+    /// target's kind, checking nothing. None when the source is not Dynamic
+    /// or the register is already the raw representation.
+    fn unbox_unchecked_from_dynamic(
+        &mut self,
+        value: IrId,
+        source: TypeId,
+        target: TypeId,
+    ) -> Option<IrId> {
+        let (source_kind, target_kind) = {
+            let type_table = self.type_table;
+            (
+                type_table.get(source).map(|t| t.kind.clone()),
+                type_table.get(target).map(|t| t.kind.clone()),
+            )
+        };
+        if !matches!(source_kind, Some(TypeKind::Dynamic)) {
+            return None;
+        }
+        if !matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_))) {
+            return None;
+        }
+        match target_kind {
+            Some(TypeKind::Int)
+            | Some(TypeKind::Float)
+            | Some(TypeKind::Bool)
+            | Some(TypeKind::String)
+            | Some(TypeKind::Class { .. })
+            | Some(TypeKind::Array { .. })
+            | Some(TypeKind::Anonymous { .. })
+            | Some(TypeKind::Enum { .. }) => self.maybe_unbox_value(value, source, target),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lower_cast(&mut self, expr: &HirExpr) -> Option<IrId> {
         let HirExprKind::Cast {
             expr,
@@ -69,6 +104,24 @@ impl<'a> HirToMirContext<'a> {
         let from_type = self.convert_type(expr.ty);
         let to_type = self.convert_type(*target);
 
+        // A Dynamic source is a box, so even the unchecked cast changes the
+        // representation: the value comes out of the box, unverified. Before
+        // the same-MIR-type shortcut, which a box and an object both take.
+        if !*is_safe {
+            let source_is_dynamic = matches!(
+                self.type_table.get(expr.ty).map(|t| &t.kind),
+                Some(TypeKind::Dynamic)
+            );
+            if source_is_dynamic {
+                let value_reg = self.lower_expression(expr)?;
+                if let Some(out) = self.unbox_unchecked_from_dynamic(value_reg, expr.ty, *target)
+                {
+                    return Some(out);
+                }
+                return self.builder.build_cast(value_reg, from_type, to_type);
+            }
+        }
+
         // An abstract and its underlying type share a MIR type, so the cast is a
         // no-op. Safe casts between class types must NOT take this shortcut:
         // both are Ptr(Void), but the runtime still verifies the hierarchy.
@@ -81,6 +134,8 @@ impl<'a> HirToMirContext<'a> {
             let type_table = self.type_table;
             let src_kind = type_table.get(expr.ty).map(|t| &t.kind).cloned();
             let tgt_kind = type_table.get(*target).map(|t| &t.kind).cloned();
+            // A Dynamic source shares the pointer type too, but holds a box:
+            // it needs the downcast below, not a reinterpretation.
             let needs_runtime_check = matches!(
                 (&src_kind, &tgt_kind),
                 (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
@@ -96,7 +151,8 @@ impl<'a> HirToMirContext<'a> {
                         Some(TypeKind::Interface { .. }),
                         Some(TypeKind::Interface { .. })
                     )
-            );
+            ) || (matches!(&src_kind, Some(TypeKind::Dynamic))
+                && !matches!(&tgt_kind, Some(TypeKind::Dynamic)));
             if !needs_runtime_check {
                 return self.lower_expression(expr);
             }
@@ -249,12 +305,12 @@ impl<'a> HirToMirContext<'a> {
             // Dynamic → non-primitive type: runtime downcast (null on failure)
             (Some(TypeKind::Dynamic), _) if !matches!(&target_kind, Some(TypeKind::Dynamic)) => {
                 let value_reg = self.lower_expression(expr)?;
-                // DynamicValue boxing uses TAST TypeId (value_ty.as_raw()),
-                // so downcast comparison must also use TAST TypeId for consistency;
-                // an anonymous target carries the runtime's own tag instead.
-                let expected_id = match &target_kind {
-                    Some(TypeKind::Anonymous { .. }) => self.runtime_type_id(*target) as i64,
-                    _ => target.as_raw() as i64,
+                // The tag a box of the target carries: the stable runtime id
+                // where one exists, else the context-local TypeId, as the
+                // boxing side chooses it.
+                let expected_id = match self.runtime_type_id(*target) {
+                    0 => target.as_raw() as i64,
+                    stable => stable as i64,
                 };
                 let type_id_const = self.builder.build_const(IrValue::I64(expected_id))?;
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));

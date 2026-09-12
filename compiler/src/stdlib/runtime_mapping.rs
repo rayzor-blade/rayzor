@@ -739,6 +739,28 @@ impl StdlibMapping {
     }
 
     /// Get all unique stdlib class names that have registered methods
+    /// Every registered class with its instance method names, for the
+    /// runtime's class registry: a class the runtime implements has no
+    /// compiled declaration to register from, yet reflection on one of its
+    /// values still has to know its methods.
+    pub fn runtime_class_methods(&self) -> Vec<(&'static str, Vec<&'static str>)> {
+        let mut by_class: std::collections::BTreeMap<&'static str, Vec<&'static str>> =
+            std::collections::BTreeMap::new();
+        for sig in self.mappings.keys() {
+            if !sig.is_static {
+                by_class.entry(sig.class).or_default().push(sig.method);
+            }
+        }
+        by_class
+            .into_iter()
+            .map(|(class, mut methods)| {
+                methods.sort_unstable();
+                methods.dedup();
+                (class, methods)
+            })
+            .collect()
+    }
+
     pub fn get_all_classes(&self) -> Vec<&'static str> {
         let mut classes: Vec<&'static str> = self.mappings.keys().map(|sig| sig.class).collect();
         classes.sort_unstable();

@@ -55,26 +55,18 @@ impl<'a> HirToMirContext<'a> {
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
-        // Unbox the Dynamic value to get the anonymous object handle.
-        // The object may be a boxed DynamicValue (from haxe_box_reference_ptr).
-        let unbox_ref_id = self.get_or_register_extern_function(
-            "haxe_unbox_reference_ptr",
-            vec![ptr_u8.clone()],
-            ptr_u8.clone(),
-        );
-        let handle = self
-            .builder
-            .build_call_direct(unbox_ref_id, vec![obj], ptr_u8.clone())?;
-
+        // The box goes to the runtime whole: its tag says whether the value is
+        // an array, a string, an anonymous object or a class instance, and
+        // only the tag can -- an array's header read as an object faulted.
         let field_name_reg = self.builder.build_const(IrValue::String(field_name_str))?;
-        let reflect_field_id = self.get_or_register_extern_function(
-            "haxe_reflect_field",
+        let dynamic_field_id = self.get_or_register_extern_function(
+            "haxe_dynamic_field",
             vec![ptr_u8.clone(), ptr_u8.clone()],
             ptr_u8.clone(),
         );
         let dynamic_result = self.builder.build_call_direct(
-            reflect_field_id,
-            vec![handle, field_name_reg],
+            dynamic_field_id,
+            vec![obj, field_name_reg],
             ptr_u8.clone(),
         )?;
 

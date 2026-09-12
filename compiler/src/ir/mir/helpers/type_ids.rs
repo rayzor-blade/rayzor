@@ -26,6 +26,8 @@ impl<'a> HirToMirContext<'a> {
     /// Used for anonymous object shape descriptors.
     /// Runtime type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
     pub(crate) fn runtime_type_id(&self, type_id: TypeId) -> u32 {
+        /// The runtime's builtin tag for arrays (`type_system::TYPE_ARRAY`).
+        const TYPE_ARRAY: u32 = 7;
         use crate::tast::TypeKind;
         let type_table = self.type_table;
         match type_table.get(type_id).map(|t| &t.kind) {
@@ -36,6 +38,11 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::String) => 5,
             Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
             Some(TypeKind::Class { symbol_id, .. }) => {
+                // `Array` as a class (`Std.isOfType(d, Array)`) is the runtime's
+                // TYPE_ARRAY, the tag an array boxes with.
+                if self.class_is_named(*symbol_id, "Array") {
+                    return TYPE_ARRAY;
+                }
                 // Derived from the qualified class name so the id is identical
                 // across compilation sessions regardless of import order: cached
                 // MIR bakes the type_id in as a constant, and object headers in
@@ -65,8 +72,22 @@ impl<'a> HirToMirContext<'a> {
             // unwraps. A context-local id here left `Reflect.field` reading the
             // box as the object.
             Some(TypeKind::Anonymous { .. }) => 6,
+            // The runtime's `TYPE_ARRAY`, so a boxed array is recognisable as
+            // one by every reader; a context-local id was recognisable by none.
+            Some(TypeKind::Array { .. }) => TYPE_ARRAY,
             _ => 0, // default to void/unknown
         }
+    }
+
+    fn class_is_named(&self, symbol_id: SymbolId, name: &str) -> bool {
+        self.symbol_table
+            .get_symbol(symbol_id)
+            .and_then(|sym| {
+                sym.qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(sym.name))
+            })
+            .is_some_and(|n| n == name)
     }
 
     /// FNV-1a 32-bit hash over the qualified name of a class symbol,

@@ -125,27 +125,11 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 return Some(boxed);
                             }
-
-                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                            let unbox_func = self.get_or_register_extern_function(
-                                "haxe_unbox_reference_ptr",
-                                vec![ptr_u8.clone()],
-                                ptr_u8.clone(),
-                            );
-                            let unboxed_obj =
-                                self.builder
-                                    .build_call_direct(unbox_func, vec![obj], ptr_u8)?;
-
-                            if self.field_exists_in_any_class(field) {
-                                return self.lower_field_access_for_class(
-                                    unboxed_obj,
-                                    field,
-                                    field_ty,
-                                );
-                            }
-                            // No class has this field — use Reflect API (anonymous object).
-                            // Already unboxed above, so use raw_anon path (no double-unbox).
-                            return self.raw_anon_reflect_field_read(unboxed_obj, field, field_ty);
+                            // The box's tag says what it holds; a field name
+                            // alone does not (`length` is an array's, a
+                            // string's and a List's), and reading a class slot
+                            // off whatever the name matched faulted.
+                            return self.dynamic_reflect_field_read(obj, field, field_ty);
                         }
                     }
                     // Dynamic values have no statically known class layout. Field
@@ -157,22 +141,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                         return self.dynamic_reflect_field_read(obj, field, field_ty);
                     }
-                    if matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8))
-                    {
-                        return self.raw_anon_reflect_field_read(obj, field, field_ty);
-                    }
-
-                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                    let unbox_func_id = self.get_or_register_extern_function(
-                        "haxe_unbox_reference_ptr",
-                        vec![ptr_u8.clone()],
-                        ptr_u8.clone(),
-                    );
-                    let unboxed_obj =
-                        self.builder
-                            .build_call_direct(unbox_func_id, vec![obj], ptr_u8.clone())?;
-
-                    return self.raw_anon_reflect_field_read(unboxed_obj, field, field_ty);
+                    return self.dynamic_reflect_field_read(obj, field, field_ty);
                 } else {
                     (obj, receiver_ty)
                 }

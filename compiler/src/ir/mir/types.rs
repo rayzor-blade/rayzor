@@ -598,6 +598,21 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
         }
+        // An anonymous object prints through its box: the stringifier reads
+        // the tag, and a raw handle has none.
+        if let Some(type_id) = hir_type_id {
+            let is_anon = matches!(
+                self.type_table.get(type_id).map(|t| &t.kind),
+                Some(TypeKind::Anonymous { .. })
+            );
+            if is_anon && matches!(from_type, IrType::Ptr(_)) {
+                let dynamic_ty = self.type_table.dynamic_type();
+                let boxed = self
+                    .maybe_box_value(value, type_id, dynamic_ty)
+                    .unwrap_or(value);
+                return self.convert_dynamic_to_string(boxed);
+            }
+        }
         // Check if the HIR type is a TypeParameter — if so, use tag-based dispatch
         // even though the MIR type is I64 (type-erased).
         if let Some(type_id) = hir_type_id {

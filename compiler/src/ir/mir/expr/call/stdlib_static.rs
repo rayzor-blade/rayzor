@@ -403,6 +403,15 @@ impl<'a> HirToMirContext<'a> {
                             .iter()
                             .enumerate()
                             .map(|(i, &reg)| {
+                                if let (Some(expected_ty), Some(arg)) =
+                                    (expected_param_types.get(i), static_args.get(i))
+                                {
+                                    if let Some(boxed) =
+                                        self.box_anon_for_dynamic_slot(reg, arg.ty, expected_ty)
+                                    {
+                                        return boxed;
+                                    }
+                                }
                                 if let (Some(expected_ty), Some(actual_ty)) = (
                                     expected_param_types.get(i),
                                     self.builder.get_register_type(reg),

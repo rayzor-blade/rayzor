@@ -206,6 +206,31 @@ impl<'a> HirToMirContext<'a> {
     /// but the compiler generates primitive values for concrete type parameters like Int.
     ///
     /// Returns the (potentially boxed) value register.
+    /// A structural value handed to a runtime `Dynamic` slot travels as its
+    /// box: the runtime reads the tag, and a raw anonymous-object handle has
+    /// none, so `Std.string({..})` printed null. Only the anonymous kind is
+    /// boxed here; the other reference kinds already are, or are read raw.
+    pub(crate) fn box_anon_for_dynamic_slot(
+        &mut self,
+        value: IrId,
+        hir_ty: TypeId,
+        expected_ty: &IrType,
+    ) -> Option<IrId> {
+        if !matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8)) {
+            return None;
+        }
+        let is_anon = matches!(
+            self.type_table.get(hir_ty).map(|t| &t.kind),
+            Some(crate::tast::TypeKind::Anonymous { .. })
+        );
+        if !is_anon || self.boxed_value_regs.contains(&value) {
+            return None;
+        }
+        let dynamic_ty = self.type_table.dynamic_type();
+        self.maybe_box_value(value, hir_ty, dynamic_ty)
+            .filter(|boxed| *boxed != value)
+    }
+
     pub(crate) fn maybe_box_for_extern_call(
         &mut self,
         value: IrId,
@@ -675,18 +700,42 @@ impl<'a> HirToMirContext<'a> {
                 return Some(value);
             }
             if matches!(mir_ty, IrType::Ptr(_))
-                && matches!(
-                    &target_kind_cloned,
-                    Some(TypeKind::Array { .. })
-                        | Some(TypeKind::Interface { .. })
-                        | Some(TypeKind::Anonymous { .. })
-                )
+                && matches!(&target_kind_cloned, Some(TypeKind::Interface { .. }))
             {
                 debug!(
                     "[UNBOXING] Skipping unbox — value MIR type {:?} is already a pointer for reference target {:?}",
                     mir_ty, target_kind_cloned
                 );
                 return Some(value);
+            }
+            // An array, string or anonymous object begins with a data pointer,
+            // never with its own tag, so the box is told from the raw object
+            // by the tag alone and a raw one passes through. Producers still
+            // hand some of these back raw under a Dynamic type.
+            let tagged = match &target_kind_cloned {
+                Some(TypeKind::Array { .. }) => Some(7u32),
+                Some(TypeKind::String) => Some(5u32),
+                Some(TypeKind::Anonymous { .. }) => Some(6u32),
+                _ => None,
+            };
+            if let (Some(tag), true) = (tagged, matches!(mir_ty, IrType::Ptr(_) | IrType::String)) {
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let unbox = self.get_or_register_extern_function(
+                    "haxe_unbox_if_tag",
+                    vec![ptr_u8.clone(), IrType::U32],
+                    ptr_u8.clone(),
+                );
+                let tag_reg = self.builder.build_const(IrValue::U32(tag))?;
+                let as_ptr = if matches!(mir_ty, IrType::String) {
+                    self.builder.build_bitcast(value, ptr_u8.clone())?
+                } else {
+                    value
+                };
+                let raw = self
+                    .builder
+                    .build_call_direct(unbox, vec![as_ptr, tag_reg], ptr_u8)?;
+                let to = self.convert_type(target_ty);
+                return self.builder.build_bitcast(raw, to);
             }
         }
 

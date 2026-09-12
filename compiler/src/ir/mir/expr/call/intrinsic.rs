@@ -679,6 +679,28 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
 
+            // An anonymous object prints through its box: the runtime's
+            // stringifier reads the tag, and a raw handle has none.
+            if matches!(hir_type_kind.as_ref(), Some(TypeKind::Anonymous { .. })) {
+                let arg_reg = self.lower_expression(arg)?;
+                let dynamic_ty = self.type_table.dynamic_type();
+                let boxed = self
+                    .maybe_box_value(arg_reg, arg.ty, dynamic_ty)
+                    .unwrap_or(arg_reg);
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let conv_fn = self.get_or_register_extern_function(
+                    "haxe_std_string_ptr",
+                    vec![ptr_u8.clone()],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+                let as_ptr = self.builder.build_bitcast(boxed, ptr_u8)?;
+                return self.builder.build_call_direct(
+                    conv_fn,
+                    vec![as_ptr],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+            }
+
             // These MIR wrappers forward to the extern runtime functions.
             let mir_wrapper = match arg_type {
                 IrType::I32 | IrType::I64 => "int_to_string",

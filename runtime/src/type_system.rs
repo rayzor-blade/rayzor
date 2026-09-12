@@ -2823,6 +2823,61 @@ pub extern "C" fn haxe_unbox_scalar_or_addr(ptr: *mut u8) -> i64 {
     ptr as usize as i64
 }
 
+/// An iteration handle for a Dynamic, or null when its box holds nothing
+/// iterable. The layout is the compiler's (`iter_handle.rs`): the tag, the
+/// object, then `iterator`, `hasNext` and `next` entry points. An array
+/// iterates through `iterator_fn`; a value tagged `iterator_tag` (an array
+/// iterator) is the iterator already, and slot 16 is left null to say so.
+#[no_mangle]
+pub extern "C" fn haxe_iter_handle_from_dynamic(
+    ptr: *mut u8,
+    handle_tag: i64,
+    iterator_fn: i64,
+    has_next_fn: i64,
+    next_fn: i64,
+    iterator_tag: u32,
+) -> *mut u8 {
+    let Some(d) = dynamic_box_at(ptr).filter(|d| d.tag_is_known()) else {
+        return std::ptr::null_mut();
+    };
+    let iterator_slot = if d.type_id == TYPE_ARRAY {
+        iterator_fn
+    } else if d.type_id.0 == iterator_tag {
+        0
+    } else {
+        return std::ptr::null_mut();
+    };
+    let words: Box<[i64; 5]> = Box::new([
+        handle_tag,
+        d.value_ptr as i64,
+        iterator_slot,
+        has_next_fn,
+        next_fn,
+    ]);
+    Box::into_raw(words) as *mut u8
+}
+
+/// The tag of a Dynamic value's box, or 0 for a slot that is not one.
+#[no_mangle]
+pub extern "C" fn haxe_dynamic_tag(ptr: *mut u8) -> u32 {
+    dynamic_box_at(ptr)
+        .filter(|d| d.tag_is_known())
+        .map_or(0, |d| d.type_id.0)
+}
+
+/// Unwrap a box carrying `tag`, or pass anything else through unchanged.
+///
+/// For an array, string or anonymous object the raw value begins with a
+/// data pointer, which can never read as the small builtin tag, so this
+/// tells the box from the object without a heuristic.
+#[no_mangle]
+pub extern "C" fn haxe_unbox_if_tag(ptr: *mut u8, tag: u32) -> *mut u8 {
+    match dynamic_box_at(ptr) {
+        Some(d) if d.type_id.0 == tag => d.value_ptr,
+        _ => ptr,
+    }
+}
+
 /// Unwrap the return of an erased generic method to the bits the caller's T
 /// expects, or pass a non-box through unchanged.
 ///

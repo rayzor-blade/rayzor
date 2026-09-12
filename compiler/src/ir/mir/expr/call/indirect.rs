@@ -96,6 +96,9 @@ impl<'a> HirToMirContext<'a> {
         );
 
         let func_ptr = self.lower_expression(callee)?;
+        // A function held in a Dynamic is a box; the call goes to the
+        // closure inside it, not to the box's tag.
+        let func_ptr = self.unbox_dynamic_function(func_ptr, callee);
 
         // Signature from the callee's function type, else from the arguments.
         let param_types: Vec<IrType> = {

@@ -519,6 +519,8 @@ impl<'a> HirToMirContext<'a> {
                     let mut arg_regs = Vec::new();
                     let args_to_process: &[HirExpr] = if is_instance_method {
                         let receiver_reg = self.lower_expression(receiver)?;
+                        let receiver_reg =
+                            self.unbox_dynamic_receiver(receiver_reg, receiver, class_name);
                         arg_regs.push(receiver_reg);
                         &args[1..]
                     } else {

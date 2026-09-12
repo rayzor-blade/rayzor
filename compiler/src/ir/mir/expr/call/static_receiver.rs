@@ -153,7 +153,14 @@ impl<'a> HirToMirContext<'a> {
                             .cloned()
                             .unwrap_or_else(|| actual_ty.clone());
                         let final_reg =
-                            self.maybe_box_for_extern_call(arg_reg, &actual_ty, &expected_ty)?;
+                            match self.box_anon_for_dynamic_slot(arg_reg, arg.ty, &expected_ty) {
+                                Some(boxed) => boxed,
+                                None => self.maybe_box_for_extern_call(
+                                    arg_reg,
+                                    &actual_ty,
+                                    &expected_ty,
+                                )?,
+                            };
                         arg_regs.push(final_reg);
                     }
 

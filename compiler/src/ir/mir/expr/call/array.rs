@@ -166,12 +166,17 @@ impl<'a> HirToMirContext<'a> {
                         TypeKind::String => 5,
                         _ => 6,
                     })
-                    .unwrap_or(5)
+                    // A receiver whose elements are not statically known (a
+                    // Dynamic) takes the tag that lets each element say what
+                    // it is; the String tag dereferenced a raw Int.
+                    .unwrap_or(6)
             };
             if let (Some(arr_reg), Some(sep_reg)) = (
                 self.lower_expression(&args[0]),
                 self.lower_expression(&args[1]),
             ) {
+                // A Dynamic receiver arrives boxed; the runtime wants the array.
+                let arr_reg = self.unbox_dynamic_receiver(arr_reg, &args[0], "Array");
                 let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                 let tag_reg = self.builder.build_const(IrValue::I32(elem_tag))?;
                 let join_fn = self.get_or_register_extern_function(
@@ -179,11 +184,28 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_void.clone(), ptr_void.clone(), IrType::I32],
                     ptr_void.clone(),
                 );
-                return self.builder.build_call_direct(
+                let joined = self.builder.build_call_direct(
                     join_fn,
                     vec![arr_reg, sep_reg, tag_reg],
                     ptr_void,
+                )?;
+                // Through a Dynamic receiver the result is Dynamic too, and a
+                // Dynamic is a box.
+                let receiver_is_dynamic = matches!(
+                    self.type_table.get(args[0].ty).map(|t| &t.kind),
+                    Some(TypeKind::Dynamic)
                 );
+                if receiver_is_dynamic {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let as_ptr = self.builder.build_bitcast(joined, ptr_u8.clone())?;
+                    let box_fn = self.get_or_register_extern_function(
+                        "haxe_box_haxestring_ptr",
+                        vec![ptr_u8.clone()],
+                        ptr_u8.clone(),
+                    );
+                    return self.builder.build_call_direct(box_fn, vec![as_ptr], ptr_u8);
+                }
+                return Some(joined);
             }
         }
         *fell_through = true;

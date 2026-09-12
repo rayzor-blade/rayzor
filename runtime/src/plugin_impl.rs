@@ -1688,6 +1688,13 @@ register_symbol!(
     crate::reflect::haxe_reflect_has_field
 );
 register_symbol!("haxe_reflect_field", crate::reflect::haxe_reflect_field);
+register_symbol!("haxe_dynamic_field", crate::reflect::haxe_dynamic_field);
+register_symbol!("haxe_unbox_if_tag", crate::type_system::haxe_unbox_if_tag);
+register_symbol!("haxe_dynamic_tag", crate::type_system::haxe_dynamic_tag);
+register_symbol!(
+    "haxe_iter_handle_from_dynamic",
+    crate::type_system::haxe_iter_handle_from_dynamic
+);
 register_symbol!(
     "haxe_reflect_set_field",
     crate::reflect::haxe_reflect_set_field

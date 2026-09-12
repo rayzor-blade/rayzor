@@ -291,7 +291,11 @@ impl<'a> HirToMirContext<'a> {
                                     self.builder.get_register_type(value_reg),
                                     Some(IrType::Ptr(ref inner)) if matches!(**inner, IrType::U8)
                                 );
-                                if is_dynamic_init && is_ptr_u8 {
+                                // A register known to hold a box is not a raw handle.
+                                if is_dynamic_init
+                                    && is_ptr_u8
+                                    && !self.boxed_value_regs.contains(&value_reg)
+                                {
                                     self.raw_anon_symbols.insert(*symbol);
                                 }
                             }
@@ -376,9 +380,12 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             false
                         };
+                        // A value boxed for a Dynamic binding is a box now, not
+                        // a handle: cloning it read the box as the object.
                         let final_value = if !is_anon_view
                             && !src_has_view
                             && !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. })
+                            && !self.boxed_value_regs.contains(&final_value)
                         {
                             self.maybe_clone_anonymous(final_value, init_expr.ty)
                         } else {
@@ -909,6 +916,7 @@ impl<'a> HirToMirContext<'a> {
                         // Skip for object literals (fresh handles) and compound assignments.
                         let value = if op.is_none()
                             && !matches!(&rhs.kind, HirExprKind::ObjectLiteral { .. })
+                            && !self.boxed_value_regs.contains(&value)
                         {
                             self.maybe_clone_anonymous(value, rhs.ty)
                         } else {
@@ -1046,6 +1054,15 @@ impl<'a> HirToMirContext<'a> {
                     {
                         if let Some(boxed) = self.maybe_box_for_optional(val, e.ty, fn_ret_ty) {
                             return Some(boxed);
+                        }
+                        // Concrete -> Dynamic at the return boundary must box,
+                        // as Let, Assign and a call argument do: a caller
+                        // reads a Dynamic as a box, and a raw array or object
+                        // handed back here had its header read as one.
+                        if let Some(boxed) = self.maybe_box_value(val, e.ty, fn_ret_ty) {
+                            if boxed != val {
+                                return Some(boxed);
+                            }
                         }
                         // Inverse: a `Null<T>` expression (boxed `DynamicValue*`) returned
                         // from a `:T` function must be unboxed, or the caller reads the box

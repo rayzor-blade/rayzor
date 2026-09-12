@@ -2914,6 +2914,7 @@ impl TieredBackend {
                 );
             }
         }
+        CraneliftBackend::register_stdlib_runtime_class_rtti();
     }
 
     /// Process pending LLVM compilations on the main thread

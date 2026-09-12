@@ -71,6 +71,10 @@ pub(crate) enum IterSource {
     /// handle is built, and the array iterator wrappers carry it from there --
     /// the same reading of a map that the `for`-in form takes.
     MapValues { values_fn: &'static str },
+    /// A Dynamic: its box says at run time whether it holds an array or an
+    /// array iterator, so the runtime builds the handle, given the array
+    /// wrappers' entry points. Anything else yields no handle.
+    Dynamic,
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -325,6 +329,9 @@ impl<'a> HirToMirContext<'a> {
     /// cannot all be named produces no handle rather than a half-filled one.
     pub(crate) fn build_iter_handle(&mut self, obj_reg: IrId, source: &IterSource) -> Option<IrId> {
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        if matches!(source, IterSource::Dynamic) {
+            return self.build_iter_handle_from_dynamic(obj_reg);
+        }
         // A map hands its values over as an array, and from there the handle
         // carries an array like any other. The copy is taken here, where the map
         // itself is in hand, because the wrappers the slots below name read an
@@ -398,6 +405,7 @@ impl<'a> HirToMirContext<'a> {
                 let nx = self.iter_thunk_for_runtime(&next.clone(), *next_is_mir, IrType::I64)?;
                 (None, hn, nx)
             }
+            IterSource::Dynamic => return self.build_iter_handle_from_dynamic(obj_reg),
         };
 
         let malloc_fn = self.get_or_register_extern_function(
@@ -440,6 +448,48 @@ impl<'a> HirToMirContext<'a> {
         let nx = self.builder.build_function_ref(next_fn)?;
         self.store_handle_slot_value(handle, 32, nx)?;
 
+        self.iter_handle_regs.insert(handle);
+        Some(handle)
+    }
+
+    /// The handle for a Dynamic, built by the runtime from the box's tag with
+    /// the array wrappers' entry points in hand: an array iterates through
+    /// `array_iterator`, an array iterator is one already. Any other value
+    /// gets a null handle, which the loop reads as nothing to iterate.
+    fn build_iter_handle_from_dynamic(&mut self, box_reg: IrId) -> Option<IrId> {
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let iterator_fn =
+            self.iter_thunk_for_wrapper("array_iterator", vec![ptr_void.clone()], ptr_void.clone())?;
+        let has_next_fn =
+            self.iter_thunk_for_wrapper("ArrayIterator_hasNext", vec![ptr_void.clone()], IrType::I32)?;
+        let next_fn =
+            self.iter_thunk_for_wrapper("ArrayIterator_next", vec![ptr_void.clone()], IrType::I64)?;
+        let iterator_ref = self.builder.build_function_ref(iterator_fn)?;
+        let has_next_ref = self.builder.build_function_ref(has_next_fn)?;
+        let next_ref = self.builder.build_function_ref(next_fn)?;
+        let iterator_tag = self
+            .builder
+            .build_const(IrValue::U32(Self::fnv1a_class_type_id("haxe.iterators.ArrayIterator")))?;
+        let handle_tag = self.builder.build_const(IrValue::I64(ITER_HANDLE_TAG))?;
+        let build = self.get_or_register_extern_function(
+            "haxe_iter_handle_from_dynamic",
+            vec![
+                ptr_u8.clone(),
+                IrType::I64,
+                IrType::I64,
+                IrType::I64,
+                IrType::I64,
+                IrType::U32,
+            ],
+            ptr_u8.clone(),
+        );
+        let as_ptr = self.builder.build_bitcast(box_reg, ptr_u8.clone())?;
+        let handle = self.builder.build_call_direct(
+            build,
+            vec![as_ptr, handle_tag, iterator_ref, has_next_ref, next_ref, iterator_tag],
+            ptr_u8,
+        )?;
         self.iter_handle_regs.insert(handle);
         Some(handle)
     }
@@ -502,7 +552,15 @@ impl<'a> HirToMirContext<'a> {
         if let Some(src) = self.iter_source_of(source_ty) {
             return Some(src);
         }
-        self.iter_source_from_hint(value_reg)
+        if let Some(src) = self.iter_source_from_hint(value_reg) {
+            return Some(src);
+        }
+        let is_dynamic = matches!(
+            self.type_table.get(source_ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        );
+        let is_ptr = matches!(self.builder.get_register_type(value_reg), Some(IrType::Ptr(_)));
+        (is_dynamic && is_ptr).then_some(IterSource::Dynamic)
     }
 
     /// The stdlib iterator a register's class hint names.

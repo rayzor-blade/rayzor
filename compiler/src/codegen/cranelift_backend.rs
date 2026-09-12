@@ -6047,6 +6047,27 @@ impl CraneliftBackend {
                 }
             }
         }
+        Self::register_stdlib_runtime_class_rtti();
+    }
+
+    /// Register the classes the runtime implements (an array iterator, the
+    /// maps) with the methods the stdlib mapping declares for them, under
+    /// the id their boxes carry. A class compiled from source is already
+    /// registered above and is left as it is.
+    pub fn register_stdlib_runtime_class_rtti() {
+        use rayzor_runtime::type_system::{get_type_info, register_class_with_methods_from_mir};
+        let mapping = crate::stdlib::StdlibMapping::new();
+        for (class, methods) in mapping.runtime_class_methods() {
+            if matches!(class, "Array" | "String") {
+                continue;
+            }
+            let id = crate::ir::mir::HirToMirContext::fnv1a_class_type_id(class);
+            if get_type_info(rayzor_runtime::type_system::TypeId(id)).is_some() {
+                continue;
+            }
+            let methods: Vec<String> = methods.into_iter().map(str::to_string).collect();
+            register_class_with_methods_from_mir(id, class, None, &[], &[], &[], &methods);
+        }
     }
 
     /// Register enum RTTI by walking MIR module type definitions directly.
