@@ -377,14 +377,28 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        self.infer_unannotated_param_types(class_decl, class_symbol);
-
         // Process fields, methods, and constructors separately
         let mut fields = Vec::with_capacity(class_decl.fields.len());
         let mut methods = Vec::with_capacity(class_decl.fields.len()); // Initially allocate for all fields
         let mut constructors = Vec::with_capacity(2); // Most classes have 0-2 constructors
 
-        for (field_idx, field) in class_decl.fields.iter().enumerate() {
+        // Fields before functions: an unannotated parameter takes the type of
+        // the field it is stored into, so every field must be registered
+        // before the signatures are settled and any body is lowered.
+        for field in &class_decl.fields {
+            if matches!(&field.kind, ClassFieldKind::Function(_)) {
+                continue;
+            }
+            // Handle regular fields (var, final, property)
+            match self.lower_field(field) {
+                Ok(typed_field) => fields.push(typed_field),
+                Err(e) => self.context.add_error(e),
+            }
+        }
+
+        self.infer_unannotated_param_types(class_decl, class_symbol);
+
+        for field in &class_decl.fields {
             match &field.kind {
                 ClassFieldKind::Function(func) => {
                     // Handle functions as methods or constructors
@@ -423,13 +437,7 @@ impl<'a> AstLowering<'a> {
                         Err(e) => self.context.add_error(e),
                     }
                 }
-                _ => {
-                    // Handle regular fields (var, final, property)
-                    match self.lower_field(field) {
-                        Ok(typed_field) => fields.push(typed_field),
-                        Err(e) => self.context.add_error(e),
-                    }
-                }
+                _ => {}
             }
         }
 
