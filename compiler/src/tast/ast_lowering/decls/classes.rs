@@ -1159,6 +1159,45 @@ impl<'a> AstLowering<'a> {
 
         let body = func.body.as_ref()?;
         let returned = returned_expr(body)?;
+        // `return OpStr(p)` / `return None`: the enum's own type. Resolved by
+        // name, which is enough at pre-registration because enums are
+        // registered before any class body is lowered.
+        let ctor_name = match &returned.kind {
+            ExprKind::Call { expr: callee, .. } => match &callee.kind {
+                ExprKind::Ident(n) => Some(n.as_str()),
+                _ => None,
+            },
+            ExprKind::Ident(n) => Some(n.as_str()),
+            _ => None,
+        };
+        if let Some(n) = ctor_name {
+            let interned = self.context.intern_string(n);
+            if let Some(sym) = self.resolve_symbol_in_scope_hierarchy(interned) {
+                let is_variant = self
+                    .context
+                    .symbol_table
+                    .get_symbol(sym)
+                    .is_some_and(|sy| sy.kind == crate::tast::symbols::SymbolKind::EnumVariant);
+                if is_variant {
+                    if let Some(parent) = self
+                        .context
+                        .symbol_table
+                        .find_parent_enum_for_constructor(sym)
+                    {
+                        if let Some(ty) = self
+                            .context
+                            .symbol_table
+                            .get_symbol(parent)
+                            .map(|p| p.type_id)
+                        {
+                            if ty.is_valid() {
+                                return Some(ty);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let ty = match &returned.kind {
             ExprKind::Ident(name) => new_type(local_init(body, name)?),
             _ => new_type(returned),
@@ -1216,6 +1255,13 @@ fn returned_expr(expr: &parser::haxe_ast::Expr) -> Option<&parser::haxe_ast::Exp
             parser::BlockElement::Expr(e) => returned_expr(e),
             _ => None,
         }),
+        // A body that returns from inside a branch (`if (t.s) return OpStr(p);`)
+        // says its type there just as well.
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => returned_expr(then_branch).or_else(|| else_branch.as_deref().and_then(returned_expr)),
         _ => None,
     }
 }

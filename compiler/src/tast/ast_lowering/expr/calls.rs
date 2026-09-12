@@ -1895,6 +1895,9 @@ impl<'a> AstLowering<'a> {
                 if let Some((field_sym, fn_type)) =
                     self.resolve_function_typed_field(receiver_expr.expr_type, method_name)
                 {
+                    // A stdlib method on a local arrives here as a
+                    // function-typed field; it can still bind the local's T.
+                    self.refine_generic_receiver_from_call(&receiver_expr, field_sym, &arg_exprs);
                     let lifetime_id = receiver_expr.lifetime_id;
                     let field_access = TypedExpression {
                         kind: TypedExpressionKind::FieldAccess {
@@ -1929,6 +1932,7 @@ impl<'a> AstLowering<'a> {
 
                 // First, try to resolve as a regular method on the receiver
                 let method_symbol = self.resolve_method_symbol(&receiver_expr, method_name);
+                self.refine_generic_receiver_from_call(&receiver_expr, method_symbol, &arg_exprs);
 
                 // Check if the resolved symbol is a placeholder (newly created function)
                 // If so, try to find a static extension method from 'using' modules
@@ -2580,6 +2584,129 @@ impl<'a> AstLowering<'a> {
             _ => return ty,
         };
         self.context.type_table.borrow_mut().create_type(rebuilt)
+    }
+
+    /// Resolve an un-parameterised generic local from its first use, the way
+    /// Haxe resolves a monomorph: `var l = new List(); l.add(x)` makes `l` a
+    /// `List<typeof x>`. Until then the local carries the class's own formal T
+    /// as its argument, and everything downstream that needs T -- unboxing an
+    /// erased `first()`, most visibly -- has nothing to resolve.
+    ///
+    /// Only a variable receiver, only a class declaring exactly one type
+    /// parameter, and only when the call binds it to one concrete type.
+    pub(crate) fn refine_generic_receiver_from_call(
+        &mut self,
+        receiver: &TypedExpression,
+        method_symbol: SymbolId,
+        arguments: &[TypedExpression],
+    ) {
+        use crate::tast::core::TypeKind;
+        let TypedExpressionKind::Variable { symbol_id: var } = &receiver.kind else {
+            return;
+        };
+        // The outermost symbol names the type the user wrote (the `List`
+        // alias); the instantiated type is created against it so it lands on
+        // the same TypeId an annotation would.
+        let (outer_sym, class_sym) = {
+            let tt = self.context.type_table.borrow();
+            // "Un-instantiated" is not "no arguments": `new List()` carries
+            // the class's own formal T as its argument until something binds
+            // it. Either shape counts.
+            let unbound = |args: &[TypeId]| {
+                args.is_empty()
+                    || args.iter().all(|a| {
+                        matches!(
+                            tt.get(*a).map(|t| &t.kind),
+                            Some(TypeKind::TypeParameter { .. }) | Some(TypeKind::Unknown)
+                        )
+                    })
+            };
+            let (outer, mut cur) = match tt.get(receiver.expr_type).map(|t| &t.kind) {
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                    ..
+                })
+                | Some(TypeKind::TypeAlias {
+                    symbol_id,
+                    type_args,
+                    ..
+                }) if unbound(type_args) => (*symbol_id, receiver.expr_type),
+                _ => return,
+            };
+            let mut class = None;
+            for _ in 0..8 {
+                match tt.get(cur).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                    Some(TypeKind::Class { symbol_id, .. }) => {
+                        class = Some(*symbol_id);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            let Some(class) = class else { return };
+            (outer, class)
+        };
+        let declares_one = self
+            .context
+            .symbol_table
+            .get_class_type_params(class_sym)
+            .map_or(false, |ps| ps.len() == 1);
+        if !declares_one {
+            return;
+        }
+        let bound = {
+            let Some(fn_ty) = self
+                .context
+                .symbol_table
+                .get_symbol(method_symbol)
+                .map(|s| s.type_id)
+                .filter(|t| t.is_valid())
+            else {
+                return;
+            };
+            let tt = self.context.type_table.borrow();
+            let Some(TypeKind::Function { params, .. }) = tt.get(fn_ty).map(|i| &i.kind) else {
+                return;
+            };
+            let mut bound: Option<TypeId> = None;
+            for (declared, arg) in params.iter().zip(arguments.iter()) {
+                let is_param = matches!(
+                    tt.get(*declared).map(|i| &i.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                );
+                if !is_param {
+                    continue;
+                }
+                let informative = !matches!(
+                    tt.get(arg.expr_type).map(|i| &i.kind),
+                    Some(TypeKind::TypeParameter { .. })
+                        | Some(TypeKind::Dynamic)
+                        | Some(TypeKind::Unknown)
+                        | Some(TypeKind::Error)
+                        | None
+                );
+                if !informative {
+                    continue;
+                }
+                match bound {
+                    None => bound = Some(arg.expr_type),
+                    Some(b) if b == arg.expr_type => {}
+                    Some(_) => return,
+                }
+            }
+            match bound {
+                Some(b) => b,
+                None => return,
+            }
+        };
+        let refined = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_class_type(outer_sym, vec![bound]);
+        self.context.symbol_table.update_symbol_type(*var, refined);
     }
 
     /// Type arguments for a call to a generic method, recovered by matching the
