@@ -52,7 +52,24 @@ impl<'a> AstLowering<'a> {
             .symbol_table
             .lookup_symbol(ScopeId::first(), class_name)
         {
-            existing_symbol.id
+            let existing = existing_symbol.id;
+            // A top-level typedef of the same name (`typedef List<T> =
+            // haxe.ds.List<T>`) takes the root slot first and the class
+            // then lowers onto its symbol. Register that symbol under this
+            // package too, so `import haxe.ds.List` finds the class rather
+            // than minting an empty placeholder beside it.
+            let in_named_package = self.context.current_package.is_some_and(|pkg| {
+                existing_symbol.package_id != Some(pkg)
+                    && self
+                        .context
+                        .namespace_resolver
+                        .get_package(pkg)
+                        .is_some_and(|p| !p.full_path.is_empty())
+            });
+            if in_named_package {
+                self.register_symbol_with_package(existing, &class_decl.name);
+            }
+            existing
         } else {
             let new_symbol = self
                 .context

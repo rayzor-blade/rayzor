@@ -721,14 +721,40 @@ impl<'a> AstLowering<'a> {
     fn find_static_extension_method(
         &self,
         method_name: InternedString,
-        _receiver_type: TypeId,
+        receiver_type: TypeId,
     ) -> Option<(SymbolId, SymbolId)> {
+        // A Dynamic receiver takes only an extension whose first parameter
+        // is itself Dynamic, as Haxe's `using_field` does: `d.stringify()`
+        // reaches `Json.stringify(v:Dynamic)`, while `d.iterator()` stays a
+        // dynamic call rather than becoming `StringTools.iterator(d)`.
+        let receiver_is_dynamic = matches!(
+            self.context.type_table.borrow().get(receiver_type).map(|t| &t.kind),
+            Some(crate::tast::core::TypeKind::Dynamic)
+        );
+        let applies = |lowering: &Self, method: SymbolId| -> bool {
+            if !receiver_is_dynamic {
+                return true;
+            }
+            let Some(fn_ty) = lowering.context.symbol_table.get_symbol(method).map(|s| s.type_id)
+            else {
+                return false;
+            };
+            let tt = lowering.context.type_table.borrow();
+            match tt.get(fn_ty).map(|t| &t.kind) {
+                Some(crate::tast::core::TypeKind::Function { params, .. }) => params
+                    .first()
+                    .is_some_and(|p| {
+                        matches!(tt.get(*p).map(|t| &t.kind), Some(crate::tast::core::TypeKind::Dynamic))
+                    }),
+                _ => false,
+            }
+        };
         // Check each using module for a static method with this name
         for (_class_name, class_symbol) in &self.using_modules {
             // First, check local class_methods (for classes lowered in this instance)
             if let Some(methods) = self.class_methods.get(class_symbol) {
                 for (meth_name, meth_symbol, is_static) in methods {
-                    if *meth_name == method_name && *is_static {
+                    if *meth_name == method_name && *is_static && applies(self, *meth_symbol) {
                         return Some((*class_symbol, *meth_symbol));
                     }
                 }
@@ -745,7 +771,9 @@ impl<'a> AstLowering<'a> {
                     .lookup_symbol(class_sym.scope_id, method_name)
                 {
                     // Check if it's a static method by looking at its modifiers or kind
-                    if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
+                    if method_sym.kind == crate::tast::symbols::SymbolKind::Function
+                        && applies(self, method_sym.id)
+                    {
                         return Some((*class_symbol, method_sym.id));
                     }
                 }
@@ -2648,14 +2676,16 @@ impl<'a> AstLowering<'a> {
             let Some(class) = class else { return };
             (outer, class)
         };
-        let declares_one = self
-            .context
-            .symbol_table
-            .get_class_type_params(class_sym)
-            .map_or(false, |ps| ps.len() == 1);
-        if !declares_one {
-            return;
-        }
+        let declared_count = self
+            .class_type_params
+            .get(&class_sym)
+            .map(|ps| ps.len())
+            .or_else(|| {
+                self.context
+                    .symbol_table
+                    .get_class_type_params(class_sym)
+                    .map(|ps| ps.len())
+            });
         let bound = {
             let Some(fn_ty) = self
                 .context
@@ -2678,6 +2708,16 @@ impl<'a> AstLowering<'a> {
                 );
                 if !is_param {
                     continue;
+                }
+                // The class must declare exactly one parameter, and this
+                // formal must be it. A class reached through its package
+                // path may carry no parameter list of its own; the formal
+                // still names the declaration's.
+                let declares_one = declared_count
+                    .or_else(|| self.context.symbol_table.declared_param_count_of(*declared))
+                    == Some(1);
+                if !declares_one {
+                    return;
                 }
                 let informative = !matches!(
                     tt.get(arg.expr_type).map(|i| &i.kind),

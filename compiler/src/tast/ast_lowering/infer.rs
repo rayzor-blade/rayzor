@@ -497,6 +497,15 @@ impl<'a> AstLowering<'a> {
                                 current = *target_type;
                                 hops += 1;
                             }
+                            // `Null<{p:String}>` from an erased `first()` still
+                            // has the fields of the anon inside it. Without this
+                            // arm the field decayed to Dynamic, and a local
+                            // holding it took the Dynamic path once captured --
+                            // `.length` read as an object slot -- and faulted.
+                            crate::tast::core::TypeKind::Optional { inner_type } => {
+                                current = *inner_type;
+                                hops += 1;
+                            }
                             crate::tast::core::TypeKind::Class { symbol_id, .. } => {
                                 // Cross-module decay: this Class may actually be a
                                 // structural typedef whose real Anonymous target
@@ -1170,13 +1179,42 @@ impl<'a> AstLowering<'a> {
     }
 
     pub(crate) fn infer_return_type_from_body(&self, body: &[TypedStatement]) -> TypeId {
-        // Look for return statements in the body
+        // The first return site is not necessarily the informative one:
+        // `if (l.length == 1) return l.first(); return OpBlock(l);` returns
+        // `Null<T>` with T still the formal at the first site and the enum at
+        // the second. Prefer a site whose type says something.
+        let mut first: Option<TypeId> = None;
         for stmt in body {
-            if let Some(return_type) = self.find_return_type_in_statement(stmt) {
+            let Some(return_type) = self.find_return_type_in_statement(stmt) else {
+                continue;
+            };
+            if first.is_none() {
+                first = Some(return_type);
+            }
+            if self.return_type_is_informative(return_type) {
                 return return_type;
             }
         }
-        // No return statements found, assume void
-        self.context.type_table.borrow().void_type()
+        // No informative site: the first one, or void if there was none.
+        first.unwrap_or_else(|| self.context.type_table.borrow().void_type())
+    }
+
+    /// A return type naming a concrete type, as opposed to an unbound type
+    /// parameter (bare or under `Null`), Dynamic or Unknown.
+    fn return_type_is_informative(&self, ty: TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let tt = self.context.type_table.borrow();
+        let mut cur = ty;
+        for _ in 0..4 {
+            match tt.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => cur = *inner_type,
+                Some(TypeKind::TypeParameter { .. })
+                | Some(TypeKind::Dynamic)
+                | Some(TypeKind::Unknown)
+                | None => return false,
+                _ => return true,
+            }
+        }
+        true
     }
 }

@@ -19,8 +19,10 @@ class GenericLocalFromUse {
         var e:TE = l.first();
         if (t.exec(e) != "solo") throw "untyped local List, first()";
         if (t.exec(t.build()) != "ab") throw "forward enum-returning callee";
-        // NOTE: the same shape over Int (`li.add(41); li.first() + 1`) still
-        // faults on the value -- filed separately; not asserted here.
+        var li = new List();
+        li.add(41);
+        var v = li.first();
+        if (v + 1 != 42) throw "untyped local List over Int, first()";
         trace("CONFORMANCE_OK");
     }
 }

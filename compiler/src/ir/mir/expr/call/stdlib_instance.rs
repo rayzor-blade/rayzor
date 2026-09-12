@@ -273,19 +273,20 @@ impl<'a> HirToMirContext<'a> {
                                 distinct.sort_unstable();
                                 distinct.dedup();
                                 if distinct.len() > 1 {
+                                    // Nothing here can tell which class the value
+                                    // is, so the call cannot be bound; it throws
+                                    // where it is reached instead of failing the
+                                    // whole module, which `try` can catch and the
+                                    // rest of the module's code never notices.
                                     let candidates = filtered_classes
                                         .iter()
                                         .map(|(class, _, _)| *class)
                                         .collect::<Vec<_>>()
                                         .join(", ");
-                                    self.add_error(
-                                        &format!(
-                                            "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved. Annotate the receiver's type so the call resolves to one class",
-                                            method_name, actual_param_count, candidates
-                                        ),
-                                        expr.source_location,
-                                    );
-                                    return None;
+                                    return self.throw_unresolved_dynamic_call(&format!(
+                                        "E0801: ambiguous dynamic method dispatch: `{}` with {} argument(s) matches multiple stdlib classes ({}) and the receiver's type is unresolved",
+                                        method_name, actual_param_count, candidates
+                                    ));
                                 }
                             }
 

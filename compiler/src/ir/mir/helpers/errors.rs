@@ -22,6 +22,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 impl<'a> HirToMirContext<'a> {
+    /// Throw `message` as a String exception where this expression is
+    /// evaluated, and stand a null in for the value it cannot produce. The
+    /// throw never returns, so the block stays well-formed.
+    pub(crate) fn throw_unresolved_dynamic_call(&mut self, message: &str) -> Option<IrId> {
+        let msg = self
+            .builder
+            .build_const(IrValue::String(message.to_string()))?;
+        let as_i64 = self.builder.build_cast(msg, IrType::String, IrType::I64)?;
+        let string_tag = self.builder.build_const(IrValue::I32(5))?;
+        let throw_fn = self.get_or_register_extern_function(
+            "rayzor_throw_typed",
+            vec![IrType::I64, IrType::I32],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(throw_fn, vec![as_i64, string_tag], IrType::Void);
+        self.builder.build_const(IrValue::Null)
+    }
+
     pub(crate) fn add_error(&mut self, msg: &str, location: SourceLocation) {
         self.errors.push(LoweringError {
             message: msg.to_string(),

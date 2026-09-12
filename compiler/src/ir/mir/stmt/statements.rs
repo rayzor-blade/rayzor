@@ -1254,7 +1254,17 @@ impl<'a> HirToMirContext<'a> {
                     // Only for class types (Exception subclasses), not primitive throws.
                     if self.get_class_symbol(thrown_type).is_some() {
                         let stack_name = self.string_interner.intern("stack");
-                        let stack_field = self.resolve_field_index_by_name(stack_name, thrown_type);
+                        // Only a class that declares `stack` gets one; a
+                        // thrown class without it (`haxe.io.Eof`) must not
+                        // fail the compile on the by-name fallback.
+                        let stack_field =
+                            match self.resolve_field_index_candidates(stack_name, thrown_type) {
+                                FieldIndexResolution::Unique(
+                                    class_ty,
+                                    idx,
+                                ) => Some((class_ty, idx)),
+                                _ => None,
+                            };
                         if let Some((_class_ty, field_idx)) = stack_field {
                             let call_stack_fn = self.get_or_register_extern_function(
                                 "rayzor_native_stack_trace_call_stack",

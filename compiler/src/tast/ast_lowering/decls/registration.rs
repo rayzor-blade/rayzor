@@ -180,7 +180,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Register a symbol with package information
-    fn register_symbol_with_package(&mut self, symbol_id: SymbolId, name: &str) {
+    pub(crate) fn register_symbol_with_package(&mut self, symbol_id: SymbolId, name: &str) {
         if let Some(package_id) = self.context.current_package {
             let interned_name = self.context.string_interner.intern(name);
 

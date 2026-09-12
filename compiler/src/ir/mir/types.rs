@@ -150,7 +150,17 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Optional { inner_type }) => {
                 // Null<T>: primitives need boxing to distinguish null from 0/0.0/false.
                 // Reference types are already nullable pointers — no boxing needed.
+                // An enum with a payload is one of those: its values are heap
+                // objects carried as i64, so null is 0 and nothing else is.
+                // Only a pure discriminant enum shares Int's ambiguity.
+                let heap_enum = match self.type_table.get(*inner_type).map(|t| &t.kind) {
+                    Some(TypeKind::Enum { symbol_id, .. }) => self.enum_is_boxed(*symbol_id),
+                    _ => false,
+                };
                 let inner_ir = self.convert_type(*inner_type);
+                if heap_enum {
+                    return inner_ir;
+                }
                 match inner_ir {
                     IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool => {
                         IrType::Ptr(Box::new(IrType::U8)) // Boxed DynamicValue*

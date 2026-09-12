@@ -1384,6 +1384,16 @@ impl SymbolTable {
         self.class_type_params.get(&class_symbol)
     }
 
+    /// How many type parameters the class declaring `type_param` has. A class
+    /// reached through its package path can carry no parameter list of its
+    /// own while its methods still name the parameters of the declaration.
+    pub fn declared_param_count_of(&self, type_param: TypeId) -> Option<usize> {
+        self.class_type_params
+            .values()
+            .find(|ps| ps.contains(&type_param))
+            .map(|ps| ps.len())
+    }
+
     /// Record a class's declared DEFAULT type arguments, positionally.
     ///
     /// `class Foo<T = String>` -> `[Some(String)]`. Needed so `new Foo()` with
