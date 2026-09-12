@@ -2472,7 +2472,10 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: i32) -> i32 {
 // ============================================================================
 
 const ANON_HEADER_BYTES: usize = 8;
-static ANON_SHAPES: Mutex<Vec<Option<Vec<String>>>> = Mutex::new(Vec::new());
+/// Keyed by shape id: the compiler hashes field names into the id, so the
+/// space is sparse.
+static ANON_SHAPES: Mutex<std::collections::BTreeMap<u32, Vec<String>>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 #[inline]
 unsafe fn anon_shape_id(obj: i32) -> u32 {
@@ -2504,7 +2507,6 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: i32, descriptor: i32) {
     if shape_id < 0 {
         return;
     }
-    let shape_id = shape_id as usize;
     let Some(desc) = (unsafe { haxe_string_to_string(descriptor) }) else {
         return;
     };
@@ -2514,13 +2516,11 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: i32, descriptor: i32) {
         .filter_map(|part| part.split_once(':').map(|(name, _)| name.to_string()))
         .collect::<Vec<_>>();
 
-    let mut shapes = ANON_SHAPES.lock().unwrap();
-    if shapes.len() <= shape_id {
-        shapes.resize_with(shape_id + 1, || None);
-    }
-    if shapes[shape_id].is_none() {
-        shapes[shape_id] = Some(fields);
-    }
+    ANON_SHAPES
+        .lock()
+        .unwrap()
+        .entry(shape_id as u32)
+        .or_insert(fields);
 }
 
 /// Allocate an anonymous object with a fixed shape and 8-byte value slots.
@@ -2624,11 +2624,10 @@ pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {
     let Some(name) = (unsafe { haxe_string_to_string(name) }) else {
         return 0;
     };
-    let shape_id = unsafe { anon_shape_id(obj) as usize };
+    let shape_id = unsafe { anon_shape_id(obj) };
     let shapes = ANON_SHAPES.lock().unwrap();
     let found = shapes
-        .get(shape_id)
-        .and_then(|shape| shape.as_ref())
+        .get(&shape_id)
         .map(|fields| fields.iter().any(|field| field == &name))
         .unwrap_or(false);
     if found {

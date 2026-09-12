@@ -756,14 +756,7 @@ impl<'a> HirToMirContext<'a> {
             .collect::<Vec<_>>()
             .join(",");
 
-        let shape_id = if let Some(&existing_id) = self.anonymous_shapes.get(&shape_key) {
-            existing_id
-        } else {
-            let id = self.next_anon_shape_id;
-            self.next_anon_shape_id += 1;
-            self.anonymous_shapes.insert(shape_key, id);
-            id
-        };
+        let shape_id = Self::anon_shape_id(&shape_key);
 
         // Build shape descriptor string: "name1:type_id1,name2:type_id2,..."
         // Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String

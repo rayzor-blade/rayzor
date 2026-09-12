@@ -351,13 +351,6 @@ pub struct HirToMirContext<'a> {
     /// Current function's SymbolId (for function-level metadata like @:frameworks)
     current_function_symbol: Option<SymbolId>,
 
-    /// Mapping from sorted anonymous field names to shape_id (for runtime shape table)
-    /// Key: comma-joined sorted field names — Value: shape_id (u32)
-    anonymous_shapes: BTreeMap<String, u32>,
-
-    /// Next shape ID to allocate (incremented each time a new shape is registered)
-    next_anon_shape_id: u32,
-
     /// Interface method ordering: maps interface SymbolId → ordered list of method names
     interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
 
@@ -1366,8 +1359,6 @@ impl<'a> HirToMirContext<'a> {
             gpu_struct_layouts: BTreeMap::new(),
             tcc_func_ids: None,
             current_function_symbol: None,
-            anonymous_shapes: BTreeMap::new(),
-            next_anon_shape_id: 0,
             interface_method_names: BTreeMap::new(),
             interface_method_return_types: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),

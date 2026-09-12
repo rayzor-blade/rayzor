@@ -48,12 +48,21 @@ pub struct ShapeDescriptor {
 }
 
 /// Global shape table
-static SHAPE_TABLE: RwLock<Option<Vec<ShapeDescriptor>>> = RwLock::new(None);
+/// Keyed by shape id: compiler-emitted ids are hashes of the field names
+/// (see `anon_shape_id`), so the table is sparse; ids handed out at runtime
+/// by `rayzor_register_shape` count up from `FIRST_DYNAMIC_SHAPE`, below the
+/// hashed range.
+static SHAPE_TABLE: RwLock<Option<HashMap<u32, ShapeDescriptor>>> = RwLock::new(None);
+
+const KEY_VALUE_SHAPE: u32 = 1001;
+const FIRST_DYNAMIC_SHAPE: u32 = 1002;
+static NEXT_DYNAMIC_SHAPE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(FIRST_DYNAMIC_SHAPE);
 
 fn ensure_shape_table() {
     let mut table = SHAPE_TABLE.write().unwrap();
     if table.is_none() {
-        *table = Some(Vec::new());
+        *table = Some(HashMap::new());
     }
 }
 
@@ -67,16 +76,13 @@ pub fn register_builtin_shapes() {
     // Shape 1001: {key: Int, value: Int} for ArrayKeyValueIterator.next()
     // Fields sorted alphabetically: key(idx 0, type 3=Int), value(idx 1, type 3=Int)
     // Note: value is stored as raw i64 from haxe_array_get_i64, so type 3 (Int) is correct.
-    while shapes.len() <= 1001 {
-        shapes.push(ShapeDescriptor {
-            field_names: Vec::new(),
-            field_types: Vec::new(),
-        });
-    }
-    shapes[1001] = ShapeDescriptor {
-        field_names: vec!["key".to_string(), "value".to_string()],
-        field_types: vec![3, 3], // 3 = Int, 3 = Int
-    };
+    shapes.insert(
+        KEY_VALUE_SHAPE,
+        ShapeDescriptor {
+            field_names: vec!["key".to_string(), "value".to_string()],
+            field_types: vec![3, 3], // 3 = Int, 3 = Int
+        },
+    );
 }
 
 /// Register a new shape, returns shape_id
@@ -110,8 +116,8 @@ pub extern "C" fn rayzor_register_shape(
 
     let mut table = SHAPE_TABLE.write().unwrap();
     let table = table.as_mut().unwrap();
-    let shape_id = table.len() as u32;
-    table.push(shape);
+    let shape_id = NEXT_DYNAMIC_SHAPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    table.insert(shape_id, shape);
     shape_id
 }
 
@@ -130,7 +136,7 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
     {
         let table = SHAPE_TABLE.read().unwrap();
         if let Some(ref t) = *table {
-            if (shape_id as usize) < t.len() && !t[shape_id as usize].field_names.is_empty() {
+            if t.get(&shape_id).is_some_and(|s| !s.field_names.is_empty()) {
                 return;
             }
         }
@@ -171,23 +177,13 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
 
     // Write lock to register
     let mut table = SHAPE_TABLE.write().unwrap();
-    let table = table.as_mut().unwrap();
-
-    // Grow table if needed
-    while table.len() <= shape_id as usize {
-        table.push(ShapeDescriptor {
-            field_names: Vec::new(),
-            field_types: Vec::new(),
-        });
-    }
-
-    table[shape_id as usize] = shape;
+    table.as_mut().unwrap().insert(shape_id, shape);
 }
 
 /// Get shape descriptor by ID (internal helper)
 fn get_shape(shape_id: u32) -> Option<ShapeDescriptor> {
     let table = SHAPE_TABLE.read().unwrap();
-    table.as_ref()?.get(shape_id as usize).cloned()
+    table.as_ref()?.get(&shape_id).cloned()
 }
 
 // ============================================================================
