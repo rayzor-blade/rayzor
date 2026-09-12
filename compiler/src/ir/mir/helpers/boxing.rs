@@ -836,6 +836,30 @@ impl<'a> HirToMirContext<'a> {
     /// a boxed pointer that needs to be unboxed to the actual type T.
     ///
     /// Also handles nullable types: Null<Int> (Ptr(I32)) - we need to unbox the inner type.
+    /// Whether a callee's DECLARED return type is (or wraps) a type parameter --
+    /// the only returns that arrive erased. `isEmpty(): Bool` on the same
+    /// generic receiver returns a concrete Bool and must be left alone.
+    pub(crate) fn callee_returns_type_param(&self, callee: SymbolId) -> bool {
+        use crate::tast::TypeKind;
+        let Some(fn_ty) = self.symbol_table.get_symbol(callee).map(|s| s.type_id) else {
+            return false;
+        };
+        let tt = self.type_table;
+        let Some(TypeKind::Function { return_type, .. }) = tt.get(fn_ty).map(|i| &i.kind) else {
+            return false;
+        };
+        let mut cur = *return_type;
+        for _ in 0..4 {
+            match tt.get(cur).map(|i| &i.kind) {
+                Some(TypeKind::TypeParameter { .. }) => return true,
+                Some(TypeKind::Optional { inner_type }) => cur = *inner_type,
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Unbox the return of an erased generic method, resolving T from the
     /// receiver's type argument.
     ///
@@ -852,12 +876,15 @@ impl<'a> HirToMirContext<'a> {
     pub(crate) fn unbox_erased_generic_return(
         &mut self,
         call_result: IrId,
-        actual_return_type: &IrType,
+        actual_return_type: Option<&IrType>,
         receiver_ty: TypeId,
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
-        let erased = matches!(actual_return_type, IrType::Ptr(inner)
-            if matches!(inner.as_ref(), IrType::U8 | IrType::Void));
+        // An import's signature is not recorded, so its return type arrives as
+        // None: treat it as erased and let the runtime check decide.
+        let erased = actual_return_type.map_or(true, |t| {
+            matches!(t, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::Void))
+        });
         if !erased {
             return Some(call_result);
         }
@@ -901,6 +928,9 @@ impl<'a> HirToMirContext<'a> {
                 let f = self.builder.build_bitcast(bits, IrType::F64)?;
                 self.builder.build_cast(f, IrType::F64, IrType::F32)
             }
+            // A String register is not a plain pointer to the builder; raw
+            // bits become one through a cast, as the vtable thunks do.
+            IrType::String => self.builder.build_cast(bits, IrType::I64, IrType::String),
             other => self.builder.build_bitcast(bits, other),
         }
     }

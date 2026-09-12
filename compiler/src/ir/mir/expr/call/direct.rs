@@ -262,12 +262,12 @@ impl<'a> HirToMirContext<'a> {
                             return self.builder.build_bitcast(reg, reg_type);
                         }
                     }
-                    if *is_method && !args.is_empty() {
-                        return self.unbox_erased_generic_return(
-                            result?,
-                            &actual_return_type,
-                            args[0].ty,
-                        );
+                    if *is_method && !args.is_empty() && self.callee_returns_type_param(*symbol) {
+                        // `actual_return_type` is the CALLER's type when the
+                        // callee is an import, not the signature, so it cannot
+                        // say whether the return is erased; the declaration
+                        // can. The unboxer still validates at runtime.
+                        return self.unbox_erased_generic_return(result?, None, args[0].ty);
                     }
                     return result;
                 }
@@ -276,12 +276,8 @@ impl<'a> HirToMirContext<'a> {
                     arg_regs,
                     actual_return_type.clone(),
                 )?;
-                if *is_method && !args.is_empty() {
-                    return self.unbox_erased_generic_return(
-                        result,
-                        &actual_return_type,
-                        args[0].ty,
-                    );
+                if *is_method && !args.is_empty() && self.callee_returns_type_param(*symbol) {
+                    return self.unbox_erased_generic_return(result, None, args[0].ty);
                 }
                 return Some(result);
             }
@@ -352,9 +348,16 @@ impl<'a> HirToMirContext<'a> {
                             &hir_types,
                             false,
                         );
-                        return self
-                            .builder
-                            .build_call_direct(func_id, arg_regs, result_type);
+                        let result =
+                            self.builder
+                                .build_call_direct(func_id, arg_regs, result_type)?;
+                        // An import's return type is not recorded here; the
+                        // declaration says whether it is erased, and the
+                        // unboxer validates at runtime.
+                        if self.callee_returns_type_param(*symbol) {
+                            return self.unbox_erased_generic_return(result, None, args[0].ty);
+                        }
+                        return Some(result);
                     }
                 }
             }

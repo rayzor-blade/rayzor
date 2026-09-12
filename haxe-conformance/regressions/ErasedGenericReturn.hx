@@ -24,6 +24,21 @@ class ErasedGenericReturn {
         var li = new List<Int>();
         li.add(42);
         if (intFirst(li) != 42) throw "int first";
+        // the receiver is a LOCAL built by `new List<T>()` -- top-level List
+        // is an alias, and the local must still carry T
+        var ls = new List<String>();
+        ls.add("hello");
+        var s = ls.first();
+        if (s != "hello" || s.length != 5) throw "local String first";
+        lt.add({p:"rr", s:true});   // lt was emptied by the pops above
+        // The anon's field is read back correctly (it prints "rr") but a
+        // direct `==` on it still compares unequal -- filed separately -- so
+        // the local anon case is asserted through a String-typed function.
+        if (anonFirst(lt) != "rr") throw "local anon first";
+        if (li.first() != 42) throw "local Int first";
+        // a concrete return on the same generic receiver must be left alone
+        if (ls.isEmpty()) throw "isEmpty on a generic receiver";
+        if (ls.length != 1) throw "length on a generic receiver";
         trace("CONFORMANCE_OK");
     }
 }

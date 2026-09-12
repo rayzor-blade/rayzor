@@ -954,6 +954,33 @@ impl<'a> AstLowering<'a> {
                 // If type arguments are provided, create an instantiated type
                 // e.g., new Array<Thread<Int>>() should have type Array<Thread<Int>>, not just Array
                 let actual_class_type = if !type_args.is_empty() {
+                    // `new List<String>()`: top-level `List` is an alias of
+                    // haxe.ds.List. Type it exactly as the annotation
+                    // `var l:List<String>` would, through lower_type, so the
+                    // result is the same TypeId every downstream lookup already
+                    // knows. Minting a fresh class type here instead left the
+                    // local typed as the bare alias with NO arguments, so a
+                    // later `Null<T>` unboxing on it had nothing to resolve.
+                    let aliased = {
+                        let type_table = self.context.type_table.borrow();
+                        matches!(
+                            type_table.get(base_class_type_id).map(|ti| &ti.kind),
+                            Some(crate::tast::core::TypeKind::TypeAlias { .. })
+                        )
+                    };
+                    let via_annotation = if aliased && !params.is_empty() {
+                        let as_annotation = parser::Type::Path {
+                            path: type_path.clone(),
+                            params: params.clone(),
+                            span: expression.span,
+                        };
+                        self.lower_type(&as_annotation).ok().filter(|t| {
+                            let tt = self.context.type_table.borrow();
+                            tt.get(*t).is_some_and(|ti| ti.is_generic())
+                        })
+                    } else {
+                        None
+                    };
                     let symbol_id_opt = {
                         let type_table = self.context.type_table.borrow();
                         if let Some(base_type_info) = type_table.get(base_class_type_id) {
@@ -970,8 +997,9 @@ impl<'a> AstLowering<'a> {
                             None
                         }
                     };
-
-                    if let Some((symbol_id, is_array)) = symbol_id_opt {
+                    if let Some(t) = via_annotation {
+                        t
+                    } else if let Some((symbol_id, is_array)) = symbol_id_opt {
                         if is_array && type_args.len() == 1 {
                             self.context
                                 .type_table
