@@ -311,13 +311,11 @@ impl<'a> HirToMirContext<'a> {
                                 // methods to externs, and a forward reference to one of
                                 // those is a body that never comes.
                                 if runtime_call.is_mir_wrapper
-                                    || (self
-                                        .stdlib_mapping
-                                        .class_key(class_name)
-                                        .is_some_and(|k| self.stdlib_mapping.is_mir_wrapper_class(k))
-                                        && self
-                                            .get_extern_function_signature(runtime_call.runtime_name)
-                                            .is_none())
+                                    || (self.stdlib_mapping.class_key(class_name).is_some_and(
+                                        |k| self.stdlib_mapping.is_mir_wrapper_class(k),
+                                    ) && self
+                                        .get_extern_function_signature(runtime_call.runtime_name)
+                                        .is_none())
                                 {
                                     // Use runtime_name directly as the MIR wrapper function name
                                     // (e.g., "Arc_init" not "rayzor_concurrent_Arc_init")

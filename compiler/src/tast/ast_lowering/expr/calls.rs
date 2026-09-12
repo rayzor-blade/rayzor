@@ -728,24 +728,35 @@ impl<'a> AstLowering<'a> {
         // reaches `Json.stringify(v:Dynamic)`, while `d.iterator()` stays a
         // dynamic call rather than becoming `StringTools.iterator(d)`.
         let receiver_is_dynamic = matches!(
-            self.context.type_table.borrow().get(receiver_type).map(|t| &t.kind),
+            self.context
+                .type_table
+                .borrow()
+                .get(receiver_type)
+                .map(|t| &t.kind),
             Some(crate::tast::core::TypeKind::Dynamic)
         );
         let applies = |lowering: &Self, method: SymbolId| -> bool {
             if !receiver_is_dynamic {
                 return true;
             }
-            let Some(fn_ty) = lowering.context.symbol_table.get_symbol(method).map(|s| s.type_id)
+            let Some(fn_ty) = lowering
+                .context
+                .symbol_table
+                .get_symbol(method)
+                .map(|s| s.type_id)
             else {
                 return false;
             };
             let tt = lowering.context.type_table.borrow();
             match tt.get(fn_ty).map(|t| &t.kind) {
-                Some(crate::tast::core::TypeKind::Function { params, .. }) => params
-                    .first()
-                    .is_some_and(|p| {
-                        matches!(tt.get(*p).map(|t| &t.kind), Some(crate::tast::core::TypeKind::Dynamic))
-                    }),
+                Some(crate::tast::core::TypeKind::Function { params, .. }) => {
+                    params.first().is_some_and(|p| {
+                        matches!(
+                            tt.get(*p).map(|t| &t.kind),
+                            Some(crate::tast::core::TypeKind::Dynamic)
+                        )
+                    })
+                }
                 _ => false,
             }
         };
@@ -2612,6 +2623,33 @@ impl<'a> AstLowering<'a> {
             _ => return ty,
         };
         self.context.type_table.borrow_mut().create_type(rebuilt)
+    }
+
+    /// Whether the expression being lowered is expected to be an object: its
+    /// slot (an assignment target, a declared variable, an argument, a return)
+    /// is typed Dynamic or as an anonymous structure.
+    pub(crate) fn expects_object_value(&self) -> bool {
+        use crate::tast::core::TypeKind;
+        let expected = self
+            .expected_arg_type_stack
+            .last()
+            .copied()
+            .flatten()
+            .or(self.context.expected_new_type_hint);
+        let Some(ty) = expected else {
+            return false;
+        };
+        let tt = self.context.type_table.borrow();
+        let mut cur = ty;
+        for _ in 0..4 {
+            match tt.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Dynamic) | Some(TypeKind::Anonymous { .. }) => return true,
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                Some(TypeKind::Optional { inner_type }) => cur = *inner_type,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// Resolve an un-parameterised generic local from its first use, the way

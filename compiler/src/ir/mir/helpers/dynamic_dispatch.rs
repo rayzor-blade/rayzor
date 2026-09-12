@@ -282,8 +282,7 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone()],
                     ptr_u8.clone(),
                 );
-                self.builder
-                    .build_call_direct(box_fn, vec![as_ptr], ptr_u8)
+                self.builder.build_call_direct(box_fn, vec![as_ptr], ptr_u8)
             }
             _ => {
                 let returned_class = self

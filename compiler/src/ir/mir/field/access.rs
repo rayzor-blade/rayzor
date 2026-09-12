@@ -46,6 +46,43 @@ impl<'a> HirToMirContext<'a> {
         })
     }
 
+    /// `x.p` for a property `p` of an abstract whose getter is a method:
+    /// a call to it. None when the field is no such property or the getter
+    /// cannot be found.
+    fn read_abstract_property(
+        &mut self,
+        obj: IrId,
+        field: SymbolId,
+        receiver_ty: TypeId,
+        field_ty: TypeId,
+    ) -> Option<IrId> {
+        let info = self.abstract_property_accessors.get(&field).cloned()?;
+        let crate::tast::PropertyAccessor::Method(getter) = info.getter else {
+            return None;
+        };
+        let func_id = self
+            .resolve_method_function_id(receiver_ty, getter)
+            .or_else(|| {
+                self.function_map
+                    .iter()
+                    .find(|(sym, _)| {
+                        self.symbol_table
+                            .get_symbol(**sym)
+                            .is_some_and(|s| s.name == getter)
+                    })
+                    .map(|(_, id)| *id)
+            })?;
+        let result_type = self
+            .builder
+            .module
+            .functions
+            .get(&func_id)
+            .map(|f| f.signature.return_type.clone())
+            .unwrap_or_else(|| self.convert_type(field_ty));
+        self.builder
+            .build_call_direct(func_id, vec![obj], result_type)
+    }
+
     pub(crate) fn lower_field_access(
         &mut self,
         obj: IrId,
@@ -835,6 +872,14 @@ impl<'a> HirToMirContext<'a> {
                                     .map(|g| g.ty.clone())
                                     .unwrap_or(IrType::Any);
                                 return self.builder.build_load_global(global_id, global_type);
+                            }
+
+                            // A property of an abstract with no slot of its own
+                            // reads through its getter method.
+                            if let Some(result) =
+                                self.read_abstract_property(obj, field, receiver_ty, field_ty)
+                            {
+                                return Some(result);
                             }
 
                             if std::env::var_os("RAYZOR_E0100_DEBUG").is_some() {

@@ -923,7 +923,11 @@ impl<'a> HirToMirContext<'a> {
                             value
                         };
 
+                        // The reflective write into a Dynamic boxes the value by
+                        // this type; a register alone cannot tell a handle from a box.
+                        self.pending_store_value_ty = Some(rhs.ty);
                         self.lower_lvalue_write(lhs, value);
+                        self.pending_store_value_ty = None;
 
                         // If the LHS is a global variable, the value escapes to global storage
                         // and must NOT be tracked for drop/free. Skip all drop tracking.
@@ -1285,14 +1289,12 @@ impl<'a> HirToMirContext<'a> {
                         // Only a class that declares `stack` gets one; a
                         // thrown class without it (`haxe.io.Eof`) must not
                         // fail the compile on the by-name fallback.
-                        let stack_field =
-                            match self.resolve_field_index_candidates(stack_name, thrown_type) {
-                                FieldIndexResolution::Unique(
-                                    class_ty,
-                                    idx,
-                                ) => Some((class_ty, idx)),
-                                _ => None,
-                            };
+                        let stack_field = match self
+                            .resolve_field_index_candidates(stack_name, thrown_type)
+                        {
+                            FieldIndexResolution::Unique(class_ty, idx) => Some((class_ty, idx)),
+                            _ => None,
+                        };
                         if let Some((_class_ty, field_idx)) = stack_field {
                             let call_stack_fn = self.get_or_register_extern_function(
                                 "rayzor_native_stack_trace_call_stack",

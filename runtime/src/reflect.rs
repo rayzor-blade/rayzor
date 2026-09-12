@@ -85,9 +85,9 @@ fn builtin_length(b: &BuiltinBox) -> Option<i64> {
         BuiltinBox::Array(p) if !p.is_null() => Some(crate::haxe_array::haxe_array_length(
             *p as *const crate::haxe_array::HaxeArray,
         ) as i64),
-        BuiltinBox::String(p) if !p.is_null() => Some(crate::haxe_string::haxe_string_length(
-            *p as *const HaxeString,
-        ) as i64),
+        BuiltinBox::String(p) if !p.is_null() => {
+            Some(crate::haxe_string::haxe_string_length(*p as *const HaxeString) as i64)
+        }
         _ => None,
     }
 }

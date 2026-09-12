@@ -1066,6 +1066,18 @@ impl<'a> AstLowering<'a> {
                     else_expr: else_expression,
                 }
             }
+            // `{}` where a value is expected is Haxe's empty object
+            // declaration; the parser can only see an empty block. A Dynamic or
+            // structural expectation says which it is: an empty block there was
+            // a null, and every field written into it went nowhere.
+            ExprKind::Block(block_elements)
+                if block_elements.is_empty() && self.expects_object_value() =>
+            {
+                return self.lower_expression(&Expr {
+                    kind: ExprKind::Object(Vec::new()),
+                    span: expression.span,
+                });
+            }
             ExprKind::Block(block_elements) => {
                 // Handle block expressions with error recovery
                 let mut statements = Vec::new();

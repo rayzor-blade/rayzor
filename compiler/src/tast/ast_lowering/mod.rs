@@ -143,7 +143,12 @@ fn collect_param_call_uses<'a>(
                 visit(arg, uses, shadowed);
             }
         }
-        ExprKind::Var { name, expr: init, .. } | ExprKind::Final { name, expr: init, .. } => {
+        ExprKind::Var {
+            name, expr: init, ..
+        }
+        | ExprKind::Final {
+            name, expr: init, ..
+        } => {
             if params.contains(name.as_str()) {
                 shadowed.insert(name.as_str());
             }

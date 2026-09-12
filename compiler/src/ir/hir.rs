@@ -709,10 +709,14 @@ pub struct HirEnumField {
 
 #[derive(Debug, Clone)]
 pub struct HirAbstractField {
+    pub symbol_id: SymbolId,
     pub name: InternedString,
     pub ty: TypeId,
     pub getter: Option<SymbolId>,
     pub setter: Option<SymbolId>,
+    /// `(get, set)` accessors, as on a class field; a property of an
+    /// abstract has no slot and reads and writes through them.
+    pub property_access: Option<crate::tast::node::PropertyAccessInfo>,
 }
 
 #[derive(Debug, Clone)]

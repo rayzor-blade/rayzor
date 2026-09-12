@@ -172,7 +172,15 @@ impl<'a> HirToMirContext<'a> {
         // Check if this is a property with a custom setter.
         // Clone the info so the immutable borrow of `self` is released
         // before any of the per-arm fallbacks that need `&mut self`.
-        let property_info_owned = self.property_access_map.get(field).cloned();
+        let property_info_owned = self
+            .property_access_map
+            .get(field)
+            .or_else(|| {
+                self.abstract_property_accessors
+                    .get(field)
+                    .filter(|info| matches!(info.setter, crate::tast::PropertyAccessor::Method(_)))
+            })
+            .cloned();
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.setter {
                 // The guard keeps `this.p = v` inside `p`'s own setter on the
@@ -422,19 +430,34 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // A Dynamic receiver has no static layout: a slot found by NAME on
+        // some other class wrote through an anonymous object's bounds. It
+        // takes the reflective write below, which the value's tag drives. A
+        // register with a class hint is a raw instance of a known class (a
+        // derived clone, a wrapper's return) and keeps its slot.
+        let receiver_is_dynamic = matches!(
+            self.type_table.get(object.ty).map(|t| &t.kind),
+            Some(TypeKind::Dynamic)
+        ) && !self.register_class_hints.contains_key(&obj_reg)
+            && !matches!(&object.kind, HirExprKind::Variable { symbol, .. }
+                if self.monomorphized_var_types.contains_key(symbol));
+
         // Look up the field index (with fallback to name lookup)
-        let field_index_opt = self
-            .field_index_map
-            .get(field)
-            .map(|&(_, idx)| idx)
-            .or_else(|| {
-                // Fallback: disambiguate by receiver type when multiple classes
-                // have the same field name (e.g., StringBuf.length vs List.length)
-                let field_name = self.symbol_table.get_symbol(*field).map(|s| s.name)?;
-                let receiver_ty = object.ty;
-                self.resolve_field_index_by_name(field_name, receiver_ty)
-                    .map(|(_, idx)| idx)
-            });
+        let field_index_opt = if receiver_is_dynamic {
+            None
+        } else {
+            self.field_index_map
+                .get(field)
+                .map(|&(_, idx)| idx)
+                .or_else(|| {
+                    // Fallback: disambiguate by receiver type when multiple classes
+                    // have the same field name (e.g., StringBuf.length vs List.length)
+                    let field_name = self.symbol_table.get_symbol(*field).map(|s| s.name)?;
+                    let receiver_ty = object.ty;
+                    self.resolve_field_index_by_name(field_name, receiver_ty)
+                        .map(|(_, idx)| idx)
+                })
+        };
 
         if let Some(field_index) = field_index_opt {
             // @:cstruct: use byte-offset PtrAdd instead of GEP
@@ -633,10 +656,18 @@ impl<'a> HirToMirContext<'a> {
                         self.builder
                             .build_call_direct(unbox_ref_id, vec![obj_reg], ptr_u8.clone())
                     {
-                        // Box the value based on its IR type
+                        // Box the value by its HIR type where the assignment
+                        // recorded one -- a handle and a box share a register
+                        // type -- else by the register type.
                         let value_ir_type = self.builder.get_register_type(value);
-                        let boxed_value = match &value_ir_type {
-                            Some(IrType::F64) | Some(IrType::F32) => {
+                        let typed_box = self.pending_store_value_ty.and_then(|ty| {
+                            let dynamic_ty = self.type_table.dynamic_type();
+                            self.maybe_box_value(value, ty, dynamic_ty)
+                                .filter(|b| *b != value)
+                        });
+                        let boxed_value = match (&typed_box, &value_ir_type) {
+                            (Some(b), _) => Some(*b),
+                            (None, Some(IrType::F64)) | (None, Some(IrType::F32)) => {
                                 let box_id = self.get_or_register_extern_function(
                                     "haxe_box_float_ptr",
                                     vec![IrType::F64],
@@ -645,7 +676,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_call_direct(box_id, vec![value], ptr_u8.clone())
                             }
-                            Some(IrType::Bool) => {
+                            (None, Some(IrType::Bool)) => {
                                 let box_id = self.get_or_register_extern_function(
                                     "haxe_box_bool_ptr",
                                     vec![IrType::Bool],
@@ -654,7 +685,7 @@ impl<'a> HirToMirContext<'a> {
                                 self.builder
                                     .build_call_direct(box_id, vec![value], ptr_u8.clone())
                             }
-                            Some(IrType::Ptr(_)) => {
+                            (None, Some(IrType::Ptr(_))) => {
                                 // Already a pointer — pass through as-is
                                 Some(value)
                             }

@@ -126,6 +126,24 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
                 HirTypeDecl::Abstract(abstract_decl) => {
+                    // A property of an abstract reads and writes through its
+                    // accessor METHODS where the slot path finds nothing: the
+                    // property's symbol is shared with a same-named field of
+                    // the underlying class (`Int64.high` over `__Int64.high`),
+                    // whose own slot must keep winning. A write consults this
+                    // first, since a slot found by name would be the wrong one;
+                    // a read consults it last.
+                    for field in &abstract_decl.fields {
+                        if let Some(info) = &field.property_access {
+                            let is_method = |a: &crate::tast::PropertyAccessor| {
+                                matches!(a, crate::tast::PropertyAccessor::Method(_))
+                            };
+                            if is_method(&info.getter) || is_method(&info.setter) {
+                                self.abstract_property_accessors
+                                    .insert(field.symbol_id, info.clone());
+                            }
+                        }
+                    }
                     // Register abstract method signatures — same as classes but
                     // this_type uses the underlying type (value, not pointer)
                     for method in &abstract_decl.methods {

@@ -459,10 +459,16 @@ impl<'a> HirToMirContext<'a> {
     fn build_iter_handle_from_dynamic(&mut self, box_reg: IrId) -> Option<IrId> {
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        let iterator_fn =
-            self.iter_thunk_for_wrapper("array_iterator", vec![ptr_void.clone()], ptr_void.clone())?;
-        let has_next_fn =
-            self.iter_thunk_for_wrapper("ArrayIterator_hasNext", vec![ptr_void.clone()], IrType::I32)?;
+        let iterator_fn = self.iter_thunk_for_wrapper(
+            "array_iterator",
+            vec![ptr_void.clone()],
+            ptr_void.clone(),
+        )?;
+        let has_next_fn = self.iter_thunk_for_wrapper(
+            "ArrayIterator_hasNext",
+            vec![ptr_void.clone()],
+            IrType::I32,
+        )?;
         let next_fn =
             self.iter_thunk_for_wrapper("ArrayIterator_next", vec![ptr_void.clone()], IrType::I64)?;
         let iterator_ref = self.builder.build_function_ref(iterator_fn)?;
@@ -470,7 +476,9 @@ impl<'a> HirToMirContext<'a> {
         let next_ref = self.builder.build_function_ref(next_fn)?;
         let iterator_tag = self
             .builder
-            .build_const(IrValue::U32(Self::fnv1a_class_type_id("haxe.iterators.ArrayIterator")))?;
+            .build_const(IrValue::U32(Self::fnv1a_class_type_id(
+                "haxe.iterators.ArrayIterator",
+            )))?;
         let handle_tag = self.builder.build_const(IrValue::I64(ITER_HANDLE_TAG))?;
         let build = self.get_or_register_extern_function(
             "haxe_iter_handle_from_dynamic",
@@ -487,7 +495,14 @@ impl<'a> HirToMirContext<'a> {
         let as_ptr = self.builder.build_bitcast(box_reg, ptr_u8.clone())?;
         let handle = self.builder.build_call_direct(
             build,
-            vec![as_ptr, handle_tag, iterator_ref, has_next_ref, next_ref, iterator_tag],
+            vec![
+                as_ptr,
+                handle_tag,
+                iterator_ref,
+                has_next_ref,
+                next_ref,
+                iterator_tag,
+            ],
             ptr_u8,
         )?;
         self.iter_handle_regs.insert(handle);
@@ -559,7 +574,10 @@ impl<'a> HirToMirContext<'a> {
             self.type_table.get(source_ty).map(|t| &t.kind),
             Some(TypeKind::Dynamic)
         );
-        let is_ptr = matches!(self.builder.get_register_type(value_reg), Some(IrType::Ptr(_)));
+        let is_ptr = matches!(
+            self.builder.get_register_type(value_reg),
+            Some(IrType::Ptr(_))
+        );
         (is_dynamic && is_ptr).then_some(IterSource::Dynamic)
     }
 

@@ -923,10 +923,12 @@ impl<'a> TastToHirContext<'a> {
             .iter()
             .map(|field| {
                 HirAbstractField {
+                    symbol_id: field.symbol_id,
                     name: field.name.clone(),
                     ty: field.field_type,
                     getter: None, // Will be resolved during type checking
                     setter: None, // Will be resolved during type checking
+                    property_access: field.property_access.clone(),
                 }
             })
             .collect();

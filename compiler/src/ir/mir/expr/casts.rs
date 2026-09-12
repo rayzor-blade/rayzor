@@ -114,8 +114,7 @@ impl<'a> HirToMirContext<'a> {
             );
             if source_is_dynamic {
                 let value_reg = self.lower_expression(expr)?;
-                if let Some(out) = self.unbox_unchecked_from_dynamic(value_reg, expr.ty, *target)
-                {
+                if let Some(out) = self.unbox_unchecked_from_dynamic(value_reg, expr.ty, *target) {
                     return Some(out);
                 }
                 return self.builder.build_cast(value_reg, from_type, to_type);

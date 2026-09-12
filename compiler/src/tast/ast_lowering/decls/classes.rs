@@ -873,7 +873,11 @@ impl<'a> AstLowering<'a> {
         func: &Function,
         inferred: &BTreeMap<InternedString, TypeId>,
     ) {
-        let Some(fn_type) = self.context.symbol_table.get_symbol(symbol).map(|s| s.type_id)
+        let Some(fn_type) = self
+            .context
+            .symbol_table
+            .get_symbol(symbol)
+            .map(|s| s.type_id)
         else {
             return;
         };
@@ -941,7 +945,11 @@ impl<'a> AstLowering<'a> {
         let mut shadowed = std::collections::BTreeSet::new();
         collect_param_call_uses(body, &unannotated, &class_name, &mut uses, &mut shadowed);
 
-        let methods = self.class_methods.get(&class_symbol).cloned().unwrap_or_default();
+        let methods = self
+            .class_methods
+            .get(&class_symbol)
+            .cloned()
+            .unwrap_or_default();
         for (param, sites) in uses {
             let param_key = self.context.intern_string(param);
             if shadowed.contains(param) {

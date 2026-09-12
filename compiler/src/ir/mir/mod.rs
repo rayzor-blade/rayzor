@@ -351,6 +351,15 @@ pub struct HirToMirContext<'a> {
     /// Current function's SymbolId (for function-level metadata like @:frameworks)
     current_function_symbol: Option<SymbolId>,
 
+    /// Accessor info for the properties of abstracts, keyed by the property
+    /// symbol: a write consults it before the slot path, a read after
+    /// (see decl/module.rs).
+    abstract_property_accessors: BTreeMap<SymbolId, crate::tast::node::PropertyAccessInfo>,
+
+    /// The HIR type of the value an assignment is storing, for the reflective
+    /// write into a Dynamic, which boxes the value by it.
+    pending_store_value_ty: Option<TypeId>,
+
     /// Exception handlers pushed by the `try` bodies enclosing the code being
     /// lowered. A `return` inside them pops that many before it leaves; the
     /// try's own exit code never runs on that path.
@@ -1365,6 +1374,8 @@ impl<'a> HirToMirContext<'a> {
             tcc_func_ids: None,
             current_function_symbol: None,
             try_depth: 0,
+            pending_store_value_ty: None,
+            abstract_property_accessors: BTreeMap::new(),
             interface_method_names: BTreeMap::new(),
             interface_method_return_types: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),

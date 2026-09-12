@@ -111,6 +111,32 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?
             }
+            // A structural or class-typed field (`Dynamic<T>` gives its
+            // fields the type T) hands its readers the object, not the box.
+            Some(TypeKind::Anonymous { .. }) | Some(TypeKind::Array { .. }) => {
+                let tag = if matches!(field_type_kind, Some(TypeKind::Array { .. })) {
+                    7u32
+                } else {
+                    6u32
+                };
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_if_tag",
+                    vec![ptr_u8.clone(), IrType::U32],
+                    ptr_u8.clone(),
+                );
+                let tag_reg = self.builder.build_const(IrValue::U32(tag))?;
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result, tag_reg], ptr_u8)?
+            }
+            Some(TypeKind::Class { .. }) => {
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_u8.clone()],
+                    ptr_u8.clone(),
+                );
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?
+            }
             _ => {
                 // Dynamic or unknown: return DynamicValue* as-is
                 dynamic_result
