@@ -22,6 +22,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// Which sequence an index loop walks; see `lower_for_in_over_seq`.
+#[derive(Clone, Copy)]
+pub(crate) enum SeqKind {
+    Array,
+    String,
+}
+
 impl<'a> HirToMirContext<'a> {
     pub(crate) fn lower_for_in_loop(
         &mut self,
@@ -189,6 +196,18 @@ impl<'a> HirToMirContext<'a> {
             );
         }
         if self.try_lower_for_in_iter_handle(pattern, iter_expr, body, label) {
+            return;
+        }
+
+        // `for (c in s)` over a String iterates its char codes. Left to the
+        // array path below it was read as a HaxeArray and faulted on the
+        // string's own bytes.
+        if matches!(iter_type_kind, Some(crate::tast::TypeKind::String)) {
+            let Some(collection) = self.lower_expression(iter_expr) else {
+                return;
+            };
+            let int_ty = self.type_table.int_type();
+            self.lower_for_in_over_seq(pattern, collection, int_ty, body, label, SeqKind::String);
             return;
         }
 
@@ -1223,6 +1242,29 @@ impl<'a> HirToMirContext<'a> {
         body: &HirBlock,
         label: Option<&SymbolId>,
     ) {
+        self.lower_for_in_over_seq(
+            pattern,
+            collection,
+            elem_type_id,
+            body,
+            label,
+            SeqKind::Array,
+        )
+    }
+
+    /// Index loop over an array or a string: `var _i = 0; while (_i < len)
+    /// { var x = seq[_i]; body; _i++; }`. Both keep their length at offset 8,
+    /// so only the element read differs: a string yields the char code at
+    /// the index, as `for (c in s)` does in Haxe 4.
+    pub(crate) fn lower_for_in_over_seq(
+        &mut self,
+        pattern: &HirPattern,
+        collection: IrId,
+        elem_type_id: TypeId,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+        seq: SeqKind,
+    ) {
         // Read array length from HaxeArray struct (offset 8 = len field)
         let Some(offset_8) = self.builder.build_const(IrValue::I64(8)) else {
             return;
@@ -1383,8 +1425,20 @@ impl<'a> HirToMirContext<'a> {
             self.loop_stack.pop();
             return;
         };
-        let Some(element_value) = self.lower_index_access(collection, idx_for_access, elem_type_id)
-        else {
+        let element_value = match seq {
+            SeqKind::Array => self.lower_index_access(collection, idx_for_access, elem_type_id),
+            SeqKind::String => {
+                let char_code_at = self.get_or_register_extern_function(
+                    "haxe_string_char_code_at_ptr",
+                    vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I64],
+                    IrType::I64,
+                );
+                self.builder
+                    .build_call_direct(char_code_at, vec![collection, idx_for_access], IrType::I64)
+                    .and_then(|code| self.builder.build_cast(code, IrType::I64, IrType::I32))
+            }
+        };
+        let Some(element_value) = element_value else {
             self.loop_stack.pop();
             return;
         };
