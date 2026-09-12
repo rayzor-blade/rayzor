@@ -576,9 +576,14 @@ impl<'a> AstLowering<'a> {
         }
         self.context.push_type_parameters(type_param_map);
 
-        // Process parameters. An unannotated one takes the type of the field
-        // it is stored into, the way Haxe's own unification would.
-        let inferred = self.param_types_from_field_stores(func);
+        // Process parameters. An unannotated one takes the type recovered
+        // when the class's signatures were registered, the way Haxe's own
+        // unification would; a function registered elsewhere reads its
+        // field stores here.
+        let inferred = match self.inferred_param_types.get(&function_symbol) {
+            Some(types) => types.clone(),
+            None => self.param_types_from_field_stores(func),
+        };
         let mut parameters = Vec::new();
         for param in &func.params {
             let hint = if param.type_hint.is_none() {

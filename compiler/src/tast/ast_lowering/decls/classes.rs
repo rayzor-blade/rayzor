@@ -360,6 +360,8 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        self.infer_unannotated_param_types(class_decl, class_symbol);
+
         // Process fields, methods, and constructors separately
         let mut fields = Vec::with_capacity(class_decl.fields.len());
         let mut methods = Vec::with_capacity(class_decl.fields.len()); // Initially allocate for all fields
@@ -797,6 +799,186 @@ impl<'a> AstLowering<'a> {
         }
 
         Ok(TypedDeclaration::Class(typed_class))
+    }
+
+    /// Recover types for the unannotated parameters of every method in the
+    /// class and rewrite the registered signatures with them, before any body
+    /// is lowered. Recording the result in `inferred_param_types` is what
+    /// keeps a caller typed against the signature and the body lowered later
+    /// in agreement; each on its own would box on one side and read raw on
+    /// the other. A parameter forwarded through another unannotated one
+    /// resolves on a later round, so this runs to a fixpoint.
+    fn infer_unannotated_param_types(&mut self, class_decl: &ClassDecl, class_symbol: SymbolId) {
+        let class_scope = self.context.current_scope;
+        let mut methods: Vec<(&Function, SymbolId)> = Vec::new();
+        for field in &class_decl.fields {
+            let ClassFieldKind::Function(func) = &field.kind else {
+                continue;
+            };
+            if func.params.iter().all(|p| p.type_hint.is_some()) {
+                continue;
+            }
+            let name = self.context.intern_string(&func.name);
+            let symbol = if func.name == "new" {
+                self.class_constructor_symbols.get(&class_symbol).copied()
+            } else {
+                self.context
+                    .symbol_table
+                    .lookup_symbol(class_scope, name)
+                    .map(|entry| entry.id)
+            };
+            if let Some(symbol) = symbol {
+                methods.push((func, symbol));
+            }
+        }
+        for _round in 0..4 {
+            let mut changed = false;
+            for &(func, symbol) in &methods {
+                let inferred = self.param_types_from_uses(func, class_symbol);
+                if self.inferred_param_types.get(&symbol) == Some(&inferred) {
+                    continue;
+                }
+                changed = true;
+                self.rewrite_signature_params(symbol, func, &inferred);
+                self.inferred_param_types.insert(symbol, inferred);
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Replace the registered signature's Dynamic slots for unannotated
+    /// parameters with the recovered types.
+    fn rewrite_signature_params(
+        &mut self,
+        symbol: SymbolId,
+        func: &Function,
+        inferred: &BTreeMap<InternedString, TypeId>,
+    ) {
+        let Some(fn_type) = self.context.symbol_table.get_symbol(symbol).map(|s| s.type_id)
+        else {
+            return;
+        };
+        let (mut params, return_type) = {
+            let tt = self.context.type_table.borrow();
+            match tt.get(fn_type).map(|t| &t.kind) {
+                Some(TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                }) => (params.clone(), *return_type),
+                _ => return,
+            }
+        };
+        if params.len() != func.params.len() {
+            return;
+        }
+        for (slot, param) in params.iter_mut().zip(&func.params) {
+            if param.type_hint.is_some() {
+                continue;
+            }
+            let key = self.context.intern_string(&param.name);
+            *slot = match inferred.get(&key) {
+                Some(ty) => *ty,
+                None => self.context.type_table.borrow().dynamic_type(),
+            };
+        }
+        let rewritten = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type(params, return_type);
+        self.context
+            .symbol_table
+            .update_symbol_type(symbol, rewritten);
+    }
+
+    /// Types for the unannotated parameters of one method: the field each is
+    /// stored into, else the annotated formal of a method on this class it is
+    /// passed to. A parameter whose uses disagree, or that the body shadows,
+    /// stays Dynamic.
+    fn param_types_from_uses(
+        &mut self,
+        func: &Function,
+        class_symbol: SymbolId,
+    ) -> BTreeMap<InternedString, TypeId> {
+        let mut out = self.param_types_from_field_stores(func);
+        let unannotated: std::collections::BTreeSet<&str> = func
+            .params
+            .iter()
+            .filter(|p| p.type_hint.is_none())
+            .map(|p| p.name.as_str())
+            .collect();
+        let Some(body) = func.body.as_deref() else {
+            return out;
+        };
+        let class_name = self
+            .context
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| self.context.string_interner.get(s.name))
+            .unwrap_or("")
+            .to_string();
+        let mut uses: BTreeMap<&str, Vec<(&str, usize)>> = BTreeMap::new();
+        let mut shadowed = std::collections::BTreeSet::new();
+        collect_param_call_uses(body, &unannotated, &class_name, &mut uses, &mut shadowed);
+
+        let methods = self.class_methods.get(&class_symbol).cloned().unwrap_or_default();
+        for (param, sites) in uses {
+            let param_key = self.context.intern_string(param);
+            if shadowed.contains(param) {
+                out.remove(&param_key);
+                continue;
+            }
+            let mut agreed: Option<TypeId> = out.get(&param_key).copied();
+            let mut conflict = false;
+            for (method, index) in sites {
+                let method_key = self.context.intern_string(method);
+                let Some(&(_, method_symbol, _)) =
+                    methods.iter().find(|(name, _, _)| *name == method_key)
+                else {
+                    continue;
+                };
+                let Some(fn_type) = self
+                    .context
+                    .symbol_table
+                    .get_symbol(method_symbol)
+                    .map(|s| s.type_id)
+                else {
+                    continue;
+                };
+                let formal = {
+                    let tt = self.context.type_table.borrow();
+                    let Some(TypeKind::Function { params, .. }) = tt.get(fn_type).map(|t| &t.kind)
+                    else {
+                        continue;
+                    };
+                    let Some(&formal) = params.get(index) else {
+                        continue;
+                    };
+                    match tt.get(formal).map(|t| &t.kind) {
+                        None | Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) => {
+                            continue
+                        }
+                        _ => formal,
+                    }
+                };
+                match agreed {
+                    Some(seen) if seen != formal => {
+                        conflict = true;
+                        break;
+                    }
+                    _ => agreed = Some(formal),
+                }
+            }
+            if conflict {
+                out.remove(&param_key);
+            } else if let Some(ty) = agreed {
+                out.insert(param_key, ty);
+            }
+        }
+        out
     }
 
     /// Lower a parameter

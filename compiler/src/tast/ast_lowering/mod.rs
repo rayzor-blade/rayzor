@@ -29,7 +29,8 @@ use crate::tast::{core::*, node::MemoryEffects, node::*, type_resolution, *};
 use parser::{
     AbstractDecl, BinaryOp, BlockElement, ClassDecl, ClassField, ClassFieldKind, EnumConstructor,
     EnumDecl, Expr, ExprKind, Function, FunctionParam, HaxeFile, Import, InterfaceDecl, Metadata,
-    Modifier, ModuleField, Package, Type, TypeDeclaration, TypeParam, TypedefDecl, UnaryOp, Using,
+    Modifier, ModuleField, Package, StringPart, Type, TypeDeclaration, TypeParam, TypedefDecl,
+    UnaryOp, Using,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -95,6 +96,185 @@ fn collect_this_field_stores<'a>(
         ExprKind::While { body, .. } | ExprKind::For { body, .. } => {
             collect_this_field_stores(body, params, out);
         }
+        _ => {}
+    }
+}
+
+/// Record every call on this class -- `m(..)`, `this.m(..)`, `Cls.m(..)` --
+/// that passes a parameter unchanged as `(method, argument index)`, and every
+/// declaration that shadows a parameter. Nested functions are not entered:
+/// their own parameters can shadow, and their bodies type separately.
+fn collect_param_call_uses<'a>(
+    expr: &'a Expr,
+    params: &std::collections::BTreeSet<&str>,
+    class_name: &str,
+    uses: &mut BTreeMap<&'a str, Vec<(&'a str, usize)>>,
+    shadowed: &mut std::collections::BTreeSet<&'a str>,
+) {
+    let mut visit = |e: &'a Expr,
+                     uses: &mut BTreeMap<&'a str, Vec<(&'a str, usize)>>,
+                     shadowed: &mut std::collections::BTreeSet<&'a str>| {
+        collect_param_call_uses(e, params, class_name, uses, shadowed)
+    };
+    match &expr.kind {
+        ExprKind::Call { expr: callee, args } => {
+            let method = match &callee.kind {
+                ExprKind::Ident(name) => Some(name.as_str()),
+                ExprKind::Field {
+                    expr: recv, field, ..
+                } => match &recv.kind {
+                    ExprKind::This => Some(field.as_str()),
+                    ExprKind::Ident(cls) if cls == class_name => Some(field.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(method) = method {
+                for (i, arg) in args.iter().enumerate() {
+                    if let ExprKind::Ident(name) = &arg.kind {
+                        if params.contains(name.as_str()) {
+                            uses.entry(name.as_str()).or_default().push((method, i));
+                        }
+                    }
+                }
+            }
+            visit(callee, uses, shadowed);
+            for arg in args {
+                visit(arg, uses, shadowed);
+            }
+        }
+        ExprKind::Var { name, expr: init, .. } | ExprKind::Final { name, expr: init, .. } => {
+            if params.contains(name.as_str()) {
+                shadowed.insert(name.as_str());
+            }
+            if let Some(init) = init {
+                visit(init, uses, shadowed);
+            }
+        }
+        ExprKind::For {
+            var,
+            key_var,
+            iter,
+            body,
+        } => {
+            if params.contains(var.as_str()) {
+                shadowed.insert(var.as_str());
+            }
+            if let Some(k) = key_var {
+                if params.contains(k.as_str()) {
+                    shadowed.insert(k.as_str());
+                }
+            }
+            visit(iter, uses, shadowed);
+            visit(body, uses, shadowed);
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            finally_block,
+        } => {
+            visit(body, uses, shadowed);
+            for c in catches {
+                if params.contains(c.var.as_str()) {
+                    shadowed.insert(c.var.as_str());
+                }
+                if let Some(f) = &c.filter {
+                    visit(f, uses, shadowed);
+                }
+                visit(&c.body, uses, shadowed);
+            }
+            if let Some(f) = finally_block {
+                visit(f, uses, shadowed);
+            }
+        }
+        ExprKind::Switch {
+            expr: subject,
+            cases,
+            default,
+        } => {
+            visit(subject, uses, shadowed);
+            for case in cases {
+                if let Some(g) = &case.guard {
+                    visit(g, uses, shadowed);
+                }
+                visit(&case.body, uses, shadowed);
+            }
+            if let Some(d) = default {
+                visit(d, uses, shadowed);
+            }
+        }
+        ExprKind::Block(elements) => {
+            for element in elements {
+                if let BlockElement::Expr(e) = element {
+                    visit(e, uses, shadowed);
+                }
+            }
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            visit(cond, uses, shadowed);
+            visit(then_branch, uses, shadowed);
+            if let Some(e) = else_branch {
+                visit(e, uses, shadowed);
+            }
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            visit(cond, uses, shadowed);
+            visit(then_expr, uses, shadowed);
+            visit(else_expr, uses, shadowed);
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            visit(cond, uses, shadowed);
+            visit(body, uses, shadowed);
+        }
+        ExprKind::Binary { left, right, .. } | ExprKind::Assign { left, right, .. } => {
+            visit(left, uses, shadowed);
+            visit(right, uses, shadowed);
+        }
+        ExprKind::Index { expr: base, index } => {
+            visit(base, uses, shadowed);
+            visit(index, uses, shadowed);
+        }
+        ExprKind::New { args, .. } | ExprKind::Array(args) | ExprKind::Tuple(args) => {
+            for arg in args {
+                visit(arg, uses, shadowed);
+            }
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                visit(k, uses, shadowed);
+                visit(v, uses, shadowed);
+            }
+        }
+        ExprKind::Object(fields) => {
+            for f in fields {
+                visit(&f.expr, uses, shadowed);
+            }
+        }
+        ExprKind::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringPart::Interpolation(e) = part {
+                    visit(e, uses, shadowed);
+                }
+            }
+        }
+        ExprKind::Return(Some(inner)) => visit(inner, uses, shadowed),
+        ExprKind::Field { expr: inner, .. }
+        | ExprKind::Unary { expr: inner, .. }
+        | ExprKind::Throw(inner)
+        | ExprKind::Cast { expr: inner, .. }
+        | ExprKind::TypeCheck { expr: inner, .. }
+        | ExprKind::Untyped(inner)
+        | ExprKind::Meta { expr: inner, .. }
+        | ExprKind::Paren(inner)
+        | ExprKind::Inline(inner) => visit(inner, uses, shadowed),
         _ => {}
     }
 }
@@ -819,6 +999,11 @@ pub struct AstLowering<'a> {
     class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
     /// Constructor symbol for each class (class_symbol → constructor SymbolId)
     class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
+    /// Types recovered for a method's unannotated parameters, keyed by the
+    /// method symbol. Recorded when the class's signatures are registered, so
+    /// the signature a caller types against and the parameter the body is
+    /// lowered with agree.
+    inferred_param_types: BTreeMap<SymbolId, BTreeMap<InternedString, TypeId>>,
     /// Stack of expected lambda parameter types per active call-arg position.
     /// Pushed before lowering an argument expression to a function whose formal
     /// parameter at that position is a function type with concrete parameter

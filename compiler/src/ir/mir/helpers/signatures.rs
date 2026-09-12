@@ -515,6 +515,28 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // Dynamic -> scalar is the inverse, with the rule a Let
+                    // applies: the callee reads its formal raw. Reference
+                    // formals are left alone -- a Dynamic-typed expression
+                    // can still hold a raw object pointer (an inlined call's
+                    // result does), and unboxing one reads its header.
+                    let param_is_scalar = {
+                        let type_table = self.type_table;
+                        matches!(
+                            type_table.get(resolved_param).map(|t| &t.kind),
+                            Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+                        )
+                    };
+                    if param_is_scalar {
+                        if let Some(unboxed) =
+                            self.maybe_unbox_value(arg_reg, resolved_arg, resolved_param)
+                        {
+                            if unboxed != arg_reg {
+                                return unboxed;
+                            }
+                        }
+                    }
+
                     let param_is_anon = {
                         let type_table = self.type_table;
                         type_table
