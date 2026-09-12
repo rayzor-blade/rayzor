@@ -141,17 +141,22 @@ impl<'a> HirToMirContext<'a> {
 
         // --- normal_path block: execute try body ---
         self.builder.switch_to_block(normal_path_block);
+        self.try_depth += 1;
         self.lower_block(try_block);
+        self.try_depth -= 1;
 
-        let pop_fn = self.get_or_register_extern_function(
-            "rayzor_exception_pop_handler",
-            vec![],
-            IrType::Void,
-        );
-        self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
-
-        // Capture the try-path's exit values before it leaves for the merge.
+        // A body that returned has popped the handler itself and holds its
+        // terminator; appending the exit here replaced the return with a
+        // branch, and the function fell off its end with no value.
         if !self.is_terminated() {
+            let pop_fn = self.get_or_register_extern_function(
+                "rayzor_exception_pop_handler",
+                vec![],
+                IrType::Void,
+            );
+            self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
+
+            // Capture the try-path's exit values before it leaves for the merge.
             if let Some(blk) = self.builder.current_block() {
                 let mut vals: BTreeMap<SymbolId, IrId> = BTreeMap::new();
                 for s in tc_pre.keys() {
@@ -161,12 +166,12 @@ impl<'a> HirToMirContext<'a> {
                 }
                 tc_try_exit = Some((blk, vals));
             }
-        }
 
-        if let Some(fb) = finally_block {
-            self.builder.build_branch(fb);
-        } else {
-            self.builder.build_branch(continuation_block);
+            if let Some(fb) = finally_block {
+                self.builder.build_branch(fb);
+            } else {
+                self.builder.build_branch(continuation_block);
+            }
         }
 
         // The catch bodies run INSTEAD of the try (on exception), so they must
@@ -316,8 +321,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                         tc_catch_exits.push((blk, vals));
                     }
+                    self.builder.build_branch(after_catch_target);
                 }
-                self.builder.build_branch(after_catch_target);
             }
 
             // If all typed catches failed and no Dynamic/final catch consumed it,
@@ -395,6 +400,16 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.builder.switch_to_block(continuation_block);
+        // Every path returned or threw: nothing reaches here, and a block
+        // left to fall off the function's end reads as a return without a
+        // value.
+        let reached = tc_try_exit.is_some()
+            || !tc_catch_exits.is_empty()
+            || tc_fallthrough.is_some()
+            || finally.is_some();
+        if !reached {
+            self.builder.build_unreachable();
+        }
     }
 
     pub(crate) fn lower_try_catch_expr(&mut self, expr: &HirExpr) -> Option<IrId> {
@@ -475,27 +490,33 @@ impl<'a> HirToMirContext<'a> {
 
         // --- normal_path: execute try body ---
         self.builder.switch_to_block(normal_path_block);
+        self.try_depth += 1;
         let try_value = self.lower_expression(try_expr);
+        self.try_depth -= 1;
 
-        let pop_fn = self.get_or_register_extern_function(
-            "rayzor_exception_pop_handler",
-            vec![],
-            IrType::Void,
-        );
-        self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
-
-        if let Some(finally_body) = &finally_expr {
-            self.lower_expression(finally_body);
-        }
-
-        // Capture the try-path's values before they leave for the merge.
+        // A body that returned has popped the handler itself and holds its
+        // terminator; the exit below must not replace it.
         if !self.is_terminated() {
-            if let Some(blk) = self.builder.current_block() {
-                tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
-                value_exits.push((blk, try_value));
+            let pop_fn = self.get_or_register_extern_function(
+                "rayzor_exception_pop_handler",
+                vec![],
+                IrType::Void,
+            );
+            self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
+
+            if let Some(finally_body) = &finally_expr {
+                self.lower_expression(finally_body);
+            }
+
+            // Capture the try-path's values before they leave for the merge.
+            if !self.is_terminated() {
+                if let Some(blk) = self.builder.current_block() {
+                    tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
+                    value_exits.push((blk, try_value));
+                }
+                self.builder.build_branch(continuation_block);
             }
         }
-        self.builder.build_branch(continuation_block);
 
         // Catch bodies run INSTEAD of the try, so reset every tracked var
         // to its pre-try value before lowering them.
@@ -610,16 +631,18 @@ impl<'a> HirToMirContext<'a> {
                 self.symbol_map.insert(handler.exception_var, exception_id);
                 let handler_value = self.lower_expression(&handler.body);
 
-                if let Some(finally_body) = &finally_expr {
-                    self.lower_expression(finally_body);
+                if !self.is_terminated() {
+                    if let Some(finally_body) = &finally_expr {
+                        self.lower_expression(finally_body);
+                    }
                 }
                 if !self.is_terminated() {
                     if let Some(blk) = self.builder.current_block() {
                         tc_exits.push((blk, self.capture_tracked_values(&tc_pre)));
                         value_exits.push((blk, handler_value));
                     }
+                    self.builder.build_branch(continuation_block);
                 }
-                self.builder.build_branch(continuation_block);
             }
 
             // Fallthrough if no catch matched (exception unhandled here):
@@ -659,6 +682,12 @@ impl<'a> HirToMirContext<'a> {
 
         // --- continuation: merge the tracked vars across all paths ---
         self.builder.switch_to_block(continuation_block);
+        if tc_exits.is_empty() {
+            // Every path returned or threw: a block left to fall off the
+            // function's end reads as a return without a value.
+            self.builder.build_unreachable();
+            return None;
+        }
         for (s, (pre_reg, ty)) in &tc_pre {
             let mut incomings: Vec<(IrBlockId, IrId)> = Vec::new();
             for (blk, vals) in &tc_exits {

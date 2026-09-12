@@ -1126,6 +1126,17 @@ impl<'a> HirToMirContext<'a> {
                 // Cleanup all scopes before returning - free all owned heap values
                 // BUT skip the returned value (it escapes the function)
                 self.cleanup_all_scopes_except_symbol(returned_symbol);
+                // Leave every enclosing `try`: its handler is still pushed.
+                if self.try_depth > 0 {
+                    let pop_fn = self.get_or_register_extern_function(
+                        "rayzor_exception_pop_handler",
+                        vec![],
+                        IrType::Void,
+                    );
+                    for _ in 0..self.try_depth {
+                        self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
+                    }
+                }
                 debug!(
                     "[Return]: Building return instruction with value: {:?}",
                     ret_value

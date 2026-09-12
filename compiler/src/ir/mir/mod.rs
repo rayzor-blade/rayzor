@@ -351,6 +351,11 @@ pub struct HirToMirContext<'a> {
     /// Current function's SymbolId (for function-level metadata like @:frameworks)
     current_function_symbol: Option<SymbolId>,
 
+    /// Exception handlers pushed by the `try` bodies enclosing the code being
+    /// lowered. A `return` inside them pops that many before it leaves; the
+    /// try's own exit code never runs on that path.
+    try_depth: usize,
+
     /// Interface method ordering: maps interface SymbolId → ordered list of method names
     interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
 
@@ -1359,6 +1364,7 @@ impl<'a> HirToMirContext<'a> {
             gpu_struct_layouts: BTreeMap::new(),
             tcc_func_ids: None,
             current_function_symbol: None,
+            try_depth: 0,
             interface_method_names: BTreeMap::new(),
             interface_method_return_types: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
