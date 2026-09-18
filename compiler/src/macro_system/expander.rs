@@ -370,9 +370,7 @@ impl MacroExpander {
                     }
                 }
             }
-            ClassFieldKind::Var {
-                expr: init, ..
-            } => {
+            ClassFieldKind::Var { expr: init, .. } => {
                 if let Some(init_expr) = init.take() {
                     let backup = init_expr.clone();
                     match self.walk_expr(init_expr) {
@@ -392,9 +390,7 @@ impl MacroExpander {
                     }
                 }
             }
-            ClassFieldKind::Final {
-                expr: init, ..
-            } => {
+            ClassFieldKind::Final { expr: init, .. } => {
                 if let Some(init_expr) = init.take() {
                     let backup = init_expr.clone();
                     match self.walk_expr(init_expr) {
@@ -1392,10 +1388,12 @@ mod tests {
         let file = parse("class Test { static function main() { var x = 1 + 2; } }");
         let result = expand_macros(file);
         assert_eq!(result.expansions_count, 0);
-        assert!(result
-            .diagnostics
-            .iter()
-            .all(|d| d.severity != super::super::errors::MacroSeverity::Error));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.severity != super::super::errors::MacroSeverity::Error)
+        );
     }
 
     #[test]

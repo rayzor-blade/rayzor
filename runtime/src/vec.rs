@@ -2,7 +2,7 @@
 //!
 //! This provides a dynamically-sized byte array that can be called from JIT code.
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
 /// Vec<u8> representation: { ptr: *mut u8, len: usize, cap: usize }

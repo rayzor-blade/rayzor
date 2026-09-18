@@ -6,7 +6,7 @@
 //! signal, and report min/median/mean/max + success rate.
 
 use super::DebugCommands;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::ValueEnum;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -682,13 +682,7 @@ fn print_pool_summary(profiles: &[PoolProfile]) {
     };
     println!(
         "{:14} pool: band_med={:.1}ms band_max={:.1}ms  quant_med={:.1}ms quant_max={:.1}ms  dispatches_med={:.0}{}",
-        "",
-        band.median,
-        band.max,
-        quant.median,
-        quant.max,
-        dispatches.median,
-        worker_label
+        "", band.median, band.max, quant.median, quant.max, dispatches.median, worker_label
     );
 }
 

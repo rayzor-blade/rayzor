@@ -123,7 +123,7 @@ mod native_surface {
     /// - macOS: window_handle = NSView*, display_handle = ignored (pass null)
     /// - Linux: window_handle = X11 Window, display_handle = X11 Display*
     /// - Windows: window_handle = HWND, display_handle = HINSTANCE (or null)
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_create(
         ctx: *mut GraphicsContext,
         window_handle: *mut std::ffi::c_void,
@@ -131,128 +131,140 @@ mod native_surface {
         width: u32,
         height: u32,
     ) -> *mut GraphicsSurface {
-        if ctx.is_null() {
-            return std::ptr::null_mut();
+        unsafe {
+            if ctx.is_null() {
+                return std::ptr::null_mut();
+            }
+            let ctx = &*ctx;
+
+            let target = match make_raw_handles(window_handle, display_handle) {
+                Some(t) => t,
+                None => {
+                    eprintln!("[GPU] Invalid window/display handle for surface creation");
+                    return std::ptr::null_mut();
+                }
+            };
+
+            let surface = match ctx.instance.create_surface(target) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[GPU] Failed to create surface: {}", e);
+                    return std::ptr::null_mut();
+                }
+            };
+
+            // Pick the preferred format or fall back to Bgra8Unorm
+            let caps = surface.get_capabilities(&ctx.adapter);
+            let format = caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
+
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: width.max(1),
+                height: height.max(1),
+                present_mode: wgpu::PresentMode::Fifo, // vsync
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            surface.configure(&ctx.device, &config);
+
+            Box::into_raw(Box::new(GraphicsSurface {
+                surface,
+                config,
+                format,
+                current_texture: None,
+            }))
         }
-        let ctx = &*ctx;
-
-        let target = match make_raw_handles(window_handle, display_handle) {
-            Some(t) => t,
-            None => {
-                eprintln!("[GPU] Invalid window/display handle for surface creation");
-                return std::ptr::null_mut();
-            }
-        };
-
-        let surface = match ctx.instance.create_surface(target) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[GPU] Failed to create surface: {}", e);
-                return std::ptr::null_mut();
-            }
-        };
-
-        // Pick the preferred format or fall back to Bgra8Unorm
-        let caps = surface.get_capabilities(&ctx.adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo, // vsync
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&ctx.device, &config);
-
-        Box::into_raw(Box::new(GraphicsSurface {
-            surface,
-            config,
-            format,
-            current_texture: None,
-        }))
     }
 
     /// Resize an existing surface.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_resize(
         surface: *mut GraphicsSurface,
         ctx: *mut GraphicsContext,
         width: u32,
         height: u32,
     ) {
-        if surface.is_null() || ctx.is_null() {
-            return;
+        unsafe {
+            if surface.is_null() || ctx.is_null() {
+                return;
+            }
+            let surface = &mut *surface;
+            let ctx = &*ctx;
+            surface.config.width = width.max(1);
+            surface.config.height = height.max(1);
+            surface.surface.configure(&ctx.device, &surface.config);
         }
-        let surface = &mut *surface;
-        let ctx = &*ctx;
-        surface.config.width = width.max(1);
-        surface.config.height = height.max(1);
-        surface.surface.configure(&ctx.device, &surface.config);
     }
 
     /// Get the current frame texture view for rendering.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
         surface: *mut GraphicsSurface,
     ) -> *mut wgpu::TextureView {
-        if surface.is_null() {
-            return std::ptr::null_mut();
-        }
-        let surface = &mut *surface;
-
-        let frame = match surface.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[GPU] surface.get_current_texture() failed: {}", e);
+        unsafe {
+            if surface.is_null() {
                 return std::ptr::null_mut();
             }
-        };
+            let surface = &mut *surface;
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        surface.current_texture = Some(frame);
-        Box::into_raw(Box::new(view))
+            let frame = match surface.surface.get_current_texture() {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("[GPU] surface.get_current_texture() failed: {}", e);
+                    return std::ptr::null_mut();
+                }
+            };
+
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            surface.current_texture = Some(frame);
+            Box::into_raw(Box::new(view))
+        }
     }
 
     /// Get the surface's preferred texture format (as int code).
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_format(
         surface: *mut GraphicsSurface,
     ) -> i32 {
-        if surface.is_null() {
-            return 0;
+        unsafe {
+            if surface.is_null() {
+                return 0;
+            }
+            let surface = &*surface;
+            types::texture_format_to_int(surface.format)
         }
-        let surface = &*surface;
-        types::texture_format_to_int(surface.format)
     }
 
     /// Present the current frame.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_present(surface: *mut GraphicsSurface) {
-        if surface.is_null() {
-            return;
-        }
-        let surface = &mut *surface;
-        if let Some(texture) = surface.current_texture.take() {
-            texture.present();
+        unsafe {
+            if surface.is_null() {
+                return;
+            }
+            let surface = &mut *surface;
+            if let Some(texture) = surface.current_texture.take() {
+                texture.present();
+            }
         }
     }
 
     /// Destroy the surface.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_gfx_surface_destroy(surface: *mut GraphicsSurface) {
-        if !surface.is_null() {
-            drop(Box::from_raw(surface));
+        unsafe {
+            if !surface.is_null() {
+                drop(Box::from_raw(surface));
+            }
         }
     }
 } // mod native_surface

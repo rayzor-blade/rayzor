@@ -11,7 +11,7 @@ use crate::semantic_graph::analysis::lifetime_analyzer::{
     LifetimeAnalysisError, LifetimeConstraint,
 };
 use crate::semantic_graph::{CallGraph, CallSite, CallTarget};
-use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map, new_id_set};
 use crate::tast::{CallSiteId, LifetimeId, SourceLocation, SymbolId, TypeId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

@@ -152,8 +152,10 @@ impl MemoryRuntime {
             OwnershipState::BorrowedShared(count) => {
                 let new_count = count + 1;
                 values.insert(id, (value, OwnershipState::BorrowedShared(new_count)));
-                println!("  → Borrowed (shared) ID #{}: value = {} (BorrowedShared[{}] → BorrowedShared[{}])",
-                         id, value, count, new_count);
+                println!(
+                    "  → Borrowed (shared) ID #{}: value = {} (BorrowedShared[{}] → BorrowedShared[{}])",
+                    id, value, count, new_count
+                );
                 Ok(value)
             }
             OwnershipState::Moved => {
@@ -234,8 +236,10 @@ impl MemoryRuntime {
             OwnershipState::BorrowedShared(count) if count > 1 => {
                 let new_count = count - 1;
                 values.insert(id, (value, OwnershipState::BorrowedShared(new_count)));
-                println!("  → Released shared borrow from ID #{} (BorrowedShared[{}] → BorrowedShared[{}])",
-                         id, count, new_count);
+                println!(
+                    "  → Released shared borrow from ID #{} (BorrowedShared[{}] → BorrowedShared[{}])",
+                    id, count, new_count
+                );
                 Ok(())
             }
             OwnershipState::BorrowedShared(_) => {

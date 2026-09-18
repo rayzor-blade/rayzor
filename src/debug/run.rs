@@ -7,7 +7,7 @@
 //! are read once at startup via `Once::call_once`).
 
 use super::DebugCommands;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::process::Command;
 
 pub fn execute(cmd: DebugCommands) -> Result<()> {
@@ -61,20 +61,20 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         child.env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1");
     }
 
-    if let Some(rate) = alloc_graph {
-        if profile_built {
-            child.env("RAYZOR_ALLOC_GRAPH", "1");
-            child.env("RAYZOR_ALLOC_GRAPH_RATE", rate.to_string());
-            child.env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1");
-        }
+    if let Some(rate) = alloc_graph
+        && profile_built
+    {
+        child.env("RAYZOR_ALLOC_GRAPH", "1");
+        child.env("RAYZOR_ALLOC_GRAPH_RATE", rate.to_string());
+        child.env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1");
     }
 
-    if let Some(us) = cpu_profile {
-        if profile_built {
-            child.env("RAYZOR_CPU_PROFILE", "1");
-            child.env("RAYZOR_CPU_PROFILE_US", us.to_string());
-            child.env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1");
-        }
+    if let Some(us) = cpu_profile
+        && profile_built
+    {
+        child.env("RAYZOR_CPU_PROFILE", "1");
+        child.env("RAYZOR_CPU_PROFILE_US", us.to_string());
+        child.env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1");
     }
 
     if heap_check {
@@ -122,7 +122,7 @@ fn profile_feature_present() -> bool {
         unsafe {
             unsafe extern "C" {
                 fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8)
-                    -> *mut std::ffi::c_void;
+                -> *mut std::ffi::c_void;
             }
             let sym = std::ffi::CString::new("rayzor_dump_tensor_alloc_stats").unwrap();
             let rtld_default: *mut std::ffi::c_void = std::ptr::null_mut();

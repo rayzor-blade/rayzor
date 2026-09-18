@@ -744,10 +744,12 @@ mod validation_tests {
         assert!(!results.structural_issues.is_empty());
 
         // Should detect missing entry block
-        assert!(results
-            .structural_issues
-            .iter()
-            .any(|issue| { matches!(issue, StructuralIssue::MissingCriticalBlocks { .. }) }));
+        assert!(
+            results
+                .structural_issues
+                .iter()
+                .any(|issue| { matches!(issue, StructuralIssue::MissingCriticalBlocks { .. }) })
+        );
     }
 
     #[test]
@@ -800,9 +802,11 @@ mod validation_tests {
 
         // Should have performance warning for large block
         assert!(!results.performance_warnings.is_empty());
-        assert!(results
-            .performance_warnings
-            .iter()
-            .any(|warning| { matches!(warning, PerformanceWarning::LargeBlocks { .. }) }));
+        assert!(
+            results
+                .performance_warnings
+                .iter()
+                .any(|warning| { matches!(warning, PerformanceWarning::LargeBlocks { .. }) })
+        );
     }
 }

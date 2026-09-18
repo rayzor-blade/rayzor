@@ -155,7 +155,10 @@ impl EnvironmentLayout {
             field.ty,
             IrType::Ptr(_) | IrType::Ref(_) | IrType::String | IrType::Any
         ) {
-            debug!("DEBUG: EnvironmentLayout registering loaded {:?} as pointer type {:?} (storage was {:?})", loaded, field.ty, field.storage_ty);
+            debug!(
+                "DEBUG: EnvironmentLayout registering loaded {:?} as pointer type {:?} (storage was {:?})",
+                loaded, field.ty, field.storage_ty
+            );
             field.ty.clone()
         } else {
             debug!(

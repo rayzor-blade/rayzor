@@ -8,17 +8,17 @@ use super::{
     IrBuilder, IrId, IrModule, IrSourceLocation, IrType, IrValue, Linkage, UnaryOp,
 };
 use crate::semantic_graph::{
-    analysis::analysis_engine::{AnalysisResults, HIRLoweringHints},
     SemanticGraphs,
+    analysis::analysis_engine::{AnalysisResults, HIRLoweringHints},
 };
 use crate::tast::{
+    InternedString, SourceLocation, SymbolId, SymbolTable, Type, TypeId, TypeKind, TypeTable,
+    Visibility,
     node::{
         BinaryOperator, FunctionEffects, HasSourceLocation, LiteralValue, TypedCatchClause,
         TypedExpression, TypedExpressionKind, TypedFile, TypedFunction, TypedParameter,
         TypedStatement, TypedSwitchCase, UnaryOperator,
     },
-    InternedString, SourceLocation, SymbolId, SymbolTable, Type, TypeId, TypeKind, TypeTable,
-    Visibility,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;

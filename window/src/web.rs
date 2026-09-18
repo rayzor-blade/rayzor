@@ -7,8 +7,8 @@ use crate::event::{EventQueue, WindowEvent};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent, WheelEvent};
 
 /// Key code mapping: DOM KeyboardEvent.code → rayzor Key constants

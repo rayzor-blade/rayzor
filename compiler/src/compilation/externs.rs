@@ -178,7 +178,11 @@ impl CompilationUnit {
                     if declared != call.param_count && warn_arity {
                         eprintln!(
                             "[stdlib-arity] {}.{} declares {} parameter(s) but runtime mapping '{}' takes {} — a call supplying the extra argument(s) will be emitted against a mismatched native signature and silently produce nothing. Either implement the parameter in the runtime or narrow the .hx declaration.",
-                            class_dot_name, method_name, declared, call.runtime_name, call.param_count
+                            class_dot_name,
+                            method_name,
+                            declared,
+                            call.runtime_name,
+                            call.param_count
                         );
                     }
                     if declared != call.param_count

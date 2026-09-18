@@ -1250,15 +1250,19 @@ fn test_error_control_flow_detection() {
     assert!(MacroError::Break.is_control_flow());
     assert!(MacroError::Continue.is_control_flow());
 
-    assert!(!MacroError::DivisionByZero {
-        location: unknown_loc()
-    }
-    .is_control_flow());
-    assert!(!MacroError::TypeError {
-        message: "".to_string(),
-        location: unknown_loc()
-    }
-    .is_control_flow());
+    assert!(
+        !MacroError::DivisionByZero {
+            location: unknown_loc()
+        }
+        .is_control_flow()
+    );
+    assert!(
+        !MacroError::TypeError {
+            message: "".to_string(),
+            location: unknown_loc()
+        }
+        .is_control_flow()
+    );
 }
 
 #[test]

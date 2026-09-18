@@ -743,81 +743,87 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         y_data_off: usize,
         guest_threads: i32,
     ) -> i32 {
-        use rayzor_runtime_core::quant::matmul::prepare_x_q8k_blocks_into;
-        use rayzor_runtime_core::quant::q6_k::vec_dot_q6_K_q8_K;
-        use rayzor_runtime_core::quant::types::{
-            Q4KMBlock, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q6_K_BLOCK_BYTES, QSCHEME_Q4_K_M, QSCHEME_Q6_K,
-        };
-        // Q4_K_M dot: native NEON SDOT (the llama.cpp-ported kernel, the host's
-        // fastest) when the build has dotprod, else the portable scalar
-        // dispatcher. Both take the same `Q8KBlock` activation we prequant
-        // below, so the prequant is identical regardless of path.
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-        use rayzor_runtime_core::quant::q4_k_m::vec_dot_q4_K_q8_K;
-        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-        use rayzor_runtime_core::quant::sdot::dot_q4_k_q8_kblock_fast;
+        unsafe {
+            use rayzor_runtime_core::quant::matmul::prepare_x_q8k_blocks_into;
+            use rayzor_runtime_core::quant::q6_k::vec_dot_q6_K_q8_K;
+            use rayzor_runtime_core::quant::types::{
+                Q4_K_M_BLOCK_BYTES, Q4KMBlock, Q6_K_BLOCK_BYTES, Q8KBlock, QSCHEME_Q4_K_M,
+                QSCHEME_Q6_K,
+            };
+            // Q4_K_M dot: native NEON SDOT (the llama.cpp-ported kernel, the host's
+            // fastest) when the build has dotprod, else the portable scalar
+            // dispatcher. Both take the same `Q8KBlock` activation we prequant
+            // below, so the prequant is identical regardless of path.
+            #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+            use rayzor_runtime_core::quant::q4_k_m::vec_dot_q4_K_q8_K;
+            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+            use rayzor_runtime_core::quant::sdot::dot_q4_k_q8_kblock_fast;
 
-        const BLOCK_SIZE: usize = 256;
-        if k == 0 || n == 0 || batch == 0 || k % BLOCK_SIZE != 0 {
-            return 0;
-        }
-        let block_bytes = match scheme as u8 {
-            QSCHEME_Q4_K_M => Q4_K_M_BLOCK_BYTES,
-            QSCHEME_Q6_K => Q6_K_BLOCK_BYTES,
-            _ => return 0,
-        };
-        let blocks_per_row = k / BLOCK_SIZE;
-        // Mirror native dispatch: positive guest hint wins (clamped), else auto.
-        let threads = if guest_threads > 1 {
-            (guest_threads as usize).min(64)
-        } else {
-            wasm_kernel_threads()
-        };
-        let qt_base = base + qt_data_off;
-        let y_base = base + y_data_off;
-
-        // Pre-quantise ALL batch rows once, then a SINGLE parallel_rows over
-        // the output columns whose worker dots each weight row against every
-        // batch row (mirrors the native batched kernel
-        // qmatmul_chunk_impl_sdot_q4km_batch). For batch>1 (prompt prefill)
-        // this collapses `batch` separate worker-pool fan-outs per matmul into
-        // one, amortising dispatch/join overhead across the whole prompt — the
-        // reason native prefill is faster per-token than its decode. batch==1
-        // (decode) is unchanged.
-        let mut x_q8k_all: Vec<Q8KBlock> = Vec::with_capacity(batch * blocks_per_row);
-        let mut tmp: Vec<Q8KBlock> = Vec::with_capacity(blocks_per_row);
-        for bch in 0..batch {
-            let x_ptr = (base + x_data_off + bch * x_stride0_elems * 4) as *const f32;
-            prepare_x_q8k_blocks_into(x_ptr, k, &mut tmp);
-            x_q8k_all.extend_from_slice(&tmp[..blocks_per_row]);
-        }
-        let xq_ptr = x_q8k_all.as_ptr() as usize;
-        seq_rows(n, threads, move |lo, hi| {
-            let xq = xq_ptr as *const Q8KBlock;
-            for n_idx in lo..hi {
-                let row_ptr = (qt_base + n_idx * blocks_per_row * block_bytes) as *const u8;
-                for bch in 0..batch {
-                    let xq_row = unsafe { xq.add(bch * blocks_per_row) };
-                    let mut sum = 0.0f32;
-                    for blk in 0..blocks_per_row {
-                        let bp = unsafe { row_ptr.add(blk * block_bytes) };
-                        let xb = unsafe { &*xq_row.add(blk) };
-                        sum += if scheme as u8 == QSCHEME_Q4_K_M {
-                            let w = unsafe { &*(bp as *const Q4KMBlock) };
-                            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-                            let d = unsafe { dot_q4_k_q8_kblock_fast(w, xb) };
-                            #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-                            let d = vec_dot_q4_K_q8_K(w, xb);
-                            d
-                        } else {
-                            unsafe { vec_dot_q6_K_q8_K(bp, xb) }
-                        };
-                    }
-                    unsafe { *((y_base + bch * n * 4 + n_idx * 4) as *mut f32) = sum };
-                }
+            const BLOCK_SIZE: usize = 256;
+            if k == 0 || n == 0 || batch == 0 || k % BLOCK_SIZE != 0 {
+                return 0;
             }
-        });
-        1
+            let block_bytes = match scheme as u8 {
+                QSCHEME_Q4_K_M => Q4_K_M_BLOCK_BYTES,
+                QSCHEME_Q6_K => Q6_K_BLOCK_BYTES,
+                _ => return 0,
+            };
+            let blocks_per_row = k / BLOCK_SIZE;
+            // Mirror native dispatch: positive guest hint wins (clamped), else auto.
+            let threads = if guest_threads > 1 {
+                (guest_threads as usize).min(64)
+            } else {
+                wasm_kernel_threads()
+            };
+            let qt_base = base + qt_data_off;
+            let y_base = base + y_data_off;
+
+            // Pre-quantise ALL batch rows once, then a SINGLE parallel_rows over
+            // the output columns whose worker dots each weight row against every
+            // batch row (mirrors the native batched kernel
+            // qmatmul_chunk_impl_sdot_q4km_batch). For batch>1 (prompt prefill)
+            // this collapses `batch` separate worker-pool fan-outs per matmul into
+            // one, amortising dispatch/join overhead across the whole prompt — the
+            // reason native prefill is faster per-token than its decode. batch==1
+            // (decode) is unchanged.
+            let mut x_q8k_all: Vec<Q8KBlock> = Vec::with_capacity(batch * blocks_per_row);
+            let mut tmp: Vec<Q8KBlock> = Vec::with_capacity(blocks_per_row);
+            for bch in 0..batch {
+                let x_ptr = (base + x_data_off + bch * x_stride0_elems * 4) as *const f32;
+                prepare_x_q8k_blocks_into(x_ptr, k, &mut tmp);
+                x_q8k_all.extend_from_slice(&tmp[..blocks_per_row]);
+            }
+            let xq_ptr = x_q8k_all.as_ptr() as usize;
+            seq_rows(n, threads, move |lo, hi| {
+                let xq = xq_ptr as *const Q8KBlock;
+                for n_idx in lo..hi {
+                    let row_ptr = (qt_base + n_idx * blocks_per_row * block_bytes) as *const u8;
+                    for bch in 0..batch {
+                        let xq_row = { xq.add(bch * blocks_per_row) };
+                        let mut sum = 0.0f32;
+                        for blk in 0..blocks_per_row {
+                            let bp = { row_ptr.add(blk * block_bytes) };
+                            let xb = { &*xq_row.add(blk) };
+                            sum += if scheme as u8 == QSCHEME_Q4_K_M {
+                                let w = { &*(bp as *const Q4KMBlock) };
+                                #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                                let d = { dot_q4_k_q8_kblock_fast(w, xb) };
+                                #[cfg(not(all(
+                                    target_arch = "aarch64",
+                                    target_feature = "dotprod"
+                                )))]
+                                let d = vec_dot_q4_K_q8_K(w, xb);
+                                d
+                            } else {
+                                vec_dot_q6_K_q8_K(bp, xb)
+                            };
+                        }
+                        *((y_base + bch * n * 4 + n_idx * 4) as *mut f32) = sum;
+                    }
+                }
+            });
+            1
+        }
     }
 
     /// Host-parallel Q8_0 flash attention (decode, seq_q == 1). Mirrors the
@@ -863,88 +869,94 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         // so the f32 reduction order is preserved bit-for-bit.
         #[inline]
         unsafe fn dq(src: *const u8, dst: &mut [f32; 32]) {
-            #[cfg(target_arch = "aarch64")]
-            {
-                use std::arch::aarch64::*;
-                let scale =
-                    half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
-                let sv = vdupq_n_f32(scale);
-                let q = src.add(2) as *const i8;
-                let d = dst.as_mut_ptr();
-                for c in 0..2 {
-                    let o = c * 16;
-                    let x = vld1q_s8(q.add(o));
-                    let lo = vmovl_s8(vget_low_s8(x));
-                    let hi = vmovl_s8(vget_high_s8(x));
-                    vst1q_f32(
-                        d.add(o),
-                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), sv),
-                    );
-                    vst1q_f32(
-                        d.add(o + 4),
-                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sv),
-                    );
-                    vst1q_f32(
-                        d.add(o + 8),
-                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), sv),
-                    );
-                    vst1q_f32(
-                        d.add(o + 12),
-                        vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sv),
-                    );
+            unsafe {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    use std::arch::aarch64::*;
+                    let scale =
+                        half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
+                    let sv = vdupq_n_f32(scale);
+                    let q = src.add(2) as *const i8;
+                    let d = dst.as_mut_ptr();
+                    for c in 0..2 {
+                        let o = c * 16;
+                        let x = vld1q_s8(q.add(o));
+                        let lo = vmovl_s8(vget_low_s8(x));
+                        let hi = vmovl_s8(vget_high_s8(x));
+                        vst1q_f32(
+                            d.add(o),
+                            vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), sv),
+                        );
+                        vst1q_f32(
+                            d.add(o + 4),
+                            vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), sv),
+                        );
+                        vst1q_f32(
+                            d.add(o + 8),
+                            vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), sv),
+                        );
+                        vst1q_f32(
+                            d.add(o + 12),
+                            vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), sv),
+                        );
+                    }
                 }
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                let scale =
-                    half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
-                let q = src.add(2) as *const i8;
-                for i in 0..32 {
-                    dst[i] = (*q.add(i) as f32) * scale;
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    let scale =
+                        half::f16::from_bits(core::ptr::read_unaligned(src as *const u16)).to_f32();
+                    let q = src.add(2) as *const i8;
+                    for i in 0..32 {
+                        dst[i] = (*q.add(i) as f32) * scale;
+                    }
                 }
             }
         }
         #[inline]
         unsafe fn dotb(q: *const f32, k: &[f32; 32]) -> f32 {
-            #[cfg(target_arch = "aarch64")]
-            {
-                use std::arch::aarch64::*;
-                let kp = k.as_ptr();
-                let mut acc = vdupq_n_f32(0.0);
-                for i in 0..8 {
-                    let o = i * 4;
-                    acc = vfmaq_f32(acc, vld1q_f32(q.add(o)), vld1q_f32(kp.add(o)));
+            unsafe {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    use std::arch::aarch64::*;
+                    let kp = k.as_ptr();
+                    let mut acc = vdupq_n_f32(0.0);
+                    for i in 0..8 {
+                        let o = i * 4;
+                        acc = vfmaq_f32(acc, vld1q_f32(q.add(o)), vld1q_f32(kp.add(o)));
+                    }
+                    vaddvq_f32(acc)
                 }
-                vaddvq_f32(acc)
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                let mut acc = 0.0f32;
-                for i in 0..32 {
-                    acc += *q.add(i) * k[i];
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    let mut acc = 0.0f32;
+                    for i in 0..32 {
+                        acc += *q.add(i) * k[i];
+                    }
+                    acc
                 }
-                acc
             }
         }
         #[inline]
         unsafe fn axpyb(out: *mut f32, w: f32, v: &[f32; 32]) {
-            #[cfg(target_arch = "aarch64")]
-            {
-                use std::arch::aarch64::*;
-                let wv = vdupq_n_f32(w);
-                let vp = v.as_ptr();
-                for i in 0..8 {
-                    let o = i * 4;
-                    vst1q_f32(
-                        out.add(o),
-                        vfmaq_f32(vld1q_f32(out.add(o)), wv, vld1q_f32(vp.add(o))),
-                    );
+            unsafe {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    use std::arch::aarch64::*;
+                    let wv = vdupq_n_f32(w);
+                    let vp = v.as_ptr();
+                    for i in 0..8 {
+                        let o = i * 4;
+                        vst1q_f32(
+                            out.add(o),
+                            vfmaq_f32(vld1q_f32(out.add(o)), wv, vld1q_f32(vp.add(o))),
+                        );
+                    }
                 }
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                for i in 0..32 {
-                    *out.add(i) += w * v[i];
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    for i in 0..32 {
+                        *out.add(i) += w * v[i];
+                    }
                 }
             }
         }
@@ -1370,11 +1382,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             .and_then(|export| export.into_func())?;
         let malloc = func.typed::<i32, i32>(&*caller).ok()?;
         let ptr = malloc.call(&mut *caller, size as i32).ok()?;
-        if ptr > 0 {
-            Some(ptr as u32)
-        } else {
-            None
-        }
+        if ptr > 0 { Some(ptr as u32) } else { None }
     }
 
     /// Write bytes into WASM linear memory at `addr`.
@@ -1401,8 +1409,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             let cells = shared.data();
             let a = addr as usize;
             if a + bytes.len() > cells.len() {
-                eprintln!("[wasm-runner] write_wasm_mem: shared out of bounds addr={:#x} len={} cells.len={}",
-                    addr, bytes.len(), cells.len());
+                eprintln!(
+                    "[wasm-runner] write_wasm_mem: shared out of bounds addr={:#x} len={} cells.len={}",
+                    addr,
+                    bytes.len(),
+                    cells.len()
+                );
                 return;
             }
             // Safety: mirror of `read_wasm_mem` — host calls are serialized
@@ -1429,7 +1441,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         let dv_addr = host_alloc(caller, 8);
         write_wasm_mem(caller, dv_addr, &3u32.to_le_bytes()); // type_id = 3 (Int)
         write_wasm_mem(caller, dv_addr + 4, &val_addr.to_le_bytes()); // value_ptr
-                                                                      // Verify the write succeeded
+        // Verify the write succeeded
         if let Some(bytes) = read_wasm_mem(caller, dv_addr as usize, 8) {
             eprintln!(
                 "[wasm-runner] box_int: dv_addr={:#x} bytes={:?} val_addr={:#x} val={}",

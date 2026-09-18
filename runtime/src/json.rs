@@ -26,7 +26,7 @@
 use crate::anon_object::{self, DYNAMIC_SHAPE};
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    DynamicValue, StringPtr, TypeId, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING,
+    DynamicValue, StringPtr, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING, TypeId,
 };
 
 /// Type ID for arrays in the DynamicValue type system

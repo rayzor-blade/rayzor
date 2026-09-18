@@ -619,7 +619,7 @@ impl<'a> Lexer<'a> {
             }
             if ch == b'/' {
                 self.pos += 1; // consume closing '/'
-                               // Read flags: g, i, m, s, u
+                // Read flags: g, i, m, s, u
                 while self.pos < self.source.len() && self.source[self.pos].is_ascii_alphabetic() {
                     self.pos += 1;
                 }

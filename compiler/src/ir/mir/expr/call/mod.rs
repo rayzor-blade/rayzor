@@ -263,13 +263,13 @@ impl<'a> HirToMirContext<'a> {
                                     self.current_hir_types,
                                 ) {
                                     Ok(wgsl) => {
-                                        return self.builder.build_const(IrValue::String(wgsl))
+                                        return self.builder.build_const(IrValue::String(wgsl));
                                     }
                                     Err(e) => {
                                         return self.builder.build_const(IrValue::String(format!(
                                             "/* WGSL error: {} */",
                                             e
-                                        )))
+                                        )));
                                     }
                                 }
                             }

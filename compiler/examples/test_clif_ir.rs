@@ -41,7 +41,7 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
 }
 
 fn main() {
-    std::env::set_var("RUST_LOG", "debug");
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     env_logger::init();
 
     let source = r#"

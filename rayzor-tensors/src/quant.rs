@@ -104,6 +104,11 @@ use half::f16;
 use rayon::prelude::*;
 #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
 use rayzor_runtime_core::quant::q8_k::x_q8_cache_get;
+pub use rayzor_runtime_core::quant::{
+    Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE, Q4KBlock, Q4KMBlock, Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE,
+    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_SIZE, Q8Block, Q8KBlock, QSCHEME_INT8, QSCHEME_Q4_K_M,
+    QSCHEME_Q6_K, QSCHEME_Q8_0,
+};
 use rayzor_runtime_core::quant::{
     int8::{dot_i8_i8, int8_matmul_f32, quantise_int8_row},
     matmul::{dot_f32_simd, prepare_x_q8k_blocks_into},
@@ -113,11 +118,6 @@ use rayzor_runtime_core::quant::{
     },
     q6_k::dequant_q6_k_block,
     q8_k::quantize_row_q8_K,
-};
-pub use rayzor_runtime_core::quant::{
-    Q4KBlock, Q4KMBlock, Q8Block, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE,
-    Q6_K_BLOCK_BYTES, Q6_K_BLOCK_SIZE, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_SIZE, QSCHEME_INT8,
-    QSCHEME_Q4_K_M, QSCHEME_Q6_K, QSCHEME_Q8_0,
 };
 
 /// Internal opaque tensor representation. The layout depends on `scheme`:
@@ -364,81 +364,85 @@ fn qt_mmap_registry() -> &'static parking_lot::Mutex<std::collections::HashMap<u
 /// Falls back to malloc on any failure — this is an optimisation, never a
 /// correctness requirement.
 unsafe fn qt_alloc_data(bytes: usize) -> *mut u8 {
-    let n = if bytes > 0 { bytes } else { 1 };
-    if !qt_mmap_enabled() || n < QT_MMAP_MIN_BYTES {
-        let p = malloc(n);
-        if !p.is_null() {
-            std::ptr::write_bytes(p, 0, n);
+    unsafe {
+        let n = if bytes > 0 { bytes } else { 1 };
+        if !qt_mmap_enabled() || n < QT_MMAP_MIN_BYTES {
+            let p = malloc(n);
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, n);
+            }
+            return p;
         }
-        return p;
-    }
 
-    // An unlinked temp file: the mapping keeps it alive, and nothing is left
-    // on disk if we crash.
-    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = format!(
-        "{}/rzq.{}.{}\0",
-        dir.trim_end_matches('/'),
-        std::process::id(),
-        seq
-    );
-    let fd = libc::open(
-        path.as_ptr() as *const libc::c_char,
-        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-        0o600,
-    );
-    if fd < 0 {
-        let p = malloc(n);
-        if !p.is_null() {
-            std::ptr::write_bytes(p, 0, n);
+        // An unlinked temp file: the mapping keeps it alive, and nothing is left
+        // on disk if we crash.
+        let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = format!(
+            "{}/rzq.{}.{}\0",
+            dir.trim_end_matches('/'),
+            std::process::id(),
+            seq
+        );
+        let fd = libc::open(
+            path.as_ptr() as *const libc::c_char,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        );
+        if fd < 0 {
+            let p = malloc(n);
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, n);
+            }
+            return p;
         }
-        return p;
-    }
-    libc::unlink(path.as_ptr() as *const libc::c_char);
-    if libc::ftruncate(fd, n as libc::off_t) != 0 {
+        libc::unlink(path.as_ptr() as *const libc::c_char);
+        if libc::ftruncate(fd, n as libc::off_t) != 0 {
+            libc::close(fd);
+            let p = malloc(n);
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, n);
+            }
+            return p;
+        }
+        let addr = libc::mmap(
+            std::ptr::null_mut(),
+            n,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        // The mapping holds its own reference; the descriptor is not needed after.
         libc::close(fd);
-        let p = malloc(n);
-        if !p.is_null() {
-            std::ptr::write_bytes(p, 0, n);
+        if addr == libc::MAP_FAILED {
+            let p = malloc(n);
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, n);
+            }
+            return p;
         }
-        return p;
+        // ftruncate already guarantees zero-filled pages.
+        qt_mmap_registry().lock().insert(addr as usize, n);
+        addr as *mut u8
     }
-    let addr = libc::mmap(
-        std::ptr::null_mut(),
-        n,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_SHARED,
-        fd,
-        0,
-    );
-    // The mapping holds its own reference; the descriptor is not needed after.
-    libc::close(fd);
-    if addr == libc::MAP_FAILED {
-        let p = malloc(n);
-        if !p.is_null() {
-            std::ptr::write_bytes(p, 0, n);
-        }
-        return p;
-    }
-    // ftruncate already guarantees zero-filled pages.
-    qt_mmap_registry().lock().insert(addr as usize, n);
-    addr as *mut u8
 }
 
 /// Release storage from `qt_alloc_data`. Checks the registry so a mapping is
 /// never handed to `free`, and a malloc is never handed to `munmap`.
 unsafe fn qt_free_data(ptr: *mut u8) {
-    if ptr.is_null() {
-        return;
-    }
-    let mapped = qt_mmap_registry().lock().remove(&(ptr as usize));
-    match mapped {
-        Some(len) => {
-            libc::munmap(ptr as *mut libc::c_void, len);
+    unsafe {
+        if ptr.is_null() {
+            return;
         }
-        None => free(ptr),
+        let mapped = qt_mmap_registry().lock().remove(&(ptr as usize));
+        match mapped {
+            Some(len) => {
+                libc::munmap(ptr as *mut libc::c_void, len);
+            }
+            None => free(ptr),
+        }
     }
 }
 
@@ -448,85 +452,87 @@ unsafe fn alloc_qtensor(
     cols: usize,
     group_size: usize,
 ) -> *mut RayzorQTensor {
-    let numel = rows * cols;
-    let data_bytes = match scheme {
-        QSCHEME_INT8 => numel,
-        QSCHEME_Q4_K_M => (numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
-        QSCHEME_Q8_0 => (numel / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES,
-        _ => return std::ptr::null_mut(),
-    };
+    unsafe {
+        let numel = rows * cols;
+        let data_bytes = match scheme {
+            QSCHEME_INT8 => numel,
+            QSCHEME_Q4_K_M => (numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
+            QSCHEME_Q8_0 => (numel / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES,
+            _ => return std::ptr::null_mut(),
+        };
 
-    // Pool fast path. Returns null on miss; on hit the wrapper carries the
-    // original data + meta allocations (meta f32 scales for INT8) which we
-    // zero before handing back so the caller sees a fresh-feeling tensor.
-    let popped = try_pop_qtensor(scheme, rows, cols, group_size);
-    if !popped.is_null() {
-        let qt = &mut *popped;
-        if !qt.data.is_null() && data_bytes > 0 {
-            std::ptr::write_bytes(qt.data, 0, data_bytes);
+        // Pool fast path. Returns null on miss; on hit the wrapper carries the
+        // original data + meta allocations (meta f32 scales for INT8) which we
+        // zero before handing back so the caller sees a fresh-feeling tensor.
+        let popped = try_pop_qtensor(scheme, rows, cols, group_size);
+        if !popped.is_null() {
+            let qt = &mut *popped;
+            if !qt.data.is_null() && data_bytes > 0 {
+                std::ptr::write_bytes(qt.data, 0, data_bytes);
+            }
+            if scheme == QSCHEME_INT8 && !qt.meta.is_null() {
+                let n_groups = numel / group_size;
+                std::ptr::write_bytes(qt.meta, 0, n_groups * std::mem::size_of::<f32>());
+            }
+            qt.owns_data = true;
+            // numel / group_size / scheme / rows / cols already match the bucket
+            // key and shouldn't have drifted; refresh defensively.
+            qt.numel = numel;
+            qt.group_size = group_size;
+            qt.scheme = scheme;
+            qt.rows = rows;
+            qt.cols = cols;
+            // Phase 1 refcount reset on pool revive — see the parallel comment
+            // in `tensor.rs::alloc_tensor`.
+            qt.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
+            qt.parent = std::ptr::null_mut();
+            return popped;
         }
-        if scheme == QSCHEME_INT8 && !qt.meta.is_null() {
-            let n_groups = numel / group_size;
-            std::ptr::write_bytes(qt.meta, 0, n_groups * std::mem::size_of::<f32>());
-        }
-        qt.owns_data = true;
-        // numel / group_size / scheme / rows / cols already match the bucket
-        // key and shouldn't have drifted; refresh defensively.
-        qt.numel = numel;
-        qt.group_size = group_size;
-        qt.scheme = scheme;
-        qt.rows = rows;
-        qt.cols = cols;
-        // Phase 1 refcount reset on pool revive — see the parallel comment
-        // in `tensor.rs::alloc_tensor`.
-        qt.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
-        qt.parent = std::ptr::null_mut();
-        return popped;
-    }
 
-    let data = qt_alloc_data(data_bytes);
-    if data.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    // INT8 needs a per-row (or per-group) scale array. Q4_K_M embeds scales
-    // in the data blocks so meta is null.
-    let meta: *mut f32 = if scheme == QSCHEME_INT8 {
-        let n_groups = numel / group_size;
-        let scale_bytes = n_groups * std::mem::size_of::<f32>();
-        let s = malloc(scale_bytes.max(4)) as *mut f32;
-        if s.is_null() {
-            qt_free_data(data);
+        let data = qt_alloc_data(data_bytes);
+        if data.is_null() {
             return std::ptr::null_mut();
         }
-        s
-    } else {
-        std::ptr::null_mut()
-    };
 
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        qt_free_data(data);
-        if !meta.is_null() {
-            free(meta as *mut u8);
+        // INT8 needs a per-row (or per-group) scale array. Q4_K_M embeds scales
+        // in the data blocks so meta is null.
+        let meta: *mut f32 = if scheme == QSCHEME_INT8 {
+            let n_groups = numel / group_size;
+            let scale_bytes = n_groups * std::mem::size_of::<f32>();
+            let s = malloc(scale_bytes.max(4)) as *mut f32;
+            if s.is_null() {
+                qt_free_data(data);
+                return std::ptr::null_mut();
+            }
+            s
+        } else {
+            std::ptr::null_mut()
+        };
+
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            qt_free_data(data);
+            if !meta.is_null() {
+                free(meta as *mut u8);
+            }
+            return std::ptr::null_mut();
         }
-        return std::ptr::null_mut();
+
+        *qt = RayzorQTensor {
+            data,
+            meta,
+            numel,
+            group_size,
+            scheme,
+            owns_data: true,
+            rows,
+            cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+
+        qt
     }
-
-    *qt = RayzorQTensor {
-        data,
-        meta,
-        numel,
-        group_size,
-        scheme,
-        owns_data: true,
-        rows,
-        cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-
-    qt
 }
 
 // ============================================================================
@@ -538,24 +544,26 @@ unsafe fn alloc_qtensor(
 /// pointer to the opaque `RayzorQTensor`; 0 on failure.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_from_f32_int8(src_ptr: i64, rows: i64, cols: i64) -> i64 {
-    if src_ptr == 0 || rows <= 0 || cols <= 0 {
-        return 0;
+    unsafe {
+        if src_ptr == 0 || rows <= 0 || cols <= 0 {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
+        if qt_raw.is_null() {
+            return 0;
+        }
+        let qt = &*qt_raw;
+        let src = src_ptr as *const f32;
+        for r in 0..rows {
+            let row_src = std::slice::from_raw_parts(src.add(r * cols), cols);
+            let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
+            let scale = quantise_int8_row(row_src, row_dst);
+            *qt.meta.add(r) = scale;
+        }
+        qt_raw as i64
     }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
-    if qt_raw.is_null() {
-        return 0;
-    }
-    let qt = &*qt_raw;
-    let src = src_ptr as *const f32;
-    for r in 0..rows {
-        let row_src = std::slice::from_raw_parts(src.add(r * cols), cols);
-        let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
-        let scale = quantise_int8_row(row_src, row_dst);
-        *qt.meta.add(r) = scale;
-    }
-    qt_raw as i64
 }
 
 /// Wrap a pre-quantised Q4_K_M byte buffer in a QTensor. The runtime takes
@@ -572,31 +580,33 @@ pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
     cols: i64,
     take_ownership: i64,
 ) -> i64 {
-    if block_data_ptr == 0 || rows <= 0 || cols <= 0 {
-        return 0;
+    unsafe {
+        if block_data_ptr == 0 || rows <= 0 || cols <= 0 {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !(rows * cols).is_multiple_of(Q4_K_M_BLOCK_SIZE) {
+            return 0;
+        }
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            return 0;
+        }
+        *qt = RayzorQTensor {
+            data: block_data_ptr as *mut u8,
+            meta: std::ptr::null_mut(),
+            numel: rows * cols,
+            group_size: Q4_K_M_BLOCK_SIZE,
+            scheme: QSCHEME_Q4_K_M,
+            owns_data: take_ownership != 0,
+            rows,
+            cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+        qt as i64
     }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !(rows * cols).is_multiple_of(Q4_K_M_BLOCK_SIZE) {
-        return 0;
-    }
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        return 0;
-    }
-    *qt = RayzorQTensor {
-        data: block_data_ptr as *mut u8,
-        meta: std::ptr::null_mut(),
-        numel: rows * cols,
-        group_size: Q4_K_M_BLOCK_SIZE,
-        scheme: QSCHEME_Q4_K_M,
-        owns_data: take_ownership != 0,
-        rows,
-        cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-    qt as i64
 }
 
 /// Copy a `haxe.io.Bytes` worth of pre-quantised Q4_K_M data into a fresh
@@ -618,40 +628,42 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !(rows * cols).is_multiple_of(Q4_K_M_BLOCK_SIZE) {
-        return 0;
-    }
-    let expected = (rows * cols / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES;
-    if bytes.len < expected {
-        return 0;
-    }
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
+        }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !(rows * cols).is_multiple_of(Q4_K_M_BLOCK_SIZE) {
+            return 0;
+        }
+        let expected = (rows * cols / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES;
+        if bytes.len < expected {
+            return 0;
+        }
 
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        return 0;
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            return 0;
+        }
+        *qt = RayzorQTensor {
+            data: bytes.ptr,
+            meta: std::ptr::null_mut(),
+            numel: rows * cols,
+            group_size: Q4_K_M_BLOCK_SIZE,
+            scheme: QSCHEME_Q4_K_M,
+            owns_data: false,
+            rows,
+            cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+        qt as i64
     }
-    *qt = RayzorQTensor {
-        data: bytes.ptr,
-        meta: std::ptr::null_mut(),
-        numel: rows * cols,
-        group_size: Q4_K_M_BLOCK_SIZE,
-        scheme: QSCHEME_Q4_K_M,
-        owns_data: false,
-        rows,
-        cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-    qt as i64
 }
 
 /// Wrap a `HaxeBytes` slice as a Q6_K-backed QTensor. Same zero-copy
@@ -663,40 +675,42 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
-        return 0;
-    }
-    let expected = (rows * cols / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES;
-    if bytes.len < expected {
-        return 0;
-    }
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
+        }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
+            return 0;
+        }
+        let expected = (rows * cols / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES;
+        if bytes.len < expected {
+            return 0;
+        }
 
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        return 0;
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            return 0;
+        }
+        *qt = RayzorQTensor {
+            data: bytes.ptr,
+            meta: std::ptr::null_mut(),
+            numel: rows * cols,
+            group_size: Q6_K_BLOCK_SIZE,
+            scheme: QSCHEME_Q6_K,
+            owns_data: false,
+            rows,
+            cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+        qt as i64
     }
-    *qt = RayzorQTensor {
-        data: bytes.ptr,
-        meta: std::ptr::null_mut(),
-        numel: rows * cols,
-        group_size: Q6_K_BLOCK_SIZE,
-        scheme: QSCHEME_Q6_K,
-        owns_data: false,
-        rows,
-        cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-    qt as i64
 }
 
 // ============================================================================
@@ -713,15 +727,17 @@ const Q5_0_BLOCK_BYTES: usize = 22;
 
 /// Dequantise one Q5_0 block into `dst[0..32]`.
 unsafe fn dequant_q5_0_block(src: *const u8, dst: &mut [f32]) {
-    let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
-    let qh = u32::from_le_bytes([*src.add(2), *src.add(3), *src.add(4), *src.add(5)]);
-    let qs = src.add(6);
-    for j in 0..(Q5_0_BLOCK_SIZE / 2) {
-        let b = *qs.add(j) as u32;
-        let xh0 = ((qh >> j) << 4) & 0x10;
-        let xh1 = (qh >> (j + 12)) & 0x10;
-        dst[j] = (((b & 0x0F) | xh0) as i32 - 16) as f32 * d;
-        dst[j + Q5_0_BLOCK_SIZE / 2] = (((b >> 4) | xh1) as i32 - 16) as f32 * d;
+    unsafe {
+        let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
+        let qh = u32::from_le_bytes([*src.add(2), *src.add(3), *src.add(4), *src.add(5)]);
+        let qs = src.add(6);
+        for j in 0..(Q5_0_BLOCK_SIZE / 2) {
+            let b = *qs.add(j) as u32;
+            let xh0 = ((qh >> j) << 4) & 0x10;
+            let xh1 = (qh >> (j + 12)) & 0x10;
+            dst[j] = (((b & 0x0F) | xh0) as i32 - 16) as f32 * d;
+            dst[j + Q5_0_BLOCK_SIZE / 2] = (((b >> 4) | xh1) as i32 - 16) as f32 * d;
+        }
     }
 }
 
@@ -744,42 +760,44 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_0_int8(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !cols.is_multiple_of(Q5_0_BLOCK_SIZE) {
-        return 0;
-    }
-    let blocks_per_row = cols / Q5_0_BLOCK_SIZE;
-    let expected = rows * blocks_per_row * Q5_0_BLOCK_BYTES;
-    if bytes.len < expected {
-        return 0;
-    }
-    let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
-    if qt_raw.is_null() {
-        return 0;
-    }
-    let qt = &*qt_raw;
-    let mut stage = vec![0.0f32; cols];
-    for r in 0..rows {
-        let row_src = bytes.ptr.add(r * blocks_per_row * Q5_0_BLOCK_BYTES);
-        for b in 0..blocks_per_row {
-            dequant_q5_0_block(
-                row_src.add(b * Q5_0_BLOCK_BYTES),
-                &mut stage[b * Q5_0_BLOCK_SIZE..(b + 1) * Q5_0_BLOCK_SIZE],
-            );
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
         }
-        let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
-        let scale = quantise_int8_row(&stage, row_dst);
-        *qt.meta.add(r) = scale;
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !cols.is_multiple_of(Q5_0_BLOCK_SIZE) {
+            return 0;
+        }
+        let blocks_per_row = cols / Q5_0_BLOCK_SIZE;
+        let expected = rows * blocks_per_row * Q5_0_BLOCK_BYTES;
+        if bytes.len < expected {
+            return 0;
+        }
+        let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
+        if qt_raw.is_null() {
+            return 0;
+        }
+        let qt = &*qt_raw;
+        let mut stage = vec![0.0f32; cols];
+        for r in 0..rows {
+            let row_src = bytes.ptr.add(r * blocks_per_row * Q5_0_BLOCK_BYTES);
+            for b in 0..blocks_per_row {
+                dequant_q5_0_block(
+                    row_src.add(b * Q5_0_BLOCK_BYTES),
+                    &mut stage[b * Q5_0_BLOCK_SIZE..(b + 1) * Q5_0_BLOCK_SIZE],
+                );
+            }
+            let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
+            let scale = quantise_int8_row(&stage, row_dst);
+            *qt.meta.add(r) = scale;
+        }
+        qt_raw as i64
     }
-    qt_raw as i64
 }
 
 /// One worker's row band of the INT8 XTQ matmul: for each output row,
@@ -797,12 +815,14 @@ unsafe fn int8_xtq_chunk(
     n: usize,
     batch: usize,
 ) {
-    for n_idx in lo..hi {
-        let w_row = w_data.add(n_idx * k);
-        let ws = *w_meta.add(n_idx);
-        for b in 0..batch {
-            let dot = dot_i8_i8(w_row, xq.add(b * k), k);
-            *y.add(b * n + n_idx) = ws * *xs.add(b) * dot as f32;
+    unsafe {
+        for n_idx in lo..hi {
+            let w_row = w_data.add(n_idx * k);
+            let ws = *w_meta.add(n_idx);
+            for b in 0..batch {
+                let dot = dot_i8_i8(w_row, xq.add(b * k), k);
+                *y.add(b * n + n_idx) = ws * *xs.add(b) * dot as f32;
+            }
         }
     }
 }
@@ -817,119 +837,121 @@ unsafe fn int8_xtq_chunk(
 /// block-oriented paths in the threaded entry cannot express a rowwise
 /// scheme, so this is its own top-level short-circuit.
 unsafe fn int8_xtq_threaded(x_tensor: i64, qt_w: i64, threads: i64) -> i64 {
-    let qt = &*(qt_w as *const RayzorQTensor);
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let x_head = &*(x_tensor as *const TensorHead);
-    // Loud early-outs: a silent 0 surfaces downstream as a null-tensor
-    // crash in whatever consumes the matmul result.
-    if x_head.ndim != 2 {
-        eprintln!("int8_xtq: x ndim {} != 2", x_head.ndim);
-        return 0;
-    }
-    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
-    let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
-    let batch = x_shape[0];
-    let k = x_shape[1];
-    if k != qt.cols || x_strides[1] != 1 || qt.meta.is_null() {
-        eprintln!(
-            "int8_xtq: gate miss (x k={} vs w cols={}, inner stride={}, meta null={})",
-            k,
-            qt.cols,
-            x_strides[1],
-            qt.meta.is_null()
-        );
-        return 0;
-    }
-    let row_stride = x_strides[0];
-    let n = qt.rows;
-    let x_data = x_head.data as *const f32;
-
-    let out_shape = [batch, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
-    }
-    let y_head = &*(out_tensor as *const TensorHead);
-    let y_data = y_head.data as *mut f32;
-
-    // Resolve the auto worker count only when actually needed - the
-    // resolver reaches into the host binary (absent under `cargo test`).
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        crate::worker_pool::auto_kernel_threads()
-    };
-    if t > n {
-        t = n.max(1);
-    }
-
-    // Quantise every activation row once into PER-THREAD SCRATCH; the cost
-    // amortises across all `n` output rows exactly like the Q4_K_M path's
-    // X->Q8_K pre-quant. Scratch (not a fresh Vec pair per call) because
-    // this runs ~168x per token. `parallel_rows` joins before returning, so
-    // the workers' raw views into the scratch cannot outlive this borrow.
-    INT8_X_SCRATCH.with(|cell| {
-        let mut scratch = cell.borrow_mut();
-        let (xq, xs) = &mut *scratch;
-        if xq.len() < batch * k {
-            xq.resize(batch * k, 0);
+    unsafe {
+        let qt = &*(qt_w as *const RayzorQTensor);
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
         }
-        if xs.len() < batch {
-            xs.resize(batch, 0.0);
+        let x_head = &*(x_tensor as *const TensorHead);
+        // Loud early-outs: a silent 0 surfaces downstream as a null-tensor
+        // crash in whatever consumes the matmul result.
+        if x_head.ndim != 2 {
+            eprintln!("int8_xtq: x ndim {} != 2", x_head.ndim);
+            return 0;
         }
-        for b in 0..batch {
-            let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
-            xs[b] = quantise_int8_row(row, &mut xq[b * k..(b + 1) * k]);
-        }
-
-        if t <= 1 {
-            int8_xtq_chunk(
-                qt.data as *const i8,
-                qt.meta,
-                xq.as_ptr(),
-                xs.as_ptr(),
-                y_data,
-                0,
-                n,
+        let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+        let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
+        let batch = x_shape[0];
+        let k = x_shape[1];
+        if k != qt.cols || x_strides[1] != 1 || qt.meta.is_null() {
+            eprintln!(
+                "int8_xtq: gate miss (x k={} vs w cols={}, inner stride={}, meta null={})",
                 k,
-                n,
-                batch,
+                qt.cols,
+                x_strides[1],
+                qt.meta.is_null()
             );
-            return out_tensor;
+            return 0;
+        }
+        let row_stride = x_strides[0];
+        let n = qt.rows;
+        let x_data = x_head.data as *const f32;
+
+        let out_shape = [batch, n];
+        let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return 0;
+        }
+        let y_head = &*(out_tensor as *const TensorHead);
+        let y_data = y_head.data as *mut f32;
+
+        // Resolve the auto worker count only when actually needed - the
+        // resolver reaches into the host binary (absent under `cargo test`).
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            crate::worker_pool::auto_kernel_threads()
+        };
+        if t > n {
+            t = n.max(1);
         }
 
-        let w_data = qt.data as usize;
-        let w_meta = qt.meta as usize;
-        let xq_ptr = xq.as_ptr() as usize;
-        let xs_ptr = xs.as_ptr() as usize;
-        let y_ptr = y_data as usize;
-        crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
-            int8_xtq_chunk(
-                w_data as *const i8,
-                w_meta as *const f32,
-                xq_ptr as *const i8,
-                xs_ptr as *const f32,
-                y_ptr as *mut f32,
-                lo,
-                hi,
-                k,
-                n,
-                batch,
-            );
-        });
-        out_tensor
-    })
+        // Quantise every activation row once into PER-THREAD SCRATCH; the cost
+        // amortises across all `n` output rows exactly like the Q4_K_M path's
+        // X->Q8_K pre-quant. Scratch (not a fresh Vec pair per call) because
+        // this runs ~168x per token. `parallel_rows` joins before returning, so
+        // the workers' raw views into the scratch cannot outlive this borrow.
+        INT8_X_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            let (xq, xs) = &mut *scratch;
+            if xq.len() < batch * k {
+                xq.resize(batch * k, 0);
+            }
+            if xs.len() < batch {
+                xs.resize(batch, 0.0);
+            }
+            for b in 0..batch {
+                let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
+                xs[b] = quantise_int8_row(row, &mut xq[b * k..(b + 1) * k]);
+            }
+
+            if t <= 1 {
+                int8_xtq_chunk(
+                    qt.data as *const i8,
+                    qt.meta,
+                    xq.as_ptr(),
+                    xs.as_ptr(),
+                    y_data,
+                    0,
+                    n,
+                    k,
+                    n,
+                    batch,
+                );
+                return out_tensor;
+            }
+
+            let w_data = qt.data as usize;
+            let w_meta = qt.meta as usize;
+            let xq_ptr = xq.as_ptr() as usize;
+            let xs_ptr = xs.as_ptr() as usize;
+            let y_ptr = y_data as usize;
+            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+                int8_xtq_chunk(
+                    w_data as *const i8,
+                    w_meta as *const f32,
+                    xq_ptr as *const i8,
+                    xs_ptr as *const f32,
+                    y_ptr as *mut f32,
+                    lo,
+                    hi,
+                    k,
+                    n,
+                    batch,
+                );
+            });
+            out_tensor
+        })
+    }
 }
 
 // ============================================================================
@@ -953,16 +975,18 @@ const Q5_K_BLOCK_BYTES: usize = 176;
 
 /// Dequantise one Q5_1 block into `dst[0..32]`.
 unsafe fn dequant_q5_1_block(src: *const u8, dst: &mut [f32]) {
-    let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
-    let m = half::f16::from_bits(u16::from_le_bytes([*src.add(2), *src.add(3)])).to_f32();
-    let qh = u32::from_le_bytes([*src.add(4), *src.add(5), *src.add(6), *src.add(7)]);
-    let qs = src.add(8);
-    for j in 0..(Q5_1_BLOCK_SIZE / 2) {
-        let b = *qs.add(j) as u32;
-        let xh0 = ((qh >> j) << 4) & 0x10;
-        let xh1 = (qh >> (j + 12)) & 0x10;
-        dst[j] = (((b & 0x0F) | xh0) as f32) * d + m;
-        dst[j + Q5_1_BLOCK_SIZE / 2] = (((b >> 4) | xh1) as f32) * d + m;
+    unsafe {
+        let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
+        let m = half::f16::from_bits(u16::from_le_bytes([*src.add(2), *src.add(3)])).to_f32();
+        let qh = u32::from_le_bytes([*src.add(4), *src.add(5), *src.add(6), *src.add(7)]);
+        let qs = src.add(8);
+        for j in 0..(Q5_1_BLOCK_SIZE / 2) {
+            let b = *qs.add(j) as u32;
+            let xh0 = ((qh >> j) << 4) & 0x10;
+            let xh1 = (qh >> (j + 12)) & 0x10;
+            dst[j] = (((b & 0x0F) | xh0) as f32) * d + m;
+            dst[j + Q5_1_BLOCK_SIZE / 2] = (((b >> 4) | xh1) as f32) * d + m;
+        }
     }
 }
 
@@ -975,38 +999,40 @@ unsafe fn dequant_q5_1_block(src: *const u8, dst: &mut [f32]) {
 /// two each group (group g consumes bits 2g and 2g+1 of `qh[l]`).
 /// Value form is Q4_K's, not Q5_0's: `y = d*sc * (q + 16*bit) - dmin*mn`.
 unsafe fn dequant_q5_k_block(src: *const u8, dst: &mut [f32]) {
-    let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
-    let dmin = half::f16::from_bits(u16::from_le_bytes([*src.add(2), *src.add(3)])).to_f32();
-    let mut header = [0u8; 12];
-    for (i, slot) in header.iter_mut().enumerate() {
-        *slot = *src.add(4 + i);
-    }
-    let qh = src.add(16); // 32 bytes
-    let mut ql = src.add(48); // 128 bytes
-    let mut out = 0usize;
-    let mut is = 0usize;
-    let mut u1: u8 = 1;
-    let mut u2: u8 = 2;
-    for _group in 0..(Q5_K_BLOCK_SIZE / 64) {
-        let (sc1, mn1) = q4_k_get_scale_min(is, &header);
-        let (sc2, mn2) = q4_k_get_scale_min(is + 1, &header);
-        let d1 = d * (sc1 as f32);
-        let m1 = dmin * (mn1 as f32);
-        let d2 = d * (sc2 as f32);
-        let m2 = dmin * (mn2 as f32);
-        for l in 0..32 {
-            let hi = if (*qh.add(l) & u1) != 0 { 16.0 } else { 0.0 };
-            dst[out + l] = d1 * (((*ql.add(l) & 0x0F) as f32) + hi) - m1;
+    unsafe {
+        let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
+        let dmin = half::f16::from_bits(u16::from_le_bytes([*src.add(2), *src.add(3)])).to_f32();
+        let mut header = [0u8; 12];
+        for (i, slot) in header.iter_mut().enumerate() {
+            *slot = *src.add(4 + i);
         }
-        for l in 0..32 {
-            let hi = if (*qh.add(l) & u2) != 0 { 16.0 } else { 0.0 };
-            dst[out + 32 + l] = d2 * (((*ql.add(l) >> 4) as f32) + hi) - m2;
+        let qh = src.add(16); // 32 bytes
+        let mut ql = src.add(48); // 128 bytes
+        let mut out = 0usize;
+        let mut is = 0usize;
+        let mut u1: u8 = 1;
+        let mut u2: u8 = 2;
+        for _group in 0..(Q5_K_BLOCK_SIZE / 64) {
+            let (sc1, mn1) = q4_k_get_scale_min(is, &header);
+            let (sc2, mn2) = q4_k_get_scale_min(is + 1, &header);
+            let d1 = d * (sc1 as f32);
+            let m1 = dmin * (mn1 as f32);
+            let d2 = d * (sc2 as f32);
+            let m2 = dmin * (mn2 as f32);
+            for l in 0..32 {
+                let hi = if (*qh.add(l) & u1) != 0 { 16.0 } else { 0.0 };
+                dst[out + l] = d1 * (((*ql.add(l) & 0x0F) as f32) + hi) - m1;
+            }
+            for l in 0..32 {
+                let hi = if (*qh.add(l) & u2) != 0 { 16.0 } else { 0.0 };
+                dst[out + 32 + l] = d2 * (((*ql.add(l) >> 4) as f32) + hi) - m2;
+            }
+            out += 64;
+            ql = ql.add(32);
+            is += 2;
+            u1 <<= 2;
+            u2 <<= 2;
         }
-        out += 64;
-        ql = ql.add(32);
-        is += 2;
-        u1 <<= 2;
-        u2 <<= 2;
     }
 }
 
@@ -1022,41 +1048,43 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_1_int8(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !cols.is_multiple_of(Q5_1_BLOCK_SIZE) {
-        return 0;
-    }
-    let blocks_per_row = cols / Q5_1_BLOCK_SIZE;
-    if bytes.len < rows * blocks_per_row * Q5_1_BLOCK_BYTES {
-        return 0;
-    }
-    let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
-    if qt_raw.is_null() {
-        return 0;
-    }
-    let qt = &*qt_raw;
-    let mut stage = vec![0.0f32; cols];
-    for r in 0..rows {
-        let row_src = bytes.ptr.add(r * blocks_per_row * Q5_1_BLOCK_BYTES);
-        for b in 0..blocks_per_row {
-            dequant_q5_1_block(
-                row_src.add(b * Q5_1_BLOCK_BYTES),
-                &mut stage[b * Q5_1_BLOCK_SIZE..(b + 1) * Q5_1_BLOCK_SIZE],
-            );
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
         }
-        let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
-        let scale = quantise_int8_row(&stage, row_dst);
-        *qt.meta.add(r) = scale;
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !cols.is_multiple_of(Q5_1_BLOCK_SIZE) {
+            return 0;
+        }
+        let blocks_per_row = cols / Q5_1_BLOCK_SIZE;
+        if bytes.len < rows * blocks_per_row * Q5_1_BLOCK_BYTES {
+            return 0;
+        }
+        let qt_raw = alloc_qtensor(QSCHEME_INT8, rows, cols, cols);
+        if qt_raw.is_null() {
+            return 0;
+        }
+        let qt = &*qt_raw;
+        let mut stage = vec![0.0f32; cols];
+        for r in 0..rows {
+            let row_src = bytes.ptr.add(r * blocks_per_row * Q5_1_BLOCK_BYTES);
+            for b in 0..blocks_per_row {
+                dequant_q5_1_block(
+                    row_src.add(b * Q5_1_BLOCK_BYTES),
+                    &mut stage[b * Q5_1_BLOCK_SIZE..(b + 1) * Q5_1_BLOCK_SIZE],
+                );
+            }
+            let row_dst = std::slice::from_raw_parts_mut(qt.data.add(r * cols) as *mut i8, cols);
+            let scale = quantise_int8_row(&stage, row_dst);
+            *qt.meta.add(r) = scale;
+        }
+        qt_raw as i64
     }
-    qt_raw as i64
 }
 
 /// Build a Q4_K_M QTensor from a GGUF Q5_K byte buffer (dtype 13).
@@ -1073,40 +1101,42 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_k_q4km(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !cols.is_multiple_of(Q5_K_BLOCK_SIZE) {
-        return 0;
-    }
-    let blocks_per_row = cols / Q5_K_BLOCK_SIZE;
-    if bytes.len < rows * blocks_per_row * Q5_K_BLOCK_BYTES {
-        return 0;
-    }
-    let dst_ptr = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
-    if dst_ptr.is_null() {
-        return 0;
-    }
-    let src_us = bytes.ptr as usize;
-    let dst_us = (*dst_ptr).data as usize;
-    (0..rows).into_par_iter().for_each(|r| {
-        let mut stage = [0.0f32; 256];
-        unsafe {
-            let src_row = (src_us as *const u8).add(r * blocks_per_row * Q5_K_BLOCK_BYTES);
-            let dst_row = (dst_us as *mut Q4KMBlock).add(r * blocks_per_row);
-            for b in 0..blocks_per_row {
-                dequant_q5_k_block(src_row.add(b * Q5_K_BLOCK_BYTES), &mut stage);
-                *dst_row.add(b) = quantize_block_q4_k_m(&stage);
-            }
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
         }
-    });
-    dst_ptr as i64
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !cols.is_multiple_of(Q5_K_BLOCK_SIZE) {
+            return 0;
+        }
+        let blocks_per_row = cols / Q5_K_BLOCK_SIZE;
+        if bytes.len < rows * blocks_per_row * Q5_K_BLOCK_BYTES {
+            return 0;
+        }
+        let dst_ptr = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
+        if dst_ptr.is_null() {
+            return 0;
+        }
+        let src_us = bytes.ptr as usize;
+        let dst_us = (*dst_ptr).data as usize;
+        (0..rows).into_par_iter().for_each(|r| {
+            let mut stage = [0.0f32; 256];
+            {
+                let src_row = (src_us as *const u8).add(r * blocks_per_row * Q5_K_BLOCK_BYTES);
+                let dst_row = (dst_us as *mut Q4KMBlock).add(r * blocks_per_row);
+                for b in 0..blocks_per_row {
+                    dequant_q5_k_block(src_row.add(b * Q5_K_BLOCK_BYTES), &mut stage);
+                    *dst_row.add(b) = quantize_block_q4_k_m(&stage);
+                }
+            }
+        });
+        dst_ptr as i64
+    }
 }
 
 // ============================================================================
@@ -1115,10 +1145,12 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q5_k_q4km(
 
 /// Dequantise one Q8_0 block into `dst[0..32]`: f16 scale then 32 int8.
 unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32]) {
-    let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
-    let q = src.add(2) as *const i8;
-    for j in 0..Q8_0_BLOCK_SIZE {
-        dst[j] = (*q.add(j) as f32) * d;
+    unsafe {
+        let d = half::f16::from_bits(u16::from_le_bytes([*src, *src.add(1)])).to_f32();
+        let q = src.add(2) as *const i8;
+        for j in 0..Q8_0_BLOCK_SIZE {
+            dst[j] = (*q.add(j) as f32) * d;
+        }
     }
 }
 
@@ -1139,39 +1171,41 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q8_0(
     rows: i64,
     cols: i64,
 ) -> i64 {
-    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
-        return 0;
+    unsafe {
+        if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+            return 0;
+        }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let rows = rows as usize;
+        let cols = cols as usize;
+        if !cols.is_multiple_of(Q8_0_BLOCK_SIZE) {
+            return 0;
+        }
+        let expected = rows * (cols / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;
+        if bytes.len < expected {
+            return 0;
+        }
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            return 0;
+        }
+        *qt = RayzorQTensor {
+            data: bytes.ptr,
+            meta: std::ptr::null_mut(),
+            numel: rows * cols,
+            group_size: Q8_0_BLOCK_SIZE,
+            scheme: QSCHEME_Q8_0,
+            owns_data: false,
+            rows,
+            cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+        qt as i64
     }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let rows = rows as usize;
-    let cols = cols as usize;
-    if !cols.is_multiple_of(Q8_0_BLOCK_SIZE) {
-        return 0;
-    }
-    let expected = rows * (cols / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;
-    if bytes.len < expected {
-        return 0;
-    }
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        return 0;
-    }
-    *qt = RayzorQTensor {
-        data: bytes.ptr,
-        meta: std::ptr::null_mut(),
-        numel: rows * cols,
-        group_size: Q8_0_BLOCK_SIZE,
-        scheme: QSCHEME_Q8_0,
-        owns_data: false,
-        rows,
-        cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-    qt as i64
 }
 
 /// One worker's row band of the Q8_0 XTQ matmul.
@@ -1191,109 +1225,113 @@ unsafe fn q8_0_xtq_chunk(
     n: usize,
     batch: usize,
 ) {
-    let blocks = k / Q8_0_BLOCK_SIZE;
-    let row_bytes = blocks * Q8_0_BLOCK_BYTES;
-    for n_idx in lo..hi {
-        let w_row = w_data.add(n_idx * row_bytes);
-        for b in 0..batch {
-            let xq_row = xq.add(b * k);
-            let mut acc = 0.0f32;
-            for blk in 0..blocks {
-                let bp = w_row.add(blk * Q8_0_BLOCK_BYTES);
-                let d = half::f16::from_bits(u16::from_le_bytes([*bp, *bp.add(1)])).to_f32();
-                let wq = bp.add(2) as *const i8;
-                let dot = dot_i8_i8(wq, xq_row.add(blk * Q8_0_BLOCK_SIZE), Q8_0_BLOCK_SIZE);
-                acc += d * (dot as f32);
+    unsafe {
+        let blocks = k / Q8_0_BLOCK_SIZE;
+        let row_bytes = blocks * Q8_0_BLOCK_BYTES;
+        for n_idx in lo..hi {
+            let w_row = w_data.add(n_idx * row_bytes);
+            for b in 0..batch {
+                let xq_row = xq.add(b * k);
+                let mut acc = 0.0f32;
+                for blk in 0..blocks {
+                    let bp = w_row.add(blk * Q8_0_BLOCK_BYTES);
+                    let d = half::f16::from_bits(u16::from_le_bytes([*bp, *bp.add(1)])).to_f32();
+                    let wq = bp.add(2) as *const i8;
+                    let dot = dot_i8_i8(wq, xq_row.add(blk * Q8_0_BLOCK_SIZE), Q8_0_BLOCK_SIZE);
+                    acc += d * (dot as f32);
+                }
+                *y.add(b * n + n_idx) = acc * *xs.add(b);
             }
-            *y.add(b * n + n_idx) = acc * *xs.add(b);
         }
     }
 }
 
 /// `Y[B, N] = X[B, K] x Wq[N, K]^T` for the native Q8_0 scheme.
 unsafe fn q8_0_xtq_threaded(x_tensor: i64, qt_w: i64, threads: i64) -> i64 {
-    let qt = &*(qt_w as *const RayzorQTensor);
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let x_head = &*(x_tensor as *const TensorHead);
-    if x_head.ndim != 2 {
-        return 0;
-    }
-    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
-    let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
-    let batch = x_shape[0];
-    let k = x_shape[1];
-    if k != qt.cols || x_strides[1] != 1 || !k.is_multiple_of(Q8_0_BLOCK_SIZE) {
-        return 0;
-    }
-    let row_stride = x_strides[0];
-    let n = qt.rows;
-    let x_data = x_head.data as *const f32;
+    unsafe {
+        let qt = &*(qt_w as *const RayzorQTensor);
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let x_head = &*(x_tensor as *const TensorHead);
+        if x_head.ndim != 2 {
+            return 0;
+        }
+        let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+        let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
+        let batch = x_shape[0];
+        let k = x_shape[1];
+        if k != qt.cols || x_strides[1] != 1 || !k.is_multiple_of(Q8_0_BLOCK_SIZE) {
+            return 0;
+        }
+        let row_stride = x_strides[0];
+        let n = qt.rows;
+        let x_data = x_head.data as *const f32;
 
-    let out_shape = [batch, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
-    }
-    let y_data = (&*(out_tensor as *const TensorHead)).data as *mut f32;
+        let out_shape = [batch, n];
+        let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return 0;
+        }
+        let y_data = (&*(out_tensor as *const TensorHead)).data as *mut f32;
 
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        crate::worker_pool::auto_kernel_threads()
-    };
-    if t > n {
-        t = n.max(1);
-    }
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            crate::worker_pool::auto_kernel_threads()
+        };
+        if t > n {
+            t = n.max(1);
+        }
 
-    // Same per-thread scratch discipline as the INT8 path: a fresh Vec pair
-    // per call is ~168 allocations per token on a 24-layer model.
-    INT8_X_SCRATCH.with(|cell| {
-        let mut scratch = cell.borrow_mut();
-        let (xq, xs) = &mut *scratch;
-        if xq.len() < batch * k {
-            xq.resize(batch * k, 0);
-        }
-        if xs.len() < batch {
-            xs.resize(batch, 0.0);
-        }
-        for b in 0..batch {
-            let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
-            xs[b] = quantise_int8_row(row, &mut xq[b * k..(b + 1) * k]);
-        }
-        if t <= 1 {
-            q8_0_xtq_chunk(qt.data, xq.as_ptr(), xs.as_ptr(), y_data, 0, n, k, n, batch);
-            return out_tensor;
-        }
-        let w = qt.data as usize;
-        let xq_p = xq.as_ptr() as usize;
-        let xs_p = xs.as_ptr() as usize;
-        let y_p = y_data as usize;
-        crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
-            q8_0_xtq_chunk(
-                w as *const u8,
-                xq_p as *const i8,
-                xs_p as *const f32,
-                y_p as *mut f32,
-                lo,
-                hi,
-                k,
-                n,
-                batch,
-            );
-        });
-        out_tensor
-    })
+        // Same per-thread scratch discipline as the INT8 path: a fresh Vec pair
+        // per call is ~168 allocations per token on a 24-layer model.
+        INT8_X_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            let (xq, xs) = &mut *scratch;
+            if xq.len() < batch * k {
+                xq.resize(batch * k, 0);
+            }
+            if xs.len() < batch {
+                xs.resize(batch, 0.0);
+            }
+            for b in 0..batch {
+                let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
+                xs[b] = quantise_int8_row(row, &mut xq[b * k..(b + 1) * k]);
+            }
+            if t <= 1 {
+                q8_0_xtq_chunk(qt.data, xq.as_ptr(), xs.as_ptr(), y_data, 0, n, k, n, batch);
+                return out_tensor;
+            }
+            let w = qt.data as usize;
+            let xq_p = xq.as_ptr() as usize;
+            let xs_p = xs.as_ptr() as usize;
+            let y_p = y_data as usize;
+            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+                q8_0_xtq_chunk(
+                    w as *const u8,
+                    xq_p as *const i8,
+                    xs_p as *const f32,
+                    y_p as *mut f32,
+                    lo,
+                    hi,
+                    k,
+                    n,
+                    batch,
+                );
+            });
+            out_tensor
+        })
+    }
 }
 
 /// Re-quantise a Q6_K QTensor as Q4_K_M, returning a fresh QTensor handle.
@@ -1324,64 +1362,68 @@ unsafe fn q8_0_xtq_threaded(x_tensor: i64, qt_w: i64, threads: i64) -> i64 {
 ///   - allocation failure
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_requant_q6k_to_q4km(src_ptr: i64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_qtensor_requant_q6k_to_q4km");
-    if src_ptr == 0 {
-        return 0;
-    }
-    let src = &*(src_ptr as *const RayzorQTensor);
-    if src.scheme != QSCHEME_Q6_K {
-        return 0;
-    }
-    let rows = src.rows;
-    let cols = src.cols;
-    if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
-        return 0;
-    }
-
-    let dst_ptr = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
-    if dst_ptr.is_null() {
-        return 0;
-    }
-
-    let blocks_per_row = cols / Q6_K_BLOCK_SIZE;
-
-    // Parallelize the row-by-row requantization.
-    // This uses `std::thread::scope` to avoid using the global worker pool,
-    // which can be problematic when called from JIT'd code during startup.
-    // The one-off fork-join cost of `std::thread::scope` is acceptable for this
-    // startup-only task.
-    let src_data_us = src.data as usize;
-    let dst_data_us = (*dst_ptr).data as usize;
-
-    // Use rayon for parallelization to avoid issues with std::thread::scope
-    // and the JIT environment. Rayon's global thread pool is generally safer
-    // to use in these contexts.
-    (0..rows).into_par_iter().for_each(|r| {
-        // Each thread gets its own stack-allocated scratch buffer.
-        let mut stage = [0.0f32; 256];
-        let src_data = src_data_us as *const u8;
-        let dst_data = dst_data_us as *mut Q4KMBlock;
-
-        unsafe {
-            let src_row_ptr = src_data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
-            let dst_row_ptr = dst_data.add(r * blocks_per_row);
-            for b in 0..blocks_per_row {
-                dequant_q6_k_block(src_row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
-                *dst_row_ptr.add(b) = quantize_block_q4_k_m(&stage);
-            }
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_qtensor_requant_q6k_to_q4km");
+        if src_ptr == 0 {
+            return 0;
         }
-    });
+        let src = &*(src_ptr as *const RayzorQTensor);
+        if src.scheme != QSCHEME_Q6_K {
+            return 0;
+        }
+        let rows = src.rows;
+        let cols = src.cols;
+        if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
+            return 0;
+        }
 
-    dst_ptr as i64
+        let dst_ptr = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
+        if dst_ptr.is_null() {
+            return 0;
+        }
+
+        let blocks_per_row = cols / Q6_K_BLOCK_SIZE;
+
+        // Parallelize the row-by-row requantization.
+        // This uses `std::thread::scope` to avoid using the global worker pool,
+        // which can be problematic when called from JIT'd code during startup.
+        // The one-off fork-join cost of `std::thread::scope` is acceptable for this
+        // startup-only task.
+        let src_data_us = src.data as usize;
+        let dst_data_us = (*dst_ptr).data as usize;
+
+        // Use rayon for parallelization to avoid issues with std::thread::scope
+        // and the JIT environment. Rayon's global thread pool is generally safer
+        // to use in these contexts.
+        (0..rows).into_par_iter().for_each(|r| {
+            // Each thread gets its own stack-allocated scratch buffer.
+            let mut stage = [0.0f32; 256];
+            let src_data = src_data_us as *const u8;
+            let dst_data = dst_data_us as *mut Q4KMBlock;
+
+            {
+                let src_row_ptr = src_data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
+                let dst_row_ptr = dst_data.add(r * blocks_per_row);
+                for b in 0..blocks_per_row {
+                    dequant_q6_k_block(src_row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+                    *dst_row_ptr.add(b) = quantize_block_q4_k_m(&stage);
+                }
+            }
+        });
+
+        dst_ptr as i64
+    }
 }
 
 /// `qt.rows() -> i64`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).rows as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).rows as i64
 }
 
 /// `qt.dataPtr() -> Usize` — raw base address of the quantised weight bytes.
@@ -1391,10 +1433,12 @@ pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
 /// dlmalloc'd in guest linear memory), so the offset is a valid guest load.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).data as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).data as i64
 }
 
 /// `qt.scalesPtr() -> i64`: base address of the per-row f32 scale array
@@ -1403,37 +1447,45 @@ pub unsafe extern "C" fn rayzor_qtensor_data_ptr(qt_ptr: i64) -> i64 {
 /// Lets the pure-Haxe INT8 band kernel read row scales without an FFI matmul.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_scales_ptr(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).meta as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).meta as i64
 }
 
 /// `qt.cols() -> i64`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_cols(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).cols as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).cols as i64
 }
 
 /// `qt.scheme() -> i64`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_scheme(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).scheme as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).scheme as i64
 }
 
 /// `qt.numel() -> i64`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_numel(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        (*(qt_ptr as *const RayzorQTensor)).numel as i64
     }
-    (*(qt_ptr as *const RayzorQTensor)).numel as i64
 }
 
 /// Dequant the whole tensor into a fresh f32 Tensor (shape [rows, cols]).
@@ -1441,98 +1493,100 @@ pub unsafe extern "C" fn rayzor_qtensor_numel(qt_ptr: i64) -> i64 {
 /// the fused matmul path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
-    if qt_ptr == 0 {
-        return 0;
-    }
-    let qt = &*(qt_ptr as *const RayzorQTensor);
+    unsafe {
+        if qt_ptr == 0 {
+            return 0;
+        }
+        let qt = &*(qt_ptr as *const RayzorQTensor);
 
-    // We need a fresh f32 Tensor allocation. Mirror tensor.rs's alloc
-    // shape: [rows, cols], F32 dtype, no fill.
-    let shape = [qt.rows, qt.cols];
-    let out_tensor_ptr =
-        crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0 /* DTYPE_F32 */);
-    if out_tensor_ptr == 0 {
-        return 0;
-    }
-    // Reach into the freshly allocated tensor's data ptr. The tensor.rs
-    // layout has `data` as the first field, so dereferencing as a struct
-    // with `data: *mut u8` first is safe.
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let head = &*(out_tensor_ptr as *const TensorHead);
-    let out = head.data as *mut f32;
+        // We need a fresh f32 Tensor allocation. Mirror tensor.rs's alloc
+        // shape: [rows, cols], F32 dtype, no fill.
+        let shape = [qt.rows, qt.cols];
+        let out_tensor_ptr =
+            crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0 /* DTYPE_F32 */);
+        if out_tensor_ptr == 0 {
+            return 0;
+        }
+        // Reach into the freshly allocated tensor's data ptr. The tensor.rs
+        // layout has `data` as the first field, so dereferencing as a struct
+        // with `data: *mut u8` first is safe.
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let head = &*(out_tensor_ptr as *const TensorHead);
+        let out = head.data as *mut f32;
 
-    match qt.scheme {
-        QSCHEME_INT8 => {
-            for r in 0..qt.rows {
-                let scale = *qt.meta.add(r);
-                let row_src = qt.data.add(r * qt.cols) as *const i8;
-                let row_dst = out.add(r * qt.cols);
-                for c in 0..qt.cols {
-                    *row_dst.add(c) = (*row_src.add(c) as f32) * scale;
+        match qt.scheme {
+            QSCHEME_INT8 => {
+                for r in 0..qt.rows {
+                    let scale = *qt.meta.add(r);
+                    let row_src = qt.data.add(r * qt.cols) as *const i8;
+                    let row_dst = out.add(r * qt.cols);
+                    for c in 0..qt.cols {
+                        *row_dst.add(c) = (*row_src.add(c) as f32) * scale;
+                    }
                 }
             }
-        }
-        QSCHEME_Q4_K_M => {
-            // Rows are independent, so dequant across them. This is on the AMX
-            // prefill path, where a SERIAL dequant cost MORE than the GEMM it
-            // feeds (measured 7B: 19.8 ms dequant vs 12.9 ms GEMM at 708
-            // GFLOP/s) — one core narrowing while eight sat idle, which is why
-            // routing to AMX was a wash despite the GEMM being fast.
-            let blocks_per_row = qt.cols / Q4_K_M_BLOCK_SIZE;
-            let rows = qt.rows;
-            let cols = qt.cols;
-            let data = qt.data as usize;
-            let out_addr = out as usize;
-            (0..rows).into_par_iter().for_each(|r| {
-                let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
-                let row_ptr = (data as *const u8).add(r * blocks_per_row * Q4_K_M_BLOCK_BYTES);
-                for b in 0..blocks_per_row {
-                    let block = decode_q4_k_block(row_ptr.add(b * Q4_K_M_BLOCK_BYTES));
-                    dequant_q4_k_block(&block, &mut stage);
-                    let dst = (out_addr as *mut f32).add(r * cols + b * Q4_K_M_BLOCK_SIZE);
-                    std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
-                }
-            });
-        }
-        QSCHEME_Q8_0 => {
-            let blocks = qt.numel / Q8_0_BLOCK_SIZE;
-            let mut stage = [0.0f32; Q8_0_BLOCK_SIZE];
-            for b in 0..blocks {
-                dequant_q8_0_block(qt.data.add(b * Q8_0_BLOCK_BYTES), &mut stage);
-                std::ptr::copy_nonoverlapping(
-                    stage.as_ptr(),
-                    out.add(b * Q8_0_BLOCK_SIZE),
-                    Q8_0_BLOCK_SIZE,
-                );
+            QSCHEME_Q4_K_M => {
+                // Rows are independent, so dequant across them. This is on the AMX
+                // prefill path, where a SERIAL dequant cost MORE than the GEMM it
+                // feeds (measured 7B: 19.8 ms dequant vs 12.9 ms GEMM at 708
+                // GFLOP/s) — one core narrowing while eight sat idle, which is why
+                // routing to AMX was a wash despite the GEMM being fast.
+                let blocks_per_row = qt.cols / Q4_K_M_BLOCK_SIZE;
+                let rows = qt.rows;
+                let cols = qt.cols;
+                let data = qt.data as usize;
+                let out_addr = out as usize;
+                (0..rows).into_par_iter().for_each(|r| {
+                    let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+                    let row_ptr = (data as *const u8).add(r * blocks_per_row * Q4_K_M_BLOCK_BYTES);
+                    for b in 0..blocks_per_row {
+                        let block = decode_q4_k_block(row_ptr.add(b * Q4_K_M_BLOCK_BYTES));
+                        dequant_q4_k_block(&block, &mut stage);
+                        let dst = (out_addr as *mut f32).add(r * cols + b * Q4_K_M_BLOCK_SIZE);
+                        std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
+                    }
+                });
             }
-        }
-        QSCHEME_Q6_K => {
-            let blocks_per_row = qt.cols / Q6_K_BLOCK_SIZE;
-            let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
-            for r in 0..qt.rows {
-                let row_ptr = qt.data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
-                for b in 0..blocks_per_row {
-                    dequant_q6_k_block(row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
-                    let dst = out.add(r * qt.cols + b * Q6_K_BLOCK_SIZE);
-                    std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q6_K_BLOCK_SIZE);
+            QSCHEME_Q8_0 => {
+                let blocks = qt.numel / Q8_0_BLOCK_SIZE;
+                let mut stage = [0.0f32; Q8_0_BLOCK_SIZE];
+                for b in 0..blocks {
+                    dequant_q8_0_block(qt.data.add(b * Q8_0_BLOCK_BYTES), &mut stage);
+                    std::ptr::copy_nonoverlapping(
+                        stage.as_ptr(),
+                        out.add(b * Q8_0_BLOCK_SIZE),
+                        Q8_0_BLOCK_SIZE,
+                    );
                 }
             }
+            QSCHEME_Q6_K => {
+                let blocks_per_row = qt.cols / Q6_K_BLOCK_SIZE;
+                let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
+                for r in 0..qt.rows {
+                    let row_ptr = qt.data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
+                    for b in 0..blocks_per_row {
+                        dequant_q6_k_block(row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+                        let dst = out.add(r * qt.cols + b * Q6_K_BLOCK_SIZE);
+                        std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q6_K_BLOCK_SIZE);
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
-    }
 
-    out_tensor_ptr
+        out_tensor_ptr
+    }
 }
 
 /// Gather rows from a Q6_K quantised tensor, dequantising each selected row
@@ -1556,174 +1610,182 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
     indices_ptr: i64,
     n_indices: i64,
 ) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_gather_rows_q6_k");
-    if qt_ptr == 0 || indices_ptr == 0 || n_indices <= 0 {
-        return 0;
-    }
-    let qt = &*(qt_ptr as *const RayzorQTensor);
-    // Historical name — this gathers from ANY quantised embedding table, not
-    // just Q6_K. A model whose `token_embd` arrives as Q4_K_M (k-quant files)
-    // or INT8 (this repo's landing scheme for the 32-element legacy blocks
-    // Q5_0/Q5_1) must not fall off a Q6_K-only gate: `Embedding.lookup`
-    // routes here whenever `qweight != null` and a 0 return becomes a null
-    // Tensor and a SIGSEGV in the first forward.
-    let (block_size, block_bytes) = match qt.scheme {
-        QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
-        QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
-        QSCHEME_Q8_0 => (Q8_0_BLOCK_SIZE, Q8_0_BLOCK_BYTES),
-        // INT8 is row-wise: one byte per weight, one f32 scale per row.
-        QSCHEME_INT8 => (1, 1),
-        _ => return 0,
-    };
-    if qt.scheme != QSCHEME_INT8 && !qt.cols.is_multiple_of(block_size) {
-        return 0;
-    }
-    if qt.scheme == QSCHEME_INT8 && qt.meta.is_null() {
-        return 0;
-    }
-    let blocks_per_row = if qt.scheme == QSCHEME_INT8 {
-        0
-    } else {
-        qt.cols / block_size
-    };
-    let row_bytes = if qt.scheme == QSCHEME_INT8 {
-        qt.cols
-    } else {
-        blocks_per_row * block_bytes
-    };
-    let k = n_indices as usize;
-
-    // Allocate output via the shared tensor allocator (mirrors
-    // `rayzor_qtensor_dequant` above so we pick up the pool / histogram
-    // bookkeeping for free).
-    let shape = [k, qt.cols];
-    let out_tensor_ptr =
-        crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0 /* DTYPE_F32 */);
-    if out_tensor_ptr == 0 {
-        return 0;
-    }
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let head = &*(out_tensor_ptr as *const TensorHead);
-    let out = head.data as *mut f32;
-    let indices = indices_ptr as *const i64;
-
-    let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
-    for i in 0..k {
-        let idx_raw = *indices.add(i);
-        if idx_raw < 0 || (idx_raw as usize) >= qt.rows {
-            // Out-of-range index — leave the row zeroed (rayzor_tensor_zeros
-            // already zero-filled the entire output buffer).
-            continue;
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_gather_rows_q6_k");
+        if qt_ptr == 0 || indices_ptr == 0 || n_indices <= 0 {
+            return 0;
         }
-        let row = idx_raw as usize;
-        let row_src = qt.data.add(row * row_bytes);
-        let row_dst = out.add(i * qt.cols);
-        if qt.scheme == QSCHEME_INT8 {
-            let scale = *qt.meta.add(row);
-            let q = row_src as *const i8;
-            for c in 0..qt.cols {
-                *row_dst.add(c) = (*q.add(c) as f32) * scale;
+        let qt = &*(qt_ptr as *const RayzorQTensor);
+        // Historical name — this gathers from ANY quantised embedding table, not
+        // just Q6_K. A model whose `token_embd` arrives as Q4_K_M (k-quant files)
+        // or INT8 (this repo's landing scheme for the 32-element legacy blocks
+        // Q5_0/Q5_1) must not fall off a Q6_K-only gate: `Embedding.lookup`
+        // routes here whenever `qweight != null` and a 0 return becomes a null
+        // Tensor and a SIGSEGV in the first forward.
+        let (block_size, block_bytes) = match qt.scheme {
+            QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
+            QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+            QSCHEME_Q8_0 => (Q8_0_BLOCK_SIZE, Q8_0_BLOCK_BYTES),
+            // INT8 is row-wise: one byte per weight, one f32 scale per row.
+            QSCHEME_INT8 => (1, 1),
+            _ => return 0,
+        };
+        if qt.scheme != QSCHEME_INT8 && !qt.cols.is_multiple_of(block_size) {
+            return 0;
+        }
+        if qt.scheme == QSCHEME_INT8 && qt.meta.is_null() {
+            return 0;
+        }
+        let blocks_per_row = if qt.scheme == QSCHEME_INT8 {
+            0
+        } else {
+            qt.cols / block_size
+        };
+        let row_bytes = if qt.scheme == QSCHEME_INT8 {
+            qt.cols
+        } else {
+            blocks_per_row * block_bytes
+        };
+        let k = n_indices as usize;
+
+        // Allocate output via the shared tensor allocator (mirrors
+        // `rayzor_qtensor_dequant` above so we pick up the pool / histogram
+        // bookkeeping for free).
+        let shape = [k, qt.cols];
+        let out_tensor_ptr =
+            crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0 /* DTYPE_F32 */);
+        if out_tensor_ptr == 0 {
+            return 0;
+        }
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let head = &*(out_tensor_ptr as *const TensorHead);
+        let out = head.data as *mut f32;
+        let indices = indices_ptr as *const i64;
+
+        let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
+        for i in 0..k {
+            let idx_raw = *indices.add(i);
+            if idx_raw < 0 || (idx_raw as usize) >= qt.rows {
+                // Out-of-range index — leave the row zeroed (rayzor_tensor_zeros
+                // already zero-filled the entire output buffer).
+                continue;
             }
-            continue;
-        }
-        for b in 0..blocks_per_row {
-            if qt.scheme == QSCHEME_Q8_0 {
-                dequant_q8_0_block(row_src.add(b * block_bytes), &mut stage[..Q8_0_BLOCK_SIZE]);
-            } else if qt.scheme == QSCHEME_Q4_K_M {
-                let blk = decode_q4_k_block(row_src.add(b * block_bytes));
-                dequant_q4_k_block(&blk, &mut stage);
-            } else {
-                dequant_q6_k_block(row_src.add(b * block_bytes), &mut stage);
+            let row = idx_raw as usize;
+            let row_src = qt.data.add(row * row_bytes);
+            let row_dst = out.add(i * qt.cols);
+            if qt.scheme == QSCHEME_INT8 {
+                let scale = *qt.meta.add(row);
+                let q = row_src as *const i8;
+                for c in 0..qt.cols {
+                    *row_dst.add(c) = (*q.add(c) as f32) * scale;
+                }
+                continue;
             }
-            std::ptr::copy_nonoverlapping(stage.as_ptr(), row_dst.add(b * block_size), block_size);
+            for b in 0..blocks_per_row {
+                if qt.scheme == QSCHEME_Q8_0 {
+                    dequant_q8_0_block(row_src.add(b * block_bytes), &mut stage[..Q8_0_BLOCK_SIZE]);
+                } else if qt.scheme == QSCHEME_Q4_K_M {
+                    let blk = decode_q4_k_block(row_src.add(b * block_bytes));
+                    dequant_q4_k_block(&blk, &mut stage);
+                } else {
+                    dequant_q6_k_block(row_src.add(b * block_bytes), &mut stage);
+                }
+                std::ptr::copy_nonoverlapping(
+                    stage.as_ptr(),
+                    row_dst.add(b * block_size),
+                    block_size,
+                );
+            }
         }
-    }
 
-    out_tensor_ptr
+        out_tensor_ptr
+    }
 }
 
 /// Fused dequant-matmul: A is quantised `[M, K]`, B is f32 `[K, N]`, out is
 /// f32 `[M, N]`. Returns a fresh f32 Tensor; 0 on shape mismatch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::QTENSOR_MATMUL_F32);
-    if qt_a == 0 || b_tensor == 0 {
-        return 0;
-    }
-    let qt = &*(qt_a as *const RayzorQTensor);
-
-    // Pull B's shape + data.
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let b_head = &*(b_tensor as *const TensorHead);
-    if b_head.ndim != 2 || b_head.dtype != 0
-    /* DTYPE_F32 */
-    {
-        return 0;
-    }
-    let b_shape = std::slice::from_raw_parts(b_head.shape, 2);
-    let k_b = b_shape[0];
-    let n = b_shape[1];
-    if k_b != qt.cols {
-        return 0;
-    }
-
-    let out_shape = [qt.rows, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
-    }
-    let out_head = &*(out_tensor as *const TensorHead);
-    let out_data = out_head.data as *mut f32;
-
-    match qt.scheme {
-        QSCHEME_INT8 => {
-            int8_matmul_f32(
-                qt.data as *const i8,
-                qt.meta,
-                b_head.data as *const f32,
-                out_data,
-                qt.rows,
-                qt.cols,
-                n,
-            );
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::QTENSOR_MATMUL_F32);
+        if qt_a == 0 || b_tensor == 0 {
+            return 0;
         }
-        QSCHEME_Q4_K_M => {
-            q4_k_m_matmul_f32(
-                qt.data,
-                b_head.data as *const f32,
-                out_data,
-                qt.rows,
-                qt.cols,
-                n,
-            );
-        }
-        _ => return 0,
-    }
+        let qt = &*(qt_a as *const RayzorQTensor);
 
-    out_tensor
+        // Pull B's shape + data.
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let b_head = &*(b_tensor as *const TensorHead);
+        if b_head.ndim != 2 || b_head.dtype != 0
+        /* DTYPE_F32 */
+        {
+            return 0;
+        }
+        let b_shape = std::slice::from_raw_parts(b_head.shape, 2);
+        let k_b = b_shape[0];
+        let n = b_shape[1];
+        if k_b != qt.cols {
+            return 0;
+        }
+
+        let out_shape = [qt.rows, n];
+        let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return 0;
+        }
+        let out_head = &*(out_tensor as *const TensorHead);
+        let out_data = out_head.data as *mut f32;
+
+        match qt.scheme {
+            QSCHEME_INT8 => {
+                int8_matmul_f32(
+                    qt.data as *const i8,
+                    qt.meta,
+                    b_head.data as *const f32,
+                    out_data,
+                    qt.rows,
+                    qt.cols,
+                    n,
+                );
+            }
+            QSCHEME_Q4_K_M => {
+                q4_k_m_matmul_f32(
+                    qt.data,
+                    b_head.data as *const f32,
+                    out_data,
+                    qt.rows,
+                    qt.cols,
+                    n,
+                );
+            }
+            _ => return 0,
+        }
+
+        out_tensor
+    }
 }
 
 /// Compute `Y[B, N] = X[B, K] × Wq[N, K]^T`, with Wq quantised Q4_K_M.
@@ -1750,27 +1812,29 @@ pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> 
 /// across workers via `rayzor.concurrent.WorkerPool.parallelRows`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(qt_w: i64, x_tensor: i64) -> i64 {
-    if x_tensor == 0 || qt_w == 0 {
-        return 0;
+    unsafe {
+        if x_tensor == 0 || qt_w == 0 {
+            return 0;
+        }
+        let qt = &*(qt_w as *const RayzorQTensor);
+
+        let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
+            Some(p) => p,
+            None => return 0,
+        };
+
+        // Allocate Y[batch, N] f32.
+        let out_shape = [batch, n];
+        let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return 0;
+        }
+
+        // Single-threaded fill of all rows.
+        qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
+        let _ = k; // K used inside the impl; suppress unused warning here.
+        out_tensor
     }
-    let qt = &*(qt_w as *const RayzorQTensor);
-
-    let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    // Allocate Y[batch, N] f32.
-    let out_shape = [batch, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
-    }
-
-    // Single-threaded fill of all rows.
-    qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
-    let _ = k; // K used inside the impl; suppress unused warning here.
-    out_tensor
 }
 
 /// Threaded variant of `rayzor_tensor_matmul_qt_t_f32`.
@@ -1845,20 +1909,22 @@ pub unsafe extern "C" fn rayzor_amx_gemm_f16(
     b16: i64,
     cf32: i64,
 ) -> bool {
-    if m <= 0 || k <= 0 || n <= 0 || a16 == 0 || b16 == 0 || cf32 == 0 {
-        return false;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let (m, k, n) = (m as usize, k as usize, n as usize);
-        let a = std::slice::from_raw_parts(a16 as *const u16, m * k);
-        let b = std::slice::from_raw_parts(b16 as *const u16, n * k);
-        let c = std::slice::from_raw_parts_mut(cf32 as *mut f32, m * n);
-        crate::apple_accel::matmul_f16f32_nt(m, k, n, a, b, c)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
+    unsafe {
+        if m <= 0 || k <= 0 || n <= 0 || a16 == 0 || b16 == 0 || cf32 == 0 {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (m, k, n) = (m as usize, k as usize, n as usize);
+            let a = std::slice::from_raw_parts(a16 as *const u16, m * k);
+            let b = std::slice::from_raw_parts(b16 as *const u16, n * k);
+            let c = std::slice::from_raw_parts_mut(cf32 as *mut f32, m * n);
+            crate::apple_accel::matmul_f16f32_nt(m, k, n, a, b, c)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 }
 
@@ -1885,39 +1951,41 @@ unsafe fn amx_prefill_matmul(
     k: usize,
     n: usize,
 ) -> Option<i64> {
-    #[repr(C)]
-    struct Head {
-        data: *mut u8,
-    }
-    let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
-    let t_cache = if dbg {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
-    thread_local! {
-        static W16: std::cell::RefCell<Vec<u16>> =
-            const { std::cell::RefCell::new(Vec::new()) };
-    }
-    W16.with(|cell| {
-        let mut w16 = cell.borrow_mut();
-        w16.resize(n * k, 0);
-        let t = rayzor_qtensor_dequant(qt_w);
-        if t == 0 {
-            return None;
+    unsafe {
+        #[repr(C)]
+        struct Head {
+            data: *mut u8,
         }
-        let f32_data = (*(t as *const Head)).data as *const f32;
-        let src = std::slice::from_raw_parts(f32_data, n * k);
-        let ok = crate::apple_accel::f32_to_f16(src, &mut w16);
-        crate::tensor::rayzor_tensor_free(t);
-        if !ok {
-            return None;
+        let dbg = std::env::var_os("RZT_AMX_DEBUG").is_some();
+        let t_cache = if dbg {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        thread_local! {
+            static W16: std::cell::RefCell<Vec<u16>> =
+                const { std::cell::RefCell::new(Vec::new()) };
         }
-        let cache_us = t_cache
-            .map(|t| t.elapsed().as_secs_f64() * 1e6)
-            .unwrap_or(0.0);
-        amx_gemm_f16(x_tensor, &w16, batch, k, n, dbg, cache_us)
-    })
+        W16.with(|cell| {
+            let mut w16 = cell.borrow_mut();
+            w16.resize(n * k, 0);
+            let t = rayzor_qtensor_dequant(qt_w);
+            if t == 0 {
+                return None;
+            }
+            let f32_data = (*(t as *const Head)).data as *const f32;
+            let src = std::slice::from_raw_parts(f32_data, n * k);
+            let ok = crate::apple_accel::f32_to_f16(src, &mut w16);
+            crate::tensor::rayzor_tensor_free(t);
+            if !ok {
+                return None;
+            }
+            let cache_us = t_cache
+                .map(|t| t.elapsed().as_secs_f64() * 1e6)
+                .unwrap_or(0.0);
+            amx_gemm_f16(x_tensor, &w16, batch, k, n, dbg, cache_us)
+        })
+    }
 }
 
 /// The GEMM half of the AMX prefill path.
@@ -1931,22 +1999,23 @@ unsafe fn amx_gemm_f16(
     dbg: bool,
     cache_us: f64,
 ) -> Option<i64> {
-    #[repr(C)]
-    struct Head {
-        data: *mut u8,
-    }
-    let t_x = if dbg {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
-    let x_data = (*(x_tensor as *const Head)).data as *const f32;
-    let x = std::slice::from_raw_parts(x_data, batch * k);
-    // Per-call activation narrowing into a reused thread-local scratch.
-    thread_local! {
-        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    let out_tensor = X16.with(|cell| {
+    unsafe {
+        #[repr(C)]
+        struct Head {
+            data: *mut u8,
+        }
+        let t_x = if dbg {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let x_data = (*(x_tensor as *const Head)).data as *const f32;
+        let x = std::slice::from_raw_parts(x_data, batch * k);
+        // Per-call activation narrowing into a reused thread-local scratch.
+        thread_local! {
+            static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let out_tensor = X16.with(|cell| {
         let mut x16 = cell.borrow_mut();
         x16.resize(batch * k, 0);
         if !crate::apple_accel::f32_to_f16(x, &mut x16) {
@@ -1983,7 +2052,8 @@ unsafe fn amx_gemm_f16(
         }
         Some(out_tensor)
     })?;
-    Some(out_tensor)
+        Some(out_tensor)
+    }
 }
 
 /// Narrow a plain-F32 weight to f16 in a reusable per-thread scratch.
@@ -2026,39 +2096,41 @@ pub(crate) unsafe fn amx_matmul_t_f32(
     n: usize,
     out: *mut f32,
 ) -> bool {
-    if std::env::var_os("RZT_AMX_DEBUG").is_some() {
-        eprintln!(
-            "[amx-f32] m={m} k={k} n={n} enabled={} min_batch={}",
-            amx_prefill_enabled(),
-            amx_prefill_min_batch()
-        );
-    }
-    if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
-        return false;
-    }
-    let x = std::slice::from_raw_parts(a, m * k);
-    // Both narrowings go into per-thread scratch that is reused across calls:
-    // no permanent second copy of the weights, and nothing keyed by an address
-    // that can be freed and reused underneath us.
-    thread_local! {
-        static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
-        static W16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    W16.with(|wcell| {
-        let mut w16 = wcell.borrow_mut();
-        if !narrow_f16_weight_f32(b as usize, n * k, &mut w16) {
+    unsafe {
+        if std::env::var_os("RZT_AMX_DEBUG").is_some() {
+            eprintln!(
+                "[amx-f32] m={m} k={k} n={n} enabled={} min_batch={}",
+                amx_prefill_enabled(),
+                amx_prefill_min_batch()
+            );
+        }
+        if !amx_prefill_enabled() || m < amx_prefill_min_batch() {
             return false;
         }
-        X16.with(|cell| {
-            let mut x16 = cell.borrow_mut();
-            x16.resize(m * k, 0);
-            if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+        let x = std::slice::from_raw_parts(a, m * k);
+        // Both narrowings go into per-thread scratch that is reused across calls:
+        // no permanent second copy of the weights, and nothing keyed by an address
+        // that can be freed and reused underneath us.
+        thread_local! {
+            static X16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+            static W16: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        W16.with(|wcell| {
+            let mut w16 = wcell.borrow_mut();
+            if !narrow_f16_weight_f32(b as usize, n * k, &mut w16) {
                 return false;
             }
-            let out_slice = std::slice::from_raw_parts_mut(out, m * n);
-            crate::apple_accel::matmul_f16f32_nt(m, k, n, &x16, &w16, out_slice)
+            X16.with(|cell| {
+                let mut x16 = cell.borrow_mut();
+                x16.resize(m * k, 0);
+                if !crate::apple_accel::f32_to_f16(x, &mut x16) {
+                    return false;
+                }
+                let out_slice = std::slice::from_raw_parts_mut(out, m * n);
+                crate::apple_accel::matmul_f16f32_nt(m, k, n, &x16, &w16, out_slice)
+            })
         })
-    })
+    }
 }
 
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
@@ -2066,241 +2138,245 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     x_tensor: i64,
     threads: i64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt =
-        crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_THREADED);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qt_t_f32_threaded");
-    if x_tensor == 0 || qt_w == 0 {
-        eprintln!("matmul_qt_t_f32_threaded: null handle (x={x_tensor:#x}, w={qt_w:#x})");
-        return 0;
-    }
-    let qt = &*(qt_w as *const RayzorQTensor);
-
-    // INT8 per-row weights (Q5_0-sourced) short-circuit into their own
-    // integer-dot path — `qmatmul_prep` and every block path below are
-    // 256-wide k-quant machinery, and a rowwise scheme has no blocks.
-    if qt.scheme == QSCHEME_INT8 {
-        return int8_xtq_threaded(x_tensor, qt_w, threads);
-    }
-    // Q8_0 likewise: 32-wide blocks with their own per-block scale have no
-    // place in the 256-wide k-quant `qmatmul_prep` machinery below.
-    if qt.scheme == QSCHEME_Q8_0 {
-        return q8_0_xtq_threaded(x_tensor, qt_w, threads);
-    }
-
-    let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    // AMX prefill fast path (macOS): a compute-bound batch (prefill processes
-    // the whole prompt at once) amortizes a one-shot Q4->F32 dequant, then
-    // Accelerate's AMX sgemm runs at 400-1300 GFLOP/s vs ~57 for the SDOT
-    // band loop. Decode (batch below the threshold) stays on SDOT — bandwidth-
-    // bound, where dequant-to-F32 would be a net loss. Opt-in via RZT_AMX_PREFILL.
-    #[cfg(target_os = "macos")]
-    {
-        if amx_prefill_enabled() && std::env::var_os("RZT_AMX_DEBUG").is_some() {
-            let fire = qt.scheme == QSCHEME_Q4_K_M
-                && batch >= amx_prefill_min_batch()
-                && x_is_contiguous(x_tensor);
-            eprintln!(
-                "[amx-gate] batch={batch} n={n} k={k} q4={} contig={} fire={fire}",
-                qt.scheme == QSCHEME_Q4_K_M,
-                x_is_contiguous(x_tensor)
-            );
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt =
+            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_THREADED);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qt_t_f32_threaded");
+        if x_tensor == 0 || qt_w == 0 {
+            eprintln!("matmul_qt_t_f32_threaded: null handle (x={x_tensor:#x}, w={qt_w:#x})");
+            return 0;
         }
-        // No budget gate: there is no f16 weight cache to run out of any more.
-        // The dequant goes to a reusable scratch, so routing costs a per-call
-        // dequant at any model size rather than a permanent second copy of the
-        // model — which is what made the models that most need prefill help
-        // the only ones never to get it.
-        if qt.scheme == QSCHEME_Q4_K_M
-            && amx_prefill_enabled()
-            && batch >= amx_prefill_min_batch()
-            && x_is_contiguous(x_tensor)
+        let qt = &*(qt_w as *const RayzorQTensor);
+
+        // INT8 per-row weights (Q5_0-sourced) short-circuit into their own
+        // integer-dot path — `qmatmul_prep` and every block path below are
+        // 256-wide k-quant machinery, and a rowwise scheme has no blocks.
+        if qt.scheme == QSCHEME_INT8 {
+            return int8_xtq_threaded(x_tensor, qt_w, threads);
+        }
+        // Q8_0 likewise: 32-wide blocks with their own per-block scale have no
+        // place in the 256-wide k-quant `qmatmul_prep` machinery below.
+        if qt.scheme == QSCHEME_Q8_0 {
+            return q8_0_xtq_threaded(x_tensor, qt_w, threads);
+        }
+
+        let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
+            Some(p) => p,
+            None => return 0,
+        };
+
+        // AMX prefill fast path (macOS): a compute-bound batch (prefill processes
+        // the whole prompt at once) amortizes a one-shot Q4->F32 dequant, then
+        // Accelerate's AMX sgemm runs at 400-1300 GFLOP/s vs ~57 for the SDOT
+        // band loop. Decode (batch below the threshold) stays on SDOT — bandwidth-
+        // bound, where dequant-to-F32 would be a net loss. Opt-in via RZT_AMX_PREFILL.
+        #[cfg(target_os = "macos")]
         {
-            let t_all = if std::env::var_os("RZT_AMX_DEBUG").is_some() {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            if let Some(out) = amx_prefill_matmul(x_tensor, qt_w, batch, k, n) {
-                if let Some(t) = t_all {
-                    eprintln!("[amx-total] us={:.0}", t.elapsed().as_secs_f64() * 1e6);
+            if amx_prefill_enabled() && std::env::var_os("RZT_AMX_DEBUG").is_some() {
+                let fire = qt.scheme == QSCHEME_Q4_K_M
+                    && batch >= amx_prefill_min_batch()
+                    && x_is_contiguous(x_tensor);
+                eprintln!(
+                    "[amx-gate] batch={batch} n={n} k={k} q4={} contig={} fire={fire}",
+                    qt.scheme == QSCHEME_Q4_K_M,
+                    x_is_contiguous(x_tensor)
+                );
+            }
+            // No budget gate: there is no f16 weight cache to run out of any more.
+            // The dequant goes to a reusable scratch, so routing costs a per-call
+            // dequant at any model size rather than a permanent second copy of the
+            // model — which is what made the models that most need prefill help
+            // the only ones never to get it.
+            if qt.scheme == QSCHEME_Q4_K_M
+                && amx_prefill_enabled()
+                && batch >= amx_prefill_min_batch()
+                && x_is_contiguous(x_tensor)
+            {
+                let t_all = if std::env::var_os("RZT_AMX_DEBUG").is_some() {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                if let Some(out) = amx_prefill_matmul(x_tensor, qt_w, batch, k, n) {
+                    if let Some(t) = t_all {
+                        eprintln!("[amx-total] us={:.0}", t.elapsed().as_secs_f64() * 1e6);
+                    }
+                    return out;
                 }
-                return out;
             }
         }
-    }
 
-    let out_shape = [batch, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
-    }
-
-    // Pick worker count: explicit > 0, or auto.
-    // Auto: 6 workers. Tried 4, 6, 8 on M1 Pro / Llama 3.2 1B Q4_K_M;
-    // all sit at ~19 s for a 24-token decode (≈2 effective cores).
-    // The fork-join is invoked ~112 times per generated token (16
-    // layers × 7 Linear projections), so spawn cost + memory-bandwidth
-    // contention dominate; throwing more threads at it doesn't move
-    // the wall time. Real per-core win lives in SIMD-tiled inner dot
-    // (queued); P-core QoS hint also tested, ~0 effect on M1.
-    // Resolve the auto worker count only when it is actually needed: the
-    // resolver reaches into the host binary (RTLD_GLOBAL `perf_core_count`),
-    // which is absent under `cargo test`, so an eager call here made every
-    // Q4_K path untestable (null fn pointer -> SIGSEGV).
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        crate::worker_pool::auto_kernel_threads()
-    };
-    if t > n {
-        t = n.max(1);
-    }
-
-    // SDOT fast path: when (a) the env-gated SDOT toggle is on
-    // (default), (b) the input is the single-batch contiguous shape
-    // that Linear forward emits, and (c) the weight is Q4_K_M, we
-    // pre-quantise X to Q8_K *once* up front, then hand a shared
-    // immutable slice to every worker via the persistent pool. This
-    // eliminates the 6× redundant `quantize_x_block_q8` work each
-    // worker was doing inside `qmatmul_chunk_impl` for the same X
-    // (one per worker per Linear, 112× per generated token).
-    //
-    // Workers walk the canonical `vec_dot_q4_K_q8_K` per super-block,
-    // which thunks through the already-shipping AArch64 SDOT inner
-    // kernel — same arithmetic that produces byte-for-byte matches
-    // against llama.cpp on the rope/coherence regression suite.
-    let use_sdot_threaded = sdot_enabled_runtime()
-        && batch == 1
-        && qt.scheme == QSCHEME_Q4_K_M
-        && x_is_contiguous(x_tensor);
-    if use_sdot_threaded {
-        // Phase timer: SETUP spans entry → just-before parallel_rows
-        // dispatch. Records X pre-quantize + scratch borrow + closure
-        // construction overhead.
-        let setup_guard =
-            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
-        let x_data = x_tensor_data_ptr(x_tensor);
-
-        return X_Q8K_SCRATCH.with(|cell| {
-            let mut x_q8k = cell.borrow_mut();
-            prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
-            let nb = k / Q4_K_M_BLOCK_SIZE;
-
-            if t <= 1 {
-                drop(setup_guard);
-                qmatmul_chunk_impl_sdot_q4km(qt_w, out_tensor, 0, n as i64, &x_q8k[..nb]);
-                return out_tensor;
-            }
-
-            let q8k_ptr = x_q8k.as_ptr() as usize;
-            let q8k_len = nb;
-            let qh = qt_w;
-            let yh = out_tensor;
-            // SETUP ends at parallel_rows entry. DISPATCH_WAIT wraps
-            // the entire parallel_rows call (fork + worker work +
-            // join). The per-worker chunk_impl invocation is timed
-            // SEPARATELY by each worker via WORK_PER_WORKER — its
-            // call count is `parallel_rows_invocations * n_workers`,
-            // so divide its ns by num_matmul_calls (NOT call count)
-            // for per-matmul total work, or by call count for per-
-            // worker average.
-            drop(setup_guard);
-            let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
-                &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
-            );
-            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
-                let _work_guard = crate::kernel_timing::TimerGuard::new(
-                    &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
-                );
-                let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
-                qmatmul_chunk_impl_sdot_q4km(qh, yh, lo as i64, hi as i64, q8k_slice);
-            });
-            out_tensor
-        });
-    }
-
-    // Experimental multi-row prefill path. The decode SDOT fast path above
-    // handles `batch == 1`; prompt prefill arrives as `batch == seq_len`, so
-    // the old fallback dequantised each Q4_K_M weight block to F32 and dotted
-    // it against every prompt row. Here we pre-quantise every prompt row to
-    // Q8_K once, then run the same Q4_K_M × Q8_K block dot over output-row
-    // bands. This keeps scheduling inside the native worker pool and avoids a
-    // Haxe-side WorkerPool/FFI fan-out.
-    let use_prefill_morsels = prefill_morsels_enabled()
-        && sdot_enabled_runtime()
-        && batch > 1
-        && qt.scheme == QSCHEME_Q4_K_M
-        && x_is_row_major_contiguous(x_tensor, k);
-    if use_prefill_morsels {
-        let setup_guard =
-            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
-        let x_data = x_tensor_data_ptr(x_tensor);
-        let row_stride = x_tensor_row_stride(x_tensor);
-
-        return X_Q8K_SCRATCH.with(|cell| {
-            let mut x_q8k = cell.borrow_mut();
-            prepare_x_q8k_batch_into(x_data, batch, k, row_stride, &mut x_q8k);
-            let nb = k / Q4_K_M_BLOCK_SIZE;
-
-            if t <= 1 {
-                drop(setup_guard);
-                qmatmul_chunk_impl_sdot_q4km_batch(
-                    qt_w,
-                    out_tensor,
-                    0,
-                    n as i64,
-                    batch,
-                    &x_q8k[..batch * nb],
-                );
-                return out_tensor;
-            }
-
-            let q8k_ptr = x_q8k.as_ptr() as usize;
-            let q8k_len = batch * nb;
-            let qh = qt_w;
-            let yh = out_tensor;
-            drop(setup_guard);
-            let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
-                &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
-            );
-            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
-                let _work_guard = crate::kernel_timing::TimerGuard::new(
-                    &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
-                );
-                let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
-                qmatmul_chunk_impl_sdot_q4km_batch(qh, yh, lo as i64, hi as i64, batch, q8k_slice);
-            });
-            out_tensor
-        });
-    }
-
-    if t <= 1 {
-        qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
-        return out_tensor;
-    }
-
-    // Fallback path (multi-batch / non-contiguous / non-Q4_K_M /
-    // SDOT-disabled). Workers re-derive their own per-block Q8 cache
-    // inside `qmatmul_chunk_impl` for the shapes that don't fit the
-    // shared-X pre-quant pattern.
-    let xh = x_tensor;
-    let qh = qt_w;
-    let yh = out_tensor;
-    crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
-        // SAFETY: each worker writes Y[*, lo..hi); ranges are disjoint
-        // across calls (the pool guarantees this for a single
-        // parallel_rows invocation) so there's no aliasing on Y. X
-        // and Wq are read-only.
-        unsafe {
-            qmatmul_chunk_impl(xh, qh, yh, lo as i64, hi as i64);
+        let out_shape = [batch, n];
+        let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+        if out_tensor == 0 {
+            return 0;
         }
-    });
-    out_tensor
+
+        // Pick worker count: explicit > 0, or auto.
+        // Auto: 6 workers. Tried 4, 6, 8 on M1 Pro / Llama 3.2 1B Q4_K_M;
+        // all sit at ~19 s for a 24-token decode (≈2 effective cores).
+        // The fork-join is invoked ~112 times per generated token (16
+        // layers × 7 Linear projections), so spawn cost + memory-bandwidth
+        // contention dominate; throwing more threads at it doesn't move
+        // the wall time. Real per-core win lives in SIMD-tiled inner dot
+        // (queued); P-core QoS hint also tested, ~0 effect on M1.
+        // Resolve the auto worker count only when it is actually needed: the
+        // resolver reaches into the host binary (RTLD_GLOBAL `perf_core_count`),
+        // which is absent under `cargo test`, so an eager call here made every
+        // Q4_K path untestable (null fn pointer -> SIGSEGV).
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            crate::worker_pool::auto_kernel_threads()
+        };
+        if t > n {
+            t = n.max(1);
+        }
+
+        // SDOT fast path: when (a) the env-gated SDOT toggle is on
+        // (default), (b) the input is the single-batch contiguous shape
+        // that Linear forward emits, and (c) the weight is Q4_K_M, we
+        // pre-quantise X to Q8_K *once* up front, then hand a shared
+        // immutable slice to every worker via the persistent pool. This
+        // eliminates the 6× redundant `quantize_x_block_q8` work each
+        // worker was doing inside `qmatmul_chunk_impl` for the same X
+        // (one per worker per Linear, 112× per generated token).
+        //
+        // Workers walk the canonical `vec_dot_q4_K_q8_K` per super-block,
+        // which thunks through the already-shipping AArch64 SDOT inner
+        // kernel — same arithmetic that produces byte-for-byte matches
+        // against llama.cpp on the rope/coherence regression suite.
+        let use_sdot_threaded = sdot_enabled_runtime()
+            && batch == 1
+            && qt.scheme == QSCHEME_Q4_K_M
+            && x_is_contiguous(x_tensor);
+        if use_sdot_threaded {
+            // Phase timer: SETUP spans entry → just-before parallel_rows
+            // dispatch. Records X pre-quantize + scratch borrow + closure
+            // construction overhead.
+            let setup_guard =
+                crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
+            let x_data = x_tensor_data_ptr(x_tensor);
+
+            return X_Q8K_SCRATCH.with(|cell| {
+                let mut x_q8k = cell.borrow_mut();
+                prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+                let nb = k / Q4_K_M_BLOCK_SIZE;
+
+                if t <= 1 {
+                    drop(setup_guard);
+                    qmatmul_chunk_impl_sdot_q4km(qt_w, out_tensor, 0, n as i64, &x_q8k[..nb]);
+                    return out_tensor;
+                }
+
+                let q8k_ptr = x_q8k.as_ptr() as usize;
+                let q8k_len = nb;
+                let qh = qt_w;
+                let yh = out_tensor;
+                // SETUP ends at parallel_rows entry. DISPATCH_WAIT wraps
+                // the entire parallel_rows call (fork + worker work +
+                // join). The per-worker chunk_impl invocation is timed
+                // SEPARATELY by each worker via WORK_PER_WORKER — its
+                // call count is `parallel_rows_invocations * n_workers`,
+                // so divide its ns by num_matmul_calls (NOT call count)
+                // for per-matmul total work, or by call count for per-
+                // worker average.
+                drop(setup_guard);
+                let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
+                    &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
+                );
+                crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+                    let _work_guard = crate::kernel_timing::TimerGuard::new(
+                        &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
+                    );
+                    let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+                    qmatmul_chunk_impl_sdot_q4km(qh, yh, lo as i64, hi as i64, q8k_slice);
+                });
+                out_tensor
+            });
+        }
+
+        // Experimental multi-row prefill path. The decode SDOT fast path above
+        // handles `batch == 1`; prompt prefill arrives as `batch == seq_len`, so
+        // the old fallback dequantised each Q4_K_M weight block to F32 and dotted
+        // it against every prompt row. Here we pre-quantise every prompt row to
+        // Q8_K once, then run the same Q4_K_M × Q8_K block dot over output-row
+        // bands. This keeps scheduling inside the native worker pool and avoids a
+        // Haxe-side WorkerPool/FFI fan-out.
+        let use_prefill_morsels = prefill_morsels_enabled()
+            && sdot_enabled_runtime()
+            && batch > 1
+            && qt.scheme == QSCHEME_Q4_K_M
+            && x_is_row_major_contiguous(x_tensor, k);
+        if use_prefill_morsels {
+            let setup_guard =
+                crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
+            let x_data = x_tensor_data_ptr(x_tensor);
+            let row_stride = x_tensor_row_stride(x_tensor);
+
+            return X_Q8K_SCRATCH.with(|cell| {
+                let mut x_q8k = cell.borrow_mut();
+                prepare_x_q8k_batch_into(x_data, batch, k, row_stride, &mut x_q8k);
+                let nb = k / Q4_K_M_BLOCK_SIZE;
+
+                if t <= 1 {
+                    drop(setup_guard);
+                    qmatmul_chunk_impl_sdot_q4km_batch(
+                        qt_w,
+                        out_tensor,
+                        0,
+                        n as i64,
+                        batch,
+                        &x_q8k[..batch * nb],
+                    );
+                    return out_tensor;
+                }
+
+                let q8k_ptr = x_q8k.as_ptr() as usize;
+                let q8k_len = batch * nb;
+                let qh = qt_w;
+                let yh = out_tensor;
+                drop(setup_guard);
+                let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
+                    &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
+                );
+                crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+                    let _work_guard = crate::kernel_timing::TimerGuard::new(
+                        &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
+                    );
+                    let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+                    qmatmul_chunk_impl_sdot_q4km_batch(
+                        qh, yh, lo as i64, hi as i64, batch, q8k_slice,
+                    );
+                });
+                out_tensor
+            });
+        }
+
+        if t <= 1 {
+            qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
+            return out_tensor;
+        }
+
+        // Fallback path (multi-batch / non-contiguous / non-Q4_K_M /
+        // SDOT-disabled). Workers re-derive their own per-block Q8 cache
+        // inside `qmatmul_chunk_impl` for the shapes that don't fit the
+        // shared-X pre-quant pattern.
+        let xh = x_tensor;
+        let qh = qt_w;
+        let yh = out_tensor;
+        crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+            // SAFETY: each worker writes Y[*, lo..hi); ranges are disjoint
+            // across calls (the pool guarantees this for a single
+            // parallel_rows invocation) so there's no aliasing on Y. X
+            // and Wq are read-only.
+            {
+                qmatmul_chunk_impl(xh, qh, yh, lo as i64, hi as i64);
+            }
+        });
+        out_tensor
+    }
 }
 
 /// Fused Q/K/V projection: three concurrent `Y = X @ Wq.T` matmuls
@@ -2361,197 +2437,201 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     out_k_tensor: *mut i64,
     out_v_tensor: *mut i64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt =
-        crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QKV_QT_T_F32_THREADED);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qkv_qt_t_f32_threaded");
-    // Null guards. `out_*_tensor` are written only on success, so we
-    // refuse to run if any of them is null (otherwise the caller would
-    // silently lose the output handles).
-    if x_tensor == 0
-        || q_w == 0
-        || k_w == 0
-        || v_w == 0
-        || out_q_tensor.is_null()
-        || out_k_tensor.is_null()
-        || out_v_tensor.is_null()
-    {
-        return 1;
-    }
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(
+            &crate::kernel_timing::MATMUL_QKV_QT_T_F32_THREADED,
+        );
+        let _hc =
+            crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qkv_qt_t_f32_threaded");
+        // Null guards. `out_*_tensor` are written only on success, so we
+        // refuse to run if any of them is null (otherwise the caller would
+        // silently lose the output handles).
+        if x_tensor == 0
+            || q_w == 0
+            || k_w == 0
+            || v_w == 0
+            || out_q_tensor.is_null()
+            || out_k_tensor.is_null()
+            || out_v_tensor.is_null()
+        {
+            return 1;
+        }
 
-    let qt_q = &*(q_w as *const RayzorQTensor);
-    let qt_k = &*(k_w as *const RayzorQTensor);
-    let qt_v = &*(v_w as *const RayzorQTensor);
+        let qt_q = &*(q_w as *const RayzorQTensor);
+        let qt_k = &*(k_w as *const RayzorQTensor);
+        let qt_v = &*(v_w as *const RayzorQTensor);
 
-    // Per-weight prep validates X-vs-Wq shape/dtype individually.
-    // Each returns `(batch, n, k, _, _)`; we then enforce that
-    // (batch, k) match across all three weights (they must, since
-    // they all read the same activation).
-    let (batch_q, q_n, k_q, _, _) = match qmatmul_prep(x_tensor, qt_q) {
-        Some(p) => p,
-        None => return 2,
-    };
-    let (batch_k, k_n, k_k, _, _) = match qmatmul_prep(x_tensor, qt_k) {
-        Some(p) => p,
-        None => return 2,
-    };
-    let (batch_v, v_n, k_v, _, _) = match qmatmul_prep(x_tensor, qt_v) {
-        Some(p) => p,
-        None => return 2,
-    };
-    if batch_q != batch_k || batch_q != batch_v || k_q != k_k || k_q != k_v {
-        return 3;
-    }
-    let batch = batch_q;
-    let k = k_q;
+        // Per-weight prep validates X-vs-Wq shape/dtype individually.
+        // Each returns `(batch, n, k, _, _)`; we then enforce that
+        // (batch, k) match across all three weights (they must, since
+        // they all read the same activation).
+        let (batch_q, q_n, k_q, _, _) = match qmatmul_prep(x_tensor, qt_q) {
+            Some(p) => p,
+            None => return 2,
+        };
+        let (batch_k, k_n, k_k, _, _) = match qmatmul_prep(x_tensor, qt_k) {
+            Some(p) => p,
+            None => return 2,
+        };
+        let (batch_v, v_n, k_v, _, _) = match qmatmul_prep(x_tensor, qt_v) {
+            Some(p) => p,
+            None => return 2,
+        };
+        if batch_q != batch_k || batch_q != batch_v || k_q != k_k || k_q != k_v {
+            return 3;
+        }
+        let batch = batch_q;
+        let k = k_q;
 
-    // Up-front fast-path gate. All three weights must satisfy the
-    // SDOT preconditions; if any one of them doesn't, we bail and let
-    // the Haxe caller fall back to three sequential
-    // `rayzor_tensor_matmul_qt_t_f32_threaded` invocations (which
-    // each independently route the non-Q4_K_M / multi-batch shapes
-    // through their existing fallback code).
-    let fast_path = sdot_enabled_runtime()
-        && batch == 1
-        && qt_q.scheme == QSCHEME_Q4_K_M
-        && qt_k.scheme == QSCHEME_Q4_K_M
-        && qt_v.scheme == QSCHEME_Q4_K_M
-        && x_is_contiguous(x_tensor);
-    if !fast_path {
-        return 4;
-    }
+        // Up-front fast-path gate. All three weights must satisfy the
+        // SDOT preconditions; if any one of them doesn't, we bail and let
+        // the Haxe caller fall back to three sequential
+        // `rayzor_tensor_matmul_qt_t_f32_threaded` invocations (which
+        // each independently route the non-Q4_K_M / multi-batch shapes
+        // through their existing fallback code).
+        let fast_path = sdot_enabled_runtime()
+            && batch == 1
+            && qt_q.scheme == QSCHEME_Q4_K_M
+            && qt_k.scheme == QSCHEME_Q4_K_M
+            && qt_v.scheme == QSCHEME_Q4_K_M
+            && x_is_contiguous(x_tensor);
+        if !fast_path {
+            return 4;
+        }
 
-    // Allocate the three F32 output tensors. If any one fails, free
-    // the earlier ones via the standard tensor free path to avoid a
-    // leak on the rare allocation-failure case.
-    let q_shape = [batch, q_n];
-    let k_shape = [batch, k_n];
-    let v_shape = [batch, v_n];
-    let out_q = crate::tensor::rayzor_tensor_zeros(q_shape.as_ptr() as i64, 2, 0);
-    if out_q == 0 {
-        return 5;
-    }
-    let out_k = crate::tensor::rayzor_tensor_zeros(k_shape.as_ptr() as i64, 2, 0);
-    if out_k == 0 {
-        crate::tensor::rayzor_tensor_free(out_q);
-        return 5;
-    }
-    let out_v = crate::tensor::rayzor_tensor_zeros(v_shape.as_ptr() as i64, 2, 0);
-    if out_v == 0 {
-        crate::tensor::rayzor_tensor_free(out_q);
-        crate::tensor::rayzor_tensor_free(out_k);
-        return 5;
-    }
+        // Allocate the three F32 output tensors. If any one fails, free
+        // the earlier ones via the standard tensor free path to avoid a
+        // leak on the rare allocation-failure case.
+        let q_shape = [batch, q_n];
+        let k_shape = [batch, k_n];
+        let v_shape = [batch, v_n];
+        let out_q = crate::tensor::rayzor_tensor_zeros(q_shape.as_ptr() as i64, 2, 0);
+        if out_q == 0 {
+            return 5;
+        }
+        let out_k = crate::tensor::rayzor_tensor_zeros(k_shape.as_ptr() as i64, 2, 0);
+        if out_k == 0 {
+            crate::tensor::rayzor_tensor_free(out_q);
+            return 5;
+        }
+        let out_v = crate::tensor::rayzor_tensor_zeros(v_shape.as_ptr() as i64, 2, 0);
+        if out_v == 0 {
+            crate::tensor::rayzor_tensor_free(out_q);
+            crate::tensor::rayzor_tensor_free(out_k);
+            return 5;
+        }
 
-    // Pick worker count from the same auto/explicit rule the
-    // single-projection threaded path uses. Cap at the total row
-    // count so we don't spawn idle workers when the row space is
-    // tiny.
-    let total_rows = q_n + k_n + v_n;
-    // Resolve the auto worker count only when it is actually needed: the
-    // resolver reaches into the host binary (RTLD_GLOBAL `perf_core_count`),
-    // which is absent under `cargo test`, so an eager call here made every
-    // Q4_K path untestable (null fn pointer -> SIGSEGV).
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        crate::worker_pool::auto_kernel_threads()
-    };
-    if t > total_rows {
-        t = total_rows.max(1);
-    }
+        // Pick worker count from the same auto/explicit rule the
+        // single-projection threaded path uses. Cap at the total row
+        // count so we don't spawn idle workers when the row space is
+        // tiny.
+        let total_rows = q_n + k_n + v_n;
+        // Resolve the auto worker count only when it is actually needed: the
+        // resolver reaches into the host binary (RTLD_GLOBAL `perf_core_count`),
+        // which is absent under `cargo test`, so an eager call here made every
+        // Q4_K path untestable (null fn pointer -> SIGSEGV).
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            crate::worker_pool::auto_kernel_threads()
+        };
+        if t > total_rows {
+            t = total_rows.max(1);
+        }
 
-    // Pre-quantise X to Q8_K ONCE into the thread-local scratch.
-    // All three weights share this view (same activation row, same
-    // K). The borrow on the RefCell is held across the
-    // parallel_rows join so workers' raw-ptr reads of the scratch
-    // remain valid.
-    let x_data = x_tensor_data_ptr(x_tensor);
-    X_Q8K_SCRATCH.with(|cell| {
-        let mut x_q8k = cell.borrow_mut();
-        prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
-        let nb = k / Q4_K_M_BLOCK_SIZE;
+        // Pre-quantise X to Q8_K ONCE into the thread-local scratch.
+        // All three weights share this view (same activation row, same
+        // K). The borrow on the RefCell is held across the
+        // parallel_rows join so workers' raw-ptr reads of the scratch
+        // remain valid.
+        let x_data = x_tensor_data_ptr(x_tensor);
+        X_Q8K_SCRATCH.with(|cell| {
+            let mut x_q8k = cell.borrow_mut();
+            prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+            let nb = k / Q4_K_M_BLOCK_SIZE;
 
-        // Single-threaded shortcut — keeps the inner kernel exactly
-        // the same as the threaded path so the byte-exact reduction
-        // order holds across `threads == 1` vs `threads > 1`.
-        if t <= 1 {
-            qmatmul_chunk_impl_sdot_q4km(q_w, out_q, 0, q_n as i64, &x_q8k[..nb]);
-            qmatmul_chunk_impl_sdot_q4km(k_w, out_k, 0, k_n as i64, &x_q8k[..nb]);
-            qmatmul_chunk_impl_sdot_q4km(v_w, out_v, 0, v_n as i64, &x_q8k[..nb]);
+            // Single-threaded shortcut — keeps the inner kernel exactly
+            // the same as the threaded path so the byte-exact reduction
+            // order holds across `threads == 1` vs `threads > 1`.
+            if t <= 1 {
+                qmatmul_chunk_impl_sdot_q4km(q_w, out_q, 0, q_n as i64, &x_q8k[..nb]);
+                qmatmul_chunk_impl_sdot_q4km(k_w, out_k, 0, k_n as i64, &x_q8k[..nb]);
+                qmatmul_chunk_impl_sdot_q4km(v_w, out_v, 0, v_n as i64, &x_q8k[..nb]);
+                *out_q_tensor = out_q;
+                *out_k_tensor = out_k;
+                *out_v_tensor = out_v;
+                return;
+            }
+
+            // Multi-threaded fan-out over the concatenated row space.
+            // Concatenated layout: [0, q_n) → Q, [q_n, q_n+k_n) → K,
+            // [q_n+k_n, total_rows) → V. Each worker receives
+            // `[lo, hi) ⊆ [0, total_rows)`, clips that window against
+            // each per-weight band, and dispatches one chunk call per
+            // non-empty intersection. Output rows are disjoint across
+            // workers AND across the three output tensors, so no
+            // aliasing on any of Q/K/V outputs.
+            //
+            // SAFETY: the scratch borrow is held by this closure across
+            // the parallel_rows join, so the storage workers read via
+            // raw ptr stays alive throughout.
+            let q8k_ptr = x_q8k.as_ptr() as usize;
+            let q8k_len = nb;
+            let q_split = q_n;
+            let k_split = q_n + k_n;
+            let q_handle = q_w;
+            let k_handle = k_w;
+            let v_handle = v_w;
+            let out_q_handle = out_q;
+            let out_k_handle = out_k;
+            let out_v_handle = out_v;
+            crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| {
+                let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+
+                let q_lo = lo;
+                let q_hi = hi.min(q_split);
+                if q_lo < q_hi {
+                    qmatmul_chunk_impl_sdot_q4km(
+                        q_handle,
+                        out_q_handle,
+                        q_lo as i64,
+                        q_hi as i64,
+                        q8k_slice,
+                    );
+                }
+
+                let k_lo = lo.max(q_split);
+                let k_hi = hi.min(k_split);
+                if k_lo < k_hi {
+                    qmatmul_chunk_impl_sdot_q4km(
+                        k_handle,
+                        out_k_handle,
+                        (k_lo - q_split) as i64,
+                        (k_hi - q_split) as i64,
+                        q8k_slice,
+                    );
+                }
+
+                let v_lo = lo.max(k_split);
+                let v_hi = hi;
+                if v_lo < v_hi {
+                    qmatmul_chunk_impl_sdot_q4km(
+                        v_handle,
+                        out_v_handle,
+                        (v_lo - k_split) as i64,
+                        (v_hi - k_split) as i64,
+                        q8k_slice,
+                    );
+                }
+            });
+
             *out_q_tensor = out_q;
             *out_k_tensor = out_k;
             *out_v_tensor = out_v;
-            return;
-        }
-
-        // Multi-threaded fan-out over the concatenated row space.
-        // Concatenated layout: [0, q_n) → Q, [q_n, q_n+k_n) → K,
-        // [q_n+k_n, total_rows) → V. Each worker receives
-        // `[lo, hi) ⊆ [0, total_rows)`, clips that window against
-        // each per-weight band, and dispatches one chunk call per
-        // non-empty intersection. Output rows are disjoint across
-        // workers AND across the three output tensors, so no
-        // aliasing on any of Q/K/V outputs.
-        //
-        // SAFETY: the scratch borrow is held by this closure across
-        // the parallel_rows join, so the storage workers read via
-        // raw ptr stays alive throughout.
-        let q8k_ptr = x_q8k.as_ptr() as usize;
-        let q8k_len = nb;
-        let q_split = q_n;
-        let k_split = q_n + k_n;
-        let q_handle = q_w;
-        let k_handle = k_w;
-        let v_handle = v_w;
-        let out_q_handle = out_q;
-        let out_k_handle = out_k;
-        let out_v_handle = out_v;
-        crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| unsafe {
-            let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
-
-            let q_lo = lo;
-            let q_hi = hi.min(q_split);
-            if q_lo < q_hi {
-                qmatmul_chunk_impl_sdot_q4km(
-                    q_handle,
-                    out_q_handle,
-                    q_lo as i64,
-                    q_hi as i64,
-                    q8k_slice,
-                );
-            }
-
-            let k_lo = lo.max(q_split);
-            let k_hi = hi.min(k_split);
-            if k_lo < k_hi {
-                qmatmul_chunk_impl_sdot_q4km(
-                    k_handle,
-                    out_k_handle,
-                    (k_lo - q_split) as i64,
-                    (k_hi - q_split) as i64,
-                    q8k_slice,
-                );
-            }
-
-            let v_lo = lo.max(k_split);
-            let v_hi = hi;
-            if v_lo < v_hi {
-                qmatmul_chunk_impl_sdot_q4km(
-                    v_handle,
-                    out_v_handle,
-                    (v_lo - k_split) as i64,
-                    (v_hi - k_split) as i64,
-                    q8k_slice,
-                );
-            }
         });
-
-        *out_q_tensor = out_q;
-        *out_k_tensor = out_k;
-        *out_v_tensor = out_v;
-    });
-    0
+        0
+    }
 }
 
 /// Bias the calling thread toward the performance cores on macOS.
@@ -2610,41 +2690,44 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     n_start: i64,
     n_end: i64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_CHUNK);
-    if x_tensor == 0 || qt_w == 0 || y_tensor == 0 {
-        return 0;
-    }
-    let qt = &*(qt_w as *const RayzorQTensor);
-    let (batch, _n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
-        Some(p) => p,
-        None => return 0,
-    };
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt =
+            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_CHUNK);
+        if x_tensor == 0 || qt_w == 0 || y_tensor == 0 {
+            return 0;
+        }
+        let qt = &*(qt_w as *const RayzorQTensor);
+        let (batch, _n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
+            Some(p) => p,
+            None => return 0,
+        };
 
-    // SDOT chunk fast path: pre-quantise the X super-blocks that this
-    // chunk touches ONCE at entry, then dispatch the canonical
-    // `vec_dot_q4_K_q8_K` over each output row in `[n_start, n_end)`.
-    // Versus the legacy lazy-cache in `qmatmul_chunk_impl`, this is
-    // identical in arithmetic and hands the inner loop the spec-shaped
-    // public Q8KBlock layout — the same path the `quantize_row_q8_K`
-    // unit tests exercise.
-    if sdot_enabled_runtime()
-        && batch == 1
-        && qt.scheme == QSCHEME_Q4_K_M
-        && x_is_contiguous(x_tensor)
-    {
-        let x_data = x_tensor_data_ptr(x_tensor);
-        X_Q8K_SCRATCH.with(|cell| {
-            let mut x_q8k = cell.borrow_mut();
-            prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
-            let nb = k / Q4_K_M_BLOCK_SIZE;
-            qmatmul_chunk_impl_sdot_q4km(qt_w, y_tensor, n_start, n_end, &x_q8k[..nb]);
-        });
-        return 1;
-    }
+        // SDOT chunk fast path: pre-quantise the X super-blocks that this
+        // chunk touches ONCE at entry, then dispatch the canonical
+        // `vec_dot_q4_K_q8_K` over each output row in `[n_start, n_end)`.
+        // Versus the legacy lazy-cache in `qmatmul_chunk_impl`, this is
+        // identical in arithmetic and hands the inner loop the spec-shaped
+        // public Q8KBlock layout — the same path the `quantize_row_q8_K`
+        // unit tests exercise.
+        if sdot_enabled_runtime()
+            && batch == 1
+            && qt.scheme == QSCHEME_Q4_K_M
+            && x_is_contiguous(x_tensor)
+        {
+            let x_data = x_tensor_data_ptr(x_tensor);
+            X_Q8K_SCRATCH.with(|cell| {
+                let mut x_q8k = cell.borrow_mut();
+                prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+                let nb = k / Q4_K_M_BLOCK_SIZE;
+                qmatmul_chunk_impl_sdot_q4km(qt_w, y_tensor, n_start, n_end, &x_q8k[..nb]);
+            });
+            return 1;
+        }
 
-    qmatmul_chunk_impl(x_tensor, qt_w, y_tensor, n_start, n_end);
-    1
+        qmatmul_chunk_impl(x_tensor, qt_w, y_tensor, n_start, n_end);
+        1
+    }
 }
 
 /// Shape-validate `X` and a `Wq` QTensor for `Y = X @ Wq.T`. Returns
@@ -2653,38 +2736,40 @@ unsafe fn qmatmul_prep(
     x_tensor: i64,
     qt: &RayzorQTensor,
 ) -> Option<(usize, usize, usize, usize, usize)> {
-    let (block_size, block_bytes) = match qt.scheme {
-        QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
-        QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
-        _ => return None,
-    };
+    unsafe {
+        let (block_size, block_bytes) = match qt.scheme {
+            QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+            QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
+            _ => return None,
+        };
 
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let x_head = &*(x_tensor as *const TensorHead);
-    if x_head.ndim != 2 || x_head.dtype != 0
-    /* DTYPE_F32 */
-    {
-        return None;
-    }
-    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
-    let batch = x_shape[0];
-    let k = x_shape[1];
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let x_head = &*(x_tensor as *const TensorHead);
+        if x_head.ndim != 2 || x_head.dtype != 0
+        /* DTYPE_F32 */
+        {
+            return None;
+        }
+        let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+        let batch = x_shape[0];
+        let k = x_shape[1];
 
-    if k != qt.cols || !k.is_multiple_of(block_size) {
-        return None;
+        if k != qt.cols || !k.is_multiple_of(block_size) {
+            return None;
+        }
+        Some((batch, qt.rows, k, block_size, block_bytes))
     }
-    Some((batch, qt.rows, k, block_size, block_bytes))
 }
 
 /// Architecture-agnostic SDOT runtime gate. Returns `true` only on
@@ -2747,24 +2832,26 @@ fn prefill_morsels_enabled() -> bool {
 /// the inner kernel a flat `*const f32` view of each X super-block.
 #[inline]
 unsafe fn x_is_contiguous(x_tensor: i64) -> bool {
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
+    unsafe {
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let head = &*(x_tensor as *const TensorHead);
+        if head.ndim != 2 || head.dtype != 0 {
+            return false;
+        }
+        let strides = std::slice::from_raw_parts(head.strides, 2);
+        strides[1] == 1
     }
-    let head = &*(x_tensor as *const TensorHead);
-    if head.ndim != 2 || head.dtype != 0 {
-        return false;
-    }
-    let strides = std::slice::from_raw_parts(head.strides, 2);
-    strides[1] == 1
 }
 
 /// Raw `*const f32` cursor at the start of `x_tensor`'s data buffer.
@@ -2772,40 +2859,44 @@ unsafe fn x_is_contiguous(x_tensor: i64) -> bool {
 /// `x_is_contiguous`).
 #[inline]
 unsafe fn x_tensor_data_ptr(x_tensor: i64) -> *const f32 {
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
+    unsafe {
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        (*(x_tensor as *const TensorHead)).data as *const f32
     }
-    (*(x_tensor as *const TensorHead)).data as *const f32
 }
 
 /// Row stride of a 2-D F32 tensor, in elements. Caller must have validated the
 /// tensor shape before using this in pointer arithmetic.
 #[inline]
 unsafe fn x_tensor_row_stride(x_tensor: i64) -> usize {
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
+    unsafe {
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let head = &*(x_tensor as *const TensorHead);
+        let strides = std::slice::from_raw_parts(head.strides, 2);
+        strides[0]
     }
-    let head = &*(x_tensor as *const TensorHead);
-    let strides = std::slice::from_raw_parts(head.strides, 2);
-    strides[0]
 }
 
 /// Is `x_tensor` a dense row-major `[batch, k]` F32 matrix?
@@ -2816,24 +2907,26 @@ unsafe fn x_tensor_row_stride(x_tensor: i64) -> usize {
 /// `strides[0] == k` so row `b + 1` starts exactly after row `b`.
 #[inline]
 unsafe fn x_is_row_major_contiguous(x_tensor: i64, k: usize) -> bool {
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
+    unsafe {
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let head = &*(x_tensor as *const TensorHead);
+        if head.ndim != 2 || head.dtype != 0 {
+            return false;
+        }
+        let strides = std::slice::from_raw_parts(head.strides, 2);
+        strides[1] == 1 && strides[0] == k
     }
-    let head = &*(x_tensor as *const TensorHead);
-    if head.ndim != 2 || head.dtype != 0 {
-        return false;
-    }
-    let strides = std::slice::from_raw_parts(head.strides, 2);
-    strides[1] == 1 && strides[0] == k
 }
 
 /// Pre-quantise every row of a dense prefill activation matrix into one
@@ -2845,23 +2938,25 @@ unsafe fn prepare_x_q8k_batch_into(
     row_stride: usize,
     dest: &mut Vec<Q8KBlock>,
 ) {
-    debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
-    let nb = k / Q4_K_M_BLOCK_SIZE;
-    let needed = batch * nb;
-    if dest.len() < needed {
-        dest.resize(
-            needed,
-            Q8KBlock {
-                d: 0.0,
-                qs: [0i8; 256],
-                bsums: [0i16; 16],
-            },
-        );
-    }
-    for b in 0..batch {
-        let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
-        let start = b * nb;
-        quantize_row_q8_K(row, &mut dest[start..start + nb]);
+    unsafe {
+        debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
+        let nb = k / Q4_K_M_BLOCK_SIZE;
+        let needed = batch * nb;
+        if dest.len() < needed {
+            dest.resize(
+                needed,
+                Q8KBlock {
+                    d: 0.0,
+                    qs: [0i8; 256],
+                    bsums: [0i16; 16],
+                },
+            );
+        }
+        for b in 0..batch {
+            let row = std::slice::from_raw_parts(x_data.add(b * row_stride), k);
+            let start = b * nb;
+            quantize_row_q8_K(row, &mut dest[start..start + nb]);
+        }
     }
 }
 
@@ -2905,99 +3000,106 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
     n_end: i64,
     x_q8k: &[Q8KBlock],
 ) {
-    let qt = &*(qt_w as *const RayzorQTensor);
-    let block_size = Q4_K_M_BLOCK_SIZE;
-    let block_bytes = Q4_K_M_BLOCK_BYTES;
+    unsafe {
+        let qt = &*(qt_w as *const RayzorQTensor);
+        let block_size = Q4_K_M_BLOCK_SIZE;
+        let block_bytes = Q4_K_M_BLOCK_BYTES;
 
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let y_head = &*(y_tensor as *const TensorHead);
-    let y_data = y_head.data as *mut f32;
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let y_head = &*(y_tensor as *const TensorHead);
+        let y_data = y_head.data as *mut f32;
 
-    let n = qt.rows;
-    let blocks_per_row = qt.cols / block_size;
-    debug_assert_eq!(x_q8k.len(), blocks_per_row);
+        let n = qt.rows;
+        let blocks_per_row = qt.cols / block_size;
+        debug_assert_eq!(x_q8k.len(), blocks_per_row);
 
-    let lo = (n_start.max(0) as usize).min(n);
-    let hi = (n_end.max(0) as usize).min(n);
-    if lo >= hi {
-        return;
-    }
-
-    // Two-block paired SDOT path: when blocks_per_row is even (the
-    // common case for k = 2048 → 8 blocks, k = 4096 → 16 blocks)
-    // process pairs of (b_idx, b_idx+1) with one
-    // `dot_q4_k_q8_kblock_2` call. Interleaves both blocks' inner
-    // SDOT chains so M1's OoO scheduler sees 8 independent
-    // accumulators per sub-block-pair iteration instead of 4.
-    //
-    // The per-block result is bit-identical to the single-block
-    // path — the partial reduction order within each block is the
-    // same, only the *order in which two consecutive blocks fire*
-    // changes. So the row sum `vec_dot(a) + vec_dot(b)` matches
-    // exactly when we call `dot_q4_k_q8_kblock_2(a, b)` and add the
-    // two returned f32s.
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_pairs = sdot_enabled() && blocks_per_row >= 2 && blocks_per_row.is_multiple_of(2);
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-    let use_pairs = false;
-
-    // Llama.cpp-pattern kernel is 2.12x faster in standalone microbench
-    // (perf_q4km_llamacpp_kernel_port). Default ON; set
-    // RZT_LEGACY_KERNEL=1 to fall back to the 2-block paired path
-    // for A/B or in case of numerical regression on a specific workload.
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_fast = fast_kernel_enabled();
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-    let use_fast = false;
-
-    for n_idx in lo..hi {
-        let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
-        let mut sum = 0.0f32;
-
-        if use_fast {
-            // Fastest path: llama.cpp-pattern single-block kernel in a
-            // simple loop. The 2-block pairing win (~7% kernel-level
-            // from acb80e5) is dominated by the 2.12x kernel speedup,
-            // so pairing is no longer needed.
-            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-            for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
-                let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
-                sum += dot_q4_k_q8_kblock_fast(weight, x_block);
-            }
-        } else if use_pairs {
-            // Legacy path: 2-block paired SDOT (acb80e5). Keep behind
-            // RZT_LEGACY_KERNEL=1 for A/B regression testing.
-            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-            {
-                let mut b_idx = 0;
-                while b_idx + 1 < blocks_per_row {
-                    let weight_a = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
-                    let weight_b = &*(row_ptr.add((b_idx + 1) * block_bytes) as *const Q4KMBlock);
-                    let (sa, sb) =
-                        dot_q4_k_q8_kblock_2(weight_a, weight_b, &x_q8k[b_idx], &x_q8k[b_idx + 1]);
-                    sum += sa + sb;
-                    b_idx += 2;
-                }
-            }
-        } else {
-            for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
-                let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
-                sum += vec_dot_q4_K_q8_K(weight, x_block);
-            }
+        let lo = (n_start.max(0) as usize).min(n);
+        let hi = (n_end.max(0) as usize).min(n);
+        if lo >= hi {
+            return;
         }
 
-        *y_data.add(n_idx) = sum;
+        // Two-block paired SDOT path: when blocks_per_row is even (the
+        // common case for k = 2048 → 8 blocks, k = 4096 → 16 blocks)
+        // process pairs of (b_idx, b_idx+1) with one
+        // `dot_q4_k_q8_kblock_2` call. Interleaves both blocks' inner
+        // SDOT chains so M1's OoO scheduler sees 8 independent
+        // accumulators per sub-block-pair iteration instead of 4.
+        //
+        // The per-block result is bit-identical to the single-block
+        // path — the partial reduction order within each block is the
+        // same, only the *order in which two consecutive blocks fire*
+        // changes. So the row sum `vec_dot(a) + vec_dot(b)` matches
+        // exactly when we call `dot_q4_k_q8_kblock_2(a, b)` and add the
+        // two returned f32s.
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let use_pairs = sdot_enabled() && blocks_per_row >= 2 && blocks_per_row.is_multiple_of(2);
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+        let use_pairs = false;
+
+        // Llama.cpp-pattern kernel is 2.12x faster in standalone microbench
+        // (perf_q4km_llamacpp_kernel_port). Default ON; set
+        // RZT_LEGACY_KERNEL=1 to fall back to the 2-block paired path
+        // for A/B or in case of numerical regression on a specific workload.
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let use_fast = fast_kernel_enabled();
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+        let use_fast = false;
+
+        for n_idx in lo..hi {
+            let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+            let mut sum = 0.0f32;
+
+            if use_fast {
+                // Fastest path: llama.cpp-pattern single-block kernel in a
+                // simple loop. The 2-block pairing win (~7% kernel-level
+                // from acb80e5) is dominated by the 2.12x kernel speedup,
+                // so pairing is no longer needed.
+                #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
+                    let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
+                    sum += dot_q4_k_q8_kblock_fast(weight, x_block);
+                }
+            } else if use_pairs {
+                // Legacy path: 2-block paired SDOT (acb80e5). Keep behind
+                // RZT_LEGACY_KERNEL=1 for A/B regression testing.
+                #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                {
+                    let mut b_idx = 0;
+                    while b_idx + 1 < blocks_per_row {
+                        let weight_a = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
+                        let weight_b =
+                            &*(row_ptr.add((b_idx + 1) * block_bytes) as *const Q4KMBlock);
+                        let (sa, sb) = dot_q4_k_q8_kblock_2(
+                            weight_a,
+                            weight_b,
+                            &x_q8k[b_idx],
+                            &x_q8k[b_idx + 1],
+                        );
+                        sum += sa + sb;
+                        b_idx += 2;
+                    }
+                }
+            } else {
+                for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
+                    let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
+                    sum += vec_dot_q4_K_q8_K(weight, x_block);
+                }
+            }
+
+            *y_data.add(n_idx) = sum;
+        }
     }
 }
 
@@ -3016,60 +3118,62 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
     batch: usize,
     x_q8k: &[Q8KBlock],
 ) {
-    let qt = &*(qt_w as *const RayzorQTensor);
-    let block_size = Q4_K_M_BLOCK_SIZE;
-    let block_bytes = Q4_K_M_BLOCK_BYTES;
+    unsafe {
+        let qt = &*(qt_w as *const RayzorQTensor);
+        let block_size = Q4_K_M_BLOCK_SIZE;
+        let block_bytes = Q4_K_M_BLOCK_BYTES;
 
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let y_head = &*(y_tensor as *const TensorHead);
-    let y_data = y_head.data as *mut f32;
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        let y_head = &*(y_tensor as *const TensorHead);
+        let y_data = y_head.data as *mut f32;
 
-    let n = qt.rows;
-    let blocks_per_row = qt.cols / block_size;
-    debug_assert_eq!(x_q8k.len(), batch * blocks_per_row);
+        let n = qt.rows;
+        let blocks_per_row = qt.cols / block_size;
+        debug_assert_eq!(x_q8k.len(), batch * blocks_per_row);
 
-    let lo = (n_start.max(0) as usize).min(n);
-    let hi = (n_end.max(0) as usize).min(n);
-    if lo >= hi || batch == 0 {
-        return;
-    }
+        let lo = (n_start.max(0) as usize).min(n);
+        let hi = (n_end.max(0) as usize).min(n);
+        if lo >= hi || batch == 0 {
+            return;
+        }
 
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_fast = fast_kernel_enabled();
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
-    let use_fast = false;
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let use_fast = fast_kernel_enabled();
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+        let use_fast = false;
 
-    for n_idx in lo..hi {
-        let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
-        for b in 0..batch {
-            let x_blocks = &x_q8k[b * blocks_per_row..(b + 1) * blocks_per_row];
-            let mut sum = 0.0f32;
+        for n_idx in lo..hi {
+            let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+            for b in 0..batch {
+                let x_blocks = &x_q8k[b * blocks_per_row..(b + 1) * blocks_per_row];
+                let mut sum = 0.0f32;
 
-            if use_fast {
-                #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-                for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
-                    let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
-                    sum += dot_q4_k_q8_kblock_fast(weight, x_block);
+                if use_fast {
+                    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                    for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
+                        let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
+                        sum += dot_q4_k_q8_kblock_fast(weight, x_block);
+                    }
+                } else {
+                    for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
+                        let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
+                        sum += vec_dot_q4_K_q8_K(weight, x_block);
+                    }
                 }
-            } else {
-                for (block_idx, x_block) in x_blocks.iter().enumerate().take(blocks_per_row) {
-                    let weight = &*(row_ptr.add(block_idx * block_bytes) as *const Q4KMBlock);
-                    sum += vec_dot_q4_K_q8_K(weight, x_block);
-                }
+
+                *y_data.add(b * n + n_idx) = sum;
             }
-
-            *y_data.add(b * n + n_idx) = sum;
         }
     }
 }
@@ -3080,119 +3184,149 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km_batch(
 /// thread-local heap; cross-thread state is just the `*y` write band,
 /// which workers split disjointly so this needs no synchronisation.
 unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i64, n_end: i64) {
-    let qt = &*(qt_w as *const RayzorQTensor);
-    let (block_size, block_bytes) = match qt.scheme {
-        QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
-        QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
-        _ => return,
-    };
+    unsafe {
+        let qt = &*(qt_w as *const RayzorQTensor);
+        let (block_size, block_bytes) = match qt.scheme {
+            QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+            QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
+            _ => return,
+        };
 
-    #[repr(C)]
-    struct TensorHead {
-        data: *mut u8,
-        shape: *mut usize,
-        strides: *mut usize,
-        ndim: usize,
-        numel: usize,
-        dtype: u8,
-        owns_data: bool,
-        device: u8,
-        numa_node: i32,
-    }
-    let x_head = &*(x_tensor as *const TensorHead);
-    let y_head = &*(y_tensor as *const TensorHead);
-    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
-    let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
-    let batch = x_shape[0];
-    let k = x_shape[1];
-    let n = qt.rows;
-    let blocks_per_row = k / block_size;
-
-    let lo = (n_start.max(0) as usize).min(n);
-    let hi = (n_end.max(0) as usize).min(n);
-    if lo >= hi {
-        return;
-    }
-
-    let y_data = y_head.data as *mut f32;
-    let x_data = x_head.data as *const f32;
-    let x_contig = x_strides[1] == 1;
-
-    // Stage buffer for one dequanted block — 256 floats stays hot in
-    // L1 across the (dequant, dot) pair, so we never write a
-    // full-row scratch. Each `n_idx` iteration walks blocks_per_row
-    // (8 for k=2048) blocks; each block is decoded, dotted against
-    // the matching X chunk, sum accumulated, then discarded.
-    let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
-                                   // Second stage buffer for the Q6_K 2-row tile path (batch=1 decode).
-    let mut stage_pair = [0.0f32; 256];
-
-    // Per-row sums. Sized to `batch` so the general path can write
-    // into it for any value of `batch`; the `batch == 1 && x_contig`
-    // fast path below skips this entirely.
-    let mut row_sums: Vec<f32> = vec![0.0; batch.max(1)];
-
-    // Lazy cache of `quantize_x_block_q8` results for the SDOT path.
-    // Each chunk call reuses the same X across every `n_idx` in
-    // `[lo, hi)`, so quantising it once amortises across the whole
-    // chunk. Populated on the first use of each block index.
-    //
-    // Gate: AArch64 + `+dotprod`. The `+dotprod` requirement matches
-    // the cfg gate on `dot_q4_k_q8` itself — the symbol is cfg'd out
-    // in builds without `+dotprod`, so the `use_sdot` binding (and the
-    // initialiser block) MUST be cfg'd identically. `sdot_enabled()`
-    // is the no-dotprod-stub returning `false` in the alternate arm,
-    // so the runtime gate stays consistent across builds.
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_sdot = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M;
-    // Q6_K SDOT path: same x-q8 cache shape, but uses `dot_q6_k_q8` which
-    // reads `Q8Block::bsums_16` for the -32 bias correction (Q4_K_M uses
-    // `bsums` for its 32-elem sub-block min). Sharing the cache between
-    // both schemes means a single allocation per chunk regardless of which
-    // scheme each call uses. Earlier attempts (per
-    // bugs_q6k_sdot_no_win.md) showed -4.7% in isolated per-row testing
-    // because per-block 6-bit reconstruction eats the SDOT density win at
-    // single-row granularity — combining with the 2-row tile that landed
-    // at 6285c22 amortises the x→Q8 reconstruction across two output rows
-    // per block, which is where the win is expected to come from. Try it,
-    // bench, document failure if not.
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let use_sdot_q6k = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K;
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let mut x_q8_cache: Vec<Q8Block> = Vec::new();
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    let mut x_q8_init: Vec<bool> = Vec::new();
-    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    if use_sdot || use_sdot_q6k {
-        x_q8_cache.reserve_exact(blocks_per_row);
-        for _ in 0..blocks_per_row {
-            x_q8_cache.push(Q8Block {
-                quants: [0i8; 256],
-                scale: 0.0,
-                bsums: [0i32; 8],
-                bsums_16: [0i32; 16],
-            });
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
         }
-        x_q8_init = vec![false; blocks_per_row];
-    }
+        let x_head = &*(x_tensor as *const TensorHead);
+        let y_head = &*(y_tensor as *const TensorHead);
+        let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+        let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
+        let batch = x_shape[0];
+        let k = x_shape[1];
+        let n = qt.rows;
+        let blocks_per_row = k / block_size;
 
-    // Q6_K 2-row tile (batch=1 decode fast path only). Shares one
-    // x-chunk load per block between two output rows, giving two
-    // independent FMA accumulator chains in the inner dot product.
-    // matmul_qt_threaded is the dominant remaining decode-wall share
-    // post-flash-attention on Llama-3.2-1B-Q4_K_M (lm_head is Q6_K),
-    // so even a small per-row saving compounds across vocab=128256 rows.
-    //
-    // SDOT path (use_sdot_q6k): pre-quantise X to Q8 once per block,
-    // reuse across both rows in the tile. Falls back to dequant+f32-dot
-    // when SDOT isn't available (non-aarch64, !+dotprod, or
-    // RZT_USE_SDOT=0).
-    let mut row_start = lo;
-    if batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K {
-        let tiled_end = lo + ((hi - lo) & !1usize); // largest even <= (hi-lo) + lo
-        let mut r = lo;
+        let lo = (n_start.max(0) as usize).min(n);
+        let hi = (n_end.max(0) as usize).min(n);
+        if lo >= hi {
+            return;
+        }
+
+        let y_data = y_head.data as *mut f32;
+        let x_data = x_head.data as *const f32;
+        let x_contig = x_strides[1] == 1;
+
+        // Stage buffer for one dequanted block — 256 floats stays hot in
+        // L1 across the (dequant, dot) pair, so we never write a
+        // full-row scratch. Each `n_idx` iteration walks blocks_per_row
+        // (8 for k=2048) blocks; each block is decoded, dotted against
+        // the matching X chunk, sum accumulated, then discarded.
+        let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
+        // Second stage buffer for the Q6_K 2-row tile path (batch=1 decode).
+        let mut stage_pair = [0.0f32; 256];
+
+        // Per-row sums. Sized to `batch` so the general path can write
+        // into it for any value of `batch`; the `batch == 1 && x_contig`
+        // fast path below skips this entirely.
+        let mut row_sums: Vec<f32> = vec![0.0; batch.max(1)];
+
+        // Lazy cache of `quantize_x_block_q8` results for the SDOT path.
+        // Each chunk call reuses the same X across every `n_idx` in
+        // `[lo, hi)`, so quantising it once amortises across the whole
+        // chunk. Populated on the first use of each block index.
+        //
+        // Gate: AArch64 + `+dotprod`. The `+dotprod` requirement matches
+        // the cfg gate on `dot_q4_k_q8` itself — the symbol is cfg'd out
+        // in builds without `+dotprod`, so the `use_sdot` binding (and the
+        // initialiser block) MUST be cfg'd identically. `sdot_enabled()`
+        // is the no-dotprod-stub returning `false` in the alternate arm,
+        // so the runtime gate stays consistent across builds.
         #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-        if use_sdot_q6k {
+        let use_sdot = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M;
+        // Q6_K SDOT path: same x-q8 cache shape, but uses `dot_q6_k_q8` which
+        // reads `Q8Block::bsums_16` for the -32 bias correction (Q4_K_M uses
+        // `bsums` for its 32-elem sub-block min). Sharing the cache between
+        // both schemes means a single allocation per chunk regardless of which
+        // scheme each call uses. Earlier attempts (per
+        // bugs_q6k_sdot_no_win.md) showed -4.7% in isolated per-row testing
+        // because per-block 6-bit reconstruction eats the SDOT density win at
+        // single-row granularity — combining with the 2-row tile that landed
+        // at 6285c22 amortises the x→Q8 reconstruction across two output rows
+        // per block, which is where the win is expected to come from. Try it,
+        // bench, document failure if not.
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let use_sdot_q6k = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K;
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let mut x_q8_cache: Vec<Q8Block> = Vec::new();
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        let mut x_q8_init: Vec<bool> = Vec::new();
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        if use_sdot || use_sdot_q6k {
+            x_q8_cache.reserve_exact(blocks_per_row);
+            for _ in 0..blocks_per_row {
+                x_q8_cache.push(Q8Block {
+                    quants: [0i8; 256],
+                    scale: 0.0,
+                    bsums: [0i32; 8],
+                    bsums_16: [0i32; 16],
+                });
+            }
+            x_q8_init = vec![false; blocks_per_row];
+        }
+
+        // Q6_K 2-row tile (batch=1 decode fast path only). Shares one
+        // x-chunk load per block between two output rows, giving two
+        // independent FMA accumulator chains in the inner dot product.
+        // matmul_qt_threaded is the dominant remaining decode-wall share
+        // post-flash-attention on Llama-3.2-1B-Q4_K_M (lm_head is Q6_K),
+        // so even a small per-row saving compounds across vocab=128256 rows.
+        //
+        // SDOT path (use_sdot_q6k): pre-quantise X to Q8 once per block,
+        // reuse across both rows in the tile. Falls back to dequant+f32-dot
+        // when SDOT isn't available (non-aarch64, !+dotprod, or
+        // RZT_USE_SDOT=0).
+        let mut row_start = lo;
+        if batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K {
+            let tiled_end = lo + ((hi - lo) & !1usize); // largest even <= (hi-lo) + lo
+            let mut r = lo;
+            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+            if use_sdot_q6k {
+                while r < tiled_end {
+                    let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
+                    let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
+                    let mut sum0 = 0.0f32;
+                    let mut sum1 = 0.0f32;
+                    for b_idx in 0..blocks_per_row {
+                        let bp0 = row0_ptr.add(b_idx * block_bytes);
+                        let bp1 = row1_ptr.add(b_idx * block_bytes);
+                        let x_q8 = x_q8_cache_get(
+                            &mut x_q8_cache,
+                            &mut x_q8_init,
+                            b_idx,
+                            x_data.add(b_idx * block_size),
+                        );
+                        sum0 += dot_q6_k_q8(bp0, x_q8);
+                        sum1 += dot_q6_k_q8(bp1, x_q8);
+                    }
+                    *y_data.add(r) = sum0;
+                    *y_data.add(r + 1) = sum1;
+                    r += 2;
+                }
+                #[allow(unused_assignments)] // overwritten at 2959 below when fallback also runs
+                {
+                    row_start = r;
+                }
+            }
+            // Non-SDOT fallback: dequant + f32-dot 2-row tile (the original
+            // 6285c22 implementation). Runs when the SDOT gate is off or the
+            // SDOT path above didn't advance r.
             while r < tiled_end {
                 let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
                 let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
@@ -3201,155 +3335,131 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
                 for b_idx in 0..blocks_per_row {
                     let bp0 = row0_ptr.add(b_idx * block_bytes);
                     let bp1 = row1_ptr.add(b_idx * block_bytes);
-                    let x_q8 = x_q8_cache_get(
-                        &mut x_q8_cache,
-                        &mut x_q8_init,
-                        b_idx,
-                        x_data.add(b_idx * block_size),
-                    );
-                    sum0 += dot_q6_k_q8(bp0, x_q8);
-                    sum1 += dot_q6_k_q8(bp1, x_q8);
+                    dequant_q6_k_block(bp0, &mut stage);
+                    dequant_q6_k_block(bp1, &mut stage_pair);
+                    let x_chunk =
+                        std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
+                    sum0 += dot_f32_simd(x_chunk, &stage);
+                    sum1 += dot_f32_simd(x_chunk, &stage_pair);
                 }
                 *y_data.add(r) = sum0;
                 *y_data.add(r + 1) = sum1;
                 r += 2;
             }
-            #[allow(unused_assignments)] // overwritten at 2959 below when fallback also runs
-            {
-                row_start = r;
-            }
+            row_start = r;
         }
-        // Non-SDOT fallback: dequant + f32-dot 2-row tile (the original
-        // 6285c22 implementation). Runs when the SDOT gate is off or the
-        // SDOT path above didn't advance r.
-        while r < tiled_end {
-            let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
-            let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
-            let mut sum0 = 0.0f32;
-            let mut sum1 = 0.0f32;
-            for b_idx in 0..blocks_per_row {
-                let bp0 = row0_ptr.add(b_idx * block_bytes);
-                let bp1 = row1_ptr.add(b_idx * block_bytes);
-                dequant_q6_k_block(bp0, &mut stage);
-                dequant_q6_k_block(bp1, &mut stage_pair);
-                let x_chunk =
-                    std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
-                sum0 += dot_f32_simd(x_chunk, &stage);
-                sum1 += dot_f32_simd(x_chunk, &stage_pair);
+
+        for n_idx in row_start..hi {
+            let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+
+            if batch == 1 && x_contig {
+                // Decode fast path: single batch row, contiguous X. Q4_K_M
+                // can route through the SDOT kernel when `RZT_USE_SDOT=1`
+                // is set; the F32 path remains the default until A/B
+                // measurement shows SDOT wins on this hardware.
+                let mut sum = 0.0f32;
+                for b_idx in 0..blocks_per_row {
+                    let bp = row_ptr.add(b_idx * block_bytes);
+                    match qt.scheme {
+                        QSCHEME_Q4_K_M => {
+                            // SDOT inner dispatch — `dot_q4_k_q8` exists in
+                            // the binary only when `+dotprod` is enabled, so
+                            // the cfg gate must match the kernel's own
+                            // `#[cfg(...)]`. On aarch64+!dotprod / non-aarch64
+                            // we fall through to the dequant+F32-dot path.
+                            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+                            if use_sdot {
+                                let x_q8 = x_q8_cache_get(
+                                    &mut x_q8_cache,
+                                    &mut x_q8_init,
+                                    b_idx,
+                                    x_data.add(b_idx * block_size),
+                                );
+                                sum += dot_q4_k_q8(bp, x_q8);
+                                continue;
+                            }
+                            let block = decode_q4_k_block(bp);
+                            dequant_q4_k_block(&block, &mut stage);
+                            let x_chunk = std::slice::from_raw_parts(
+                                x_data.add(b_idx * block_size),
+                                block_size,
+                            );
+                            sum += dot_f32_simd(x_chunk, &stage);
+                        }
+                        QSCHEME_Q6_K => {
+                            // Q6_K SDOT was tried (see git history at
+                            // "perf(qmatmul): SDOT...Q6_K") and measured no
+                            // wall-time improvement on M1 Pro — the per-block
+                            // reconstruction overhead (4 shift/mask pairs per
+                            // 16-weight span) eats the SDOT density win at
+                            // this batch size.
+                            //
+                            // SCALAR fused dequant+dot was also tried 2026-06-04:
+                            // saves the 1 KB stage write/read round-trip per
+                            // block but loses the 4-way NEON FMA in
+                            // `dot_f32_simd`. Net -56% tok/s on nue/llama-chat
+                            // (20.5 → 9.2). The fused path only wins once the
+                            // inner loop is itself vectorised — load 4×f32 x,
+                            // decode 4×Q6_K weights via NEON shuffles,
+                            // FMA-accumulate. Estimated ~150 LOC of NEON; see
+                            // [[project-optimization-roadmap]] Tier 2 #4.
+                            // Keeping the staged F32 + dot_f32_simd path until
+                            // that NEON port lands.
+                            dequant_q6_k_block(bp, &mut stage);
+                            let x_chunk = std::slice::from_raw_parts(
+                                x_data.add(b_idx * block_size),
+                                block_size,
+                            );
+                            sum += dot_f32_simd(x_chunk, &stage);
+                        }
+                        // A scheme this kernel does not decode must degrade to
+                        // "no contribution", never panic: this runs under an
+                        // extern "C" frame where unwinding aborts the process.
+                        _ => return,
+                    }
+                }
+                *y_data.add(n_idx) = sum;
+                continue;
             }
-            *y_data.add(r) = sum0;
-            *y_data.add(r + 1) = sum1;
-            r += 2;
-        }
-        row_start = r;
-    }
 
-    for n_idx in row_start..hi {
-        let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+            // General path: batch > 1 or non-contiguous X. Accumulate one
+            // running sum per batch row; flush at the end of the row.
+            row_sums.iter_mut().for_each(|s| *s = 0.0);
 
-        if batch == 1 && x_contig {
-            // Decode fast path: single batch row, contiguous X. Q4_K_M
-            // can route through the SDOT kernel when `RZT_USE_SDOT=1`
-            // is set; the F32 path remains the default until A/B
-            // measurement shows SDOT wins on this hardware.
-            let mut sum = 0.0f32;
             for b_idx in 0..blocks_per_row {
                 let bp = row_ptr.add(b_idx * block_bytes);
                 match qt.scheme {
                     QSCHEME_Q4_K_M => {
-                        // SDOT inner dispatch — `dot_q4_k_q8` exists in
-                        // the binary only when `+dotprod` is enabled, so
-                        // the cfg gate must match the kernel's own
-                        // `#[cfg(...)]`. On aarch64+!dotprod / non-aarch64
-                        // we fall through to the dequant+F32-dot path.
-                        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-                        if use_sdot {
-                            let x_q8 = x_q8_cache_get(
-                                &mut x_q8_cache,
-                                &mut x_q8_init,
-                                b_idx,
-                                x_data.add(b_idx * block_size),
-                            );
-                            sum += dot_q4_k_q8(bp, x_q8);
-                            continue;
-                        }
                         let block = decode_q4_k_block(bp);
                         dequant_q4_k_block(&block, &mut stage);
-                        let x_chunk =
-                            std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
-                        sum += dot_f32_simd(x_chunk, &stage);
                     }
                     QSCHEME_Q6_K => {
-                        // Q6_K SDOT was tried (see git history at
-                        // "perf(qmatmul): SDOT...Q6_K") and measured no
-                        // wall-time improvement on M1 Pro — the per-block
-                        // reconstruction overhead (4 shift/mask pairs per
-                        // 16-weight span) eats the SDOT density win at
-                        // this batch size.
-                        //
-                        // SCALAR fused dequant+dot was also tried 2026-06-04:
-                        // saves the 1 KB stage write/read round-trip per
-                        // block but loses the 4-way NEON FMA in
-                        // `dot_f32_simd`. Net -56% tok/s on nue/llama-chat
-                        // (20.5 → 9.2). The fused path only wins once the
-                        // inner loop is itself vectorised — load 4×f32 x,
-                        // decode 4×Q6_K weights via NEON shuffles,
-                        // FMA-accumulate. Estimated ~150 LOC of NEON; see
-                        // [[project-optimization-roadmap]] Tier 2 #4.
-                        // Keeping the staged F32 + dot_f32_simd path until
-                        // that NEON port lands.
                         dequant_q6_k_block(bp, &mut stage);
-                        let x_chunk =
-                            std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
-                        sum += dot_f32_simd(x_chunk, &stage);
                     }
-                    // A scheme this kernel does not decode must degrade to
-                    // "no contribution", never panic: this runs under an
-                    // extern "C" frame where unwinding aborts the process.
+                    // See the sibling arm: never panic under extern "C".
                     _ => return,
                 }
-            }
-            *y_data.add(n_idx) = sum;
-            continue;
-        }
 
-        // General path: batch > 1 or non-contiguous X. Accumulate one
-        // running sum per batch row; flush at the end of the row.
-        row_sums.iter_mut().for_each(|s| *s = 0.0);
-
-        for b_idx in 0..blocks_per_row {
-            let bp = row_ptr.add(b_idx * block_bytes);
-            match qt.scheme {
-                QSCHEME_Q4_K_M => {
-                    let block = decode_q4_k_block(bp);
-                    dequant_q4_k_block(&block, &mut stage);
+                for b in 0..batch {
+                    let x_off = b * x_strides[0] + b_idx * block_size;
+                    if x_contig {
+                        let x_chunk = std::slice::from_raw_parts(x_data.add(x_off), block_size);
+                        row_sums[b] += dot_f32_simd(x_chunk, &stage);
+                    } else {
+                        let stride = x_strides[1];
+                        let mut partial = 0.0f32;
+                        let x_base = b * x_strides[0] + b_idx * block_size * stride;
+                        for p in 0..block_size {
+                            partial += *x_data.add(x_base + p * stride) * stage[p];
+                        }
+                        row_sums[b] += partial;
+                    }
                 }
-                QSCHEME_Q6_K => {
-                    dequant_q6_k_block(bp, &mut stage);
-                }
-                // See the sibling arm: never panic under extern "C".
-                _ => return,
             }
 
             for b in 0..batch {
-                let x_off = b * x_strides[0] + b_idx * block_size;
-                if x_contig {
-                    let x_chunk = std::slice::from_raw_parts(x_data.add(x_off), block_size);
-                    row_sums[b] += dot_f32_simd(x_chunk, &stage);
-                } else {
-                    let stride = x_strides[1];
-                    let mut partial = 0.0f32;
-                    let x_base = b * x_strides[0] + b_idx * block_size * stride;
-                    for p in 0..block_size {
-                        partial += *x_data.add(x_base + p * stride) * stage[p];
-                    }
-                    row_sums[b] += partial;
-                }
+                *y_data.add(b * n + n_idx) = row_sums[b];
             }
-        }
-
-        for b in 0..batch {
-            *y_data.add(b * n + n_idx) = row_sums[b];
         }
     }
 }
@@ -3357,13 +3467,15 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
 /// Atomic-refcount QTensor clone. Mirrors `rayzor_tensor_arc_clone`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_arc_clone(src: i64) -> i64 {
-    if src == 0 {
-        return 0;
+    unsafe {
+        if src == 0 {
+            return 0;
+        }
+        let s = &*(src as *const RayzorQTensor);
+        s.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        src
     }
-    let s = &*(src as *const RayzorQTensor);
-    s.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    src
 }
 
 /// `QTensor.clone(src)` Haxe entry point. Routes to the Arc-increment path.
@@ -3371,7 +3483,7 @@ pub unsafe extern "C" fn rayzor_qtensor_arc_clone(src: i64) -> i64 {
 /// `@:derive([Clone])` lowering.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
-    rayzor_qtensor_arc_clone(src)
+    unsafe { rayzor_qtensor_arc_clone(src) }
 }
 
 /// Disjoint-storage deep QTensor clone (escape hatch). Returns a fresh,
@@ -3387,72 +3499,74 @@ pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
 /// super-block so `meta` is null for those.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_deep_clone(src: i64) -> i64 {
-    if src == 0 {
-        return 0;
-    }
-    let s = &*(src as *const RayzorQTensor);
-
-    // Data buffer size by scheme — must match rayzor_qtensor_free's mental
-    // model (which frees the whole `data` block as one allocation when it
-    // owns it). For views the same byte extent is what the parent exposes,
-    // so a full copy of that range covers everything the new wrapper might
-    // dereference via `data`.
-    let data_bytes = match s.scheme {
-        QSCHEME_INT8 => s.numel,
-        QSCHEME_Q4_K_M => (s.numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
-        QSCHEME_Q6_K => (s.numel / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES,
-        _ => return 0,
-    };
-
-    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
-    if data.is_null() {
-        return 0;
-    }
-    if data_bytes > 0 && !s.data.is_null() {
-        std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
-    }
-
-    // INT8 carries a separate per-group f32 scale array; Q4_K_M / Q6_K
-    // embed scales in the data blocks (meta is null).
-    let meta: *mut f32 = if s.scheme == QSCHEME_INT8 && !s.meta.is_null() && s.group_size > 0 {
-        let n_groups = s.numel / s.group_size;
-        let scale_bytes = n_groups * std::mem::size_of::<f32>();
-        let m = malloc(scale_bytes.max(4)) as *mut f32;
-        if m.is_null() {
-            free(data);
+    unsafe {
+        if src == 0 {
             return 0;
         }
-        if n_groups > 0 {
-            std::ptr::copy_nonoverlapping(s.meta, m, n_groups);
-        }
-        m
-    } else {
-        std::ptr::null_mut()
-    };
+        let s = &*(src as *const RayzorQTensor);
 
-    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
-    if qt.is_null() {
-        free(data);
-        if !meta.is_null() {
-            free(meta as *mut u8);
+        // Data buffer size by scheme — must match rayzor_qtensor_free's mental
+        // model (which frees the whole `data` block as one allocation when it
+        // owns it). For views the same byte extent is what the parent exposes,
+        // so a full copy of that range covers everything the new wrapper might
+        // dereference via `data`.
+        let data_bytes = match s.scheme {
+            QSCHEME_INT8 => s.numel,
+            QSCHEME_Q4_K_M => (s.numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
+            QSCHEME_Q6_K => (s.numel / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES,
+            _ => return 0,
+        };
+
+        let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+        if data.is_null() {
+            return 0;
         }
-        return 0;
+        if data_bytes > 0 && !s.data.is_null() {
+            std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+        }
+
+        // INT8 carries a separate per-group f32 scale array; Q4_K_M / Q6_K
+        // embed scales in the data blocks (meta is null).
+        let meta: *mut f32 = if s.scheme == QSCHEME_INT8 && !s.meta.is_null() && s.group_size > 0 {
+            let n_groups = s.numel / s.group_size;
+            let scale_bytes = n_groups * std::mem::size_of::<f32>();
+            let m = malloc(scale_bytes.max(4)) as *mut f32;
+            if m.is_null() {
+                free(data);
+                return 0;
+            }
+            if n_groups > 0 {
+                std::ptr::copy_nonoverlapping(s.meta, m, n_groups);
+            }
+            m
+        } else {
+            std::ptr::null_mut()
+        };
+
+        let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+        if qt.is_null() {
+            free(data);
+            if !meta.is_null() {
+                free(meta as *mut u8);
+            }
+            return 0;
+        }
+
+        *qt = RayzorQTensor {
+            data,
+            meta,
+            numel: s.numel,
+            group_size: s.group_size,
+            scheme: s.scheme,
+            owns_data: true,
+            rows: s.rows,
+            cols: s.cols,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+
+        qt as i64
     }
-
-    *qt = RayzorQTensor {
-        data,
-        meta,
-        numel: s.numel,
-        group_size: s.group_size,
-        scheme: s.scheme,
-        owns_data: true,
-        rows: s.rows,
-        cols: s.cols,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-
-    qt as i64
 }
 
 // ============================================================================
@@ -3498,17 +3612,19 @@ fn qtensor_pool_shape(rows: usize, cols: usize, group_size: usize) -> [usize; 3]
 /// Canonical free for pooled QTensor entries. Mirrors `rayzor_qtensor_free`
 /// without the pool-routing — used on eviction / drain.
 unsafe fn qtensor_pool_freer(entry: PooledEntry) {
-    if entry.ptr.is_null() {
-        return;
+    unsafe {
+        if entry.ptr.is_null() {
+            return;
+        }
+        let qt = &*(entry.ptr as *const RayzorQTensor);
+        if qt.owns_data && !qt.data.is_null() {
+            qt_free_data(qt.data);
+        }
+        if !qt.meta.is_null() {
+            free(qt.meta as *mut u8);
+        }
+        free(entry.ptr);
     }
-    let qt = &*(entry.ptr as *const RayzorQTensor);
-    if qt.owns_data && !qt.data.is_null() {
-        qt_free_data(qt.data);
-    }
-    if !qt.meta.is_null() {
-        free(qt.meta as *mut u8);
-    }
-    free(entry.ptr);
 }
 
 /// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.
@@ -3522,79 +3638,81 @@ unsafe fn qtensor_pool_freer(entry: PooledEntry) {
 /// belongs to a parent `HaxeBytes`, only the wrapper struct is released.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
-    if qt_ptr == 0 {
-        return;
-    }
-    let qt = &*(qt_ptr as *const RayzorQTensor);
-
-    // Phase 1 ARC: decrement first; only the dec-to-zero thread actually
-    // releases storage (or pool-routes the owning INT8 slot).
-    let prev = qt
-        .refcount
-        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    if prev != 1 {
-        return;
-    }
-
-    // Sole owner. Snapshot parent before tearing down — we'll cascade-free
-    // it after our own storage is released, in case of view-of-qtensor.
-    let parent = qt.parent;
-
-    // Zero-copy wrappers: drop only the wrapper struct.
-    if !qt.owns_data {
-        if !qt.meta.is_null() {
-            // Defensive — wrap paths set meta to null, but if a future
-            // wrap variant adds a non-owned meta this still tracks correctly.
-            free(qt.meta as *mut u8);
+    unsafe {
+        if qt_ptr == 0 {
+            return;
         }
-        free(qt_ptr as *mut u8);
+        let qt = &*(qt_ptr as *const RayzorQTensor);
+
+        // Phase 1 ARC: decrement first; only the dec-to-zero thread actually
+        // releases storage (or pool-routes the owning INT8 slot).
+        let prev = qt
+            .refcount
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if prev != 1 {
+            return;
+        }
+
+        // Sole owner. Snapshot parent before tearing down — we'll cascade-free
+        // it after our own storage is released, in case of view-of-qtensor.
+        let parent = qt.parent;
+
+        // Zero-copy wrappers: drop only the wrapper struct.
+        if !qt.owns_data {
+            if !qt.meta.is_null() {
+                // Defensive — wrap paths set meta to null, but if a future
+                // wrap variant adds a non-owned meta this still tracks correctly.
+                free(qt.meta as *mut u8);
+            }
+            free(qt_ptr as *mut u8);
+            if !parent.is_null() {
+                rayzor_qtensor_free(parent as i64);
+            }
+            return;
+        }
+
+        // Scheme gate: only INT8 owning QTensors are pool-routed. `alloc_qtensor`
+        // currently only revives INT8 via `try_pop_qtensor` (Q4_K_M and Q6_K both
+        // arrive through `wrap`/`from_bytes` constructors that go straight to
+        // `malloc` and never consult the pool), so parking a Q4_K_M / Q6_K
+        // entry just leaks bytes into a bucket that nothing will ever pop. Take
+        // the direct-free path for them instead — same physical release the
+        // pool freer would do, without the bookkeeping churn.
+        if qt.scheme != QSCHEME_INT8 {
+            if !qt.data.is_null() {
+                qt_free_data(qt.data);
+            }
+            if !qt.meta.is_null() {
+                free(qt.meta as *mut u8);
+            }
+            free(qt_ptr as *mut u8);
+            if !parent.is_null() {
+                rayzor_qtensor_free(parent as i64);
+            }
+            return;
+        }
+
+        // Owning INT8 QTensor: park in the pool.
+        let key = qtensor_pool_key(qt.scheme, qt.rows, qt.cols, qt.group_size);
+        let shape = qtensor_pool_shape(qt.rows, qt.cols, qt.group_size);
+        let data_bytes = qt.data_bytes();
+        let meta_bytes = if qt.meta.is_null() {
+            0
+        } else {
+            // INT8 meta: one f32 scale per group.
+            (qt.numel / qt.group_size) * std::mem::size_of::<f32>()
+        };
+        let entry = PooledEntry {
+            ptr: qt_ptr as *mut u8,
+            shape: ShapeBuf::from_slice(&shape),
+            alloc_bytes: data_bytes,
+            qtensor_meta_ptr: qt.meta as *mut u8,
+            qtensor_meta_bytes: meta_bytes,
+        };
+        tensor_pool::global().push(key, entry, qtensor_pool_freer);
         if !parent.is_null() {
             rayzor_qtensor_free(parent as i64);
         }
-        return;
-    }
-
-    // Scheme gate: only INT8 owning QTensors are pool-routed. `alloc_qtensor`
-    // currently only revives INT8 via `try_pop_qtensor` (Q4_K_M and Q6_K both
-    // arrive through `wrap`/`from_bytes` constructors that go straight to
-    // `malloc` and never consult the pool), so parking a Q4_K_M / Q6_K
-    // entry just leaks bytes into a bucket that nothing will ever pop. Take
-    // the direct-free path for them instead — same physical release the
-    // pool freer would do, without the bookkeeping churn.
-    if qt.scheme != QSCHEME_INT8 {
-        if !qt.data.is_null() {
-            qt_free_data(qt.data);
-        }
-        if !qt.meta.is_null() {
-            free(qt.meta as *mut u8);
-        }
-        free(qt_ptr as *mut u8);
-        if !parent.is_null() {
-            rayzor_qtensor_free(parent as i64);
-        }
-        return;
-    }
-
-    // Owning INT8 QTensor: park in the pool.
-    let key = qtensor_pool_key(qt.scheme, qt.rows, qt.cols, qt.group_size);
-    let shape = qtensor_pool_shape(qt.rows, qt.cols, qt.group_size);
-    let data_bytes = qt.data_bytes();
-    let meta_bytes = if qt.meta.is_null() {
-        0
-    } else {
-        // INT8 meta: one f32 scale per group.
-        (qt.numel / qt.group_size) * std::mem::size_of::<f32>()
-    };
-    let entry = PooledEntry {
-        ptr: qt_ptr as *mut u8,
-        shape: ShapeBuf::from_slice(&shape),
-        alloc_bytes: data_bytes,
-        qtensor_meta_ptr: qt.meta as *mut u8,
-        qtensor_meta_bytes: meta_bytes,
-    };
-    tensor_pool::global().push(key, entry, qtensor_pool_freer);
-    if !parent.is_null() {
-        rayzor_qtensor_free(parent as i64);
     }
 }
 

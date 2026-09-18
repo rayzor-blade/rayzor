@@ -318,11 +318,7 @@ fn compute_trip_count(init: i64, bound: i64, step: i64, cmp_op: CompareOp) -> Op
         _ => return None,
     };
 
-    if range >= 0 {
-        Some(range as u64)
-    } else {
-        None
-    }
+    if range >= 0 { Some(range as u64) } else { None }
 }
 
 fn unroll_loops_in_function(function: &mut IrFunction) -> OptimizationResult {

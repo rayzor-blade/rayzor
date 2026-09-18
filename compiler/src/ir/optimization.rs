@@ -2328,10 +2328,12 @@ mod tests {
         assert!(instructions.iter().any(|instr| {
             matches!(instr, IrInstruction::CallDirect { func_id, .. } if *func_id == keep_id)
         }));
-        assert!(!builder
-            .module
-            .functions
-            .values()
-            .any(|f| f.name == "rayzor_update_call_frame_location"));
+        assert!(
+            !builder
+                .module
+                .functions
+                .values()
+                .any(|f| f.name == "rayzor_update_call_frame_location")
+        );
     }
 }

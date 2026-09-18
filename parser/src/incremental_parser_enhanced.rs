@@ -324,24 +324,21 @@ fn create_class_diagnostic(full_input: &str, remaining: &str, file_id: FileId) -
         let body = &trimmed[body_start..];
 
         // Check for switch expression without semicolon
-        if body.contains("switch") && body.contains("case") {
-            if let Some(switch_start) = body.find("switch") {
-                let after_switch = &body[switch_start..];
-                if let Some(brace_start) = after_switch.find('{') {
-                    if let Some(brace_end) = find_matching_brace(&after_switch[brace_start..]) {
-                        let after_switch_block =
-                            &after_switch[brace_start + brace_end + 1..].trim_start();
+        if body.contains("switch")
+            && body.contains("case")
+            && let Some(switch_start) = body.find("switch")
+        {
+            let after_switch = &body[switch_start..];
+            if let Some(brace_start) = after_switch.find('{')
+                && let Some(brace_end) = find_matching_brace(&after_switch[brace_start..])
+            {
+                let after_switch_block = &after_switch[brace_start + brace_end + 1..].trim_start();
 
-                        if !after_switch_block.starts_with(';') && !after_switch_block.is_empty() {
-                            let error_pos = body_start + switch_start + brace_start + brace_end + 1;
-                            let error_span =
-                                create_error_span(full_input, &remaining[error_pos..], 1, file_id);
-                            return HaxeDiagnostics::missing_semicolon(
-                                error_span,
-                                "switch expression",
-                            );
-                        }
-                    }
+                if !after_switch_block.starts_with(';') && !after_switch_block.is_empty() {
+                    let error_pos = body_start + switch_start + brace_start + brace_end + 1;
+                    let error_span =
+                        create_error_span(full_input, &remaining[error_pos..], 1, file_id);
+                    return HaxeDiagnostics::missing_semicolon(error_span, "switch expression");
                 }
             }
         }
@@ -371,24 +368,14 @@ fn create_class_diagnostic(full_input: &str, remaining: &str, file_id: FileId) -
         HaxeDiagnostics::missing_closing_delimiter(closing_span, span, '}')
     } else {
         // Check class name convention
-        if let Some(name) = trimmed.split_whitespace().nth(1) {
-            if let Some(first_char) = name.chars().next() {
-                if !first_char.is_uppercase() {
-                    let name_start = trimmed.find(name).unwrap_or(5);
-                    let name_span = create_error_span(
-                        full_input,
-                        &remaining[name_start..],
-                        name.len(),
-                        file_id,
-                    );
-                    return HaxeDiagnostics::naming_convention(
-                        name_span,
-                        "class",
-                        name,
-                        "PascalCase",
-                    );
-                }
-            }
+        if let Some(name) = trimmed.split_whitespace().nth(1)
+            && let Some(first_char) = name.chars().next()
+            && !first_char.is_uppercase()
+        {
+            let name_start = trimmed.find(name).unwrap_or(5);
+            let name_span =
+                create_error_span(full_input, &remaining[name_start..], name.len(), file_id);
+            return HaxeDiagnostics::naming_convention(name_span, "class", name, "PascalCase");
         }
 
         DiagnosticBuilder::error("syntax error in class body", span.clone())

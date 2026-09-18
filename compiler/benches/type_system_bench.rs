@@ -1,7 +1,7 @@
 //! Benchmarks for type system performance optimization validation
 
 use compiler::pipeline::*;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn generate_deep_inheritance(depth: usize) -> String {
     let mut code = String::new();

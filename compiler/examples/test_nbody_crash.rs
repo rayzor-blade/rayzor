@@ -44,7 +44,7 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
 
 fn main() {
     // Enable RUST_LOG=debug to see field access debug messages
-    std::env::set_var("RUST_LOG", "debug");
+    unsafe { std::env::set_var("RUST_LOG", "debug") };
     env_logger::init();
 
     let symbols = get_runtime_symbols();

@@ -6,12 +6,12 @@
 //! - Is pure: Whether the function has no side effects
 
 use crate::tast::{
+    SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         AsyncKind, BinaryOperator, FunctionEffects, MemoryEffects, ResourceEffects,
         TypedCatchClause, TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement,
         UnaryOperator,
     },
-    SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;

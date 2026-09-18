@@ -12,8 +12,8 @@ use crate::ir::hir::*;
 use crate::semantic_graph::SemanticGraphs;
 use crate::stdlib::{MethodSignature, StdlibMapping};
 use crate::tast::{
-    node::*, InternedString, LifetimeId, ScopeId, SourceLocation, StringInterner, SymbolId,
-    SymbolTable, TypeId, TypeKind, TypeTable, Visibility,
+    InternedString, LifetimeId, ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable,
+    TypeId, TypeKind, TypeTable, Visibility, node::*,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -1970,7 +1970,9 @@ impl<'a> TastToHirContext<'a> {
                         debug!(": Successfully inlined array access get method!");
                         return inlined;
                     } else {
-                        debug!(": Failed to inline array access get method, falling back to method call");
+                        debug!(
+                            ": Failed to inline array access get method, falling back to method call"
+                        );
                         // TODO: Fall back to method call if inlining fails
                     }
                 }
@@ -6416,8 +6418,7 @@ impl<'a> TastToHirContext<'a> {
                                     .to_string();
                                 let error_msg = format!(
                                     "Class '{}' has no constructor but 'new' was called with {} arguments",
-                                    class_name_str,
-                                    arg_count
+                                    class_name_str, arg_count
                                 );
                                 self.add_error(&error_msg, location);
                             }

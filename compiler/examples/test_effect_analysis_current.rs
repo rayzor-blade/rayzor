@@ -34,13 +34,13 @@
 //! that the foundation is solid for building enhanced effect analysis.
 
 use compiler::tast::{
+    AsyncKind, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     effect_analysis::EffectAnalyzer,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
         TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    AsyncKind, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

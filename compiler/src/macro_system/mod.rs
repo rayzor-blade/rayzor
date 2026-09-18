@@ -71,7 +71,7 @@ pub mod value;
 
 pub use ast_bridge::{apply_binary_op, expr_to_value, value_to_expr};
 pub use build_macros::{
-    process_build_macros, process_build_macros_with_class_registry, BuildMacroResult,
+    BuildMacroResult, process_build_macros, process_build_macros_with_class_registry,
 };
 pub use class_registry::ClassRegistry;
 pub use context_api::{
@@ -81,8 +81,8 @@ pub use context_api::{
 pub use environment::Environment;
 pub use errors::{MacroDiagnostic, MacroError, MacroSeverity, PipelineDiagnostic};
 pub use expander::{
-    expand_macros, expand_macros_with_class_registry, expand_macros_with_dependencies,
-    expand_macros_with_registry, ExpansionResult, MacroExpander,
+    ExpansionResult, MacroExpander, expand_macros, expand_macros_with_class_registry,
+    expand_macros_with_dependencies, expand_macros_with_registry,
 };
 pub use interpreter::MacroInterpreter;
 pub use registry::{BuildMacroEntry, MacroDefinition, MacroRegistry};

@@ -3,7 +3,7 @@
 //! This example shows how the enhanced diagnostic system integrates with
 //! the parser's context errors to provide rich, actionable error messages.
 
-use parser::{parse_incrementally_enhanced, ErrorFormatter};
+use parser::{ErrorFormatter, parse_incrementally_enhanced};
 
 fn main() {
     println!("🔧 Context Integration Demo");

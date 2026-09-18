@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use parser::incremental_parser::{parse_incrementally, ParsedElement};
+    use parser::incremental_parser::{ParsedElement, parse_incrementally};
 
     #[test]
     fn test_module_field_parsing() {

@@ -4,11 +4,11 @@
 //! through control flow and detecting potential null dereferences.
 
 use crate::tast::{
+    SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
     control_flow_analysis::{BlockId, ControlFlowGraph, VariableState},
     core::TypeKind,
     node::{BinaryOperator, TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement},
     symbols::SymbolFlags,
-    SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -669,7 +669,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
             if let Some(state) = states.get(&var_id) {
                 match state {
                     NullState::Null | NullState::MaybeNull | NullState::Uninitialized => {
-                        return true
+                        return true;
                     }
                     NullState::NotNull => return false,
                 }

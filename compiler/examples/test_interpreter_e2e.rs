@@ -34,9 +34,9 @@
 //!
 //! Run with: cargo run --package compiler --example test_interpreter_e2e
 
+use compiler::codegen::InterpValue;
 use compiler::codegen::profiling::ProfileConfig;
 use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
-use compiler::codegen::InterpValue;
 use compiler::compilation::{CompilationConfig, CompilationUnit};
 use compiler::ir::IrModule;
 use std::sync::Arc;

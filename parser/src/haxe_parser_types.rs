@@ -3,16 +3,16 @@
 //! This module handles parsing of type expressions, type parameters, etc.
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     combinator::{map, opt, peek},
     multi::{separated_list0, separated_list1},
     sequence::{delimited, preceded},
-    IResult, Parser,
 };
 
 use crate::custom_error::ContextualError;
 use crate::haxe_ast::*;
-use crate::haxe_parser::{dot_path, identifier, keyword, position, symbol, ws, PResult};
+use crate::haxe_parser::{PResult, dot_path, identifier, keyword, position, symbol, ws};
 
 /// Parse type parameters: `<T, U>`
 pub fn type_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<TypeParam>> {
@@ -358,7 +358,7 @@ fn anonymous_type<'a>(full: &'a str, input: &'a str) -> PResult<'a, Type> {
                 return Err(nom::Err::Error(ContextualError::new(
                     current_input,
                     nom::error::ErrorKind::Tag,
-                )))
+                )));
             }
         }
     }

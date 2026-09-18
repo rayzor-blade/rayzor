@@ -671,11 +671,7 @@ impl ScopeTree {
             .values()
             .filter_map(|scope_ref| {
                 let scope: &Scope = scope_ref;
-                if predicate(scope) {
-                    Some(scope)
-                } else {
-                    None
-                }
+                if predicate(scope) { Some(scope) } else { None }
             })
             .collect()
     }

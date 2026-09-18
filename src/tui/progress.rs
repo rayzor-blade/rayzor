@@ -4,18 +4,17 @@
 //! with program output in a bordered panel.
 
 use crossterm::{
-    cursor,
+    ExecutableCommand, cursor,
     event::{self, Event, KeyCode},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table, Wrap},
-    Terminal,
 };
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -238,60 +237,60 @@ impl ProgressTui {
         loop {
             terminal.draw(|frame| app.render(frame))?;
 
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    if app.search_mode {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.search_mode = false;
-                                app.search_query.clear();
-                            }
-                            KeyCode::Enter => {
-                                app.search_mode = false;
-                                // Jump to first match
-                                app.jump_to_match();
-                            }
-                            KeyCode::Backspace => {
-                                app.search_query.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                app.search_query.push(c);
-                            }
-                            _ => {}
+            if event::poll(Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+            {
+                if app.search_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.search_mode = false;
+                            app.search_query.clear();
                         }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('/') => {
-                                app.search_mode = true;
-                                app.search_query.clear();
-                            }
-                            KeyCode::Char('s') => app.show_stats = !app.show_stats,
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                app.scroll_offset = app.scroll_offset.saturating_sub(1);
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                app.scroll_offset = (app.scroll_offset + 1)
-                                    .min(app.state.output_lines.len().saturating_sub(1));
-                            }
-                            KeyCode::PageUp => {
-                                app.scroll_offset = app.scroll_offset.saturating_sub(20);
-                            }
-                            KeyCode::PageDown => {
-                                app.scroll_offset = (app.scroll_offset + 20)
-                                    .min(app.state.output_lines.len().saturating_sub(1));
-                            }
-                            KeyCode::Home | KeyCode::Char('g') => {
-                                app.scroll_offset = 0;
-                            }
-                            KeyCode::End | KeyCode::Char('G') => {
-                                app.scroll_offset = app.state.output_lines.len().saturating_sub(1);
-                            }
-                            KeyCode::Char('n') if !app.search_query.is_empty() => {
-                                app.jump_to_next_match();
-                            }
-                            _ => {}
+                        KeyCode::Enter => {
+                            app.search_mode = false;
+                            // Jump to first match
+                            app.jump_to_match();
                         }
+                        KeyCode::Backspace => {
+                            app.search_query.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.search_query.push(c);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('/') => {
+                            app.search_mode = true;
+                            app.search_query.clear();
+                        }
+                        KeyCode::Char('s') => app.show_stats = !app.show_stats,
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.scroll_offset = (app.scroll_offset + 1)
+                                .min(app.state.output_lines.len().saturating_sub(1));
+                        }
+                        KeyCode::PageUp => {
+                            app.scroll_offset = app.scroll_offset.saturating_sub(20);
+                        }
+                        KeyCode::PageDown => {
+                            app.scroll_offset = (app.scroll_offset + 20)
+                                .min(app.state.output_lines.len().saturating_sub(1));
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            app.scroll_offset = 0;
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            app.scroll_offset = app.state.output_lines.len().saturating_sub(1);
+                        }
+                        KeyCode::Char('n') if !app.search_query.is_empty() => {
+                            app.jump_to_next_match();
+                        }
+                        _ => {}
                     }
                 }
             }

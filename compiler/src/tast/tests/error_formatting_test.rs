@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::tast::{AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable};
-    use parser::{parse_haxe_file_with_diagnostics, ErrorFormatter};
+    use parser::{ErrorFormatter, parse_haxe_file_with_diagnostics};
     use std::cell::RefCell;
     use std::rc::Rc;
 

@@ -131,8 +131,10 @@ class StaticContext {
 
         let error = &result.errors[0];
         assert!(error.message.contains("Instance member"));
-        assert!(error
-            .message
-            .contains("cannot be accessed from static context"));
+        assert!(
+            error
+                .message
+                .contains("cannot be accessed from static context")
+        );
     }
 }

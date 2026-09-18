@@ -83,27 +83,24 @@ class Test {
     let file = result.unwrap();
     assert_eq!(file.declarations.len(), 1);
 
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
-                            assert_eq!(name, "v");
-                            assert!(arg.is_some());
-                            if let Some(arg_expr) = arg {
-                                if let ExprKind::Ident(ident) = &arg_expr.kind {
-                                    assert_eq!(ident, "someValue");
-                                } else {
-                                    panic!("Expected Ident, got {:?}", arg_expr.kind);
-                                }
-                            }
-                        } else {
-                            panic!("Expected DollarIdent, got {:?}", expr.kind);
-                        }
-                    }
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+        && let BlockElement::Expr(expr) = &block[0]
+    {
+        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
+            assert_eq!(name, "v");
+            assert!(arg.is_some());
+            if let Some(arg_expr) = arg {
+                if let ExprKind::Ident(ident) = &arg_expr.kind {
+                    assert_eq!(ident, "someValue");
+                } else {
+                    panic!("Expected Ident, got {:?}", arg_expr.kind);
                 }
             }
+        } else {
+            panic!("Expected DollarIdent, got {:?}", expr.kind);
         }
     }
 }
@@ -126,23 +123,19 @@ class Test {
     );
 
     let file = result.unwrap();
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
-                            assert_eq!(name, "i");
-                            assert!(arg.is_some());
-                            if let Some(arg_expr) = arg {
-                                if let ExprKind::Ident(ident) = &arg_expr.kind {
-                                    assert_eq!(ident, "fieldName");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+        && let BlockElement::Expr(expr) = &block[0]
+        && let ExprKind::DollarIdent { name, arg } = &expr.kind
+    {
+        assert_eq!(name, "i");
+        assert!(arg.is_some());
+        if let Some(arg_expr) = arg
+            && let ExprKind::Ident(ident) = &arg_expr.kind
+        {
+            assert_eq!(ident, "fieldName");
         }
     }
 }
@@ -165,28 +158,24 @@ class Test {
     );
 
     let file = result.unwrap();
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
-                            assert_eq!(name, "a");
-                            assert!(arg.is_some());
-                            if let Some(arg_expr) = arg {
-                                if let ExprKind::Array(arr) = &arg_expr.kind {
-                                    assert_eq!(arr.len(), 2);
-                                    if let ExprKind::Ident(ident) = &arr[0].kind {
-                                        assert_eq!(ident, "expr1");
-                                    }
-                                    if let ExprKind::Ident(ident) = &arr[1].kind {
-                                        assert_eq!(ident, "expr2");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+        && let BlockElement::Expr(expr) = &block[0]
+        && let ExprKind::DollarIdent { name, arg } = &expr.kind
+    {
+        assert_eq!(name, "a");
+        assert!(arg.is_some());
+        if let Some(arg_expr) = arg
+            && let ExprKind::Array(arr) = &arg_expr.kind
+        {
+            assert_eq!(arr.len(), 2);
+            if let ExprKind::Ident(ident) = &arr[0].kind {
+                assert_eq!(ident, "expr1");
+            }
+            if let ExprKind::Ident(ident) = &arr[1].kind {
+                assert_eq!(ident, "expr2");
             }
         }
     }
@@ -210,23 +199,19 @@ class Test {
     );
 
     let file = result.unwrap();
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
-                            assert_eq!(name, "e");
-                            assert!(arg.is_some());
-                            if let Some(arg_expr) = arg {
-                                if let ExprKind::Ident(ident) = &arg_expr.kind {
-                                    assert_eq!(ident, "myExpression");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+        && let BlockElement::Expr(expr) = &block[0]
+        && let ExprKind::DollarIdent { name, arg } = &expr.kind
+    {
+        assert_eq!(name, "e");
+        assert!(arg.is_some());
+        if let Some(arg_expr) = arg
+            && let ExprKind::Ident(ident) = &arg_expr.kind
+        {
+            assert_eq!(ident, "myExpression");
         }
     }
 }
@@ -249,24 +234,17 @@ class Test {
     );
 
     let file = result.unwrap();
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::Return(Some(return_expr)) = &expr.kind {
-                            if let ExprKind::Macro(macro_expr) = &return_expr.kind {
-                                if let ExprKind::Reify(reify_expr) = &macro_expr.kind {
-                                    if let ExprKind::Ident(ident) = &reify_expr.kind {
-                                        assert_eq!(ident, "someExpr");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+        && let BlockElement::Expr(expr) = &block[0]
+        && let ExprKind::Return(Some(return_expr)) = &expr.kind
+        && let ExprKind::Macro(macro_expr) = &return_expr.kind
+        && let ExprKind::Reify(reify_expr) = &macro_expr.kind
+        && let ExprKind::Ident(ident) = &reify_expr.kind
+    {
+        assert_eq!(ident, "someExpr");
     }
 }
 
@@ -290,50 +268,45 @@ class Test {
     );
 
     let file = result.unwrap();
-    if let TypeDeclaration::Class(class) = &file.declarations[0] {
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(block) = &body.kind {
-                    assert_eq!(block.len(), 3);
+    if let TypeDeclaration::Class(class) = &file.declarations[0]
+        && let ClassFieldKind::Function(func) = &class.fields[0].kind
+        && let Some(body) = &func.body
+        && let ExprKind::Block(block) = &body.kind
+    {
+        assert_eq!(block.len(), 3);
 
-                    // First: $type(expr) - should be a call to $type
-                    if let BlockElement::Expr(expr) = &block[0] {
-                        if let ExprKind::Call {
-                            expr: call_expr, ..
-                        } = &expr.kind
-                        {
-                            if let ExprKind::DollarIdent { name, arg } = &call_expr.kind {
-                                assert_eq!(name, "type");
-                                assert!(arg.is_none());
-                            }
-                        }
-                    }
+        // First: $type(expr) - should be a call to $type
+        if let BlockElement::Expr(expr) = &block[0]
+            && let ExprKind::Call {
+                expr: call_expr, ..
+            } = &expr.kind
+            && let ExprKind::DollarIdent { name, arg } = &call_expr.kind
+        {
+            assert_eq!(name, "type");
+            assert!(arg.is_none());
+        }
 
-                    // Second: $v{value} - should be a dollar identifier
-                    if let BlockElement::Expr(expr) = &block[1] {
-                        if let ExprKind::DollarIdent { name, arg } = &expr.kind {
-                            assert_eq!(name, "v");
-                            assert!(arg.is_some());
-                        }
-                    }
+        // Second: $v{value} - should be a dollar identifier
+        if let BlockElement::Expr(expr) = &block[1]
+            && let ExprKind::DollarIdent { name, arg } = &expr.kind
+        {
+            assert_eq!(name, "v");
+            assert!(arg.is_some());
+        }
 
-                    // Third: var x = $someExpr - should be a var declaration with reification
-                    if let BlockElement::Expr(expr) = &block[2] {
-                        if let ExprKind::Var {
-                            name,
-                            expr: Some(var_expr),
-                            ..
-                        } = &expr.kind
-                        {
-                            assert_eq!(name, "x");
-                            if let ExprKind::Reify(reify_expr) = &var_expr.kind {
-                                if let ExprKind::Ident(ident) = &reify_expr.kind {
-                                    assert_eq!(ident, "someExpr");
-                                }
-                            }
-                        }
-                    }
-                }
+        // Third: var x = $someExpr - should be a var declaration with reification
+        if let BlockElement::Expr(expr) = &block[2]
+            && let ExprKind::Var {
+                name,
+                expr: Some(var_expr),
+                ..
+            } = &expr.kind
+        {
+            assert_eq!(name, "x");
+            if let ExprKind::Reify(reify_expr) = &var_expr.kind
+                && let ExprKind::Ident(ident) = &reify_expr.kind
+            {
+                assert_eq!(ident, "someExpr");
             }
         }
     }

@@ -55,11 +55,7 @@ fn resolve_platform_dylib(p: PathBuf) -> PathBuf {
     match p.extension().and_then(|e| e.to_str()) {
         Some(ext) if DYLIB_EXTS.contains(&ext) && ext != plat_ext && !p.exists() => {
             let swapped = p.with_extension(plat_ext);
-            if swapped.exists() {
-                swapped
-            } else {
-                p
-            }
+            if swapped.exists() { swapped } else { p }
         }
         _ => p,
     }

@@ -97,7 +97,10 @@ fn stage_stdlib_snapshot() {
     let bytes = match std::fs::read(&source) {
         Ok(bytes) if snapshot_module_count(&bytes) > 0 => bytes,
         _ => {
-            println!("cargo:warning=no standard library snapshot at {} — the library will be lowered from source; run `cargo run --release -p snapshot-gen` first", source.display());
+            println!(
+                "cargo:warning=no standard library snapshot at {} — the library will be lowered from source; run `cargo run --release -p snapshot-gen` first",
+                source.display()
+            );
             empty_snapshot()
         }
     };
@@ -231,25 +234,25 @@ fn collect_condition_idents(dir: &Path, names: &mut std::collections::BTreeSet<S
             collect_condition_idents(&path, names);
             continue;
         }
-        if path.extension().is_some_and(|e| e == "hx") {
-            if let Ok(source) = std::fs::read_to_string(&path) {
-                for line in source.lines() {
-                    let trimmed = line.trim_start();
-                    let condition = trimmed
-                        .strip_prefix("#if")
-                        .or_else(|| trimmed.strip_prefix("#elseif"));
-                    let Some(condition) = condition else { continue };
-                    // Only a directive: `#ifdef`-style run-ons are not one.
-                    if condition
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    {
-                        continue;
-                    }
-                    for ident in condition_idents(condition) {
-                        names.insert(ident);
-                    }
+        if path.extension().is_some_and(|e| e == "hx")
+            && let Ok(source) = std::fs::read_to_string(&path)
+        {
+            for line in source.lines() {
+                let trimmed = line.trim_start();
+                let condition = trimmed
+                    .strip_prefix("#if")
+                    .or_else(|| trimmed.strip_prefix("#elseif"));
+                let Some(condition) = condition else { continue };
+                // Only a directive: `#ifdef`-style run-ons are not one.
+                if condition
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    continue;
+                }
+                for ident in condition_idents(condition) {
+                    names.insert(ident);
                 }
             }
         }

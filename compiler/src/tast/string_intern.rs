@@ -12,8 +12,8 @@ use super::TypedArena;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
     Mutex,
+    atomic::{AtomicU32, Ordering},
 };
 
 /// A high-performance hasher optimized for string keys
@@ -204,8 +204,10 @@ impl StringInterner {
     /// # Safety
     /// The caller must ensure the ID is valid.
     pub unsafe fn get_unchecked(&self, id: InternedString) -> &str {
-        let reverse_map = self.reverse_map.lock().unwrap();
-        reverse_map.get_unchecked(id.0 as usize)
+        unsafe {
+            let reverse_map = self.reverse_map.lock().unwrap();
+            reverse_map.get_unchecked(id.0 as usize)
+        }
     }
 
     /// Get the number of unique strings interned

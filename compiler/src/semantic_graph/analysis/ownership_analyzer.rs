@@ -902,8 +902,14 @@ impl std::fmt::Display for OwnershipViolation {
                 conflicting_borrow,
                 conflict_type,
             } => {
-                write!(f, "Borrow conflict: variable {} has {:?} at line {} conflicting with borrow at line {}",
-                       variable.as_raw(), conflict_type, mutable_borrow.line, conflicting_borrow.line)
+                write!(
+                    f,
+                    "Borrow conflict: variable {} has {:?} at line {} conflicting with borrow at line {}",
+                    variable.as_raw(),
+                    conflict_type,
+                    mutable_borrow.line,
+                    conflicting_borrow.line
+                )
             }
             Self::MoveOfBorrowedVariable {
                 variable,
@@ -914,8 +920,13 @@ impl std::fmt::Display for OwnershipViolation {
                     .iter()
                     .map(|loc| loc.line.to_string())
                     .collect();
-                write!(f, "Move of borrowed variable: variable {} moved at line {} while borrowed at lines [{}]",
-                       variable.as_raw(), move_location.line, borrow_lines.join(", "))
+                write!(
+                    f,
+                    "Move of borrowed variable: variable {} moved at line {} while borrowed at lines [{}]",
+                    variable.as_raw(),
+                    move_location.line,
+                    borrow_lines.join(", ")
+                )
             }
             Self::BorrowOutlivesOwner {
                 borrowed_variable,
@@ -923,8 +934,14 @@ impl std::fmt::Display for OwnershipViolation {
                 borrow_location,
                 owner_end_location,
             } => {
-                write!(f, "Borrow outlives owner: borrow of variable {} by variable {} at line {} outlives owner ending at line {}",
-                       borrowed_variable.as_raw(), borrower.as_raw(), borrow_location.line, owner_end_location.line)
+                write!(
+                    f,
+                    "Borrow outlives owner: borrow of variable {} by variable {} at line {} outlives owner ending at line {}",
+                    borrowed_variable.as_raw(),
+                    borrower.as_raw(),
+                    borrow_location.line,
+                    owner_end_location.line
+                )
             }
         }
     }

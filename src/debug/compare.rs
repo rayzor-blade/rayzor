@@ -6,9 +6,9 @@
 //! Restores the original ref + stash on any error / Ctrl-C path so an
 //! aborted run never strands the tree mid-checkout.
 
-use super::bench::{run_bench, Metric};
 use super::DebugCommands;
-use anyhow::{anyhow, bail, Context, Result};
+use super::bench::{Metric, run_bench};
+use anyhow::{Context, Result, anyhow, bail};
 use std::process::Command;
 
 pub fn execute(cmd: DebugCommands) -> Result<()> {

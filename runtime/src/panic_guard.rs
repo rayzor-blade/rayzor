@@ -4,7 +4,7 @@
 //! into Haxe exceptions instead of causing undefined behavior (panic across FFI).
 //! In debug mode, the panic message includes a source-mapped stack trace.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Extract a human-readable message from a panic payload.
 fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {

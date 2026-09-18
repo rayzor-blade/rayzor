@@ -32,7 +32,7 @@
 
 use compiler::ir::{hir_to_mir::lower_hir_to_mir, tast_to_hir::lower_tast_to_hir};
 use compiler::tast::{
-    node::*, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
+    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable, node::*,
 };
 use parser::haxe_parser::parse_haxe_file;
 use std::cell::RefCell;

@@ -176,10 +176,10 @@ typedef Extended = Native & {
                 assert_eq!(typedef.meta.len(), 1);
                 assert_eq!(typedef.meta[0].name, "native");
 
-                if let Type::Intersection { right, .. } = &typedef.type_def {
-                    if let Type::Anonymous { fields, .. } = &**right {
-                        assert!(fields[0].optional);
-                    }
+                if let Type::Intersection { right, .. } = &typedef.type_def
+                    && let Type::Anonymous { fields, .. } = &**right
+                {
+                    assert!(fields[0].optional);
                 }
             }
         }

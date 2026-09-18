@@ -84,92 +84,96 @@ pub struct CocoaWindow {
 
 impl CocoaWindow {
     pub unsafe fn create(title: &str, x: i32, y: i32, w: i32, h: i32, style: i32) -> Option<Self> {
-        let send0: MsgSend0 = std::mem::transmute(msg_fn());
-        let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-        let send1int: MsgSend1Int = std::mem::transmute(msg_fn());
-        let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
-        let send1bool: MsgSend1Bool = std::mem::transmute(msg_fn());
-        let send_init: MsgSendInitWindow = std::mem::transmute(msg_fn());
+        unsafe {
+            let send0: MsgSend0 = std::mem::transmute(msg_fn());
+            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+            let send1int: MsgSend1Int = std::mem::transmute(msg_fn());
+            let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
+            let send1bool: MsgSend1Bool = std::mem::transmute(msg_fn());
+            let send_init: MsgSendInitWindow = std::mem::transmute(msg_fn());
 
-        // [NSApplication sharedApplication]
-        let app = send0(cls("NSApplication") as Id, sel("sharedApplication"));
-        if app.is_null() {
-            return None;
+            // [NSApplication sharedApplication]
+            let app = send0(cls("NSApplication") as Id, sel("sharedApplication"));
+            if app.is_null() {
+                return None;
+            }
+
+            // [app setActivationPolicy:0]
+            send1int(app, sel("setActivationPolicy:"), 0);
+
+            let mask = style_to_cocoa_mask(style);
+            let frame = CGRect {
+                x: x as CGFloat,
+                y: y as CGFloat,
+                width: w as CGFloat,
+                height: h as CGFloat,
+            };
+
+            // [[NSWindow alloc] initWithContentRect:styleMask:backing:defer:]
+            let alloc = send0(cls("NSWindow") as Id, sel("alloc"));
+            let window = send_init(
+                alloc,
+                sel("initWithContentRect:styleMask:backing:defer:"),
+                frame,
+                mask,
+                2, // NSBackingStoreBuffered
+                0, // defer: NO
+            );
+            if window.is_null() {
+                return None;
+            }
+
+            // [window setTitle:@"..."]
+            let title_cstr = std::ffi::CString::new(title).ok()?;
+            let ns_title = send1str(
+                cls("NSString") as Id,
+                sel("stringWithUTF8String:"),
+                title_cstr.as_ptr(),
+            );
+            send1ptr(window, sel("setTitle:"), ns_title);
+
+            // [window makeKeyAndOrderFront:nil]
+            send1ptr(window, sel("makeKeyAndOrderFront:"), std::ptr::null_mut());
+
+            // [app activateIgnoringOtherApps:YES]
+            send1bool(app, sel("activateIgnoringOtherApps:"), 1);
+
+            // Get content view + enable layer
+            let view = send0(window, sel("contentView"));
+            send1bool(view, sel("setWantsLayer:"), 1);
+
+            // [window setAcceptsMouseMovedEvents:YES]
+            send1bool(window, sel("setAcceptsMouseMovedEvents:"), 1);
+
+            Some(CocoaWindow {
+                ns_window: window,
+                ns_view: view,
+                width: w as u32,
+                height: h as u32,
+                resized: false,
+                should_close: false,
+                key_states: [false; 256],
+                events: crate::event::EventQueue::new(),
+                mouse_x: 0.0,
+                mouse_y: 0.0,
+                mouse_buttons: [false; 5],
+            })
         }
-
-        // [app setActivationPolicy:0]
-        send1int(app, sel("setActivationPolicy:"), 0);
-
-        let mask = style_to_cocoa_mask(style);
-        let frame = CGRect {
-            x: x as CGFloat,
-            y: y as CGFloat,
-            width: w as CGFloat,
-            height: h as CGFloat,
-        };
-
-        // [[NSWindow alloc] initWithContentRect:styleMask:backing:defer:]
-        let alloc = send0(cls("NSWindow") as Id, sel("alloc"));
-        let window = send_init(
-            alloc,
-            sel("initWithContentRect:styleMask:backing:defer:"),
-            frame,
-            mask,
-            2, // NSBackingStoreBuffered
-            0, // defer: NO
-        );
-        if window.is_null() {
-            return None;
-        }
-
-        // [window setTitle:@"..."]
-        let title_cstr = std::ffi::CString::new(title).ok()?;
-        let ns_title = send1str(
-            cls("NSString") as Id,
-            sel("stringWithUTF8String:"),
-            title_cstr.as_ptr(),
-        );
-        send1ptr(window, sel("setTitle:"), ns_title);
-
-        // [window makeKeyAndOrderFront:nil]
-        send1ptr(window, sel("makeKeyAndOrderFront:"), std::ptr::null_mut());
-
-        // [app activateIgnoringOtherApps:YES]
-        send1bool(app, sel("activateIgnoringOtherApps:"), 1);
-
-        // Get content view + enable layer
-        let view = send0(window, sel("contentView"));
-        send1bool(view, sel("setWantsLayer:"), 1);
-
-        // [window setAcceptsMouseMovedEvents:YES]
-        send1bool(window, sel("setAcceptsMouseMovedEvents:"), 1);
-
-        Some(CocoaWindow {
-            ns_window: window,
-            ns_view: view,
-            width: w as u32,
-            height: h as u32,
-            resized: false,
-            should_close: false,
-            key_states: [false; 256],
-            events: crate::event::EventQueue::new(),
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            mouse_buttons: [false; 5],
-        })
     }
 
     pub unsafe fn create_centered(title: &str, w: i32, h: i32) -> Option<Self> {
-        let send0: MsgSend0 = std::mem::transmute(msg_fn());
-        let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
+        unsafe {
+            let send0: MsgSend0 = std::mem::transmute(msg_fn());
+            let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
 
-        let screen = send0(cls("NSScreen") as Id, sel("mainScreen"));
-        let screen_frame = send_rect(screen, sel("frame"));
+            let screen = send0(cls("NSScreen") as Id, sel("mainScreen"));
+            let screen_frame = send_rect(screen, sel("frame"));
 
-        let x = ((screen_frame.width - w as f64) / 2.0) as i32;
-        let y = ((screen_frame.height - h as f64) / 2.0) as i32;
+            let x = ((screen_frame.width - w as f64) / 2.0) as i32;
+            let y = ((screen_frame.height - h as f64) / 2.0) as i32;
 
-        Self::create(title, x, y, w, h, 1 | 2 | 4 | 8 | 16)
+            Self::create(title, x, y, w, h, 1 | 2 | 4 | 8 | 16)
+        }
     }
 
     // ========================================================================
@@ -177,138 +181,140 @@ impl CocoaWindow {
     // ========================================================================
 
     pub unsafe fn poll_events(&mut self) -> bool {
-        use crate::event::WindowEvent;
+        unsafe {
+            use crate::event::WindowEvent;
 
-        self.resized = false;
-        self.events.clear();
+            self.resized = false;
+            self.events.clear();
 
-        let send0: MsgSend0 = std::mem::transmute(msg_fn());
-        let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
-        let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-        let send_event: MsgSendEvent = std::mem::transmute(msg_fn());
-        let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
-        let send_nsuint: MsgSendNSUInt = std::mem::transmute(msg_fn());
-        let send_u16: MsgSendU16 = std::mem::transmute(msg_fn());
-        let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
-        let send_nspoint: MsgSendNSPoint = std::mem::transmute(msg_fn());
+            let send0: MsgSend0 = std::mem::transmute(msg_fn());
+            let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
+            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+            let send_event: MsgSendEvent = std::mem::transmute(msg_fn());
+            let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
+            let send_nsuint: MsgSendNSUInt = std::mem::transmute(msg_fn());
+            let send_u16: MsgSendU16 = std::mem::transmute(msg_fn());
+            let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
+            let send_nspoint: MsgSendNSPoint = std::mem::transmute(msg_fn());
 
-        let app = send0(cls("NSApplication") as Id, sel("sharedApplication"));
-        let mode = send1str(
-            cls("NSString") as Id,
-            sel("stringWithUTF8String:"),
-            c"kCFRunLoopDefaultMode".as_ptr(),
-        );
-
-        // Helper: get cocoa modifier flags as our bitmask
-        let get_mods = |evt: Id| -> i32 {
-            let flags = send_nsuint(evt, sel("modifierFlags"));
-            let mut m = 0i32;
-            if flags & (1 << 17) != 0 {
-                m |= 1;
-            } // shift
-            if flags & (1 << 18) != 0 {
-                m |= 2;
-            } // ctrl
-            if flags & (1 << 19) != 0 {
-                m |= 4;
-            } // alt/option
-            if flags & (1 << 20) != 0 {
-                m |= 8;
-            } // cmd
-            m
-        };
-
-        loop {
-            let event = send_event(
-                app,
-                sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
-                NSUInteger::MAX,
-                std::ptr::null_mut(),
-                mode,
-                1,
+            let app = send0(cls("NSApplication") as Id, sel("sharedApplication"));
+            let mode = send1str(
+                cls("NSString") as Id,
+                sel("stringWithUTF8String:"),
+                c"kCFRunLoopDefaultMode".as_ptr(),
             );
-            if event.is_null() {
-                break;
+
+            // Helper: get cocoa modifier flags as our bitmask
+            let get_mods = |evt: Id| -> i32 {
+                let flags = send_nsuint(evt, sel("modifierFlags"));
+                let mut m = 0i32;
+                if flags & (1 << 17) != 0 {
+                    m |= 1;
+                } // shift
+                if flags & (1 << 18) != 0 {
+                    m |= 2;
+                } // ctrl
+                if flags & (1 << 19) != 0 {
+                    m |= 4;
+                } // alt/option
+                if flags & (1 << 20) != 0 {
+                    m |= 8;
+                } // cmd
+                m
+            };
+
+            loop {
+                let event = send_event(
+                    app,
+                    sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
+                    NSUInteger::MAX,
+                    std::ptr::null_mut(),
+                    mode,
+                    1,
+                );
+                if event.is_null() {
+                    break;
+                }
+
+                let et = send_nsuint(event, sel("type"));
+
+                match et {
+                    // Key down/up
+                    10 | 11 => {
+                        let keycode = send_u16(event, sel("keyCode"));
+                        let vk = cocoa_keycode_to_key(keycode);
+                        let mods = get_mods(event);
+                        if vk < 256 {
+                            self.key_states[vk] = et == 10;
+                        }
+                        if et == 10 {
+                            self.events.push(WindowEvent::key_down(vk as i32, mods));
+                        } else {
+                            self.events.push(WindowEvent::key_up(vk as i32, mods));
+                        }
+                    }
+                    // Mouse down: 1=left, 3=right, 25=other
+                    1 | 3 | 25 => {
+                        let btn = match et {
+                            1 => 0,
+                            3 => 1,
+                            _ => 2,
+                        };
+                        let loc = send_nspoint(event, sel("locationInWindow"));
+                        self.mouse_x = loc[0];
+                        self.mouse_y = loc[1];
+                        self.mouse_buttons[btn as usize] = true;
+                        self.events
+                            .push(WindowEvent::mouse_down(btn, loc[0], loc[1]));
+                    }
+                    // Mouse up: 2=left, 4=right, 26=other
+                    2 | 4 | 26 => {
+                        let btn = match et {
+                            2 => 0,
+                            4 => 1,
+                            _ => 2,
+                        };
+                        let loc = send_nspoint(event, sel("locationInWindow"));
+                        self.mouse_x = loc[0];
+                        self.mouse_y = loc[1];
+                        self.mouse_buttons[btn as usize] = false;
+                        self.events.push(WindowEvent::mouse_up(btn, loc[0], loc[1]));
+                    }
+                    // Mouse moved / dragged
+                    5 | 6 | 7 | 27 => {
+                        let loc = send_nspoint(event, sel("locationInWindow"));
+                        self.mouse_x = loc[0];
+                        self.mouse_y = loc[1];
+                        self.events.push(WindowEvent::mouse_move(loc[0], loc[1]));
+                    }
+                    // Scroll wheel (22)
+                    22 => {
+                        type MsgSendCGFloat = unsafe extern "C" fn(Id, Sel) -> CGFloat;
+                        let send_cgf: MsgSendCGFloat = std::mem::transmute(msg_fn());
+                        let dx = send_cgf(event, sel("scrollingDeltaX"));
+                        let dy = send_cgf(event, sel("scrollingDeltaY"));
+                        self.events.push(WindowEvent::mouse_wheel(dx, dy));
+                    }
+                    _ => {}
+                }
+
+                send1ptr(app, sel("sendEvent:"), event);
             }
 
-            let et = send_nsuint(event, sel("type"));
-
-            match et {
-                // Key down/up
-                10 | 11 => {
-                    let keycode = send_u16(event, sel("keyCode"));
-                    let vk = cocoa_keycode_to_key(keycode);
-                    let mods = get_mods(event);
-                    if vk < 256 {
-                        self.key_states[vk] = et == 10;
-                    }
-                    if et == 10 {
-                        self.events.push(WindowEvent::key_down(vk as i32, mods));
-                    } else {
-                        self.events.push(WindowEvent::key_up(vk as i32, mods));
-                    }
-                }
-                // Mouse down: 1=left, 3=right, 25=other
-                1 | 3 | 25 => {
-                    let btn = match et {
-                        1 => 0,
-                        3 => 1,
-                        _ => 2,
-                    };
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                    self.mouse_buttons[btn as usize] = true;
-                    self.events
-                        .push(WindowEvent::mouse_down(btn, loc[0], loc[1]));
-                }
-                // Mouse up: 2=left, 4=right, 26=other
-                2 | 4 | 26 => {
-                    let btn = match et {
-                        2 => 0,
-                        4 => 1,
-                        _ => 2,
-                    };
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                    self.mouse_buttons[btn as usize] = false;
-                    self.events.push(WindowEvent::mouse_up(btn, loc[0], loc[1]));
-                }
-                // Mouse moved / dragged
-                5 | 6 | 7 | 27 => {
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                    self.events.push(WindowEvent::mouse_move(loc[0], loc[1]));
-                }
-                // Scroll wheel (22)
-                22 => {
-                    type MsgSendCGFloat = unsafe extern "C" fn(Id, Sel) -> CGFloat;
-                    let send_cgf: MsgSendCGFloat = std::mem::transmute(msg_fn());
-                    let dx = send_cgf(event, sel("scrollingDeltaX"));
-                    let dy = send_cgf(event, sel("scrollingDeltaY"));
-                    self.events.push(WindowEvent::mouse_wheel(dx, dy));
-                }
-                _ => {}
+            // Detect window resize
+            let frame = send_rect(self.ns_view, sel("frame"));
+            let new_w = frame.width as u32;
+            let new_h = frame.height as u32;
+            if new_w != self.width || new_h != self.height {
+                self.events
+                    .push(WindowEvent::resize(new_w as i32, new_h as i32));
+                self.width = new_w;
+                self.height = new_h;
+                self.resized = true;
             }
 
-            send1ptr(app, sel("sendEvent:"), event);
+            send_bool(self.ns_window, sel("isVisible")) != 0
         }
-
-        // Detect window resize
-        let frame = send_rect(self.ns_view, sel("frame"));
-        let new_w = frame.width as u32;
-        let new_h = frame.height as u32;
-        if new_w != self.width || new_h != self.height {
-            self.events
-                .push(WindowEvent::resize(new_w as i32, new_h as i32));
-            self.width = new_w;
-            self.height = new_h;
-            self.resized = true;
-        }
-
-        send_bool(self.ns_window, sel("isVisible")) != 0
     }
 
     // ========================================================================
@@ -345,67 +351,77 @@ impl CocoaWindow {
 
     /// Returns (x, y) position of the window frame origin (bottom-left in Cocoa coords).
     pub unsafe fn get_position(&self) -> (i32, i32) {
-        let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
-        let frame = send_rect(self.ns_window, sel("frame"));
-        (frame.x as i32, frame.y as i32)
+        unsafe {
+            let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
+            let frame = send_rect(self.ns_window, sel("frame"));
+            (frame.x as i32, frame.y as i32)
+        }
     }
 
     /// Sets the window origin to (x, y) while preserving current size.
     pub unsafe fn set_position(&self, x: i32, y: i32) {
-        let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
-        let send_set_frame: MsgSendRect1Bool = std::mem::transmute(msg_fn());
+        unsafe {
+            let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
+            let send_set_frame: MsgSendRect1Bool = std::mem::transmute(msg_fn());
 
-        let frame = send_rect(self.ns_window, sel("frame"));
-        let new_frame = CGRect {
-            x: x as CGFloat,
-            y: y as CGFloat,
-            width: frame.width,
-            height: frame.height,
-        };
-        // [window setFrame:newFrame display:YES]
-        send_set_frame(self.ns_window, sel("setFrame:display:"), new_frame, 1);
+            let frame = send_rect(self.ns_window, sel("frame"));
+            let new_frame = CGRect {
+                x: x as CGFloat,
+                y: y as CGFloat,
+                width: frame.width,
+                height: frame.height,
+            };
+            // [window setFrame:newFrame display:YES]
+            send_set_frame(self.ns_window, sel("setFrame:display:"), new_frame, 1);
+        }
     }
 
     /// Resizes the window frame to (w, h) while preserving current position.
     pub unsafe fn set_size(&mut self, w: i32, h: i32) {
-        let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
-        let send_set_frame: MsgSendRect1Bool = std::mem::transmute(msg_fn());
+        unsafe {
+            let send_rect: MsgSendRect = std::mem::transmute(msg_fn());
+            let send_set_frame: MsgSendRect1Bool = std::mem::transmute(msg_fn());
 
-        let frame = send_rect(self.ns_window, sel("frame"));
-        let new_frame = CGRect {
-            x: frame.x,
-            y: frame.y,
-            width: w as CGFloat,
-            height: h as CGFloat,
-        };
-        // [window setFrame:newFrame display:YES]
-        send_set_frame(self.ns_window, sel("setFrame:display:"), new_frame, 1);
-        self.width = w as u32;
-        self.height = h as u32;
+            let frame = send_rect(self.ns_window, sel("frame"));
+            let new_frame = CGRect {
+                x: frame.x,
+                y: frame.y,
+                width: w as CGFloat,
+                height: h as CGFloat,
+            };
+            // [window setFrame:newFrame display:YES]
+            send_set_frame(self.ns_window, sel("setFrame:display:"), new_frame, 1);
+            self.width = w as u32;
+            self.height = h as u32;
+        }
     }
 
     /// Sets the minimum content size of the window.
     pub unsafe fn set_min_size(&self, w: i32, h: i32) {
-        let send_cgsize: MsgSendCGSize = std::mem::transmute(msg_fn());
-        // [window setContentMinSize:NSMakeSize(w, h)]
-        send_cgsize(
-            self.ns_window,
-            sel("setContentMinSize:"),
-            w as CGFloat,
-            h as CGFloat,
-        );
+        unsafe {
+            let send_cgsize: MsgSendCGSize = std::mem::transmute(msg_fn());
+            // [window setContentMinSize:NSMakeSize(w, h)]
+            send_cgsize(
+                self.ns_window,
+                sel("setContentMinSize:"),
+                w as CGFloat,
+                h as CGFloat,
+            );
+        }
     }
 
     /// Sets the maximum content size of the window.
     pub unsafe fn set_max_size(&self, w: i32, h: i32) {
-        let send_cgsize: MsgSendCGSize = std::mem::transmute(msg_fn());
-        // [window setContentMaxSize:NSMakeSize(w, h)]
-        send_cgsize(
-            self.ns_window,
-            sel("setContentMaxSize:"),
-            w as CGFloat,
-            h as CGFloat,
-        );
+        unsafe {
+            let send_cgsize: MsgSendCGSize = std::mem::transmute(msg_fn());
+            // [window setContentMaxSize:NSMakeSize(w, h)]
+            send_cgsize(
+                self.ns_window,
+                sel("setContentMaxSize:"),
+                w as CGFloat,
+                h as CGFloat,
+            );
+        }
     }
 
     // ========================================================================
@@ -415,51 +431,59 @@ impl CocoaWindow {
     /// Toggles fullscreen mode. Cocoa toggleFullScreen: is a toggle, so we
     /// check current state first and only send the message if needed.
     pub unsafe fn set_fullscreen(&self, fs: bool) {
-        if self.is_fullscreen() != fs {
-            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-            // [window toggleFullScreen:nil]
-            send1ptr(
-                self.ns_window,
-                sel("toggleFullScreen:"),
-                std::ptr::null_mut(),
-            );
+        unsafe {
+            if self.is_fullscreen() != fs {
+                let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+                // [window toggleFullScreen:nil]
+                send1ptr(
+                    self.ns_window,
+                    sel("toggleFullScreen:"),
+                    std::ptr::null_mut(),
+                );
+            }
         }
     }
 
     /// Shows or hides the window.
     pub unsafe fn set_visible(&self, visible: bool) {
-        if visible {
-            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-            // [window makeKeyAndOrderFront:nil]
-            send1ptr(
-                self.ns_window,
-                sel("makeKeyAndOrderFront:"),
-                std::ptr::null_mut(),
-            );
-        } else {
-            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-            // [window orderOut:nil]
-            send1ptr(self.ns_window, sel("orderOut:"), std::ptr::null_mut());
+        unsafe {
+            if visible {
+                let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+                // [window makeKeyAndOrderFront:nil]
+                send1ptr(
+                    self.ns_window,
+                    sel("makeKeyAndOrderFront:"),
+                    std::ptr::null_mut(),
+                );
+            } else {
+                let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+                // [window orderOut:nil]
+                send1ptr(self.ns_window, sel("orderOut:"), std::ptr::null_mut());
+            }
         }
     }
 
     /// Sets the window to float above all other windows (or restores normal level).
     pub unsafe fn set_floating(&self, on_top: bool) {
-        let send1nsuint: MsgSend1NSUInt = std::mem::transmute(msg_fn());
-        let level = if on_top {
-            NS_FLOATING_WINDOW_LEVEL
-        } else {
-            NS_NORMAL_WINDOW_LEVEL
-        };
-        // [window setLevel:level]
-        send1nsuint(self.ns_window, sel("setLevel:"), level);
+        unsafe {
+            let send1nsuint: MsgSend1NSUInt = std::mem::transmute(msg_fn());
+            let level = if on_top {
+                NS_FLOATING_WINDOW_LEVEL
+            } else {
+                NS_NORMAL_WINDOW_LEVEL
+            };
+            // [window setLevel:level]
+            send1nsuint(self.ns_window, sel("setLevel:"), level);
+        }
     }
 
     /// Sets the window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub unsafe fn set_opacity(&self, opacity: f64) {
-        let send1cgfloat: MsgSend1CGFloat = std::mem::transmute(msg_fn());
-        // [window setAlphaValue:opacity]
-        send1cgfloat(self.ns_window, sel("setAlphaValue:"), opacity);
+        unsafe {
+            let send1cgfloat: MsgSend1CGFloat = std::mem::transmute(msg_fn());
+            // [window setAlphaValue:opacity]
+            send1cgfloat(self.ns_window, sel("setAlphaValue:"), opacity);
+        }
     }
 
     // ========================================================================
@@ -468,27 +492,35 @@ impl CocoaWindow {
 
     /// Returns true if the window is currently in fullscreen mode.
     pub unsafe fn is_fullscreen(&self) -> bool {
-        let send_nsuint: MsgSendNSUInt = std::mem::transmute(msg_fn());
-        let mask = send_nsuint(self.ns_window, sel("styleMask"));
-        (mask & NS_FULLSCREEN_WINDOW_MASK) != 0
+        unsafe {
+            let send_nsuint: MsgSendNSUInt = std::mem::transmute(msg_fn());
+            let mask = send_nsuint(self.ns_window, sel("styleMask"));
+            (mask & NS_FULLSCREEN_WINDOW_MASK) != 0
+        }
     }
 
     /// Returns true if the window is currently visible (on screen).
     pub unsafe fn is_visible(&self) -> bool {
-        let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
-        send_bool(self.ns_window, sel("isVisible")) != 0
+        unsafe {
+            let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
+            send_bool(self.ns_window, sel("isVisible")) != 0
+        }
     }
 
     /// Returns true if the window is currently minimized to the dock.
     pub unsafe fn is_minimized(&self) -> bool {
-        let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
-        send_bool(self.ns_window, sel("isMiniaturized")) != 0
+        unsafe {
+            let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
+            send_bool(self.ns_window, sel("isMiniaturized")) != 0
+        }
     }
 
     /// Returns true if the window is the key window (has keyboard focus).
     pub unsafe fn is_focused(&self) -> bool {
-        let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
-        send_bool(self.ns_window, sel("isKeyWindow")) != 0
+        unsafe {
+            let send_bool: MsgSendBool = std::mem::transmute(msg_fn());
+            send_bool(self.ns_window, sel("isKeyWindow")) != 0
+        }
     }
 
     // ========================================================================
@@ -496,22 +528,26 @@ impl CocoaWindow {
     // ========================================================================
 
     pub unsafe fn set_title(&self, title: &str) {
-        let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
-        let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
-        if let Ok(cstr) = std::ffi::CString::new(title) {
-            let ns_title = send1str(
-                cls("NSString") as Id,
-                sel("stringWithUTF8String:"),
-                cstr.as_ptr(),
-            );
-            send1ptr(self.ns_window, sel("setTitle:"), ns_title);
+        unsafe {
+            let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
+            let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
+            if let Ok(cstr) = std::ffi::CString::new(title) {
+                let ns_title = send1str(
+                    cls("NSString") as Id,
+                    sel("stringWithUTF8String:"),
+                    cstr.as_ptr(),
+                );
+                send1ptr(self.ns_window, sel("setTitle:"), ns_title);
+            }
         }
     }
 
     pub unsafe fn destroy(&self) {
-        if !self.ns_window.is_null() {
-            let send0: MsgSend0 = std::mem::transmute(msg_fn());
-            send0(self.ns_window, sel("close"));
+        unsafe {
+            if !self.ns_window.is_null() {
+                let send0: MsgSend0 = std::mem::transmute(msg_fn());
+                send0(self.ns_window, sel("close"));
+            }
         }
     }
 }

@@ -3659,7 +3659,7 @@ fn param_retained(
                 IrInstruction::Load { dest, ptr, .. }
                     if in_set(ptr) && reads_of(*dest, function) > 0 =>
                 {
-                    return true
+                    return true;
                 }
                 IrInstruction::Return { value: Some(v) } if in_set(v) => return true,
                 IrInstruction::CallIndirect { func_ptr, args, .. }

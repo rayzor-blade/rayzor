@@ -66,7 +66,7 @@ pub mod hdll_plugin;
 pub mod hl_types;
 
 use crate::compiler_plugin::CompilerPluginRegistry;
-use crate::ir::{mir_builder::MirBuilder, IrModule};
+use crate::ir::{IrModule, mir_builder::MirBuilder};
 
 // Re-export runtime mapping types
 pub use runtime_mapping::{

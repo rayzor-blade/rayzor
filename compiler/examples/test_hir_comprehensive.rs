@@ -40,10 +40,10 @@
 
 use compiler::ir::{hir::*, hir_to_mir::lower_hir_to_mir, tast_to_hir::lower_tast_to_hir};
 use compiler::tast::{
-    ast_lowering::AstLowering, scopes::ScopeTree, StringInterner, SymbolTable, TypeTable,
+    StringInterner, SymbolTable, TypeTable, ast_lowering::AstLowering, scopes::ScopeTree,
 };
 use parser::haxe_parser::parse_haxe_file;
-use parser::{parse_haxe_file_with_diagnostics, Diagnostic};
+use parser::{Diagnostic, parse_haxe_file_with_diagnostics};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -982,66 +982,66 @@ fn check_block_for_features(
 
             HirStatement::Expr(expr) => {
                 // Special debugging for the testArrayComprehension method
-                if idx == 0 {
-                    if let HirExprKind::Block(inner_block) = &expr.kind {
-                        println!(
-                            "       DEBUG: Expr(Block) contains {} statements",
-                            inner_block.statements.len()
-                        );
-                        // Special debug for lvalue operations test
-                        if inner_block.statements.len() == 5 {
-                            for (i, stmt) in inner_block.statements.iter().enumerate() {
-                                match stmt {
-                                    HirStatement::Expr(expr) => {
-                                        println!("         Statement {} is Expr", i + 1);
-                                        // For testLvalueOperations, we know these are assignments
-                                        // even if they're not properly detected as Assign statements
-                                        // This is a workaround for the test
-                                    }
-                                    HirStatement::Assign { .. } => {
-                                        println!(
-                                            "         Statement {} is ASSIGN! Found lvalue op!",
-                                            i + 1
-                                        );
-                                        // This would indicate proper lvalue operations
-                                    }
-                                    _ => {}
+                if idx == 0
+                    && let HirExprKind::Block(inner_block) = &expr.kind
+                {
+                    println!(
+                        "       DEBUG: Expr(Block) contains {} statements",
+                        inner_block.statements.len()
+                    );
+                    // Special debug for lvalue operations test
+                    if inner_block.statements.len() == 5 {
+                        for (i, stmt) in inner_block.statements.iter().enumerate() {
+                            match stmt {
+                                HirStatement::Expr(expr) => {
+                                    println!("         Statement {} is Expr", i + 1);
+                                    // For testLvalueOperations, we know these are assignments
+                                    // even if they're not properly detected as Assign statements
+                                    // This is a workaround for the test
                                 }
+                                HirStatement::Assign { .. } => {
+                                    println!(
+                                        "         Statement {} is ASSIGN! Found lvalue op!",
+                                        i + 1
+                                    );
+                                    // This would indicate proper lvalue operations
+                                }
+                                _ => {}
                             }
                         }
-                        for (i, stmt) in inner_block.statements.iter().take(5).enumerate() {
-                            let stmt_type = match stmt {
-                                HirStatement::Let { init, .. } => {
-                                    // Check if Let statement has a block expression as init
-                                    if let Some(init_expr) = init {
-                                        if let HirExprKind::Block(init_block) = &init_expr.kind {
-                                            // This could be an array comprehension!
-                                            let has_forin = init_block
-                                                .statements
-                                                .iter()
-                                                .any(|s| matches!(s, HirStatement::ForIn { .. }));
-                                            if has_forin {
-                                                format!("Let (with ForIn in init block!)")
-                                            } else {
-                                                format!(
-                                                    "Let (init block with {} stmts)",
-                                                    init_block.statements.len()
-                                                )
-                                            }
+                    }
+                    for (i, stmt) in inner_block.statements.iter().take(5).enumerate() {
+                        let stmt_type = match stmt {
+                            HirStatement::Let { init, .. } => {
+                                // Check if Let statement has a block expression as init
+                                if let Some(init_expr) = init {
+                                    if let HirExprKind::Block(init_block) = &init_expr.kind {
+                                        // This could be an array comprehension!
+                                        let has_forin = init_block
+                                            .statements
+                                            .iter()
+                                            .any(|s| matches!(s, HirStatement::ForIn { .. }));
+                                        if has_forin {
+                                            format!("Let (with ForIn in init block!)")
                                         } else {
-                                            "Let".to_string()
+                                            format!(
+                                                "Let (init block with {} stmts)",
+                                                init_block.statements.len()
+                                            )
                                         }
                                     } else {
-                                        "Let (no init)".to_string()
+                                        "Let".to_string()
                                     }
+                                } else {
+                                    "Let (no init)".to_string()
                                 }
-                                HirStatement::Expr(_) => "Expr".to_string(),
-                                HirStatement::ForIn { .. } => "ForIn".to_string(),
-                                HirStatement::Return(_) => "Return".to_string(),
-                                _ => "Other".to_string(),
-                            };
-                            println!("         Inner statement {}: {}", i + 1, stmt_type);
-                        }
+                            }
+                            HirStatement::Expr(_) => "Expr".to_string(),
+                            HirStatement::ForIn { .. } => "ForIn".to_string(),
+                            HirStatement::Return(_) => "Return".to_string(),
+                            _ => "Other".to_string(),
+                        };
+                        println!("         Inner statement {}: {}", i + 1, stmt_type);
                     }
                 }
                 check_expr_for_features(
@@ -1227,11 +1227,10 @@ fn check_expr_for_features(
                 op: HirBinaryOp::Eq,
                 ..
             } = &condition.kind
+                && let HirExprKind::If { .. } = &else_expr.kind
             {
-                if let HirExprKind::If { .. } = &else_expr.kind {
-                    // Nested if-else with equality - likely a desugared switch
-                    *has_pattern_match = true;
-                }
+                // Nested if-else with equality - likely a desugared switch
+                *has_pattern_match = true;
             }
             check_expr_for_features(
                 condition,

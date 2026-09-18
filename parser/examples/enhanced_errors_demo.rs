@@ -8,8 +8,8 @@
 
 use parser::enhanced_context::HaxeDiagnostics;
 use parser::{
-    parse_haxe_file, DiagnosticBuilder, Diagnostics, ErrorFormatter, SourceMap, SourcePosition,
-    SourceSpan,
+    DiagnosticBuilder, Diagnostics, ErrorFormatter, SourceMap, SourcePosition, SourceSpan,
+    parse_haxe_file,
 };
 
 fn main() {

@@ -146,7 +146,10 @@ impl HxmlConfig {
             {
                 // Ignore traditional Haxe targets - Rayzor uses --rayzor-jit or --rayzor-compile
                 if config.verbose {
-                    eprintln!("Note: Ignoring traditional Haxe target: {}. Use --rayzor-jit or --rayzor-compile", line);
+                    eprintln!(
+                        "Note: Ignoring traditional Haxe target: {}. Use --rayzor-jit or --rayzor-compile",
+                        line
+                    );
                 }
             } else if let Some(rest) = line.strip_prefix("-resource ") {
                 let parts: Vec<&str> = rest.trim().splitn(2, '@').collect();

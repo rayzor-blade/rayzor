@@ -258,7 +258,11 @@ impl<'a> HirToMirContext<'a> {
                     if std::env::var_os("RAYZOR_TRACE_STDLIB_DISPATCH").is_some() {
                         eprintln!(
                             "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
-                            class_name, method_name, runtime_func, is_instance_method, is_mir_wrapper
+                            class_name,
+                            method_name,
+                            runtime_func,
+                            is_instance_method,
+                            is_mir_wrapper
                         );
                     }
                     debug!(

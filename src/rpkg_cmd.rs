@@ -157,21 +157,21 @@ pub fn cmd_rpkg_pack(
             };
             compiler::workspace::find_project_root(&abs)
         });
-        if let Some(root) = manifest_root {
-            if let Ok(project) = compiler::workspace::load_project(&root) {
-                for (module_name, abs_path) in project.resolved_wasm_hosts() {
-                    match std::fs::read_to_string(&abs_path) {
-                        Ok(source) => {
-                            println!(
-                                "  js-host: {} ({:.1} KB)",
-                                module_name,
-                                source.len() as f64 / 1024.0
-                            );
-                            js_hosts.push((module_name, source));
-                        }
-                        Err(e) => {
-                            eprintln!("  warning: JS host {} not found: {}", abs_path.display(), e)
-                        }
+        if let Some(root) = manifest_root
+            && let Ok(project) = compiler::workspace::load_project(&root)
+        {
+            for (module_name, abs_path) in project.resolved_wasm_hosts() {
+                match std::fs::read_to_string(&abs_path) {
+                    Ok(source) => {
+                        println!(
+                            "  js-host: {} ({:.1} KB)",
+                            module_name,
+                            source.len() as f64 / 1024.0
+                        );
+                        js_hosts.push((module_name, source));
+                    }
+                    Err(e) => {
+                        eprintln!("  warning: JS host {} not found: {}", abs_path.display(), e)
                     }
                 }
             }
@@ -200,24 +200,24 @@ pub fn cmd_rpkg_pack(
             // Check for companion _bg.wasm alongside the JS host
             // Reconstruct the path from the CLI arg to find the companion
             let bg_path = js_host_args.iter().find_map(|arg| {
-                if let Some((name, file)) = arg.split_once('=') {
-                    if name == module_name {
-                        let js_path = PathBuf::from(file);
-                        let bg = js_path.with_file_name(
-                            js_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
-                        );
-                        if bg.exists() {
-                            return Some(bg);
-                        }
+                if let Some((name, file)) = arg.split_once('=')
+                    && name == module_name
+                {
+                    let js_path = PathBuf::from(file);
+                    let bg = js_path.with_file_name(
+                        js_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
+                    );
+                    if bg.exists() {
+                        return Some(bg);
                     }
                 }
                 None
             });
-            if let Some(bg) = bg_path {
-                if let Ok(wasm_bytes) = std::fs::read(&bg) {
-                    builder.add_js_host_with_wasm(module_name, js_source, &wasm_bytes);
-                    continue;
-                }
+            if let Some(bg) = bg_path
+                && let Ok(wasm_bytes) = std::fs::read(&bg)
+            {
+                builder.add_js_host_with_wasm(module_name, js_source, &wasm_bytes);
+                continue;
             }
             builder.add_js_host(module_name, js_source);
         }

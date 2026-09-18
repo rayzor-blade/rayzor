@@ -173,11 +173,7 @@ impl<'a> HirToMirContext<'a> {
                                     // When is_method=true, args[0] is the enum class reference
                                     // (receiver), not a constructor field. Skip it.
                                     let constructor_args: &[HirExpr] = if *is_method {
-                                        if args.len() > 1 {
-                                            &args[1..]
-                                        } else {
-                                            &[]
-                                        }
+                                        if args.len() > 1 { &args[1..] } else { &[] }
                                     } else {
                                         args
                                     };

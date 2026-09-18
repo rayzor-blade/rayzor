@@ -4,6 +4,10 @@
 //! providing a complete type checking phase with diagnostic reporting.
 
 use super::{
+    AccessLevel, FlowSafetyError, FlowSafetyResults, InternedString, NamespaceResolver,
+    PackageAccessContext, PackageAccessValidator, ScopeTree, SourceLocation, StringInterner,
+    SymbolId, SymbolTable, TypeCheckError, TypeChecker, TypeErrorKind, TypeFlowGuard, TypeId,
+    TypeKind, TypeTable, Visibility,
     node::{
         BinaryOperator, CastKind, StringInterpolationPart, TypedClass, TypedEnum, TypedExpression,
         TypedExpressionKind, TypedField, TypedFile, TypedFunction, TypedInterface, TypedMapEntry,
@@ -12,10 +16,6 @@ use super::{
     send_sync_validator::{SendSyncError, SendSyncValidator},
     type_checker::TypeCompatibility,
     type_diagnostics::{TypeDiagnosticEmitter, TypeErrorContext},
-    AccessLevel, FlowSafetyError, FlowSafetyResults, InternedString, NamespaceResolver,
-    PackageAccessContext, PackageAccessValidator, ScopeTree, SourceLocation, StringInterner,
-    SymbolId, SymbolTable, TypeCheckError, TypeChecker, TypeErrorKind, TypeFlowGuard, TypeId,
-    TypeKind, TypeTable, Visibility,
 };
 use diagnostics::{Diagnostics, SourceMap};
 use source_map::{SourcePosition, SourceSpan};
@@ -600,9 +600,11 @@ class StaticContext {
 
         let error = &result.errors[0];
         assert!(error.message.contains("Instance member"));
-        assert!(error
-            .message
-            .contains("cannot be accessed from static context"));
+        assert!(
+            error
+                .message
+                .contains("cannot be accessed from static context")
+        );
     }
 
     #[test]

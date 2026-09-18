@@ -39,4 +39,4 @@ pub use tiered_backend::{
 };
 
 #[cfg(feature = "llvm-backend")]
-pub use llvm_jit_backend::{init_llvm_once, llvm_lock, reset_llvm_global_state, LLVMJitBackend};
+pub use llvm_jit_backend::{LLVMJitBackend, init_llvm_once, llvm_lock, reset_llvm_global_state};

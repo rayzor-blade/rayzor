@@ -29,7 +29,7 @@
     clippy::clone_on_copy
 )]
 /// Test that safety violations are actually detected and reported with proper diagnostics
-use compiler::pipeline::{compile_haxe_source, CompilationError, ErrorCategory};
+use compiler::pipeline::{CompilationError, ErrorCategory, compile_haxe_source};
 use diagnostics::{ErrorFormatter, SourceMap};
 
 fn print_diagnostics(source: &str, filename: &str, errors: &[CompilationError]) {

@@ -200,11 +200,7 @@ impl GgufFile {
 }
 
 fn div_ceil(n: u64, d: u64) -> u64 {
-    if n == 0 {
-        0
-    } else {
-        ((n - 1) / d) + 1
-    }
+    if n == 0 { 0 } else { ((n - 1) / d) + 1 }
 }
 
 struct Parser<'a, S: ByteSource> {

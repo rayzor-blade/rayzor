@@ -8,14 +8,14 @@
 //! - Minimal fragmentation
 //! - Thread-safe design
 
-use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::{self, MaybeUninit};
 use std::ptr::{self, NonNull};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 /// A chunk of memory within an arena
@@ -65,43 +65,45 @@ impl<T> ArenaChunk<T> {
     /// - Must check `can_allocate(count)` before calling
     /// - Caller must ensure returned memory is properly initialized before use
     unsafe fn allocate(&self, count: usize) -> Option<*mut T> {
-        // For zero-sized types, we need to handle them specially to ensure distinct addresses
-        if mem::size_of::<T>() == 0 {
-            // For ZSTs, increment the counter and return a distinct "address"
-            let current_len = self.len.fetch_add(count, Ordering::Relaxed);
-            if current_len + count > self.capacity {
-                // Restore the counter since we couldn't allocate
-                self.len.fetch_sub(count, Ordering::Relaxed);
-                return None;
-            }
-            // For ZSTs, create distinct addresses by using the allocation count as byte offset
-            // This ensures each ZST allocation gets a unique address for identity purposes
-            let base_addr = self.data.as_ptr() as usize;
-            let distinct_addr = base_addr.wrapping_add(current_len);
-            return Some(distinct_addr as *mut T);
-        }
-
-        // Use compare-and-swap loop for non-ZST types
-        loop {
-            let current_len = self.len.load(Ordering::Relaxed);
-
-            if current_len + count > self.capacity {
-                return None; // Not enough space
-            }
-
-            // Try to atomically update the length
-            match self.len.compare_exchange_weak(
-                current_len,
-                current_len + count,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return Some(self.data.as_ptr().add(current_len));
+        unsafe {
+            // For zero-sized types, we need to handle them specially to ensure distinct addresses
+            if mem::size_of::<T>() == 0 {
+                // For ZSTs, increment the counter and return a distinct "address"
+                let current_len = self.len.fetch_add(count, Ordering::Relaxed);
+                if current_len + count > self.capacity {
+                    // Restore the counter since we couldn't allocate
+                    self.len.fetch_sub(count, Ordering::Relaxed);
+                    return None;
                 }
-                Err(_) => {
-                    // Another thread beat us, try again
-                    continue;
+                // For ZSTs, create distinct addresses by using the allocation count as byte offset
+                // This ensures each ZST allocation gets a unique address for identity purposes
+                let base_addr = self.data.as_ptr() as usize;
+                let distinct_addr = base_addr.wrapping_add(current_len);
+                return Some(distinct_addr as *mut T);
+            }
+
+            // Use compare-and-swap loop for non-ZST types
+            loop {
+                let current_len = self.len.load(Ordering::Relaxed);
+
+                if current_len + count > self.capacity {
+                    return None; // Not enough space
+                }
+
+                // Try to atomically update the length
+                match self.len.compare_exchange_weak(
+                    current_len,
+                    current_len + count,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        return Some(self.data.as_ptr().add(current_len));
+                    }
+                    Err(_) => {
+                        // Another thread beat us, try again
+                        continue;
+                    }
                 }
             }
         }
@@ -271,25 +273,27 @@ impl<T> TypedArena<T> {
     /// # Safety
     /// Caller must ensure the returned memory is properly initialized before use.
     unsafe fn alloc_raw(&self, count: usize) -> *mut T {
-        if count == 0 {
-            return NonNull::dangling().as_ptr();
-        }
+        unsafe {
+            if count == 0 {
+                return NonNull::dangling().as_ptr();
+            }
 
-        // Fast path: try current chunk
-        let current_chunk_idx = self.current_chunk.load(Ordering::Relaxed);
+            // Fast path: try current chunk
+            let current_chunk_idx = self.current_chunk.load(Ordering::Relaxed);
 
-        // Try to allocate from current chunk without holding lock for long
-        {
-            let chunks_guard = self.chunks.lock().unwrap();
-            if let Some(chunk) = chunks_guard.get(current_chunk_idx) {
-                if let Some(ptr) = chunk.allocate(count) {
-                    return ptr;
+            // Try to allocate from current chunk without holding lock for long
+            {
+                let chunks_guard = self.chunks.lock().unwrap();
+                if let Some(chunk) = chunks_guard.get(current_chunk_idx) {
+                    if let Some(ptr) = chunk.allocate(count) {
+                        return ptr;
+                    }
                 }
             }
-        }
 
-        // Slow path: need a new chunk
-        self.allocate_new_chunk_for_request(count)
+            // Slow path: need a new chunk
+            self.allocate_new_chunk_for_request(count)
+        }
     }
 
     /// Allocate a new chunk to handle a request of `required_count` items
@@ -529,8 +533,8 @@ mod tests {
     #[test]
     #[ignore = "arena Drop causes SIGABRT on Linux CI"]
     fn test_drop_semantics() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 

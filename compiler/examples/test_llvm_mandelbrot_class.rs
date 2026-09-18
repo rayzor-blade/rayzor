@@ -52,7 +52,9 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
 fn main() {
     #[cfg(not(feature = "llvm-backend"))]
     {
-        eprintln!("LLVM backend not enabled. Run with: cargo run --release --features llvm-backend --example test_llvm_mandelbrot_class");
+        eprintln!(
+            "LLVM backend not enabled. Run with: cargo run --release --features llvm-backend --example test_llvm_mandelbrot_class"
+        );
         return;
     }
 

@@ -25,24 +25,22 @@ fn test_js_code_block() {
     // Verify the compiler-specific code block was parsed correctly
     if let TypeDeclaration::Class(class) = &file.declarations[0] {
         assert_eq!(class.fields.len(), 1);
-        if let ClassFieldKind::Function(func) = &class.fields[0].kind {
-            if let Some(body) = &func.body {
-                if let ExprKind::Block(elements) = &body.kind {
-                    if let BlockElement::Expr(expr) = &elements[0] {
-                        match &expr.kind {
-                            ExprKind::CompilerSpecific { target, code, .. } => {
-                                assert_eq!(target, "__js__");
-                                if let ExprKind::String(s) = &code.kind {
-                                    assert_eq!(s, "console.log('Hello from JavaScript');");
-                                } else {
-                                    panic!("Expected string literal for code");
-                                }
-                            }
-                            _ => {
-                                panic!("Expected CompilerSpecific expression, got {:?}", expr.kind)
-                            }
-                        }
+        if let ClassFieldKind::Function(func) = &class.fields[0].kind
+            && let Some(body) = &func.body
+            && let ExprKind::Block(elements) = &body.kind
+            && let BlockElement::Expr(expr) = &elements[0]
+        {
+            match &expr.kind {
+                ExprKind::CompilerSpecific { target, code, .. } => {
+                    assert_eq!(target, "__js__");
+                    if let ExprKind::String(s) = &code.kind {
+                        assert_eq!(s, "console.log('Hello from JavaScript');");
+                    } else {
+                        panic!("Expected string literal for code");
                     }
+                }
+                _ => {
+                    panic!("Expected CompilerSpecific expression, got {:?}", expr.kind)
                 }
             }
         }

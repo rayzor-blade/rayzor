@@ -20,6 +20,7 @@
 
 #[cfg(feature = "llvm-backend")]
 use inkwell::{
+    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
@@ -34,7 +35,6 @@ use inkwell::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PhiValue,
         PointerValue,
     },
-    AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel,
 };
 
 use crate::ir::{
@@ -3721,7 +3721,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     other,
                     lv.get_type().get_size(),
                     if is_float { "float" } else { "int" }
-                ))
+                ));
             }
         };
         out.map_err(|e| format!("Failed to build vector {:?}: {}", op, e))
@@ -4542,7 +4542,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             return Err(format!(
                                 "Invalid signature type for CallIndirect: {:?}",
                                 signature
-                            ))
+                            ));
                         }
                     }
                 };
@@ -5234,7 +5234,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
                     self.value_map.insert(*dest, closure_ptr.into());
                 } else {
-                    return Err(format!("Function {:?} not found in function_map for FunctionRef. Ensure all modules are compiled in declare-first order.", func_id));
+                    return Err(format!(
+                        "Function {:?} not found in function_map for FunctionRef. Ensure all modules are compiled in declare-first order.",
+                        func_id
+                    ));
                 }
             }
 
@@ -5321,7 +5324,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     if !lhs.is_vector_value() || !rhs.is_vector_value() {
                         return Err(format!(
                             "VectorBinOp(float) operand not a vector: left {:?}={:?}, right {:?}={:?}, vec_ty={:?}",
-                            left, lhs.get_type(), right, rhs.get_type(), vec_ty
+                            left,
+                            lhs.get_type(),
+                            right,
+                            rhs.get_type(),
+                            vec_ty
                         ));
                     }
                     let lhs_vec = lhs.into_vector_value();
@@ -5375,7 +5382,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 return Err(format!(
                                     "VectorBinOp(int) scalar rhs needs int lanes, got {:?}",
                                     other
-                                ))
+                                ));
                             }
                         };
                         let scalar = rhs.into_int_value();
@@ -5898,8 +5905,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 src_ty,
                 result_ty,
             } => {
-                use inkwell::types::VectorType;
                 use inkwell::IntPredicate;
+                use inkwell::types::VectorType;
 
                 let lo_v = self.get_value(*lo)?.into_vector_value();
                 let hi_v = self.get_value(*hi)?.into_vector_value();
@@ -5912,7 +5919,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         IrType::I8 | IrType::U8 => 8u64,
                         IrType::I16 | IrType::U16 => 16u64,
                         other => {
-                            return Err(format!("VectorNarrow: bad destination lane {:?}", other))
+                            return Err(format!("VectorNarrow: bad destination lane {:?}", other));
                         }
                     },
                     other => return Err(format!("VectorNarrow: non-vector result {:?}", other)),
@@ -7951,11 +7958,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Add hidden env parameter (null/0) only if function expects it
         let param_offset = if expects_env {
             arg_values.push(self.context.i64_type().const_int(0, false).into());
-            if uses_sret {
-                2
-            } else {
-                1
-            } // sret + env, or just env
+            if uses_sret { 2 } else { 1 } // sret + env, or just env
         } else if uses_sret {
             1 // just sret, no env
         } else {

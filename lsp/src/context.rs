@@ -44,14 +44,14 @@ impl LspContext {
             Ok(m) => m,
             Err(_) => return,
         };
-        if let compiler::workspace::manifest::RayzorManifest::SingleProject(project) = manifest {
-            if let Some(ref build) = project.build {
-                self.class_paths = build
-                    .class_paths
-                    .iter()
-                    .map(|cp| self.root.join(cp))
-                    .collect();
-            }
+        if let compiler::workspace::manifest::RayzorManifest::SingleProject(project) = manifest
+            && let Some(ref build) = project.build
+        {
+            self.class_paths = build
+                .class_paths
+                .iter()
+                .map(|cp| self.root.join(cp))
+                .collect();
         }
     }
 

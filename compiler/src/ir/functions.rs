@@ -347,7 +347,7 @@ impl IrFunction {
             for inst in &block.instructions {
                 match inst {
                     IrInstruction::CallDirect { .. } | IrInstruction::CallIndirect { .. } => {
-                        return false
+                        return false;
                     }
                     _ => {}
                 }

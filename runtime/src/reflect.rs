@@ -11,9 +11,9 @@
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    box_class_field_as_dynamic, dynamic_box_at, get_type_info, haxe_box_int_ptr, is_class_type,
-    lookup_class_field, DynamicValue, ParamType, TypeId, TYPE_ARRAY, TYPE_BOOL, TYPE_FLOAT,
-    TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING, TYPE_VOID,
+    DynamicValue, ParamType, TYPE_ARRAY, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL,
+    TYPE_STRING, TYPE_VOID, TypeId, box_class_field_as_dynamic, dynamic_box_at, get_type_info,
+    haxe_box_int_ptr, is_class_type, lookup_class_field,
 };
 
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
@@ -36,14 +36,16 @@ pub const TVALUETYPE_TUNKNOWN: i32 = 8;
 /// # Safety
 /// field_ptr must be a valid HaxeString pointer or null
 unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
-    if field_ptr.is_null() {
-        return None;
+    unsafe {
+        if field_ptr.is_null() {
+            return None;
+        }
+        let hs = &*(field_ptr as *const HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            return None;
+        }
+        Some((hs.ptr as *const u8, hs.len as u32))
     }
-    let hs = &*(field_ptr as *const HaxeString);
-    if hs.ptr.is_null() || hs.len == 0 {
-        return None;
-    }
-    Some((hs.ptr as *const u8, hs.len as u32))
 }
 
 // ============================================================================
@@ -93,14 +95,16 @@ fn builtin_length(b: &BuiltinBox) -> Option<i64> {
 }
 
 unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
-    let type_id = std::ptr::read_unaligned(ptr as *const u32);
-    if type_id == anon_object::TYPE_ANON_OBJECT.0 {
-        let dv = std::ptr::read_unaligned(ptr as *const DynamicValue);
-        if !dv.value_ptr.is_null() {
-            return dv.value_ptr;
+    unsafe {
+        let type_id = std::ptr::read_unaligned(ptr as *const u32);
+        if type_id == anon_object::TYPE_ANON_OBJECT.0 {
+            let dv = std::ptr::read_unaligned(ptr as *const DynamicValue);
+            if !dv.value_ptr.is_null() {
+                return dv.value_ptr;
+            }
         }
+        ptr
     }
-    ptr
 }
 
 /// Read the runtime type_id at offset 0 of an object pointer.
@@ -114,7 +118,7 @@ unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
 /// rather than a type_id). Callers MUST gate the interpretation
 /// via [`is_class_type`] before treating the value as a class id.
 unsafe fn read_class_type_id(obj: *mut u8) -> u32 {
-    std::ptr::read_unaligned(obj as *const u32)
+    unsafe { std::ptr::read_unaligned(obj as *const u32) }
 }
 
 /// Reflect.hasField(obj, field) -> Bool
@@ -204,16 +208,18 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
 /// (it answers `!= null` and `Reflect.isFunction`; nothing here can bind it
 /// into a callable closure); else null.
 unsafe fn class_field_of(type_id: u32, obj: *mut u8, name: &str) -> *mut u8 {
-    match lookup_class_field(type_id, name) {
-        Some((offset, ty)) => {
-            let slot_ptr = obj.add(offset) as *const u64;
-            let value = std::ptr::read_unaligned(slot_ptr);
-            box_class_field_as_dynamic(value, ty)
+    unsafe {
+        match lookup_class_field(type_id, name) {
+            Some((offset, ty)) => {
+                let slot_ptr = obj.add(offset) as *const u64;
+                let value = std::ptr::read_unaligned(slot_ptr);
+                box_class_field_as_dynamic(value, ty)
+            }
+            None if class_declares_method(type_id, name) => {
+                crate::type_system::haxe_box_reference_ptr(obj, TYPE_FUNCTION.0)
+            }
+            None => std::ptr::null_mut(),
         }
-        None if class_declares_method(type_id, name) => {
-            crate::type_system::haxe_box_reference_ptr(obj, TYPE_FUNCTION.0)
-        }
-        None => std::ptr::null_mut(),
     }
 }
 
@@ -715,11 +721,7 @@ fn compare_reference_slot(a: i64, b: i64) -> i64 {
             return haxe_reflect_compare(a as *mut u8, b as *mut u8);
         }
     }
-    if a < b {
-        -1
-    } else {
-        1
-    }
+    if a < b { -1 } else { 1 }
 }
 
 /// Reflect.isEnumValue(v) -> Bool
@@ -734,10 +736,10 @@ pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
     unsafe {
         let dv = *(v as *const DynamicValue);
         let registry = crate::type_system::TYPE_REGISTRY.read().unwrap();
-        if let Some(ref map) = *registry {
-            if let Some(info) = map.get(&dv.type_id) {
-                return info.enum_info.is_some();
-            }
+        if let Some(ref map) = *registry
+            && let Some(info) = map.get(&dv.type_id)
+        {
+            return info.enum_info.is_some();
         }
         false
     }
@@ -750,26 +752,30 @@ pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
 /// Allocate a boxed enum payload with no constructor parameters.
 /// Layout: [tag:i32][pad:i32] => returned as i64 pointer.
 unsafe fn alloc_boxed_enum_tag_only(tag: i32) -> i64 {
-    let ptr = libc::malloc(8) as *mut u8;
-    if ptr.is_null() {
-        return 0;
+    unsafe {
+        let ptr = libc::malloc(8) as *mut u8;
+        if ptr.is_null() {
+            return 0;
+        }
+        *(ptr as *mut i32) = tag;
+        *((ptr as *mut i32).add(1)) = 0;
+        ptr as i64
     }
-    *(ptr as *mut i32) = tag;
-    *((ptr as *mut i32).add(1)) = 0;
-    ptr as i64
 }
 
 /// Allocate a boxed enum payload with one i64 constructor parameter.
 /// Layout: [tag:i32][pad:i32][field0:i64] => returned as i64 pointer.
 unsafe fn alloc_boxed_enum_with_i64(tag: i32, field0: i64) -> i64 {
-    let ptr = libc::malloc(16) as *mut u8;
-    if ptr.is_null() {
-        return 0;
+    unsafe {
+        let ptr = libc::malloc(16) as *mut u8;
+        if ptr.is_null() {
+            return 0;
+        }
+        std::ptr::write_bytes(ptr, 0, 16);
+        *(ptr as *mut i32) = tag;
+        *(ptr.add(8) as *mut i64) = field0;
+        ptr as i64
     }
-    std::ptr::write_bytes(ptr, 0, 16);
-    *(ptr as *mut i32) = tag;
-    *(ptr.add(8) as *mut i64) = field0;
-    ptr as i64
 }
 
 fn valuetype_tag_only(tag: i32) -> i64 {

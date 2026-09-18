@@ -477,11 +477,7 @@ fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<I
         });
     }
 
-    if hints.is_empty() {
-        None
-    } else {
-        Some(hints)
-    }
+    if hints.is_empty() { None } else { Some(hints) }
 }
 
 // ---------------------------------------------------------------------------

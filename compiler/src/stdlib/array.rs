@@ -1384,8 +1384,8 @@ fn build_array_kv_iterator_next(builder: &mut MirBuilder) {
 
     // Ensure shape {key:3,value:7} is registered
     let shape_id = builder.const_i64(1001); // KV_SHAPE_ID from runtime
-                                            // We skip ensure_shape here — the runtime ArrayKeyValueIterator already registers it,
-                                            // and the shape is lazily created by rayzor_anon_new if needed.
+    // We skip ensure_shape here — the runtime ArrayKeyValueIterator already registers it,
+    // and the shape is lazily created by rayzor_anon_new if needed.
 
     let field_count = builder.const_i64(2);
     let handle = builder

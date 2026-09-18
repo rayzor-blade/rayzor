@@ -87,7 +87,9 @@ class TestFieldAccess {
                     });
 
                     if has_field_error {
-                        panic!("Found UnresolvedSymbol error for field 'name' - field resolution not working");
+                        panic!(
+                            "Found UnresolvedSymbol error for field 'name' - field resolution not working"
+                        );
                     }
 
                     println!("No field resolution errors found - test passed!");

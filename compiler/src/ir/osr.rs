@@ -669,10 +669,10 @@ pub fn build_osr_variant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::IrType;
     use crate::ir::builder::*;
     use crate::ir::instructions::CompareOp;
     use crate::ir::loop_analysis::{DominatorTree, LoopNestInfo};
-    use crate::ir::IrType;
     use crate::tast::SymbolId;
 
     /// A counted loop whose header carries a phi, plus a value defined before

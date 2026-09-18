@@ -40,15 +40,15 @@ pub mod optimization;
 pub mod osr; // On-stack replacement: a second entry point into a hot loop
 pub mod scalar_replacement; // Scalar Replacement of Aggregates (SRA)
 pub mod snapshot; // Standard library lowered at build time and carried in the binary
-                  // Shaders lower from HIR to WGSL source, which is a lowering step and not
-                  // code generation — it reads HIR and types, and nothing a backend provides.
+// Shaders lower from HIR to WGSL source, which is a lowering step and not
+// code generation — it reads HIR and types, and nothing a backend provides.
 pub mod tree_shake; // Dead-code elimination for .rzb bundles
 pub mod types;
 pub mod validation;
 pub mod vectorization;
 pub mod wgsl_transpiler; // SIMD auto-vectorization for loops
 
-pub use blade::{load_bundle, save_bundle, BladeError, RayzorBundle};
+pub use blade::{BladeError, RayzorBundle, load_bundle, save_bundle};
 pub use blocks::*;
 pub use builder::*;
 pub use environment_layout::{EnvironmentField, EnvironmentLayout};

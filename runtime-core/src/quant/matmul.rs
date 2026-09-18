@@ -18,7 +18,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::q8_k::quantize_row_q8_K;
-use super::types::{Q8KBlock, Q4_K_M_BLOCK_SIZE};
+use super::types::{Q4_K_M_BLOCK_SIZE, Q8KBlock};
 
 /// Vectorized horizontal dot product `Σ a[i] * b[i]`. NEON on aarch64
 /// (4×FMA-with-acc unroll); AVX2+FMA on x86_64 when feature-detected
@@ -168,19 +168,21 @@ pub unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
 #[inline]
 #[allow(dead_code)] // allocating sibling of prepare_x_q8k_blocks_into; kept for one-shot callers
 pub unsafe fn prepare_x_q8k_blocks(x_data: *const f32, k: usize) -> Vec<Q8KBlock> {
-    debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
-    let nb = k / Q4_K_M_BLOCK_SIZE;
-    let x_slice = core::slice::from_raw_parts(x_data, k);
-    let mut dest = vec![
-        Q8KBlock {
-            d: 0.0,
-            qs: [0i8; 256],
-            bsums: [0i16; 16],
-        };
-        nb
-    ];
-    quantize_row_q8_K(x_slice, &mut dest);
-    dest
+    unsafe {
+        debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
+        let nb = k / Q4_K_M_BLOCK_SIZE;
+        let x_slice = core::slice::from_raw_parts(x_data, k);
+        let mut dest = vec![
+            Q8KBlock {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            };
+            nb
+        ];
+        quantize_row_q8_K(x_slice, &mut dest);
+        dest
+    }
 }
 
 /// Same as [`prepare_x_q8k_blocks`] but writes into a caller-provided
@@ -195,18 +197,20 @@ pub unsafe fn prepare_x_q8k_blocks(x_data: *const f32, k: usize) -> Vec<Q8KBlock
 /// # Safety
 /// Same as [`prepare_x_q8k_blocks`].
 pub unsafe fn prepare_x_q8k_blocks_into(x_data: *const f32, k: usize, dest: &mut Vec<Q8KBlock>) {
-    debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
-    let nb = k / Q4_K_M_BLOCK_SIZE;
-    let x_slice = core::slice::from_raw_parts(x_data, k);
-    if dest.len() < nb {
-        dest.resize(
-            nb,
-            Q8KBlock {
-                d: 0.0,
-                qs: [0i8; 256],
-                bsums: [0i16; 16],
-            },
-        );
+    unsafe {
+        debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
+        let nb = k / Q4_K_M_BLOCK_SIZE;
+        let x_slice = core::slice::from_raw_parts(x_data, k);
+        if dest.len() < nb {
+            dest.resize(
+                nb,
+                Q8KBlock {
+                    d: 0.0,
+                    qs: [0i8; 256],
+                    bsums: [0i16; 16],
+                },
+            );
+        }
+        quantize_row_q8_K(x_slice, &mut dest[..nb]);
     }
-    quantize_row_q8_K(x_slice, &mut dest[..nb]);
 }

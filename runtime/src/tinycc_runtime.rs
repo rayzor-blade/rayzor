@@ -7,7 +7,7 @@
 //! compiler and runtime link into the same binary, these extern declarations
 //! resolve at link time.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::ptr;
 
 use crate::haxe_string::HaxeString;
@@ -59,18 +59,20 @@ const RTLD_LAZY: i32 = 0x1;
 /// # Safety
 /// `path` must be a valid NUL-terminated C string.
 unsafe fn load_shared_library(path: *const c_char) -> *mut std::ffi::c_void {
-    #[cfg(unix)]
-    {
-        dlopen(path, RTLD_LAZY)
-    }
-    #[cfg(windows)]
-    {
-        LoadLibraryA(path)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = path;
-        std::ptr::null_mut()
+    unsafe {
+        #[cfg(unix)]
+        {
+            dlopen(path, RTLD_LAZY)
+        }
+        #[cfg(windows)]
+        {
+            LoadLibraryA(path)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -135,15 +137,17 @@ fn discover_system_include_paths() -> &'static Vec<String> {
 // ============================================================================
 
 unsafe fn haxe_string_to_cstring(s: *const HaxeString) -> Option<CString> {
-    if s.is_null() {
-        return None;
+    unsafe {
+        if s.is_null() {
+            return None;
+        }
+        let hs = &*s;
+        if hs.ptr.is_null() || hs.len == 0 {
+            return Some(CString::new("").unwrap());
+        }
+        let slice = std::slice::from_raw_parts(hs.ptr, hs.len);
+        CString::new(slice).ok()
     }
-    let hs = &*s;
-    if hs.ptr.is_null() || hs.len == 0 {
-        return Some(CString::new("").unwrap());
-    }
-    let slice = std::slice::from_raw_parts(hs.ptr, hs.len);
-    CString::new(slice).ok()
 }
 
 // ============================================================================
@@ -318,10 +322,12 @@ pub extern "C" fn rayzor_tcc_get_symbol(state: *mut TCCState, name: *const HaxeS
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(dead_code)]
 unsafe fn jit_write_protect(enabled: bool) {
-    unsafe extern "C" {
-        fn pthread_jit_write_protect_np(enabled: i32);
+    unsafe {
+        unsafe extern "C" {
+            fn pthread_jit_write_protect_np(enabled: i32);
+        }
+        pthread_jit_write_protect_np(if enabled { 1 } else { 0 });
     }
-    pthread_jit_write_protect_np(if enabled { 1 } else { 0 });
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -417,10 +423,10 @@ pub extern "C" fn rayzor_tcc_add_framework(state: *mut TCCState, name: *const Ha
                             "{}/System/Library/Frameworks/{}.framework/Headers",
                             sdk, fw_str
                         );
-                        if std::path::Path::new(&fw_headers).is_dir() {
-                            if let Ok(c_inc) = CString::new(fw_headers.as_str()) {
-                                tcc_add_include_path(state, c_inc.as_ptr());
-                            }
+                        if std::path::Path::new(&fw_headers).is_dir()
+                            && let Ok(c_inc) = CString::new(fw_headers.as_str())
+                        {
+                            tcc_add_include_path(state, c_inc.as_ptr());
                         }
                     }
                     return 1;
@@ -461,11 +467,7 @@ pub extern "C" fn rayzor_tcc_add_include_path(
             None => return 0,
         };
         let ret = tcc_add_include_path(state, c_path.as_ptr());
-        if ret < 0 {
-            0
-        } else {
-            1
-        }
+        if ret < 0 { 0 } else { 1 }
     }
 }
 
@@ -516,11 +518,11 @@ pub extern "C" fn rayzor_tcc_add_clib(state: *mut TCCState, name: *const HaxeStr
         Ok(output) if output.status.success() => {
             let cflags = String::from_utf8_lossy(&output.stdout);
             for flag in cflags.split_whitespace() {
-                if let Some(path) = flag.strip_prefix("-I") {
-                    if let Ok(c_path) = CString::new(path) {
-                        unsafe {
-                            tcc_add_include_path(state, c_path.as_ptr());
-                        }
+                if let Some(path) = flag.strip_prefix("-I")
+                    && let Ok(c_path) = CString::new(path)
+                {
+                    unsafe {
+                        tcc_add_include_path(state, c_path.as_ptr());
                     }
                 }
             }

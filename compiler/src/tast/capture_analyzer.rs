@@ -5,8 +5,8 @@
 //! constraints when closures are passed to Thread::spawn or similar functions.
 
 use crate::tast::{
-    node::{TypedExpression, TypedExpressionKind, TypedStatement},
     ScopeId, SymbolId, TypeId,
+    node::{TypedExpression, TypedExpressionKind, TypedStatement},
 };
 use std::collections::{BTreeMap, BTreeSet};
 

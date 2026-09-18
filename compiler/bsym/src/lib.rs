@@ -788,12 +788,11 @@ fn hash_string(s: &str) -> u64 {
 fn extract_native_meta(meta: &[parser::Metadata]) -> Option<String> {
     for m in meta {
         let name = m.name.strip_prefix(':').unwrap_or(&m.name);
-        if name == "native" {
-            if let Some(first_param) = m.params.first() {
-                if let parser::ExprKind::String(native_name) = &first_param.kind {
-                    return Some(native_name.clone());
-                }
-            }
+        if name == "native"
+            && let Some(first_param) = m.params.first()
+            && let parser::ExprKind::String(native_name) = &first_param.kind
+        {
+            return Some(native_name.clone());
         }
     }
     None

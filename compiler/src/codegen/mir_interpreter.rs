@@ -3239,7 +3239,7 @@ impl MirInterpreter {
     /// the start of "RAYZOR_PROFILE_LOAD", in Sys.getEnv under the interpreter
     /// tier).
     #[allow(clippy::vec_box)] // Box gives each header a STABLE address: raw pointers into
-                              // these allocations are handed to native code while the Vec may still grow.
+    // these allocations are handed to native code while the Vec may still grow.
     fn marshal_string_arg(s: &str, scratch: &mut Vec<Box<[usize; 3]>>) -> NativeValue {
         let header: Box<[usize; 3]> = Box::new([s.as_ptr() as usize, s.len(), s.len()]);
         let addr = header.as_ref() as *const [usize; 3] as usize;
@@ -3427,13 +3427,15 @@ impl MirInterpreter {
         args: &[NativeValue],
         return_type: &IrType,
     ) -> Result<NativeValue, InterpError> {
-        #[cfg(windows)]
-        {
-            self.call_native_fn_win64(ptr, args, return_type)
-        }
-        #[cfg(not(windows))]
-        {
-            self.call_native_fn_sysv(ptr, args, return_type)
+        unsafe {
+            #[cfg(windows)]
+            {
+                self.call_native_fn_win64(ptr, args, return_type)
+            }
+            #[cfg(not(windows))]
+            {
+                self.call_native_fn_sysv(ptr, args, return_type)
+            }
         }
     }
 
@@ -3549,74 +3551,77 @@ impl MirInterpreter {
         args: &[NativeValue],
         return_type: &IrType,
     ) -> Result<NativeValue, InterpError> {
-        const MAX_PER_CLASS: usize = 8;
+        unsafe {
+            const MAX_PER_CLASS: usize = 8;
 
-        let mut ints: Vec<u64> = Vec::with_capacity(args.len());
-        let mut floats: Vec<f64> = Vec::with_capacity(args.len());
-        for arg in args {
-            match arg {
-                // An `f32` parameter is read from the low half of the vector
-                // register, so hand over a double carrying those same bits
-                // rather than the widened value.
-                NativeValue::F32(n) => floats.push(f64::from_bits(n.to_bits() as u64)),
-                NativeValue::F64(n) => floats.push(*n),
-                other => ints.push(other.to_u64()),
+            let mut ints: Vec<u64> = Vec::with_capacity(args.len());
+            let mut floats: Vec<f64> = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    // An `f32` parameter is read from the low half of the vector
+                    // register, so hand over a double carrying those same bits
+                    // rather than the widened value.
+                    NativeValue::F32(n) => floats.push(f64::from_bits(n.to_bits() as u64)),
+                    NativeValue::F64(n) => floats.push(*n),
+                    other => ints.push(other.to_u64()),
+                }
             }
-        }
 
-        if ints.len() > MAX_PER_CLASS || floats.len() > MAX_PER_CLASS {
-            return Err(InterpError::RuntimeError(format!(
-                "FFI call with {} integer and {} float arguments not supported (max {} per class)",
-                ints.len(),
-                floats.len(),
-                MAX_PER_CLASS
-            )));
-        }
-        ints.resize(MAX_PER_CLASS, 0);
-        floats.resize(MAX_PER_CLASS, 0.0);
-
-        let (i0, i1, i2, i3, i4, i5, i6, i7) = (
-            ints[0], ints[1], ints[2], ints[3], ints[4], ints[5], ints[6], ints[7],
-        );
-        let (f0, f1, f2, f3, f4, f5, f6, f7) = (
-            floats[0], floats[1], floats[2], floats[3], floats[4], floats[5], floats[6], floats[7],
-        );
-
-        macro_rules! call_returning {
-            ($ret:ty) => {{
-                let f: extern "C" fn(
-                    u64,
-                    u64,
-                    u64,
-                    u64,
-                    u64,
-                    u64,
-                    u64,
-                    u64,
-                    f64,
-                    f64,
-                    f64,
-                    f64,
-                    f64,
-                    f64,
-                    f64,
-                    f64,
-                ) -> $ret = std::mem::transmute(ptr);
-                f(
-                    i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7,
-                )
-            }};
-        }
-
-        Ok(match return_type {
-            IrType::F32 => NativeValue::F32(call_returning!(f32)),
-            IrType::F64 => NativeValue::F64(call_returning!(f64)),
-            IrType::Void => {
-                call_returning!(());
-                NativeValue::Void
+            if ints.len() > MAX_PER_CLASS || floats.len() > MAX_PER_CLASS {
+                return Err(InterpError::RuntimeError(format!(
+                    "FFI call with {} integer and {} float arguments not supported (max {} per class)",
+                    ints.len(),
+                    floats.len(),
+                    MAX_PER_CLASS
+                )));
             }
-            _ => NativeValue::U64(call_returning!(u64)),
-        })
+            ints.resize(MAX_PER_CLASS, 0);
+            floats.resize(MAX_PER_CLASS, 0.0);
+
+            let (i0, i1, i2, i3, i4, i5, i6, i7) = (
+                ints[0], ints[1], ints[2], ints[3], ints[4], ints[5], ints[6], ints[7],
+            );
+            let (f0, f1, f2, f3, f4, f5, f6, f7) = (
+                floats[0], floats[1], floats[2], floats[3], floats[4], floats[5], floats[6],
+                floats[7],
+            );
+
+            macro_rules! call_returning {
+                ($ret:ty) => {{
+                    let f: extern "C" fn(
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                    ) -> $ret = std::mem::transmute(ptr);
+                    f(
+                        i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7,
+                    )
+                }};
+            }
+
+            Ok(match return_type {
+                IrType::F32 => NativeValue::F32(call_returning!(f32)),
+                IrType::F64 => NativeValue::F64(call_returning!(f64)),
+                IrType::Void => {
+                    call_returning!(());
+                    NativeValue::Void
+                }
+                _ => NativeValue::U64(call_returning!(u64)),
+            })
+        }
     }
 }
 
@@ -3802,15 +3807,21 @@ mod tests {
     fn test_compare_ops() {
         let interp = MirInterpreter::new();
 
-        assert!(interp
-            .eval_compare_op(CompareOp::Lt, InterpValue::I64(5), InterpValue::I64(10))
-            .unwrap());
-        assert!(!interp
-            .eval_compare_op(CompareOp::Lt, InterpValue::I64(10), InterpValue::I64(5))
-            .unwrap());
-        assert!(interp
-            .eval_compare_op(CompareOp::Eq, InterpValue::I64(5), InterpValue::I64(5))
-            .unwrap());
+        assert!(
+            interp
+                .eval_compare_op(CompareOp::Lt, InterpValue::I64(5), InterpValue::I64(10))
+                .unwrap()
+        );
+        assert!(
+            !interp
+                .eval_compare_op(CompareOp::Lt, InterpValue::I64(10), InterpValue::I64(5))
+                .unwrap()
+        );
+        assert!(
+            interp
+                .eval_compare_op(CompareOp::Eq, InterpValue::I64(5), InterpValue::I64(5))
+                .unwrap()
+        );
     }
 
     // FFI test functions (extern "C" for proper ABI)

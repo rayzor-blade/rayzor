@@ -28,12 +28,14 @@ unsafe extern "C" {
 /// - Caller must eventually call `rayzor_box_free` to release the memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_init(value: i64) -> i64 {
-    let p = malloc(8);
-    if p.is_null() {
-        return 0;
+    unsafe {
+        let p = malloc(8);
+        if p.is_null() {
+            return 0;
+        }
+        *(p as *mut i64) = value;
+        p as i64
     }
-    *(p as *mut i64) = value;
-    p as i64
 }
 
 /// Free a Box allocation.
@@ -43,10 +45,12 @@ pub unsafe extern "C" fn rayzor_box_init(value: i64) -> i64 {
 /// - Must not be called more than once on the same pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_free(box_ptr: i64) {
-    if box_ptr == 0 {
-        return;
+    unsafe {
+        if box_ptr == 0 {
+            return;
+        }
+        free(box_ptr as *mut u8);
     }
-    free(box_ptr as *mut u8);
 }
 
 /// Read the value from a Box (Box.unbox).
@@ -57,10 +61,12 @@ pub unsafe extern "C" fn rayzor_box_free(box_ptr: i64) {
 /// - `box_ptr` must be a valid i64 returned by `rayzor_box_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_box_unbox(box_ptr: i64) -> i64 {
-    if box_ptr == 0 {
-        return 0;
+    unsafe {
+        if box_ptr == 0 {
+            return 0;
+        }
+        *((box_ptr as usize) as *const i64)
     }
-    *((box_ptr as usize) as *const i64)
 }
 
 /// Get the raw heap address as i64 (Box.raw / Box.asPtr / Box.asRef).

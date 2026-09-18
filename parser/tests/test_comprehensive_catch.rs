@@ -31,38 +31,25 @@ class Test {
             // Verify we have the expected number of catch blocks
             if let Some(parser::haxe_ast::TypeDeclaration::Class(class)) =
                 result.declarations.first()
+                && let Some(method) = class.fields.first()
+                && let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind
+                && let Some(body) = &func.body
+                && let parser::haxe_ast::ExprKind::Block(block) = &body.kind
+                && let Some(parser::haxe_ast::BlockElement::Expr(try_expr)) = block.first()
+                && let parser::haxe_ast::ExprKind::Try { catches, .. } = &try_expr.kind
             {
-                if let Some(method) = class.fields.first() {
-                    if let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind {
-                        if let Some(body) = &func.body {
-                            if let parser::haxe_ast::ExprKind::Block(block) = &body.kind {
-                                if let Some(parser::haxe_ast::BlockElement::Expr(try_expr)) =
-                                    block.first()
-                                {
-                                    if let parser::haxe_ast::ExprKind::Try { catches, .. } =
-                                        &try_expr.kind
-                                    {
-                                        assert_eq!(catches.len(), 5, "Should have 5 catch blocks");
+                assert_eq!(catches.len(), 5, "Should have 5 catch blocks");
 
-                                        // Verify the types are correct
-                                        let expected_types =
-                                            ["String", "Int", "Float", "Bool", "Dynamic"];
-                                        for (i, catch_block) in catches.iter().enumerate() {
-                                            if let Some(parser::haxe_ast::Type::Path {
-                                                path, ..
-                                            }) = &catch_block.type_hint
-                                            {
-                                                assert_eq!(
-                                                    path.name, expected_types[i],
-                                                    "Catch block {} should have type {}",
-                                                    i, expected_types[i]
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                // Verify the types are correct
+                let expected_types = ["String", "Int", "Float", "Bool", "Dynamic"];
+                for (i, catch_block) in catches.iter().enumerate() {
+                    if let Some(parser::haxe_ast::Type::Path { path, .. }) = &catch_block.type_hint
+                    {
+                        assert_eq!(
+                            path.name, expected_types[i],
+                            "Catch block {} should have type {}",
+                            i, expected_types[i]
+                        );
                     }
                 }
             }

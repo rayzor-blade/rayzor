@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::tast::{
+    SymbolId, SymbolTable, TypeId,
     core::{TypeKind, TypeTable},
     type_checker::{ClassHierarchyInfo, ClassHierarchyRegistry},
-    SymbolId, SymbolTable, TypeId,
 };
 
 /// Builder for constructing class hierarchies during semantic analysis

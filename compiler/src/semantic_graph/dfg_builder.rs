@@ -7,7 +7,7 @@
 use crate::semantic_graph::free_variables::{CapturedVariable, FreeVariableVisitor};
 use crate::semantic_graph::phi_type::{DfgBuilderPhiTypeUnification, PhiTypeUnifier};
 use crate::semantic_graph::tast_cfg_mapping::{BranchContext, StatementLocation, TastCfgMapping};
-use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map, new_id_set};
 use crate::tast::core::{TypeKind, TypeTable};
 use crate::tast::node::{
     BinaryOperator, CastKind as TastCastKind, HasSourceLocation, LiteralValue, TypedExpression,
@@ -382,8 +382,12 @@ impl DfgBuilder {
             }
 
             Err(GraphConstructionError::InternalError {
-                message: format!("Statement not found at location: {:?}. Current depth: {}, statements at this level: {}",
-                                location, current_depth, statements.len()),
+                message: format!(
+                    "Statement not found at location: {:?}. Current depth: {}, statements at this level: {}",
+                    location,
+                    current_depth,
+                    statements.len()
+                ),
             })
         }
     }
@@ -3779,10 +3783,10 @@ impl DfgBuilderPhiTypeUnification for DfgBuilder {
 #[cfg(test)]
 mod tests {
     use crate::{
-        semantic_graph::{dfg_builder, CfgBuilder},
+        semantic_graph::{CfgBuilder, dfg_builder},
         tast::{
-            node::{FunctionEffects, FunctionMetadata},
             MemoryEffects, Mutability, ResourceEffects, StringInterner, Visibility,
+            node::{FunctionEffects, FunctionMetadata},
         },
     };
 
@@ -4260,9 +4264,11 @@ mod tests {
         assert!(matches!(phi_node.kind, DataFlowNodeKind::Phi { .. }));
 
         // Verify incomplete phi info was tracked
-        assert!(dfg_builder
-            .ssa_state
-            .incomplete_phis
-            .contains_key(&phi_node_id));
+        assert!(
+            dfg_builder
+                .ssa_state
+                .incomplete_phis
+                .contains_key(&phi_node_id)
+        );
     }
 }

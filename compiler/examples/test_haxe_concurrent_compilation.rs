@@ -223,17 +223,17 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        all_function_calls.insert(callee.name.clone());
-                        if callee.name == "rayzor_thread_spawn" {
-                            found_spawn = true;
-                            println!("  ✅ Found call to rayzor_thread_spawn");
-                        }
-                        if callee.name == "rayzor_thread_join" {
-                            found_join = true;
-                            println!("  ✅ Found call to rayzor_thread_join");
-                        }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                {
+                    all_function_calls.insert(callee.name.clone());
+                    if callee.name == "rayzor_thread_spawn" {
+                        found_spawn = true;
+                        println!("  ✅ Found call to rayzor_thread_spawn");
+                    }
+                    if callee.name == "rayzor_thread_join" {
+                        found_join = true;
+                        println!("  ✅ Found call to rayzor_thread_join");
                     }
                 }
             }
@@ -323,17 +323,17 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        all_function_calls.insert(callee.name.clone());
-                        if callee.name == "rayzor_thread_spawn" {
-                            found_spawn = true;
-                            println!("  ✅ Found call to rayzor_thread_spawn");
-                        }
-                        if callee.name == "rayzor_thread_join" {
-                            found_join = true;
-                            println!("  ✅ Found call to rayzor_thread_join");
-                        }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                {
+                    all_function_calls.insert(callee.name.clone());
+                    if callee.name == "rayzor_thread_spawn" {
+                        found_spawn = true;
+                        println!("  ✅ Found call to rayzor_thread_spawn");
+                    }
+                    if callee.name == "rayzor_thread_join" {
+                        found_join = true;
+                        println!("  ✅ Found call to rayzor_thread_join");
                     }
                 }
             }
@@ -396,20 +396,20 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        if callee.name == "rayzor_channel_init" {
-                            found_init = true;
-                            println!("  ✅ Found call to rayzor_channel_init");
-                        }
-                        if callee.name == "rayzor_channel_send" {
-                            found_send = true;
-                            println!("  ✅ Found call to rayzor_channel_send");
-                        }
-                        if callee.name == "rayzor_channel_receive" {
-                            found_receive = true;
-                            println!("  ✅ Found call to rayzor_channel_receive");
-                        }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                {
+                    if callee.name == "rayzor_channel_init" {
+                        found_init = true;
+                        println!("  ✅ Found call to rayzor_channel_init");
+                    }
+                    if callee.name == "rayzor_channel_send" {
+                        found_send = true;
+                        println!("  ✅ Found call to rayzor_channel_send");
+                    }
+                    if callee.name == "rayzor_channel_receive" {
+                        found_receive = true;
+                        println!("  ✅ Found call to rayzor_channel_receive");
                     }
                 }
             }
@@ -467,20 +467,20 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        if callee.name == "rayzor_arc_init" {
-                            found_init = true;
-                            println!("  ✅ Found call to rayzor_arc_init");
-                        }
-                        if callee.name == "rayzor_arc_clone" {
-                            found_clone = true;
-                            println!("  ✅ Found call to rayzor_arc_clone");
-                        }
-                        if callee.name == "rayzor_arc_get" {
-                            found_get = true;
-                            println!("  ✅ Found call to rayzor_arc_get");
-                        }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                {
+                    if callee.name == "rayzor_arc_init" {
+                        found_init = true;
+                        println!("  ✅ Found call to rayzor_arc_init");
+                    }
+                    if callee.name == "rayzor_arc_clone" {
+                        found_clone = true;
+                        println!("  ✅ Found call to rayzor_arc_clone");
+                    }
+                    if callee.name == "rayzor_arc_get" {
+                        found_get = true;
+                        println!("  ✅ Found call to rayzor_arc_get");
                     }
                 }
             }
@@ -535,20 +535,20 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        if callee.name == "rayzor_mutex_init" {
-                            found_init = true;
-                            println!("  ✅ Found call to rayzor_mutex_init");
-                        }
-                        if callee.name == "rayzor_mutex_lock" {
-                            found_lock = true;
-                            println!("  ✅ Found call to rayzor_mutex_lock");
-                        }
-                        if callee.name == "rayzor_mutex_unlock" {
-                            found_unlock = true;
-                            println!("  ✅ Found call to rayzor_mutex_unlock");
-                        }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                {
+                    if callee.name == "rayzor_mutex_init" {
+                        found_init = true;
+                        println!("  ✅ Found call to rayzor_mutex_init");
+                    }
+                    if callee.name == "rayzor_mutex_lock" {
+                        found_lock = true;
+                        println!("  ✅ Found call to rayzor_mutex_lock");
+                    }
+                    if callee.name == "rayzor_mutex_unlock" {
+                        found_unlock = true;
+                        println!("  ✅ Found call to rayzor_mutex_unlock");
                     }
                 }
             }
@@ -631,13 +631,12 @@ class Main {
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
             for instr in &block.instructions {
-                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr {
-                    if let Some(callee) = mir_module.functions.get(func_id) {
-                        if expected_calls.contains(&callee.name.as_str()) {
-                            found_calls.insert(callee.name.clone());
-                            println!("  ✅ Found call to {}", callee.name);
-                        }
-                    }
+                if let compiler::ir::IrInstruction::CallDirect { func_id, .. } = instr
+                    && let Some(callee) = mir_module.functions.get(func_id)
+                    && expected_calls.contains(&callee.name.as_str())
+                {
+                    found_calls.insert(callee.name.clone());
+                    println!("  ✅ Found call to {}", callee.name);
                 }
             }
         }

@@ -1,7 +1,7 @@
 //! Literal expression tests for the new Haxe parser
 
 use parser::haxe_ast::{ExprKind, TypeDeclaration};
-use parser::{parse_haxe_file, ClassFieldKind};
+use parser::{ClassFieldKind, parse_haxe_file};
 
 fn parse_simple_expr(expr: &str) -> ExprKind {
     let input = &format!("class Test {{ function test() {{ var x = {}; }} }}", expr);
@@ -9,24 +9,18 @@ fn parse_simple_expr(expr: &str) -> ExprKind {
         Ok(haxe_file) => {
             if let TypeDeclaration::Class(class) = &haxe_file.declarations[0] {
                 for field in &class.fields {
-                    if let ClassFieldKind::Function(func) = &field.kind {
-                        if func.name == "test" && field.modifiers.is_empty() {
-                            if let Some(body) = &func.body {
-                                if let ExprKind::Block(elements) = &body.kind {
-                                    if let Some(parser::haxe_ast::BlockElement::Expr(expr)) =
-                                        elements.first()
-                                    {
-                                        if let ExprKind::Var {
-                                            expr: Some(var_expr),
-                                            ..
-                                        } = &expr.kind
-                                        {
-                                            return var_expr.kind.clone();
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    if let ClassFieldKind::Function(func) = &field.kind
+                        && func.name == "test"
+                        && field.modifiers.is_empty()
+                        && let Some(body) = &func.body
+                        && let ExprKind::Block(elements) = &body.kind
+                        && let Some(parser::haxe_ast::BlockElement::Expr(expr)) = elements.first()
+                        && let ExprKind::Var {
+                            expr: Some(var_expr),
+                            ..
+                        } = &expr.kind
+                    {
+                        return var_expr.kind.clone();
                     }
                 }
             }

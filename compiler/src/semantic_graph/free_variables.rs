@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use crate::{
     semantic_graph::dfg_builder::SsaConstructionState,
     tast::{
-        node::{TypedExpression, TypedExpressionKind, TypedParameter, TypedStatement},
         SsaVariableId, SymbolId, TypeId,
+        node::{TypedExpression, TypedExpressionKind, TypedParameter, TypedStatement},
     },
 };
 
@@ -270,12 +270,12 @@ mod lambda_tests {
     use super::*;
     use crate::{
         semantic_graph::{
-            dfg_builder::DfgBuilder, ConstantValue, DataFlowNode, DataFlowNodeKind,
-            GraphConstructionOptions, NodeMetadata,
+            ConstantValue, DataFlowNode, DataFlowNodeKind, GraphConstructionOptions, NodeMetadata,
+            dfg_builder::DfgBuilder,
         },
         tast::{
-            collections::new_id_set, node::*, BlockId, DataFlowNodeId, Mutability, SourceLocation,
-            StringInterner,
+            BlockId, DataFlowNodeId, Mutability, SourceLocation, StringInterner,
+            collections::new_id_set, node::*,
         },
     };
 

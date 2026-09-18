@@ -8,7 +8,7 @@
 //! them at dlopen time.
 //!
 //! All host interaction goes through the [`rayzor_plugin`] ABI crate.
-//! This file does not declare ANY `extern "C" { ... }` block of its
+//! This file does not declare ANY `unsafe extern "C" { ... }` block of its
 //! own — every reach into the host process flows through the
 //! published ABI surface, so a host-side signature drift surfaces as
 //! a compile error here instead of a silent SIGSEGV at dispatch.
@@ -27,7 +27,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use half::f16;
-use rayzor_plugin::{declare_native_methods, dtype, NativeMethodDesc, Tensor};
+use rayzor_plugin::{NativeMethodDesc, Tensor, declare_native_methods, dtype};
 
 // In-process CoreML graph engines (macOS ANE/CPU): BERT whole-encoder + Llama
 // fused prefill. Native-only (std + the CoreML ObjC shim compiled by build.rs);
@@ -56,7 +56,7 @@ mod wasm_rt {
     // this allocator shares the merged module's single dlmalloc heap — there
     // is no separate plugin heap to collide with the runtime's.
     #[allow(suspicious_runtime_symbol_definitions)]
-    extern "C" {
+    unsafe extern "C" {
         fn malloc(size: usize) -> *mut u8;
         fn free(ptr: *mut u8);
     }
@@ -196,10 +196,12 @@ declare_native_methods! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_describe(out_count: *mut usize) -> *const NativeMethodDesc {
-    if !out_count.is_null() {
-        *out_count = NUE_METHODS.len();
+    unsafe {
+        if !out_count.is_null() {
+            *out_count = NUE_METHODS.len();
+        }
+        NUE_METHODS.as_ptr()
     }
-    NUE_METHODS.as_ptr()
 }
 
 // ============================================================================
@@ -233,60 +235,62 @@ macro_rules! entry {
 #[cfg(not(target_arch = "wasm32"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntry {
-    let entries = Box::new([
-        entry!(b"rayzor_kv_cache_q8_alloc", rayzor_kv_cache_q8_alloc),
-        entry!(b"rayzor_kv_cache_q8_free", rayzor_kv_cache_q8_free),
-        entry!(b"rayzor_kv_cache_q8_append", rayzor_kv_cache_q8_append),
-        entry!(
-            b"rayzor_kv_cache_q8_dequant_view",
-            rayzor_kv_cache_q8_dequant_view
-        ),
-        entry!(
-            b"rayzor_tensor_flash_attn_decode_q8",
-            rayzor_tensor_flash_attn_decode_q8
-        ),
-        entry!(
-            b"rayzor_tensor_flash_attn_q8_host",
-            rayzor_tensor_flash_attn_q8_host
-        ),
-        entry!(b"rayzor_kvcacheq8_clone", rayzor_kvcacheq8_clone),
-        entry!(b"rayzor_kvcacheq8_arc_clone", rayzor_kvcacheq8_arc_clone),
-        // CoreML graph engines (macOS): BERT encoder + Llama fused prefill.
-        entry!(
-            b"nue_bert_graph_load",
-            crate::bert_graph::nue_bert_graph_load
-        ),
-        entry!(
-            b"nue_bert_graph_bucket",
-            crate::bert_graph::nue_bert_graph_bucket
-        ),
-        entry!(
-            b"nue_bert_graph_execute",
-            crate::bert_graph::nue_bert_graph_execute
-        ),
-        entry!(
-            b"nue_prefill_graph_load",
-            crate::prefill_graph::nue_prefill_graph_load
-        ),
-        entry!(
-            b"nue_prefill_graph_bucket",
-            crate::prefill_graph::nue_prefill_graph_bucket
-        ),
-        entry!(
-            b"nue_prefill_graph_execute",
-            crate::prefill_graph::nue_prefill_graph_execute
-        ),
-        entry!(
-            b"nue_prefill_graph_kv_copy",
-            crate::prefill_graph::nue_prefill_graph_kv_copy
-        ),
-    ]);
-    let count = entries.len();
-    let ptr = Box::leak(entries).as_ptr();
-    if !out_count.is_null() {
-        *out_count = count;
+    unsafe {
+        let entries = Box::new([
+            entry!(b"rayzor_kv_cache_q8_alloc", rayzor_kv_cache_q8_alloc),
+            entry!(b"rayzor_kv_cache_q8_free", rayzor_kv_cache_q8_free),
+            entry!(b"rayzor_kv_cache_q8_append", rayzor_kv_cache_q8_append),
+            entry!(
+                b"rayzor_kv_cache_q8_dequant_view",
+                rayzor_kv_cache_q8_dequant_view
+            ),
+            entry!(
+                b"rayzor_tensor_flash_attn_decode_q8",
+                rayzor_tensor_flash_attn_decode_q8
+            ),
+            entry!(
+                b"rayzor_tensor_flash_attn_q8_host",
+                rayzor_tensor_flash_attn_q8_host
+            ),
+            entry!(b"rayzor_kvcacheq8_clone", rayzor_kvcacheq8_clone),
+            entry!(b"rayzor_kvcacheq8_arc_clone", rayzor_kvcacheq8_arc_clone),
+            // CoreML graph engines (macOS): BERT encoder + Llama fused prefill.
+            entry!(
+                b"nue_bert_graph_load",
+                crate::bert_graph::nue_bert_graph_load
+            ),
+            entry!(
+                b"nue_bert_graph_bucket",
+                crate::bert_graph::nue_bert_graph_bucket
+            ),
+            entry!(
+                b"nue_bert_graph_execute",
+                crate::bert_graph::nue_bert_graph_execute
+            ),
+            entry!(
+                b"nue_prefill_graph_load",
+                crate::prefill_graph::nue_prefill_graph_load
+            ),
+            entry!(
+                b"nue_prefill_graph_bucket",
+                crate::prefill_graph::nue_prefill_graph_bucket
+            ),
+            entry!(
+                b"nue_prefill_graph_execute",
+                crate::prefill_graph::nue_prefill_graph_execute
+            ),
+            entry!(
+                b"nue_prefill_graph_kv_copy",
+                crate::prefill_graph::nue_prefill_graph_kv_copy
+            ),
+        ]);
+        let count = entries.len();
+        let ptr = Box::leak(entries).as_ptr();
+        if !out_count.is_null() {
+            *out_count = count;
+        }
+        ptr
     }
-    ptr
 }
 
 // ============================================================================
@@ -317,41 +321,47 @@ unsafe extern "C" {
 /// Raw base of the Q8_0 block storage (guest kernels read it directly).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_q8_data_ptr(handle: i64) -> i64 {
-    if handle == 0 {
-        return 0;
+    unsafe {
+        if handle == 0 {
+            return 0;
+        }
+        (*(handle as *const RayzorKvCacheQ8)).data as i64
     }
-    (*(handle as *const RayzorKvCacheQ8)).data as i64
 }
 
 /// Bytes per cache row (= num_kv_heads * head_dim_bytes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_q8_row_bytes(handle: i64) -> i64 {
-    if handle == 0 {
-        return 0;
+    unsafe {
+        if handle == 0 {
+            return 0;
+        }
+        let c = &*(handle as *const RayzorKvCacheQ8);
+        (c.num_kv_heads * c.head_dim_bytes) as i64
     }
-    let c = &*(handle as *const RayzorKvCacheQ8);
-    (c.num_kv_heads * c.head_dim_bytes) as i64
 }
 
 #[inline]
 unsafe fn quantize_q8_0_block(src: *const f32, dst: *mut u8) {
-    let mut max_abs = 0.0f32;
-    for i in 0..Q8_0_BLOCK_SIZE {
-        let v = fmath::abs(*src.add(i));
-        if v > max_abs {
-            max_abs = v;
+    unsafe {
+        let mut max_abs = 0.0f32;
+        for i in 0..Q8_0_BLOCK_SIZE {
+            let v = fmath::abs(*src.add(i));
+            if v > max_abs {
+                max_abs = v;
+            }
         }
-    }
-    let scale = if max_abs == 0.0 { 0.0 } else { max_abs / 127.0 };
-    let inv_scale = if scale == 0.0 { 0.0 } else { 1.0 / scale };
+        let scale = if max_abs == 0.0 { 0.0 } else { max_abs / 127.0 };
+        let inv_scale = if scale == 0.0 { 0.0 } else { 1.0 / scale };
 
-    let scale_bits = f16::from_f32(scale).to_bits();
-    core::ptr::write_unaligned(dst as *mut u16, scale_bits);
+        let scale_bits = f16::from_f32(scale).to_bits();
+        core::ptr::write_unaligned(dst as *mut u16, scale_bits);
 
-    let q_ptr = dst.add(2) as *mut i8;
-    for i in 0..Q8_0_BLOCK_SIZE {
-        let r = fmath::clamp(fmath::round((*src.add(i)) * inv_scale), -128.0, 127.0);
-        *q_ptr.add(i) = r as i8;
+        let q_ptr = dst.add(2) as *mut i8;
+        for i in 0..Q8_0_BLOCK_SIZE {
+            let r = fmath::clamp(fmath::round((*src.add(i)) * inv_scale), -128.0, 127.0);
+            *q_ptr.add(i) = r as i8;
+        }
     }
 }
 
@@ -406,29 +416,31 @@ unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn dequant_q8_0_block(src: *const u8, dst: &mut [f32; Q8_0_BLOCK_SIZE]) {
-    use std::arch::aarch64::*;
-    let scale_bits = core::ptr::read_unaligned(src as *const u16);
-    let scale = f16::from_bits(scale_bits).to_f32();
-    let scale_v = vdupq_n_f32(scale);
-    let q_ptr = src.add(2) as *const i8;
-    let dst_ptr = dst.as_mut_ptr();
-    for chunk in 0..2 {
-        let off = chunk * 16;
-        let i8x16 = vld1q_s8(q_ptr.add(off));
-        let i16_lo = vmovl_s8(vget_low_s8(i8x16));
-        let i16_hi = vmovl_s8(vget_high_s8(i8x16));
-        let i32_0 = vmovl_s16(vget_low_s16(i16_lo));
-        let i32_1 = vmovl_s16(vget_high_s16(i16_lo));
-        let i32_2 = vmovl_s16(vget_low_s16(i16_hi));
-        let i32_3 = vmovl_s16(vget_high_s16(i16_hi));
-        let f0 = vmulq_f32(vcvtq_f32_s32(i32_0), scale_v);
-        let f1 = vmulq_f32(vcvtq_f32_s32(i32_1), scale_v);
-        let f2 = vmulq_f32(vcvtq_f32_s32(i32_2), scale_v);
-        let f3 = vmulq_f32(vcvtq_f32_s32(i32_3), scale_v);
-        vst1q_f32(dst_ptr.add(off), f0);
-        vst1q_f32(dst_ptr.add(off + 4), f1);
-        vst1q_f32(dst_ptr.add(off + 8), f2);
-        vst1q_f32(dst_ptr.add(off + 12), f3);
+    unsafe {
+        use std::arch::aarch64::*;
+        let scale_bits = core::ptr::read_unaligned(src as *const u16);
+        let scale = f16::from_bits(scale_bits).to_f32();
+        let scale_v = vdupq_n_f32(scale);
+        let q_ptr = src.add(2) as *const i8;
+        let dst_ptr = dst.as_mut_ptr();
+        for chunk in 0..2 {
+            let off = chunk * 16;
+            let i8x16 = vld1q_s8(q_ptr.add(off));
+            let i16_lo = vmovl_s8(vget_low_s8(i8x16));
+            let i16_hi = vmovl_s8(vget_high_s8(i8x16));
+            let i32_0 = vmovl_s16(vget_low_s16(i16_lo));
+            let i32_1 = vmovl_s16(vget_high_s16(i16_lo));
+            let i32_2 = vmovl_s16(vget_low_s16(i16_hi));
+            let i32_3 = vmovl_s16(vget_high_s16(i16_hi));
+            let f0 = vmulq_f32(vcvtq_f32_s32(i32_0), scale_v);
+            let f1 = vmulq_f32(vcvtq_f32_s32(i32_1), scale_v);
+            let f2 = vmulq_f32(vcvtq_f32_s32(i32_2), scale_v);
+            let f3 = vmulq_f32(vcvtq_f32_s32(i32_3), scale_v);
+            vst1q_f32(dst_ptr.add(off), f0);
+            vst1q_f32(dst_ptr.add(off + 4), f1);
+            vst1q_f32(dst_ptr.add(off + 8), f2);
+            vst1q_f32(dst_ptr.add(off + 12), f3);
+        }
     }
 }
 
@@ -438,54 +450,58 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_alloc(
     num_kv_heads: i64,
     head_dim: i64,
 ) -> i64 {
-    if max_seq_len <= 0 || num_kv_heads <= 0 || head_dim <= 0 {
-        return 0;
-    }
-    let max_seq_len = max_seq_len as usize;
-    let num_kv_heads = num_kv_heads as usize;
-    let head_dim = head_dim as usize;
-    if !head_dim.is_multiple_of(Q8_0_BLOCK_SIZE) {
-        return 0;
-    }
-    let head_dim_bytes = (head_dim / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;
-    let total = match max_seq_len
-        .checked_mul(num_kv_heads)
-        .and_then(|v| v.checked_mul(head_dim_bytes))
-    {
-        Some(t) if t > 0 => t,
-        _ => return 0,
-    };
-    let data = malloc(total);
-    if data.is_null() {
-        return 0;
-    }
-    core::ptr::write_bytes(data, 0, total);
+    unsafe {
+        if max_seq_len <= 0 || num_kv_heads <= 0 || head_dim <= 0 {
+            return 0;
+        }
+        let max_seq_len = max_seq_len as usize;
+        let num_kv_heads = num_kv_heads as usize;
+        let head_dim = head_dim as usize;
+        if !head_dim.is_multiple_of(Q8_0_BLOCK_SIZE) {
+            return 0;
+        }
+        let head_dim_bytes = (head_dim / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;
+        let total = match max_seq_len
+            .checked_mul(num_kv_heads)
+            .and_then(|v| v.checked_mul(head_dim_bytes))
+        {
+            Some(t) if t > 0 => t,
+            _ => return 0,
+        };
+        let data = malloc(total);
+        if data.is_null() {
+            return 0;
+        }
+        core::ptr::write_bytes(data, 0, total);
 
-    let handle = malloc(core::mem::size_of::<RayzorKvCacheQ8>()) as *mut RayzorKvCacheQ8;
-    if handle.is_null() {
-        free(data);
-        return 0;
+        let handle = malloc(core::mem::size_of::<RayzorKvCacheQ8>()) as *mut RayzorKvCacheQ8;
+        if handle.is_null() {
+            free(data);
+            return 0;
+        }
+        *handle = RayzorKvCacheQ8 {
+            data,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+            head_dim_bytes,
+        };
+        handle as i64
     }
-    *handle = RayzorKvCacheQ8 {
-        data,
-        max_seq_len,
-        num_kv_heads,
-        head_dim,
-        head_dim_bytes,
-    };
-    handle as i64
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_free(handle: i64) {
-    if handle == 0 {
-        return;
+    unsafe {
+        if handle == 0 {
+            return;
+        }
+        let h = handle as *mut RayzorKvCacheQ8;
+        if !(*h).data.is_null() {
+            free((*h).data);
+        }
+        free(h as *mut u8);
     }
-    let h = handle as *mut RayzorKvCacheQ8;
-    if !(*h).data.is_null() {
-        free((*h).data);
-    }
-    free(h as *mut u8);
 }
 
 #[unsafe(no_mangle)]
@@ -494,80 +510,84 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_append(
     current_len: i64,
     src_tensor: i64,
 ) -> i64 {
-    if handle == 0 || src_tensor == 0 {
-        return -1;
-    }
-    let h = &*(handle as *const RayzorKvCacheQ8);
-    let t = match Tensor::from_handle(src_tensor) {
-        Some(t) => t,
-        None => return -1,
-    };
-    if t.dtype() != dtype::F32 || !t.is_contiguous() || t.ndim() != 3 {
-        return -1;
-    }
-    let t_shape = t.shape();
-    let n_new = t_shape[0];
-    if t_shape[1] != h.num_kv_heads || t_shape[2] != h.head_dim {
-        return -1;
-    }
-    let current_len = current_len.max(0) as usize;
-    if current_len + n_new > h.max_seq_len {
-        return -1;
-    }
-    let blocks_per_head = h.head_dim / Q8_0_BLOCK_SIZE;
-    let row_bytes = h.num_kv_heads * h.head_dim_bytes;
-    let src_data = t.data_ptr() as *const f32;
-    for l in 0..n_new {
-        for kvh in 0..h.num_kv_heads {
-            let src_row_ptr = src_data.add((l * h.num_kv_heads + kvh) * h.head_dim);
-            let dst_row_ptr = h
-                .data
-                .add((current_len + l) * row_bytes + kvh * h.head_dim_bytes);
-            for b in 0..blocks_per_head {
-                quantize_q8_0_block(
-                    src_row_ptr.add(b * Q8_0_BLOCK_SIZE),
-                    dst_row_ptr.add(b * Q8_0_BLOCK_BYTES),
-                );
+    unsafe {
+        if handle == 0 || src_tensor == 0 {
+            return -1;
+        }
+        let h = &*(handle as *const RayzorKvCacheQ8);
+        let t = match Tensor::from_handle(src_tensor) {
+            Some(t) => t,
+            None => return -1,
+        };
+        if t.dtype() != dtype::F32 || !t.is_contiguous() || t.ndim() != 3 {
+            return -1;
+        }
+        let t_shape = t.shape();
+        let n_new = t_shape[0];
+        if t_shape[1] != h.num_kv_heads || t_shape[2] != h.head_dim {
+            return -1;
+        }
+        let current_len = current_len.max(0) as usize;
+        if current_len + n_new > h.max_seq_len {
+            return -1;
+        }
+        let blocks_per_head = h.head_dim / Q8_0_BLOCK_SIZE;
+        let row_bytes = h.num_kv_heads * h.head_dim_bytes;
+        let src_data = t.data_ptr() as *const f32;
+        for l in 0..n_new {
+            for kvh in 0..h.num_kv_heads {
+                let src_row_ptr = src_data.add((l * h.num_kv_heads + kvh) * h.head_dim);
+                let dst_row_ptr = h
+                    .data
+                    .add((current_len + l) * row_bytes + kvh * h.head_dim_bytes);
+                for b in 0..blocks_per_head {
+                    quantize_q8_0_block(
+                        src_row_ptr.add(b * Q8_0_BLOCK_SIZE),
+                        dst_row_ptr.add(b * Q8_0_BLOCK_BYTES),
+                    );
+                }
             }
         }
+        (current_len + n_new) as i64
     }
-    (current_len + n_new) as i64
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kv_cache_q8_dequant_view(handle: i64, current_len: i64) -> i64 {
-    if handle == 0 || current_len <= 0 {
-        return 0;
-    }
-    let h = &*(handle as *const RayzorKvCacheQ8);
-    let current_len = current_len as usize;
-    if current_len > h.max_seq_len {
-        return 0;
-    }
-    let blocks_per_head = h.head_dim / Q8_0_BLOCK_SIZE;
-    let row_bytes = h.num_kv_heads * h.head_dim_bytes;
+    unsafe {
+        if handle == 0 || current_len <= 0 {
+            return 0;
+        }
+        let h = &*(handle as *const RayzorKvCacheQ8);
+        let current_len = current_len as usize;
+        if current_len > h.max_seq_len {
+            return 0;
+        }
+        let blocks_per_head = h.head_dim / Q8_0_BLOCK_SIZE;
+        let row_bytes = h.num_kv_heads * h.head_dim_bytes;
 
-    let out = match Tensor::alloc_zeros_f32(&[current_len, h.num_kv_heads, h.head_dim]) {
-        Some(t) => t,
-        None => return 0,
-    };
-    let out_data = out.data_ptr() as *mut f32;
-    let mut block_buf = [0.0f32; Q8_0_BLOCK_SIZE];
-    for l in 0..current_len {
-        for kvh in 0..h.num_kv_heads {
-            let src = h.data.add(l * row_bytes + kvh * h.head_dim_bytes);
-            let dst = out_data.add((l * h.num_kv_heads + kvh) * h.head_dim);
-            for b in 0..blocks_per_head {
-                dequant_q8_0_block(src.add(b * Q8_0_BLOCK_BYTES), &mut block_buf);
-                core::ptr::copy_nonoverlapping(
-                    block_buf.as_ptr(),
-                    dst.add(b * Q8_0_BLOCK_SIZE),
-                    Q8_0_BLOCK_SIZE,
-                );
+        let out = match Tensor::alloc_zeros_f32(&[current_len, h.num_kv_heads, h.head_dim]) {
+            Some(t) => t,
+            None => return 0,
+        };
+        let out_data = out.data_ptr() as *mut f32;
+        let mut block_buf = [0.0f32; Q8_0_BLOCK_SIZE];
+        for l in 0..current_len {
+            for kvh in 0..h.num_kv_heads {
+                let src = h.data.add(l * row_bytes + kvh * h.head_dim_bytes);
+                let dst = out_data.add((l * h.num_kv_heads + kvh) * h.head_dim);
+                for b in 0..blocks_per_head {
+                    dequant_q8_0_block(src.add(b * Q8_0_BLOCK_BYTES), &mut block_buf);
+                    core::ptr::copy_nonoverlapping(
+                        block_buf.as_ptr(),
+                        dst.add(b * Q8_0_BLOCK_SIZE),
+                        Q8_0_BLOCK_SIZE,
+                    );
+                }
             }
         }
+        out.handle
     }
-    out.handle
 }
 
 #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
@@ -611,16 +631,18 @@ unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn dot_block_f32(q: *const f32, k: &[f32; Q8_0_BLOCK_SIZE]) -> f32 {
-    use std::arch::aarch64::*;
-    let k_ptr = k.as_ptr();
-    let mut acc = vdupq_n_f32(0.0);
-    for i in 0..8 {
-        let off = i * 4;
-        let qv = vld1q_f32(q.add(off));
-        let kv = vld1q_f32(k_ptr.add(off));
-        acc = vfmaq_f32(acc, qv, kv);
+    unsafe {
+        use std::arch::aarch64::*;
+        let k_ptr = k.as_ptr();
+        let mut acc = vdupq_n_f32(0.0);
+        for i in 0..8 {
+            let off = i * 4;
+            let qv = vld1q_f32(q.add(off));
+            let kv = vld1q_f32(k_ptr.add(off));
+            acc = vfmaq_f32(acc, qv, kv);
+        }
+        vaddvq_f32(acc)
     }
-    vaddvq_f32(acc)
 }
 
 #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "wasm32")))]
@@ -654,15 +676,17 @@ unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn axpy_block_f32(out: *mut f32, w: f32, v: &[f32; Q8_0_BLOCK_SIZE]) {
-    use std::arch::aarch64::*;
-    let w_v = vdupq_n_f32(w);
-    let v_ptr = v.as_ptr();
-    for i in 0..8 {
-        let off = i * 4;
-        let vv = vld1q_f32(v_ptr.add(off));
-        let ov = vld1q_f32(out.add(off));
-        let nv = vfmaq_f32(ov, w_v, vv);
-        vst1q_f32(out.add(off), nv);
+    unsafe {
+        use std::arch::aarch64::*;
+        let w_v = vdupq_n_f32(w);
+        let v_ptr = v.as_ptr();
+        for i in 0..8 {
+            let off = i * 4;
+            let vv = vld1q_f32(v_ptr.add(off));
+            let ov = vld1q_f32(out.add(off));
+            let nv = vfmaq_f32(ov, w_v, vv);
+            vst1q_f32(out.add(off), nv);
+        }
     }
 }
 
@@ -698,162 +722,164 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_q8(
     num_q_heads: i64,
     scale: f64,
 ) -> i64 {
-    if q_ptr == 0 || k_handle == 0 || v_handle == 0 || cache_len < 0 {
-        return 0;
-    }
-    let q = match Tensor::from_handle(q_ptr) {
-        Some(t) => t,
-        None => return 0,
-    };
-    if q.dtype() != dtype::F32 || !q.is_contiguous() || q.ndim() != 3 {
-        return 0;
-    }
-    let k_cache = &*(k_handle as *const RayzorKvCacheQ8);
-    let v_cache = &*(v_handle as *const RayzorKvCacheQ8);
-    let cache_len = cache_len as usize;
-    if cache_len > k_cache.max_seq_len || cache_len > v_cache.max_seq_len {
-        return 0;
-    }
-    if k_cache.num_kv_heads != v_cache.num_kv_heads || k_cache.head_dim != v_cache.head_dim {
-        return 0;
-    }
-    let q_shape = q.shape();
-    let seq_q = q_shape[0];
-    let nqh = q_shape[1];
-    let hd = q_shape[2];
-    if seq_q != 1 || nqh != num_q_heads as usize || hd != k_cache.head_dim {
-        return 0;
-    }
-    let num_q_heads = nqh;
-    let num_kv_heads = k_cache.num_kv_heads;
-    let head_dim = hd;
-    if num_kv_heads == 0 || num_q_heads % num_kv_heads != 0 {
-        return 0;
-    }
-    let group = num_q_heads / num_kv_heads;
-    let blocks_per_head = head_dim / Q8_0_BLOCK_SIZE;
-    let head_dim_bytes = blocks_per_head * Q8_0_BLOCK_BYTES;
-    let row_bytes = num_kv_heads * head_dim_bytes;
-
-    let out = match Tensor::alloc_zeros_f32(&[1, num_q_heads, head_dim]) {
-        Some(t) => t,
-        None => return 0,
-    };
-
-    let q_data = q.data_ptr() as *const f32;
-    let out_data = out.data_ptr() as *mut f32;
-    let k_base = k_cache.data;
-    let v_base = v_cache.data;
-    let scale_f32 = scale as f32;
-
-    // GQA-aware layout: iterate kv_head OUTER so the dequant of each
-    // K/V block fires once per (kv_head, cache_pos, block) and feeds
-    // ALL `group` query heads in the GQA group. The original
-    // q_head-outer layout re-dequanted the same block once per
-    // query head → 4× redundant dequant work for Llama-3 GQA where
-    // group = num_q_heads / num_kv_heads = 4.
-    //
-    // Per-group scratch sized once; `group * cache_len` floats holds
-    // (a) the pre-softmax scores, then (b) the normalised weights
-    // after softmax. For Llama-3.2-1B (group=4, cache_len=2048)
-    // that's 32 KB — well within L1.
-    let mut group_scores: Vec<f32> = vec![0.0; group * cache_len];
-    let mut group_max: Vec<f32> = vec![f32::NEG_INFINITY; group];
-    let mut group_denom: Vec<f32> = vec![0.0; group];
-    let mut k_block = [0.0f32; Q8_0_BLOCK_SIZE];
-    let mut v_block = [0.0f32; Q8_0_BLOCK_SIZE];
-
-    for kv_head in 0..num_kv_heads {
-        let group_start = kv_head * group;
-
-        // Reset per-group state.
-        for s in &mut group_scores[..group * cache_len] {
-            *s = 0.0;
+    unsafe {
+        if q_ptr == 0 || k_handle == 0 || v_handle == 0 || cache_len < 0 {
+            return 0;
         }
-        for m in &mut group_max[..group] {
-            *m = f32::NEG_INFINITY;
+        let q = match Tensor::from_handle(q_ptr) {
+            Some(t) => t,
+            None => return 0,
+        };
+        if q.dtype() != dtype::F32 || !q.is_contiguous() || q.ndim() != 3 {
+            return 0;
         }
-        for d in &mut group_denom[..group] {
-            *d = 0.0;
+        let k_cache = &*(k_handle as *const RayzorKvCacheQ8);
+        let v_cache = &*(v_handle as *const RayzorKvCacheQ8);
+        let cache_len = cache_len as usize;
+        if cache_len > k_cache.max_seq_len || cache_len > v_cache.max_seq_len {
+            return 0;
         }
+        if k_cache.num_kv_heads != v_cache.num_kv_heads || k_cache.head_dim != v_cache.head_dim {
+            return 0;
+        }
+        let q_shape = q.shape();
+        let seq_q = q_shape[0];
+        let nqh = q_shape[1];
+        let hd = q_shape[2];
+        if seq_q != 1 || nqh != num_q_heads as usize || hd != k_cache.head_dim {
+            return 0;
+        }
+        let num_q_heads = nqh;
+        let num_kv_heads = k_cache.num_kv_heads;
+        let head_dim = hd;
+        if num_kv_heads == 0 || num_q_heads % num_kv_heads != 0 {
+            return 0;
+        }
+        let group = num_q_heads / num_kv_heads;
+        let blocks_per_head = head_dim / Q8_0_BLOCK_SIZE;
+        let head_dim_bytes = blocks_per_head * Q8_0_BLOCK_BYTES;
+        let row_bytes = num_kv_heads * head_dim_bytes;
 
-        // K step. Dequant each block once; dot against every group
-        // query head before moving on. Accumulation order per
-        // (gi, l) stays block-by-block — same as the original
-        // q_head-outer code, so the f32 reduction order (and Paris
-        // MATCH) is preserved.
-        for l in 0..cache_len {
-            let k_row_ptr = k_base.add(l * row_bytes + kv_head * head_dim_bytes);
-            for b in 0..blocks_per_head {
-                dequant_q8_0_block(k_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut k_block);
+        let out = match Tensor::alloc_zeros_f32(&[1, num_q_heads, head_dim]) {
+            Some(t) => t,
+            None => return 0,
+        };
+
+        let q_data = q.data_ptr() as *const f32;
+        let out_data = out.data_ptr() as *mut f32;
+        let k_base = k_cache.data;
+        let v_base = v_cache.data;
+        let scale_f32 = scale as f32;
+
+        // GQA-aware layout: iterate kv_head OUTER so the dequant of each
+        // K/V block fires once per (kv_head, cache_pos, block) and feeds
+        // ALL `group` query heads in the GQA group. The original
+        // q_head-outer layout re-dequanted the same block once per
+        // query head → 4× redundant dequant work for Llama-3 GQA where
+        // group = num_q_heads / num_kv_heads = 4.
+        //
+        // Per-group scratch sized once; `group * cache_len` floats holds
+        // (a) the pre-softmax scores, then (b) the normalised weights
+        // after softmax. For Llama-3.2-1B (group=4, cache_len=2048)
+        // that's 32 KB — well within L1.
+        let mut group_scores: Vec<f32> = vec![0.0; group * cache_len];
+        let mut group_max: Vec<f32> = vec![f32::NEG_INFINITY; group];
+        let mut group_denom: Vec<f32> = vec![0.0; group];
+        let mut k_block = [0.0f32; Q8_0_BLOCK_SIZE];
+        let mut v_block = [0.0f32; Q8_0_BLOCK_SIZE];
+
+        for kv_head in 0..num_kv_heads {
+            let group_start = kv_head * group;
+
+            // Reset per-group state.
+            for s in &mut group_scores[..group * cache_len] {
+                *s = 0.0;
+            }
+            for m in &mut group_max[..group] {
+                *m = f32::NEG_INFINITY;
+            }
+            for d in &mut group_denom[..group] {
+                *d = 0.0;
+            }
+
+            // K step. Dequant each block once; dot against every group
+            // query head before moving on. Accumulation order per
+            // (gi, l) stays block-by-block — same as the original
+            // q_head-outer code, so the f32 reduction order (and Paris
+            // MATCH) is preserved.
+            for l in 0..cache_len {
+                let k_row_ptr = k_base.add(l * row_bytes + kv_head * head_dim_bytes);
+                for b in 0..blocks_per_head {
+                    dequant_q8_0_block(k_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut k_block);
+                    for gi in 0..group {
+                        let q_head = group_start + gi;
+                        let q_row_ptr = q_data.add(q_head * head_dim);
+                        let partial = dot_block_f32(q_row_ptr.add(b * Q8_0_BLOCK_SIZE), &k_block);
+                        group_scores[gi * cache_len + l] += partial;
+                    }
+                }
+                // Apply scale + accumulate max per gi for this l.
                 for gi in 0..group {
-                    let q_head = group_start + gi;
-                    let q_row_ptr = q_data.add(q_head * head_dim);
-                    let partial = dot_block_f32(q_row_ptr.add(b * Q8_0_BLOCK_SIZE), &k_block);
-                    group_scores[gi * cache_len + l] += partial;
+                    let s = group_scores[gi * cache_len + l] * scale_f32;
+                    group_scores[gi * cache_len + l] = s;
+                    if s > group_max[gi] {
+                        group_max[gi] = s;
+                    }
                 }
             }
-            // Apply scale + accumulate max per gi for this l.
+
+            // Softmax in-place: exp(x - max), accumulate denom, then
+            // normalise. Two passes per gi (one to build weights and
+            // denom, one to divide); the second pass turns scores into
+            // pre-multiplied weights so the V step's axpy can fold the
+            // 1/denom division out of the hot loop.
             for gi in 0..group {
-                let s = group_scores[gi * cache_len + l] * scale_f32;
-                group_scores[gi * cache_len + l] = s;
-                if s > group_max[gi] {
-                    group_max[gi] = s;
+                let max_g = group_max[gi];
+                let row = &mut group_scores[gi * cache_len..(gi + 1) * cache_len];
+                let mut denom = 0.0f32;
+                for s in row.iter_mut() {
+                    let e = fmath::exp(*s - max_g);
+                    *s = e;
+                    denom += e;
+                }
+                group_denom[gi] = denom;
+                let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+                for s in row.iter_mut() {
+                    *s *= inv_denom;
+                }
+            }
+
+            // Zero output rows for the group's q_heads before the
+            // first axpy. q_heads in the same GQA group are stored at
+            // contiguous offsets, so the four zeroings stream cleanly.
+            for gi in 0..group {
+                let q_head = group_start + gi;
+                let out_row_ptr = out_data.add(q_head * head_dim);
+                for d in 0..head_dim {
+                    *out_row_ptr.add(d) = 0.0;
+                }
+            }
+
+            // V step. Dequant each block once; axpy into every group
+            // query head's output row before moving on. Same dequant
+            // savings as the K step (4× less work per cache block);
+            // axpy work is unchanged.
+            for l in 0..cache_len {
+                let v_row_ptr = v_base.add(l * row_bytes + kv_head * head_dim_bytes);
+                for b in 0..blocks_per_head {
+                    dequant_q8_0_block(v_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut v_block);
+                    for gi in 0..group {
+                        let q_head = group_start + gi;
+                        let w = group_scores[gi * cache_len + l];
+                        let out_row_ptr = out_data.add(q_head * head_dim);
+                        axpy_block_f32(out_row_ptr.add(b * Q8_0_BLOCK_SIZE), w, &v_block);
+                    }
                 }
             }
         }
 
-        // Softmax in-place: exp(x - max), accumulate denom, then
-        // normalise. Two passes per gi (one to build weights and
-        // denom, one to divide); the second pass turns scores into
-        // pre-multiplied weights so the V step's axpy can fold the
-        // 1/denom division out of the hot loop.
-        for gi in 0..group {
-            let max_g = group_max[gi];
-            let row = &mut group_scores[gi * cache_len..(gi + 1) * cache_len];
-            let mut denom = 0.0f32;
-            for s in row.iter_mut() {
-                let e = fmath::exp(*s - max_g);
-                *s = e;
-                denom += e;
-            }
-            group_denom[gi] = denom;
-            let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
-            for s in row.iter_mut() {
-                *s *= inv_denom;
-            }
-        }
-
-        // Zero output rows for the group's q_heads before the
-        // first axpy. q_heads in the same GQA group are stored at
-        // contiguous offsets, so the four zeroings stream cleanly.
-        for gi in 0..group {
-            let q_head = group_start + gi;
-            let out_row_ptr = out_data.add(q_head * head_dim);
-            for d in 0..head_dim {
-                *out_row_ptr.add(d) = 0.0;
-            }
-        }
-
-        // V step. Dequant each block once; axpy into every group
-        // query head's output row before moving on. Same dequant
-        // savings as the K step (4× less work per cache block);
-        // axpy work is unchanged.
-        for l in 0..cache_len {
-            let v_row_ptr = v_base.add(l * row_bytes + kv_head * head_dim_bytes);
-            for b in 0..blocks_per_head {
-                dequant_q8_0_block(v_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut v_block);
-                for gi in 0..group {
-                    let q_head = group_start + gi;
-                    let w = group_scores[gi * cache_len + l];
-                    let out_row_ptr = out_data.add(q_head * head_dim);
-                    axpy_block_f32(out_row_ptr.add(b * Q8_0_BLOCK_SIZE), w, &v_block);
-                }
-            }
-        }
+        out.handle
     }
-
-    out.handle
 }
 
 // Convention clone shims so `KvCacheQ8` can carry `@:derive([Clone])`
@@ -868,20 +894,22 @@ pub unsafe extern "C" fn rayzor_kvcacheq8_arc_clone(handle: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_kvcacheq8_clone(handle: i64) -> i64 {
-    if handle == 0 {
-        return 0;
+    unsafe {
+        if handle == 0 {
+            return 0;
+        }
+        let src = &*(handle as *const RayzorKvCacheQ8);
+        let new_handle = rayzor_kv_cache_q8_alloc(
+            src.max_seq_len as i64,
+            src.num_kv_heads as i64,
+            src.head_dim as i64,
+        );
+        if new_handle == 0 {
+            return 0;
+        }
+        let dst = &*(new_handle as *const RayzorKvCacheQ8);
+        let total = src.max_seq_len * src.num_kv_heads * src.head_dim_bytes;
+        core::ptr::copy_nonoverlapping(src.data, dst.data, total);
+        new_handle
     }
-    let src = &*(handle as *const RayzorKvCacheQ8);
-    let new_handle = rayzor_kv_cache_q8_alloc(
-        src.max_seq_len as i64,
-        src.num_kv_heads as i64,
-        src.head_dim as i64,
-    );
-    if new_handle == 0 {
-        return 0;
-    }
-    let dst = &*(new_handle as *const RayzorKvCacheQ8);
-    let total = src.max_seq_len * src.num_kv_heads * src.head_dim_bytes;
-    core::ptr::copy_nonoverlapping(src.data, dst.data, total);
-    new_handle
 }

@@ -7,7 +7,7 @@
 //! `file_id` column into a real source path.
 
 use super::DebugCommands;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -193,12 +193,12 @@ fn latest_jit_csv() -> Result<PathBuf> {
         if !(name.starts_with("rayzor_jit_symbols.") && name.ends_with(".csv")) {
             continue;
         }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(mt) = meta.modified() {
-                let p = entry.path();
-                if newest.as_ref().map(|(t, _)| mt > *t).unwrap_or(true) {
-                    newest = Some((mt, p));
-                }
+        if let Ok(meta) = entry.metadata()
+            && let Ok(mt) = meta.modified()
+        {
+            let p = entry.path();
+            if newest.as_ref().map(|(t, _)| mt > *t).unwrap_or(true) {
+                newest = Some((mt, p));
             }
         }
     }

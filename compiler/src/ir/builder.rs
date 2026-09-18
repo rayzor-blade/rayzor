@@ -596,22 +596,30 @@ impl IrBuilder {
                     // Vector types (e.g., F32X4 from SIMD4f) should never be cast.
                     // The function returns the correct vector type; the caller's expected
                     // type may be Ptr(Void) due to abstract type resolution.
-                    debug!("DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (vector type)",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (vector type)",
+                        actual_return_type, ty
+                    );
                 } else if actual_is_ptr && expected_is_scalar {
-                    debug!("DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (pointer->scalar would lose data)",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (pointer->scalar would lose data)",
+                        actual_return_type, ty
+                    );
                     // Type already registered above - trust actual type
                 } else if actual_is_scalar && expected_is_ptr {
                     // Don't cast from scalar to pointer - the function returns a concrete type
                     // (e.g., F64 from Sys.time()) but the HIR expects Dynamic (Ptr(Void)).
                     // Trust the actual return type to preserve type information.
-                    debug!("DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (scalar->pointer would lose type info)",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, but NOT inserting cast (scalar->pointer would lose type info)",
+                        actual_return_type, ty
+                    );
                     // Type already registered above - trust actual type
                 } else {
-                    debug!("DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, inserting cast",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, inserting cast",
+                        actual_return_type, ty
+                    );
                     // I64↔F64: use bitcast (bit-preserving) for type erasure boundaries
                     let use_bitcast = matches!(
                         (&actual_return_type, &ty),
@@ -739,11 +747,15 @@ impl IrBuilder {
                 );
 
                 if actual_is_ptr && expected_is_scalar {
-                    debug!("DEBUG: CallDirect (generic) type mismatch - function returns {:?}, expected {:?}, NOT inserting cast",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect (generic) type mismatch - function returns {:?}, expected {:?}, NOT inserting cast",
+                        actual_return_type, ty
+                    );
                 } else {
-                    debug!("DEBUG: CallDirect (generic) type mismatch - function returns {:?}, expected {:?}, inserting cast",
-                              actual_return_type, ty);
+                    debug!(
+                        "DEBUG: CallDirect (generic) type mismatch - function returns {:?}, expected {:?}, inserting cast",
+                        actual_return_type, ty
+                    );
                     return self.build_cast(dest_reg, actual_return_type.clone(), ty);
                 }
             }

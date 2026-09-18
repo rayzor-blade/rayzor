@@ -8,14 +8,14 @@
 mod escape_analysis_tests {
     use super::super::{escape_analyzer::*, ownership_analyzer::FunctionAnalysisContext};
     use crate::semantic_graph::{
-        cfg::{BasicBlock, Terminator},
-        dfg::{CallType as DfgCallType, ConstantValue, LivenessInfo, NodeMetadata, SsaVariable},
         CallGraph, CallSite, CallTarget, CallType, ControlFlowGraph, DataFlowGraph, DataFlowNode,
         DataFlowNodeKind, OwnershipGraph,
+        cfg::{BasicBlock, Terminator},
+        dfg::{CallType as DfgCallType, ConstantValue, LivenessInfo, NodeMetadata, SsaVariable},
     };
     use crate::tast::{
-        collections::new_id_set, node::BinaryOperator, BlockId, CallSiteId, DataFlowNodeId,
-        SourceLocation, SsaVariableId, SymbolId, TypeId,
+        BlockId, CallSiteId, DataFlowNodeId, SourceLocation, SsaVariableId, SymbolId, TypeId,
+        collections::new_id_set, node::BinaryOperator,
     };
     use std::collections::BTreeMap;
     use std::time::Duration;

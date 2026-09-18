@@ -2,7 +2,7 @@
 //!
 //! This avoids ABI issues with struct returns by using out-parameters
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 
 #[repr(C)]
 #[derive(Copy, Clone)]

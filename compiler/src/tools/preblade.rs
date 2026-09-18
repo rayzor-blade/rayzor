@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 
 use crate::compilation::{CompilationConfig, CompilationUnit};
 use crate::ir::blade::{
-    save_bundle, save_symbol_manifest, BladeAbstractInfo, BladeClassInfo, BladeEnumInfo,
-    BladeEnumVariantInfo, BladeFieldInfo, BladeMethodInfo, BladeModuleSymbols, BladeParamInfo,
-    BladeTypeAliasInfo, BladeTypeInfo, RayzorBundle,
+    BladeAbstractInfo, BladeClassInfo, BladeEnumInfo, BladeEnumVariantInfo, BladeFieldInfo,
+    BladeMethodInfo, BladeModuleSymbols, BladeParamInfo, BladeTypeAliasInfo, BladeTypeInfo,
+    RayzorBundle, save_bundle, save_symbol_manifest,
 };
-use crate::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
+use crate::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
 use crate::ir::tree_shake;
 
 /// Configuration for bundle creation.

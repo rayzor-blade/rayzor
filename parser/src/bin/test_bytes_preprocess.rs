@@ -1,6 +1,6 @@
 //! Test preprocessor with Bytes.hx pattern
 use parser::parse_haxe_file_with_diagnostics;
-use parser::preprocessor::{preprocess, PreprocessorConfig};
+use parser::preprocessor::{PreprocessorConfig, preprocess};
 
 fn main() {
     let config = PreprocessorConfig::default();

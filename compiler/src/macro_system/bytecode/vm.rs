@@ -236,7 +236,7 @@ impl MacroVm {
                         _ => {
                             return Err(
                                 self.error(frame_idx, format!("cannot negate {}", val.type_name()))
-                            )
+                            );
                         }
                     }
                 }
@@ -246,7 +246,7 @@ impl MacroVm {
                         MacroValue::Int(i) => self.stack.push(MacroValue::Int(!i)),
                         _ => {
                             return Err(self
-                                .error(frame_idx, format!("cannot bit-not {}", val.type_name())))
+                                .error(frame_idx, format!("cannot bit-not {}", val.type_name())));
                         }
                     }
                 }
@@ -256,8 +256,10 @@ impl MacroVm {
                         MacroValue::Int(i) => self.stack.push(MacroValue::Int(i + 1)),
                         MacroValue::Float(f) => self.stack.push(MacroValue::Float(f + 1.0)),
                         _ => {
-                            return Err(self
-                                .error(frame_idx, format!("cannot increment {}", val.type_name())))
+                            return Err(self.error(
+                                frame_idx,
+                                format!("cannot increment {}", val.type_name()),
+                            ));
                         }
                     }
                 }
@@ -267,8 +269,10 @@ impl MacroVm {
                         MacroValue::Int(i) => self.stack.push(MacroValue::Int(i - 1)),
                         MacroValue::Float(f) => self.stack.push(MacroValue::Float(f - 1.0)),
                         _ => {
-                            return Err(self
-                                .error(frame_idx, format!("cannot decrement {}", val.type_name())))
+                            return Err(self.error(
+                                frame_idx,
+                                format!("cannot decrement {}", val.type_name()),
+                            ));
                         }
                     }
                 }

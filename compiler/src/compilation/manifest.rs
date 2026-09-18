@@ -183,8 +183,10 @@ impl CompilationUnit {
             self.define_class_members_from_blade(class_info, declaration);
         }
 
-        debug!("[BLADE] Registered {} classes, {} enums, {} aliases, {} abstracts ({} methods) from manifest",
-            total_classes, total_enums, total_aliases, total_abstracts, total_methods);
+        debug!(
+            "[BLADE] Registered {} classes, {} enums, {} aliases, {} abstracts ({} methods) from manifest",
+            total_classes, total_enums, total_aliases, total_abstracts, total_methods
+        );
     }
 
     /// Index a packaged manifest type under its short name for signature
@@ -738,8 +740,7 @@ impl CompilationUnit {
 
         trace!(
             "[BLADE] Registered type alias: {} -> {:?}",
-            qualified_name,
-            alias_info.target_type
+            qualified_name, alias_info.target_type
         );
 
         symbol_id

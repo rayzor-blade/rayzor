@@ -256,103 +256,109 @@ fn dispatch_fused(
 // ---------------------------------------------------------------------------
 
 /// Create a GPU buffer from a RayzorTensor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_create_buffer(ctx: i64, tensor_ptr: i64) -> i64 {
-    crate::ops::gpu_thread_check("create_buffer");
-    if ctx == 0 || tensor_ptr == 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &*(ctx as *const GpuContext);
-    let tensor = tensor_ptr as *const u8;
-    let data_ptr = *(tensor as *const *const u8);
-    let numel = *(tensor.add(32) as *const usize);
-    let dtype = *tensor.add(40);
-    let byte_size = numel * dtype_byte_size(dtype);
-
-    match gpu_ctx.inner.buffer_from_data(data_ptr, byte_size) {
-        Some(inner) => {
-            let buf = GpuBuffer::materialized(inner, numel, dtype);
-            Box::into_raw(Box::new(buf)) as i64
+    unsafe {
+        crate::ops::gpu_thread_check("create_buffer");
+        if ctx == 0 || tensor_ptr == 0 {
+            return 0;
         }
-        None => 0,
+
+        let gpu_ctx = &*(ctx as *const GpuContext);
+        let tensor = tensor_ptr as *const u8;
+        let data_ptr = *(tensor as *const *const u8);
+        let numel = *(tensor.add(32) as *const usize);
+        let dtype = *tensor.add(40);
+        let byte_size = numel * dtype_byte_size(dtype);
+
+        match gpu_ctx.inner.buffer_from_data(data_ptr, byte_size) {
+            Some(inner) => {
+                let buf = GpuBuffer::materialized(inner, numel, dtype);
+                Box::into_raw(Box::new(buf)) as i64
+            }
+            None => 0,
+        }
     }
 }
 
 /// Allocate an empty GPU buffer with the given element count and dtype.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_alloc_buffer(ctx: i64, numel: i64, dtype: i64) -> i64 {
-    if ctx == 0 || numel <= 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &*(ctx as *const GpuContext);
-    let numel = numel as usize;
-    let dtype = dtype as u8;
-    let byte_size = numel * dtype_byte_size(dtype);
-
-    match gpu_ctx.inner.allocate_buffer(byte_size) {
-        Some(inner) => {
-            let buf = GpuBuffer::materialized(inner, numel, dtype);
-            Box::into_raw(Box::new(buf)) as i64
+    unsafe {
+        if ctx == 0 || numel <= 0 {
+            return 0;
         }
-        None => 0,
+
+        let gpu_ctx = &*(ctx as *const GpuContext);
+        let numel = numel as usize;
+        let dtype = dtype as u8;
+        let byte_size = numel * dtype_byte_size(dtype);
+
+        match gpu_ctx.inner.allocate_buffer(byte_size) {
+            Some(inner) => {
+                let buf = GpuBuffer::materialized(inner, numel, dtype);
+                Box::into_raw(Box::new(buf)) as i64
+            }
+            None => 0,
+        }
     }
 }
 
 /// Copy GPU buffer data back to a new RayzorTensor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_to_tensor(ctx: i64, buffer_ptr: i64) -> i64 {
-    crate::ops::gpu_thread_check("to_tensor");
-    if ctx == 0 || buffer_ptr == 0 {
-        return 0;
+    unsafe {
+        crate::ops::gpu_thread_check("to_tensor");
+        if ctx == 0 || buffer_ptr == 0 {
+            return 0;
+        }
+
+        let buf = &mut *(buffer_ptr as *mut GpuBuffer);
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        if buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+
+        let byte_size = buf.numel * dtype_byte_size(buf.dtype);
+        let native_buf = buf.native_buffer();
+
+        let data_vec = match native_buf.read_bytes(byte_size) {
+            Some(d) => d,
+            None => return 0,
+        };
+
+        // Build the tensor with the TENSOR CRATE'S OWN constructor rather than
+        // hand-rolling its layout.
+        //
+        // This used to malloc 48 bytes and write fields by raw offset. RayzorTensor
+        // is 64: `refcount` sits at offset 48 and `parent` at 56, so BOTH landed
+        // past the end of the allocation. Nothing noticed until a caller actually
+        // FREED the result — `rayzor_tensor_free` then read a garbage refcount,
+        // followed a garbage `parent`, and recursed into free(), segfaulting. The
+        // GPU tests only ever called `sum()`, so a to_tensor result had never been
+        // handed to the runtime's normal lifecycle before.
+        //
+        // Resolved dynamically: rayzor-gpu does not link rayzor-tensors, but the
+        // host exports its symbols. If it is absent we REFUSE (return 0) rather
+        // than fabricate a wrapper the runtime will later free.
+        let uninit = match tensor_uninit_fn() {
+            Some(f) => f,
+            None => return 0,
+        };
+        let shape_arr: [usize; 1] = [buf.numel];
+        let t = uninit(shape_arr.as_ptr() as i64, 1, buf.dtype as i64);
+        if t == 0 {
+            return 0;
+        }
+        // `data` is the first field of the wrapper.
+        let data = *(t as *const *mut u8);
+        if data.is_null() {
+            return 0;
+        }
+        std::ptr::copy_nonoverlapping(data_vec.as_ptr(), data, byte_size);
+
+        t
     }
-
-    let buf = &mut *(buffer_ptr as *mut GpuBuffer);
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    if buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-
-    let byte_size = buf.numel * dtype_byte_size(buf.dtype);
-    let native_buf = buf.native_buffer();
-
-    let data_vec = match native_buf.read_bytes(byte_size) {
-        Some(d) => d,
-        None => return 0,
-    };
-
-    // Build the tensor with the TENSOR CRATE'S OWN constructor rather than
-    // hand-rolling its layout.
-    //
-    // This used to malloc 48 bytes and write fields by raw offset. RayzorTensor
-    // is 64: `refcount` sits at offset 48 and `parent` at 56, so BOTH landed
-    // past the end of the allocation. Nothing noticed until a caller actually
-    // FREED the result — `rayzor_tensor_free` then read a garbage refcount,
-    // followed a garbage `parent`, and recursed into free(), segfaulting. The
-    // GPU tests only ever called `sum()`, so a to_tensor result had never been
-    // handed to the runtime's normal lifecycle before.
-    //
-    // Resolved dynamically: rayzor-gpu does not link rayzor-tensors, but the
-    // host exports its symbols. If it is absent we REFUSE (return 0) rather
-    // than fabricate a wrapper the runtime will later free.
-    let uninit = match tensor_uninit_fn() {
-        Some(f) => f,
-        None => return 0,
-    };
-    let shape_arr: [usize; 1] = [buf.numel];
-    let t = uninit(shape_arr.as_ptr() as i64, 1, buf.dtype as i64);
-    if t == 0 {
-        return 0;
-    }
-    // `data` is the first field of the wrapper.
-    let data = *(t as *const *mut u8);
-    if data.is_null() {
-        return 0;
-    }
-    std::ptr::copy_nonoverlapping(data_vec.as_ptr(), data, byte_size);
-
-    t
 }
 
 /// `rayzor_tensor_uninit`, resolved from the process's global symbols.
@@ -374,32 +380,38 @@ fn tensor_uninit_fn() -> Option<TensorUninitFn> {
 }
 
 /// Free a GPU buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_free_buffer(_ctx: i64, buffer_ptr: i64) {
-    if buffer_ptr == 0 {
-        return;
+    unsafe {
+        if buffer_ptr == 0 {
+            return;
+        }
+        let _ = Box::from_raw(buffer_ptr as *mut GpuBuffer);
     }
-    let _ = Box::from_raw(buffer_ptr as *mut GpuBuffer);
 }
 
 /// Get the number of elements in a GPU buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_buffer_numel(buffer_ptr: i64) -> i64 {
-    if buffer_ptr == 0 {
-        return 0;
+    unsafe {
+        if buffer_ptr == 0 {
+            return 0;
+        }
+        let buf = &*(buffer_ptr as *const GpuBuffer);
+        buf.numel as i64
     }
-    let buf = &*(buffer_ptr as *const GpuBuffer);
-    buf.numel as i64
 }
 
 /// Get the dtype tag of a GPU buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_buffer_dtype(buffer_ptr: i64) -> i64 {
-    if buffer_ptr == 0 {
-        return 0;
+    unsafe {
+        if buffer_ptr == 0 {
+            return 0;
+        }
+        let buf = &*(buffer_ptr as *const GpuBuffer);
+        buf.dtype as i64
     }
-    let buf = &*(buffer_ptr as *const GpuBuffer);
-    buf.dtype as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -407,74 +419,82 @@ pub unsafe extern "C" fn rayzor_gpu_compute_buffer_dtype(buffer_ptr: i64) -> i64
 // ---------------------------------------------------------------------------
 
 /// Create a GPU buffer from an array of @:gpuStruct instances.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_create_struct_buffer(
     ctx: i64,
     array_ptr: i64,
     count: i64,
     struct_size: i64,
 ) -> i64 {
-    if ctx == 0 || array_ptr == 0 || count <= 0 || struct_size <= 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &*(ctx as *const GpuContext);
-    let count = count as usize;
-    let struct_size = struct_size as usize;
-    let total_bytes = count * struct_size;
-
-    let staging = libc::malloc(total_bytes) as *mut u8;
-    if staging.is_null() {
-        return 0;
-    }
-
-    let array_data = *(array_ptr as *const *const i64);
-    for i in 0..count {
-        let struct_ptr = *array_data.add(i) as *const u8;
-        if !struct_ptr.is_null() {
-            std::ptr::copy_nonoverlapping(struct_ptr, staging.add(i * struct_size), struct_size);
-        } else {
-            std::ptr::write_bytes(staging.add(i * struct_size), 0, struct_size);
+    unsafe {
+        if ctx == 0 || array_ptr == 0 || count <= 0 || struct_size <= 0 {
+            return 0;
         }
-    }
 
-    let result = match gpu_ctx.inner.buffer_from_data(staging, total_bytes) {
-        Some(inner) => {
-            let buf = GpuBuffer::materialized(inner, count, DTYPE_F32);
-            Box::into_raw(Box::new(buf)) as i64
+        let gpu_ctx = &*(ctx as *const GpuContext);
+        let count = count as usize;
+        let struct_size = struct_size as usize;
+        let total_bytes = count * struct_size;
+
+        let staging = libc::malloc(total_bytes) as *mut u8;
+        if staging.is_null() {
+            return 0;
         }
-        None => 0,
-    };
 
-    libc::free(staging as *mut libc::c_void);
-    result
+        let array_data = *(array_ptr as *const *const i64);
+        for i in 0..count {
+            let struct_ptr = *array_data.add(i) as *const u8;
+            if !struct_ptr.is_null() {
+                std::ptr::copy_nonoverlapping(
+                    struct_ptr,
+                    staging.add(i * struct_size),
+                    struct_size,
+                );
+            } else {
+                std::ptr::write_bytes(staging.add(i * struct_size), 0, struct_size);
+            }
+        }
+
+        let result = match gpu_ctx.inner.buffer_from_data(staging, total_bytes) {
+            Some(inner) => {
+                let buf = GpuBuffer::materialized(inner, count, DTYPE_F32);
+                Box::into_raw(Box::new(buf)) as i64
+            }
+            None => 0,
+        };
+
+        libc::free(staging as *mut libc::c_void);
+        result
+    }
 }
 
 /// Allocate an empty GPU buffer for `count` structs of `struct_size` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_alloc_struct_buffer(
     ctx: i64,
     count: i64,
     struct_size: i64,
 ) -> i64 {
-    if ctx == 0 || count <= 0 || struct_size <= 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &*(ctx as *const GpuContext);
-    let total_bytes = (count as usize) * (struct_size as usize);
-
-    match gpu_ctx.inner.allocate_buffer(total_bytes) {
-        Some(inner) => {
-            let buf = GpuBuffer::materialized(inner, count as usize, DTYPE_F32);
-            Box::into_raw(Box::new(buf)) as i64
+    unsafe {
+        if ctx == 0 || count <= 0 || struct_size <= 0 {
+            return 0;
         }
-        None => 0,
+
+        let gpu_ctx = &*(ctx as *const GpuContext);
+        let total_bytes = (count as usize) * (struct_size as usize);
+
+        match gpu_ctx.inner.allocate_buffer(total_bytes) {
+            Some(inner) => {
+                let buf = GpuBuffer::materialized(inner, count as usize, DTYPE_F32);
+                Box::into_raw(Box::new(buf)) as i64
+            }
+            None => 0,
+        }
     }
 }
 
 /// Read a single f32 field from a structured GPU buffer, promote to f64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_read_struct_float(
     _ctx: i64,
     buffer_ptr: i64,
@@ -482,33 +502,35 @@ pub unsafe extern "C" fn rayzor_gpu_compute_read_struct_float(
     struct_size: i64,
     field_offset: i64,
 ) -> f64 {
-    if buffer_ptr == 0 {
-        return 0.0;
-    }
+    unsafe {
+        if buffer_ptr == 0 {
+            return 0.0;
+        }
 
-    let buf = &*(buffer_ptr as *const GpuBuffer);
-    let native_buf = buf.native_buffer();
-    let byte_offset = (index as usize) * (struct_size as usize) + (field_offset as usize);
+        let buf = &*(buffer_ptr as *const GpuBuffer);
+        let native_buf = buf.native_buffer();
+        let byte_offset = (index as usize) * (struct_size as usize) + (field_offset as usize);
 
-    let ptr = native_buf.contents_ptr();
-    if !ptr.is_null() {
-        let val = *(ptr.add(byte_offset) as *const f32);
-        return val as f64;
-    }
+        let ptr = native_buf.contents_ptr();
+        if !ptr.is_null() {
+            let val = *(ptr.add(byte_offset) as *const f32);
+            return val as f64;
+        }
 
-    // Fallback for wgpu: read via staging buffer
-    let total = byte_offset + 4;
-    if let Some(data) = native_buf.read_bytes(total) {
-        if data.len() >= total {
+        // Fallback for wgpu: read via staging buffer
+        let total = byte_offset + 4;
+        if let Some(data) = native_buf.read_bytes(total)
+            && data.len() >= total
+        {
             let val = *(data.as_ptr().add(byte_offset) as *const f32);
             return val as f64;
         }
+        0.0
     }
-    0.0
 }
 
 /// Read a single i32 field from a structured GPU buffer, extend to i64.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_read_struct_int(
     _ctx: i64,
     buffer_ptr: i64,
@@ -516,26 +538,28 @@ pub unsafe extern "C" fn rayzor_gpu_compute_read_struct_int(
     struct_size: i64,
     field_offset: i64,
 ) -> i64 {
-    if buffer_ptr == 0 {
-        return 0;
-    }
+    unsafe {
+        if buffer_ptr == 0 {
+            return 0;
+        }
 
-    let buf = &*(buffer_ptr as *const GpuBuffer);
-    let native_buf = buf.native_buffer();
-    let byte_offset = (index as usize) * (struct_size as usize) + (field_offset as usize);
+        let buf = &*(buffer_ptr as *const GpuBuffer);
+        let native_buf = buf.native_buffer();
+        let byte_offset = (index as usize) * (struct_size as usize) + (field_offset as usize);
 
-    let ptr = native_buf.contents_ptr();
-    if !ptr.is_null() {
-        let val = *(ptr.add(byte_offset) as *const i32);
-        return val as i64;
-    }
+        let ptr = native_buf.contents_ptr();
+        if !ptr.is_null() {
+            let val = *(ptr.add(byte_offset) as *const i32);
+            return val as i64;
+        }
 
-    let total = byte_offset + 4;
-    if let Some(data) = native_buf.read_bytes(total) {
-        if data.len() >= total {
+        let total = byte_offset + 4;
+        if let Some(data) = native_buf.read_bytes(total)
+            && data.len() >= total
+        {
             let val = *(data.as_ptr().add(byte_offset) as *const i32);
             return val as i64;
         }
+        0
     }
-    0
 }

@@ -57,7 +57,7 @@ pub mod cuda;
 pub mod wasm_exports;
 
 #[cfg(feature = "native")]
-use rayzor_plugin::{declare_native_methods, NativeMethodDesc};
+use rayzor_plugin::{NativeMethodDesc, declare_native_methods};
 
 // The loader refuses a plugin with no `rayzor_plugin_abi_version` export
 // (treated as ABI v0). This crate predates the handshake, so it failed to load
@@ -226,7 +226,7 @@ mod native_plugin {
     }
 
     /// Plugin initialization — returns a flat symbol table for JIT linking.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_plugin_init(out_count: *mut usize) -> *const SymbolEntry {
         let symbols = collect_symbols();
         let count = symbols.len();
@@ -244,7 +244,7 @@ mod native_plugin {
     ///
     /// The compiler reads these to auto-generate method mappings and extern
     /// declarations — no manual MIR wrappers or compiler core changes needed.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
         out_count: *mut usize,
     ) -> *const NativeMethodDesc {

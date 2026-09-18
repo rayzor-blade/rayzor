@@ -36,12 +36,12 @@
 
 use compiler::tast::type_flow_guard::{FlowSafetyError, FlowSafetyResults, TypeFlowGuard};
 use compiler::tast::{
+    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
         TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -94,11 +94,15 @@ fn main() {
         }
         85..=94 => {
             println!("🟡 NEARLY PRODUCTION READY");
-            println!("TypeFlowGuard has good coverage with minor gaps. Address failing tests for production use.");
+            println!(
+                "TypeFlowGuard has good coverage with minor gaps. Address failing tests for production use."
+            );
         }
         70..=84 => {
             println!("🟠 DEVELOPMENT READY");
-            println!("TypeFlowGuard has adequate coverage for development. More testing needed for production.");
+            println!(
+                "TypeFlowGuard has adequate coverage for development. More testing needed for production."
+            );
         }
         _ => {
             println!("🔴 NOT READY");

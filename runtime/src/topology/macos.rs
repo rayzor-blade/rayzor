@@ -79,11 +79,7 @@ pub(super) fn perf_core_count() -> i32 {
             0,
         )
     };
-    if rc == 0 && val > 0 {
-        val
-    } else {
-        cpu_count()
-    }
+    if rc == 0 && val > 0 { val } else { cpu_count() }
 }
 
 pub(super) fn cpu_to_node(_cpu: i32) -> i32 {
@@ -115,11 +111,7 @@ pub(super) fn bind_current_thread(node: i32) -> i32 {
             THREAD_AFFINITY_POLICY_COUNT,
         )
     };
-    if rc == KERN_SUCCESS {
-        0
-    } else {
-        -1
-    }
+    if rc == KERN_SUCCESS { 0 } else { -1 }
 }
 
 pub(super) fn bind_current_thread_to_performance() -> i32 {
@@ -129,11 +121,7 @@ pub(super) fn bind_current_thread_to_performance() -> i32 {
     };
     let qos_rc = unsafe { pthread_set_qos_class_self_np(qos, 0) };
     let aff_rc = bind_current_thread(0);
-    if qos_rc == 0 && aff_rc == 0 {
-        0
-    } else {
-        -1
-    }
+    if qos_rc == 0 && aff_rc == 0 { 0 } else { -1 }
 }
 
 pub(super) fn unbind_current_thread() -> i32 {
@@ -148,9 +136,5 @@ pub(super) fn unbind_current_thread() -> i32 {
             THREAD_AFFINITY_POLICY_COUNT,
         )
     };
-    if rc == KERN_SUCCESS {
-        0
-    } else {
-        -1
-    }
+    if rc == KERN_SUCCESS { 0 } else { -1 }
 }

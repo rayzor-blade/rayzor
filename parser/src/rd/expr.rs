@@ -1,7 +1,7 @@
 //! Expression parser using precedence climbing (Pratt parsing).
 
-use super::error::ParseError;
 use super::RdParser;
+use super::error::ParseError;
 use crate::haxe_ast::*;
 use crate::haxe_parser_expr::unescape_string;
 use crate::token::TokenKind;
@@ -1146,20 +1146,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         // Try arrow function: save position, attempt to parse params
         let saved = self.stream.save();
-        if let Ok(params) = self.try_parse_arrow_params() {
-            if self.stream.eat(TokenKind::RParen).is_some()
-                && self.stream.eat(TokenKind::Arrow).is_some()
-            {
-                let body = self.parse_expression()?;
-                let end = body.span.end;
-                return Ok(Expr {
-                    kind: ExprKind::Arrow {
-                        params,
-                        expr: Box::new(body),
-                    },
-                    span: Span::new(start, end),
-                });
-            }
+        if let Ok(params) = self.try_parse_arrow_params()
+            && self.stream.eat(TokenKind::RParen).is_some()
+            && self.stream.eat(TokenKind::Arrow).is_some()
+        {
+            let body = self.parse_expression()?;
+            let end = body.span.end;
+            return Ok(Expr {
+                kind: ExprKind::Arrow {
+                    params,
+                    expr: Box::new(body),
+                },
+                span: Span::new(start, end),
+            });
         }
         // Restore and parse as regular paren expression
         self.stream.restore(saved);
@@ -1346,25 +1345,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         "<interp>",
                         false,
                         false,
-                    ) {
-                        if let Some(TypeDeclaration::Class(c)) = file.declarations.first() {
-                            if let Some(ClassFieldKind::Function(f)) =
-                                c.fields.first().map(|f| &f.kind)
-                            {
-                                if let Some(body) = &f.body {
-                                    if let ExprKind::Block(elements) = &body.kind {
-                                        if let Some(BlockElement::Expr(Expr {
-                                            kind: ExprKind::Return(Some(expr)),
-                                            ..
-                                        })) = elements.first()
-                                        {
-                                            parts.push(StringPart::Interpolation(*expr.clone()));
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    ) && let Some(TypeDeclaration::Class(c)) = file.declarations.first()
+                        && let Some(ClassFieldKind::Function(f)) = c.fields.first().map(|f| &f.kind)
+                        && let Some(body) = &f.body
+                        && let ExprKind::Block(elements) = &body.kind
+                        && let Some(BlockElement::Expr(Expr {
+                            kind: ExprKind::Return(Some(expr)),
+                            ..
+                        })) = elements.first()
+                    {
+                        parts.push(StringPart::Interpolation(*expr.clone()));
+                        continue;
                     }
                     // Fallback: treat as identifier
                     parts.push(StringPart::Interpolation(Expr {
@@ -1445,7 +1436,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 }
                 TokenKind::FatArrow if depth == 0 => return true,
                 TokenKind::Colon | TokenKind::Comma | TokenKind::Pipe if depth == 0 => {
-                    return false
+                    return false;
                 }
                 TokenKind::Eof => return false,
                 _ => {}
@@ -1463,14 +1454,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // into the legacy parser, and with it every macro it defines.
         if self.case_pattern_is_extractor() {
             let start = self.stream.save();
-            if let Ok(expr) = self.parse_expression() {
-                if self.stream.eat(TokenKind::FatArrow).is_some() {
-                    let value = self.parse_expression()?;
-                    return Ok(Pattern::Extractor {
-                        expr: Box::new(expr),
-                        value: Box::new(value),
-                    });
-                }
+            if let Ok(expr) = self.parse_expression()
+                && self.stream.eat(TokenKind::FatArrow).is_some()
+            {
+                let value = self.parse_expression()?;
+                return Ok(Pattern::Extractor {
+                    expr: Box::new(expr),
+                    value: Box::new(value),
+                });
             }
             // Not actually an extractor after all -- put the tokens back and
             // let the ordinary pattern parser have them.
@@ -1496,10 +1487,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::LParen => {
                 let saved = self.stream.save();
                 self.stream.advance();
-                if let Ok(pattern) = self.parse_case_pattern() {
-                    if self.stream.eat(TokenKind::RParen).is_some() {
-                        return Ok(pattern);
-                    }
+                if let Ok(pattern) = self.parse_case_pattern()
+                    && self.stream.eat(TokenKind::RParen).is_some()
+                {
+                    return Ok(pattern);
                 }
                 self.stream.restore(saved);
                 let expr = self.parse_expression()?;
@@ -1507,13 +1498,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     expr: inner,
                     type_hint,
                 } = &expr.kind
+                    && let ExprKind::Ident(var) = &inner.kind
                 {
-                    if let ExprKind::Ident(var) = &inner.kind {
-                        return Ok(Pattern::Type {
-                            var: var.clone(),
-                            type_hint: type_hint.clone(),
-                        });
-                    }
+                    return Ok(Pattern::Type {
+                        var: var.clone(),
+                        type_hint: type_hint.clone(),
+                    });
                 }
                 Ok(Pattern::Const(expr))
             }

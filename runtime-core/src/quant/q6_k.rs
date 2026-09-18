@@ -12,7 +12,7 @@
 
 use half::f16;
 
-use super::types::{Q8KBlock, Q6_K_BLOCK_SIZE};
+use super::types::{Q6_K_BLOCK_SIZE, Q8KBlock};
 
 /// Dispatch wrapper: wasm32+simd128 uses the vectorised Q6_K×Q8_K dot,
 /// everything else uses the scalar reference. The dot prequantizes the
@@ -45,13 +45,15 @@ pub unsafe fn vec_dot_q6_K_q8_K(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
 #[allow(non_snake_case)]
 #[allow(clippy::needless_range_loop)] // kernel-style indexed loop, mirrors llama.cpp
 pub unsafe fn vec_dot_q6_K_q8_K_scalar(block_ptr: *const u8, x: &Q8KBlock) -> f32 {
-    let mut w = [0.0f32; Q6_K_BLOCK_SIZE];
-    dequant_q6_k_block(block_ptr, &mut w);
-    let mut acc = 0.0f32;
-    for i in 0..Q6_K_BLOCK_SIZE {
-        acc += w[i] * (x.d * (*x.qs.get_unchecked(i) as f32));
+    unsafe {
+        let mut w = [0.0f32; Q6_K_BLOCK_SIZE];
+        dequant_q6_k_block(block_ptr, &mut w);
+        let mut acc = 0.0f32;
+        for i in 0..Q6_K_BLOCK_SIZE {
+            acc += w[i] * (x.d * (*x.qs.get_unchecked(i) as f32));
+        }
+        acc
     }
-    acc
 }
 
 /// SIMD128 (wasm) Q6_K×Q8_K dot — port of the native NEON `dot_q6_k_q8`
@@ -198,43 +200,46 @@ pub unsafe fn vec_dot_q6_K_q8_K_simd128(block_ptr: *const u8, x: &Q8KBlock) -> f
 /// be exactly `Q6_K_BLOCK_SIZE` (256) f32 entries.
 #[inline]
 pub unsafe fn dequant_q6_k_block(block_ptr: *const u8, out: &mut [f32]) {
-    debug_assert_eq!(out.len(), Q6_K_BLOCK_SIZE);
-    let ql = core::slice::from_raw_parts(block_ptr, 128);
-    let qh = core::slice::from_raw_parts(block_ptr.add(128), 64);
-    let scales = core::slice::from_raw_parts(block_ptr.add(192) as *const i8, 16);
-    let d_bits = core::ptr::read_unaligned(block_ptr.add(208) as *const u16);
-    let d = f16::from_bits(d_bits).to_f32();
+    unsafe {
+        debug_assert_eq!(out.len(), Q6_K_BLOCK_SIZE);
+        let ql = core::slice::from_raw_parts(block_ptr, 128);
+        let qh = core::slice::from_raw_parts(block_ptr.add(128), 64);
+        let scales = core::slice::from_raw_parts(block_ptr.add(192) as *const i8, 16);
+        let d_bits = core::ptr::read_unaligned(block_ptr.add(208) as *const u16);
+        let d = f16::from_bits(d_bits).to_f32();
 
-    // Two halves of 128 weights each. Per half:
-    //   - ql_off advances by 64 bytes (lower nibbles span 128 weights)
-    //   - qh_off advances by 32 bytes (2-bit quants span 128 weights)
-    //   - sc_off advances by 8 (8 scales per half)
-    for n in 0..2 {
-        let ql_off = n * 64;
-        let qh_off = n * 32;
-        let sc_off = n * 8;
-        let out_off = n * 128;
-        for l in 0..32 {
-            // 4 quants per (l, n) — at positions 0, 32, 64, 96 within the half.
-            // Each takes 4 bits from ql + 2 bits from qh.
-            let qh_byte = qh[qh_off + l];
-            let q1 = ((ql[ql_off + l] & 0x0F) as i32) | (((qh_byte & 3) as i32) << 4);
-            let q2 = ((ql[ql_off + l + 32] & 0x0F) as i32) | ((((qh_byte >> 2) & 3) as i32) << 4);
-            let q3 = ((ql[ql_off + l] >> 4) as i32) | ((((qh_byte >> 4) & 3) as i32) << 4);
-            let q4 = ((ql[ql_off + l + 32] >> 4) as i32) | ((((qh_byte >> 6) & 3) as i32) << 4);
+        // Two halves of 128 weights each. Per half:
+        //   - ql_off advances by 64 bytes (lower nibbles span 128 weights)
+        //   - qh_off advances by 32 bytes (2-bit quants span 128 weights)
+        //   - sc_off advances by 8 (8 scales per half)
+        for n in 0..2 {
+            let ql_off = n * 64;
+            let qh_off = n * 32;
+            let sc_off = n * 8;
+            let out_off = n * 128;
+            for l in 0..32 {
+                // 4 quants per (l, n) — at positions 0, 32, 64, 96 within the half.
+                // Each takes 4 bits from ql + 2 bits from qh.
+                let qh_byte = qh[qh_off + l];
+                let q1 = ((ql[ql_off + l] & 0x0F) as i32) | (((qh_byte & 3) as i32) << 4);
+                let q2 =
+                    ((ql[ql_off + l + 32] & 0x0F) as i32) | ((((qh_byte >> 2) & 3) as i32) << 4);
+                let q3 = ((ql[ql_off + l] >> 4) as i32) | ((((qh_byte >> 4) & 3) as i32) << 4);
+                let q4 = ((ql[ql_off + l + 32] >> 4) as i32) | ((((qh_byte >> 6) & 3) as i32) << 4);
 
-            // Sub-block scale index: l < 16 → first scale slot, l >= 16 → second.
-            let is_idx = l / 16;
-            let s0 = scales[sc_off + is_idx] as i32;
-            let s2 = scales[sc_off + 2 + is_idx] as i32;
-            let s4 = scales[sc_off + 4 + is_idx] as i32;
-            let s6 = scales[sc_off + 6 + is_idx] as i32;
+                // Sub-block scale index: l < 16 → first scale slot, l >= 16 → second.
+                let is_idx = l / 16;
+                let s0 = scales[sc_off + is_idx] as i32;
+                let s2 = scales[sc_off + 2 + is_idx] as i32;
+                let s4 = scales[sc_off + 4 + is_idx] as i32;
+                let s6 = scales[sc_off + 6 + is_idx] as i32;
 
-            // Bias of -32 makes the unsigned 6-bit value (0..63) signed (-32..31).
-            out[out_off + l] = d * (s0 as f32) * ((q1 - 32) as f32);
-            out[out_off + l + 32] = d * (s2 as f32) * ((q2 - 32) as f32);
-            out[out_off + l + 64] = d * (s4 as f32) * ((q3 - 32) as f32);
-            out[out_off + l + 96] = d * (s6 as f32) * ((q4 - 32) as f32);
+                // Bias of -32 makes the unsigned 6-bit value (0..63) signed (-32..31).
+                out[out_off + l] = d * (s0 as f32) * ((q1 - 32) as f32);
+                out[out_off + l + 32] = d * (s2 as f32) * ((q2 - 32) as f32);
+                out[out_off + l + 64] = d * (s4 as f32) * ((q3 - 32) as f32);
+                out[out_off + l + 96] = d * (s6 as f32) * ((q4 - 32) as f32);
+            }
         }
     }
 }

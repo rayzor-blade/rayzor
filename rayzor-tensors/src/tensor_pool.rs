@@ -180,8 +180,8 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -468,27 +468,27 @@ impl TensorPool {
             // incoming entry instead (free-through). Either way the lock
             // is held continuously so concurrent pushers see the updated
             // current_bytes before deciding.
-            if let Some(entries) = buckets.get_mut(&key) {
-                if !entries.is_empty() {
-                    let evicted = entries.remove(0);
-                    self.stats
-                        .current_bytes
-                        .fetch_sub(evicted.alloc_bytes, Ordering::Relaxed);
-                    self.stats.evictions.fetch_add(1, Ordering::Relaxed);
-                    // Poison BEFORE parking the incoming entry so its
-                    // buffer carries the sentinel during the park.
-                    unsafe { poison_entry_data(&entry) };
-                    // Now park the incoming under the same lock so the
-                    // intermediate state is never observable.
-                    let bucket = buckets.entry(key).or_default();
-                    bucket.push(entry);
-                    let bucket_len = bucket.len();
-                    self.bump_bytes(added_bytes);
-                    self.bump_peak_bucket(bucket_len);
-                    drop(buckets);
-                    unsafe { freer(evicted) };
-                    return true;
-                }
+            if let Some(entries) = buckets.get_mut(&key)
+                && !entries.is_empty()
+            {
+                let evicted = entries.remove(0);
+                self.stats
+                    .current_bytes
+                    .fetch_sub(evicted.alloc_bytes, Ordering::Relaxed);
+                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                // Poison BEFORE parking the incoming entry so its
+                // buffer carries the sentinel during the park.
+                unsafe { poison_entry_data(&entry) };
+                // Now park the incoming under the same lock so the
+                // intermediate state is never observable.
+                let bucket = buckets.entry(key).or_default();
+                bucket.push(entry);
+                let bucket_len = bucket.len();
+                self.bump_bytes(added_bytes);
+                self.bump_peak_bucket(bucket_len);
+                drop(buckets);
+                unsafe { freer(evicted) };
+                return true;
             }
             // No room and bucket empty: evict the incoming.
             self.stats.evictions.fetch_add(1, Ordering::Relaxed);
@@ -706,23 +706,25 @@ pub fn poison_enabled() -> bool {
 /// `data` field is the first pointer-sized slot. The `qtensor_meta_*`
 /// fields are independently checked.
 unsafe fn poison_entry_data(entry: &PooledEntry) {
-    if !poison_enabled() || entry.ptr.is_null() {
-        return;
-    }
-    // Both RayzorTensor and RayzorQTensor lay out `data: *mut u8` as the
-    // first field (verified by the on-disk struct layouts in tensor.rs
-    // and quant.rs respectively). Read it without depending on either
-    // module's concrete struct so the pool layer stays decoupled.
-    let data_ptr: *mut u8 = *(entry.ptr as *mut *mut u8);
-    if !data_ptr.is_null() && entry.alloc_bytes > 0 {
-        std::ptr::write_bytes(data_ptr, POISON_BYTE, entry.alloc_bytes);
-    }
-    if !entry.qtensor_meta_ptr.is_null() && entry.qtensor_meta_bytes > 0 {
-        std::ptr::write_bytes(
-            entry.qtensor_meta_ptr,
-            POISON_BYTE,
-            entry.qtensor_meta_bytes,
-        );
+    unsafe {
+        if !poison_enabled() || entry.ptr.is_null() {
+            return;
+        }
+        // Both RayzorTensor and RayzorQTensor lay out `data: *mut u8` as the
+        // first field (verified by the on-disk struct layouts in tensor.rs
+        // and quant.rs respectively). Read it without depending on either
+        // module's concrete struct so the pool layer stays decoupled.
+        let data_ptr: *mut u8 = *(entry.ptr as *mut *mut u8);
+        if !data_ptr.is_null() && entry.alloc_bytes > 0 {
+            std::ptr::write_bytes(data_ptr, POISON_BYTE, entry.alloc_bytes);
+        }
+        if !entry.qtensor_meta_ptr.is_null() && entry.qtensor_meta_bytes > 0 {
+            std::ptr::write_bytes(
+                entry.qtensor_meta_ptr,
+                POISON_BYTE,
+                entry.qtensor_meta_bytes,
+            );
+        }
     }
 }
 
@@ -861,19 +863,21 @@ mod tests {
     static FREE_COUNT_LOCK: PLMutex<()> = PLMutex::new(());
 
     unsafe fn test_freer(entry: PooledEntry) {
-        // Reconstitute the Vec from the leaked pointer + length and let it
-        // drop. `alloc_bytes` is the original Vec's capacity.
-        if !entry.ptr.is_null() && entry.alloc_bytes > 0 {
-            let _ = Vec::from_raw_parts(entry.ptr, entry.alloc_bytes, entry.alloc_bytes);
+        unsafe {
+            // Reconstitute the Vec from the leaked pointer + length and let it
+            // drop. `alloc_bytes` is the original Vec's capacity.
+            if !entry.ptr.is_null() && entry.alloc_bytes > 0 {
+                let _ = Vec::from_raw_parts(entry.ptr, entry.alloc_bytes, entry.alloc_bytes);
+            }
+            if !entry.qtensor_meta_ptr.is_null() && entry.qtensor_meta_bytes > 0 {
+                let _ = Vec::from_raw_parts(
+                    entry.qtensor_meta_ptr,
+                    entry.qtensor_meta_bytes,
+                    entry.qtensor_meta_bytes,
+                );
+            }
+            FREE_COUNT.fetch_add(1, Ordering::Relaxed);
         }
-        if !entry.qtensor_meta_ptr.is_null() && entry.qtensor_meta_bytes > 0 {
-            let _ = Vec::from_raw_parts(
-                entry.qtensor_meta_ptr,
-                entry.qtensor_meta_bytes,
-                entry.qtensor_meta_bytes,
-            );
-        }
-        FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     fn fake_entry(bytes: usize, shape: &[usize]) -> PooledEntry {
@@ -1335,16 +1339,18 @@ mod tests {
     }
 
     unsafe fn poison_fake_freer(entry: PooledEntry) {
-        if !entry.ptr.is_null() {
-            // Reconstruct the wrapper to drop its data buffer + the
-            // wrapper itself.
-            let fx = Box::from_raw(entry.ptr as *mut PoisonFixture);
-            if !fx.data.is_null() && entry.alloc_bytes > 0 {
-                let _ = Vec::from_raw_parts(fx.data, entry.alloc_bytes, entry.alloc_bytes);
+        unsafe {
+            if !entry.ptr.is_null() {
+                // Reconstruct the wrapper to drop its data buffer + the
+                // wrapper itself.
+                let fx = Box::from_raw(entry.ptr as *mut PoisonFixture);
+                if !fx.data.is_null() && entry.alloc_bytes > 0 {
+                    let _ = Vec::from_raw_parts(fx.data, entry.alloc_bytes, entry.alloc_bytes);
+                }
+                drop(fx);
             }
-            drop(fx);
+            FREE_COUNT.fetch_add(1, Ordering::Relaxed);
         }
-        FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     // ------------------------------------------------------------------

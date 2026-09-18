@@ -1,8 +1,8 @@
 // Phi Type Unification Implementation for DFG Builder
 // Properly unifies types from all phi operands instead of just using the first one
 
-use crate::semantic_graph::dfg::{DataFlowGraph, DataFlowNodeKind, PhiIncoming};
 use crate::semantic_graph::GraphConstructionError;
+use crate::semantic_graph::dfg::{DataFlowGraph, DataFlowNodeKind, PhiIncoming};
 use crate::tast::core::{TypeKind, TypeTable};
 use crate::tast::type_checker::TypeChecker;
 use crate::tast::{DataFlowNodeId, TypeId};

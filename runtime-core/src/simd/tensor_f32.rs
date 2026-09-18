@@ -1099,36 +1099,38 @@ mod tests {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[allow(clippy::excessive_precision)] // C1 = 355/512 written in full: the split-constant
-                                      // technique needs it EXACTLY representable, and the digits document that.
+// technique needs it EXACTLY representable, and the digits document that.
 unsafe fn expq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64::float32x4_t {
-    use core::arch::aarch64::*;
-    let x = vminq_f32(
-        vmaxq_f32(x, vdupq_n_f32(-87.336_55)),
-        vdupq_n_f32(88.376_26),
-    );
+    unsafe {
+        use core::arch::aarch64::*;
+        let x = vminq_f32(
+            vmaxq_f32(x, vdupq_n_f32(-87.336_55)),
+            vdupq_n_f32(88.376_26),
+        );
 
-    // n = round(x * log2(e)); r = x - n*ln2 (split-constant for precision).
-    let n_f = vcvtq_f32_s32(vcvtaq_s32_f32(vmulq_f32(
-        x,
-        vdupq_n_f32(core::f32::consts::LOG2_E),
-    )));
-    let mut r = vfmsq_f32(x, n_f, vdupq_n_f32(0.693_359_375)); // x - n*C1
-    r = vfmsq_f32(r, n_f, vdupq_n_f32(-2.121_944_4e-4)); // - n*C2
+        // n = round(x * log2(e)); r = x - n*ln2 (split-constant for precision).
+        let n_f = vcvtq_f32_s32(vcvtaq_s32_f32(vmulq_f32(
+            x,
+            vdupq_n_f32(core::f32::consts::LOG2_E),
+        )));
+        let mut r = vfmsq_f32(x, n_f, vdupq_n_f32(0.693_359_375)); // x - n*C1
+        r = vfmsq_f32(r, n_f, vdupq_n_f32(-2.121_944_4e-4)); // - n*C2
 
-    // exp(r) ≈ 1 + r + r²·P(r), Cephes degree-5 Horner.
-    let z = vmulq_f32(r, r);
-    let mut p = vdupq_n_f32(1.987_569_2e-4);
-    p = vfmaq_f32(vdupq_n_f32(1.398_199_9e-3), p, r);
-    p = vfmaq_f32(vdupq_n_f32(8.333_452e-3), p, r);
-    p = vfmaq_f32(vdupq_n_f32(4.166_579_6e-2), p, r);
-    p = vfmaq_f32(vdupq_n_f32(1.666_666_5e-1), p, r);
-    p = vfmaq_f32(vdupq_n_f32(0.5), p, r);
-    let y = vaddq_f32(vfmaq_f32(r, z, p), vdupq_n_f32(1.0));
+        // exp(r) ≈ 1 + r + r²·P(r), Cephes degree-5 Horner.
+        let z = vmulq_f32(r, r);
+        let mut p = vdupq_n_f32(1.987_569_2e-4);
+        p = vfmaq_f32(vdupq_n_f32(1.398_199_9e-3), p, r);
+        p = vfmaq_f32(vdupq_n_f32(8.333_452e-3), p, r);
+        p = vfmaq_f32(vdupq_n_f32(4.166_579_6e-2), p, r);
+        p = vfmaq_f32(vdupq_n_f32(1.666_666_5e-1), p, r);
+        p = vfmaq_f32(vdupq_n_f32(0.5), p, r);
+        let y = vaddq_f32(vfmaq_f32(r, z, p), vdupq_n_f32(1.0));
 
-    // Scale by 2^n via exponent bits.
-    let n_i = vcvtaq_s32_f32(vmulq_f32(x, vdupq_n_f32(core::f32::consts::LOG2_E)));
-    let pow2n = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(n_i, vdupq_n_s32(127)), 23));
-    vmulq_f32(y, pow2n)
+        // Scale by 2^n via exponent bits.
+        let n_i = vcvtaq_s32_f32(vmulq_f32(x, vdupq_n_f32(core::f32::consts::LOG2_E)));
+        let pow2n = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(n_i, vdupq_n_s32(127)), 23));
+        vmulq_f32(y, pow2n)
+    }
 }
 
 /// silu(x) = x / (1 + exp(-x)) over a contiguous f32 buffer, NEON path.
@@ -1137,19 +1139,21 @@ unsafe fn expq_f32(x: core::arch::aarch64::float32x4_t) -> core::arch::aarch64::
 /// `src` and `dst` must reference `n` live, non-overlapping f32 elements.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn silu_slice_neon(src: *const f32, dst: *mut f32, n: usize) {
-    use core::arch::aarch64::*;
-    let one = vdupq_n_f32(1.0);
-    let mut i = 0;
-    while i + 4 <= n {
-        let x = vld1q_f32(src.add(i));
-        let e = expq_f32(vnegq_f32(x));
-        vst1q_f32(dst.add(i), vdivq_f32(x, vaddq_f32(one, e)));
-        i += 4;
-    }
-    while i < n {
-        let x = *src.add(i);
-        *dst.add(i) = x / (1.0 + (-x).exp());
-        i += 1;
+    unsafe {
+        use core::arch::aarch64::*;
+        let one = vdupq_n_f32(1.0);
+        let mut i = 0;
+        while i + 4 <= n {
+            let x = vld1q_f32(src.add(i));
+            let e = expq_f32(vnegq_f32(x));
+            vst1q_f32(dst.add(i), vdivq_f32(x, vaddq_f32(one, e)));
+            i += 4;
+        }
+        while i < n {
+            let x = *src.add(i);
+            *dst.add(i) = x / (1.0 + (-x).exp());
+            i += 1;
+        }
     }
 }
 

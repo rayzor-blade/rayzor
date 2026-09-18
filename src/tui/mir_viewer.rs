@@ -8,18 +8,17 @@
 //! - q to quit
 
 use crossterm::{
-    cursor,
+    ExecutableCommand, cursor,
     event::{self, Event, KeyCode},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Terminal,
 };
 use std::io;
 use std::time::Duration;
@@ -68,67 +67,67 @@ pub fn run_mir_viewer(mir_text: &str, module_name: &str, total_functions: usize)
     loop {
         terminal.draw(|frame| app.render(frame))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if app.search_mode {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.search_mode = false;
-                            app.search_query.clear();
-                        }
-                        KeyCode::Enter => {
-                            app.search_mode = false;
-                        }
-                        KeyCode::Backspace => {
-                            app.search_query.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.search_query.push(c);
-                        }
-                        _ => {}
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if app.search_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.search_mode = false;
+                        app.search_query.clear();
                     }
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Tab => {
-                            app.active_panel = match app.active_panel {
-                                Panel::FuncList => Panel::Code,
-                                Panel::Code => Panel::FuncList,
-                            };
-                        }
-                        KeyCode::Char('/') => {
-                            app.search_mode = true;
-                            app.search_query.clear();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => match app.active_panel {
-                            Panel::FuncList => app.select_prev(),
-                            Panel::Code => app.code_scroll = app.code_scroll.saturating_sub(1),
-                        },
-                        KeyCode::Down | KeyCode::Char('j') => match app.active_panel {
-                            Panel::FuncList => app.select_next(),
-                            Panel::Code => {
-                                let max = app.current_line_count().saturating_sub(1);
-                                app.code_scroll = (app.code_scroll + 1).min(max);
-                            }
-                        },
-                        KeyCode::PageUp => {
-                            app.code_scroll = app.code_scroll.saturating_sub(20);
-                        }
-                        KeyCode::PageDown => {
+                    KeyCode::Enter => {
+                        app.search_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        app.search_query.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.search_query.push(c);
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Tab => {
+                        app.active_panel = match app.active_panel {
+                            Panel::FuncList => Panel::Code,
+                            Panel::Code => Panel::FuncList,
+                        };
+                    }
+                    KeyCode::Char('/') => {
+                        app.search_mode = true;
+                        app.search_query.clear();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => match app.active_panel {
+                        Panel::FuncList => app.select_prev(),
+                        Panel::Code => app.code_scroll = app.code_scroll.saturating_sub(1),
+                    },
+                    KeyCode::Down | KeyCode::Char('j') => match app.active_panel {
+                        Panel::FuncList => app.select_next(),
+                        Panel::Code => {
                             let max = app.current_line_count().saturating_sub(1);
-                            app.code_scroll = (app.code_scroll + 20).min(max);
+                            app.code_scroll = (app.code_scroll + 1).min(max);
                         }
-                        KeyCode::Home => app.code_scroll = 0,
-                        KeyCode::End => {
-                            app.code_scroll = app.current_line_count().saturating_sub(1);
-                        }
-                        KeyCode::Enter if app.active_panel == Panel::FuncList => {
-                            app.code_scroll = 0;
-                            app.active_panel = Panel::Code;
-                        }
-                        KeyCode::Char('n') => app.jump_to_next_match(),
-                        _ => {}
+                    },
+                    KeyCode::PageUp => {
+                        app.code_scroll = app.code_scroll.saturating_sub(20);
                     }
+                    KeyCode::PageDown => {
+                        let max = app.current_line_count().saturating_sub(1);
+                        app.code_scroll = (app.code_scroll + 20).min(max);
+                    }
+                    KeyCode::Home => app.code_scroll = 0,
+                    KeyCode::End => {
+                        app.code_scroll = app.current_line_count().saturating_sub(1);
+                    }
+                    KeyCode::Enter if app.active_panel == Panel::FuncList => {
+                        app.code_scroll = 0;
+                        app.active_panel = Panel::Code;
+                    }
+                    KeyCode::Char('n') => app.jump_to_next_match(),
+                    _ => {}
                 }
             }
         }

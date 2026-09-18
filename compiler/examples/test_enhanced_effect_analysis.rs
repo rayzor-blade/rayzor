@@ -38,13 +38,13 @@
 //! - Complex effect propagation
 
 use compiler::tast::{
+    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     effect_analysis::EffectAnalyzer,
     node::{
         AsyncKind, ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue,
         TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

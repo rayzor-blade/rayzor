@@ -360,13 +360,15 @@ impl TastIdGenerators {
 
     /// Reset all generators (unsafe - see IdGenerator::reset)
     pub unsafe fn reset_all(&self) {
-        self.symbols.reset();
-        self.types.reset();
-        self.scopes.reset();
-        self.lifetimes.reset();
-        self.expressions.reset();
-        self.statements.reset();
-        self.blocks.reset();
+        unsafe {
+            self.symbols.reset();
+            self.types.reset();
+            self.scopes.reset();
+            self.lifetimes.reset();
+            self.expressions.reset();
+            self.statements.reset();
+            self.blocks.reset();
+        }
     }
 }
 
@@ -718,8 +720,8 @@ mod tests {
         // These should be different types even with same raw value
         // This test mainly verifies the type system prevents mixing
         assert_eq!(symbol_id.as_raw(), type_id.as_raw()); // Same raw value
-                                                          // But they're different types, so this wouldn't compile:
-                                                          // assert_eq!(symbol_id, type_id); // Compile error - good!
+        // But they're different types, so this wouldn't compile:
+        // assert_eq!(symbol_id, type_id); // Compile error - good!
     }
 
     #[test]

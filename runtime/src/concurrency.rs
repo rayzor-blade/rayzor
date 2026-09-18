@@ -296,18 +296,20 @@ pub unsafe extern "C" fn rayzor_thread_spawn(
 /// - returns the result as a boxed DynamicValue* (via haxe_box_int_ptr)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_thread_join(handle: *mut u8) -> *mut u8 {
-    if handle.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if handle.is_null() {
+            return ptr::null_mut();
+        }
 
-    // Simple implementation using std::thread
-    let boxed_handle: Box<JoinHandle<i64>> = Box::from_raw(handle as *mut JoinHandle<i64>);
-    let result = boxed_handle.join().unwrap_or(-1);
-    ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
-    // Box the result as a DynamicValue* so the compiler can properly unbox it
-    // (matching the convention used by Channel and other generic containers)
-    crate::type_system::BOX_INT_VIA_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    crate::type_system::haxe_box_int_ptr(result)
+        // Simple implementation using std::thread
+        let boxed_handle: Box<JoinHandle<i64>> = Box::from_raw(handle as *mut JoinHandle<i64>);
+        let result = boxed_handle.join().unwrap_or(-1);
+        ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+        // Box the result as a DynamicValue* so the compiler can properly unbox it
+        // (matching the convention used by Channel and other generic containers)
+        crate::type_system::BOX_INT_VIA_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::type_system::haxe_box_int_ptr(result)
+    }
 }
 
 /// Check if a thread has finished executing
@@ -350,10 +352,10 @@ pub extern "C" fn rayzor_thread_park() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_thread_unpark(id: i64) {
-    if let Some(map) = PARKABLE.get() {
-        if let Some(t) = map.lock().unwrap().get(&id) {
-            t.unpark();
-        }
+    if let Some(map) = PARKABLE.get()
+        && let Some(t) = map.lock().unwrap().get(&id)
+    {
+        t.unpark();
     }
 }
 
@@ -423,31 +425,33 @@ pub unsafe extern "C" fn rayzor_arc_init(value: *mut u8) -> *mut u8 {
 /// - arc must be a valid Arc pointer from rayzor_arc_init or rayzor_arc_clone
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_arc_clone(arc: *const u8) -> *mut u8 {
-    debug!("[rayzor_arc_clone] Called with arc={:?}", arc);
+    unsafe {
+        debug!("[rayzor_arc_clone] Called with arc={:?}", arc);
 
-    if arc.is_null() {
-        debug!("[SAFETY ERROR] rayzor_arc_clone: NULL arc pointer");
-        return ptr::null_mut();
+        if arc.is_null() {
+            debug!("[SAFETY ERROR] rayzor_arc_clone: NULL arc pointer");
+            return ptr::null_mut();
+        }
+
+        // Reconstruct Arc from raw pointer (without decrementing count)
+        let arc_ref = Arc::from_raw(arc as *const *mut u8);
+        debug!(
+            "[rayzor_arc_clone] Arc reconstructed, strong_count={}",
+            Arc::strong_count(&arc_ref)
+        );
+
+        // Clone it (increments ref count)
+        let cloned = Arc::clone(&arc_ref);
+        let cloned_ptr = Arc::into_raw(cloned) as *mut u8;
+        debug!("[rayzor_arc_clone] Cloned to {:?}", cloned_ptr);
+
+        // Forget the original to avoid decrementing ref count
+        // Note: forget cannot panic, so no guard needed
+        std::mem::forget(arc_ref);
+
+        // Return new Arc as raw pointer
+        cloned_ptr
     }
-
-    // Reconstruct Arc from raw pointer (without decrementing count)
-    let arc_ref = Arc::from_raw(arc as *const *mut u8);
-    debug!(
-        "[rayzor_arc_clone] Arc reconstructed, strong_count={}",
-        Arc::strong_count(&arc_ref)
-    );
-
-    // Clone it (increments ref count)
-    let cloned = Arc::clone(&arc_ref);
-    let cloned_ptr = Arc::into_raw(cloned) as *mut u8;
-    debug!("[rayzor_arc_clone] Cloned to {:?}", cloned_ptr);
-
-    // Forget the original to avoid decrementing ref count
-    // Note: forget cannot panic, so no guard needed
-    std::mem::forget(arc_ref);
-
-    // Return new Arc as raw pointer
-    cloned_ptr
 }
 
 /// Get the inner value pointer from an Arc
@@ -457,39 +461,43 @@ pub unsafe extern "C" fn rayzor_arc_clone(arc: *const u8) -> *mut u8 {
 /// - returned pointer is valid as long as Arc exists
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_arc_get(arc: *const u8) -> *const u8 {
-    if arc.is_null() {
-        debug!("[SAFETY ERROR] rayzor_arc_get: NULL arc pointer");
-        return ptr::null();
+    unsafe {
+        if arc.is_null() {
+            debug!("[SAFETY ERROR] rayzor_arc_get: NULL arc pointer");
+            return ptr::null();
+        }
+
+        // Reconstruct Arc temporarily
+        let arc_ref = Arc::from_raw(arc as *const *mut u8);
+        debug!(
+            "[rayzor_arc_get] Arc reconstructed, strong_count={}",
+            Arc::strong_count(&arc_ref)
+        );
+
+        // Get the inner value
+        let value_ptr = *arc_ref as *const u8;
+
+        // Forget to avoid decrementing ref count
+        std::mem::forget(arc_ref);
+
+        value_ptr
     }
-
-    // Reconstruct Arc temporarily
-    let arc_ref = Arc::from_raw(arc as *const *mut u8);
-    debug!(
-        "[rayzor_arc_get] Arc reconstructed, strong_count={}",
-        Arc::strong_count(&arc_ref)
-    );
-
-    // Get the inner value
-    let value_ptr = *arc_ref as *const u8;
-
-    // Forget to avoid decrementing ref count
-    std::mem::forget(arc_ref);
-
-    value_ptr
 }
 
 /// Get the strong reference count of an Arc
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_arc_strong_count(arc: *const u8) -> u64 {
-    if arc.is_null() {
-        return 0;
+    unsafe {
+        if arc.is_null() {
+            return 0;
+        }
+
+        let arc_ref = Arc::from_raw(arc as *const *mut u8);
+        let count = Arc::strong_count(&arc_ref);
+        std::mem::forget(arc_ref);
+
+        count as u64
     }
-
-    let arc_ref = Arc::from_raw(arc as *const *mut u8);
-    let count = Arc::strong_count(&arc_ref);
-    std::mem::forget(arc_ref);
-
-    count as u64
 }
 
 /// Try to unwrap an Arc (returns value if refcount == 1)
@@ -499,18 +507,20 @@ pub unsafe extern "C" fn rayzor_arc_strong_count(arc: *const u8) -> u64 {
 /// - returns null if refcount > 1
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_arc_try_unwrap(arc: *mut u8) -> *mut u8 {
-    if arc.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if arc.is_null() {
+            return ptr::null_mut();
+        }
 
-    let arc_obj = Arc::from_raw(arc as *const *mut u8);
+        let arc_obj = Arc::from_raw(arc as *const *mut u8);
 
-    match Arc::try_unwrap(arc_obj) {
-        Ok(value) => value,
-        Err(arc_back) => {
-            // Failed to unwrap, restore the Arc
-            std::mem::forget(arc_back);
-            ptr::null_mut()
+        match Arc::try_unwrap(arc_obj) {
+            Ok(value) => value,
+            Err(arc_back) => {
+                // Failed to unwrap, restore the Arc
+                std::mem::forget(arc_back);
+                ptr::null_mut()
+            }
         }
     }
 }
@@ -518,15 +528,17 @@ pub unsafe extern "C" fn rayzor_arc_try_unwrap(arc: *mut u8) -> *mut u8 {
 /// Get the pointer address of the Arc's data
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_arc_as_ptr(arc: *const u8) -> u64 {
-    if arc.is_null() {
-        return 0;
+    unsafe {
+        if arc.is_null() {
+            return 0;
+        }
+
+        let arc_ref = Arc::from_raw(arc as *const *mut u8);
+        let ptr_addr = Arc::as_ptr(&arc_ref) as u64;
+        std::mem::forget(arc_ref);
+
+        ptr_addr
     }
-
-    let arc_ref = Arc::from_raw(arc as *const *mut u8);
-    let ptr_addr = Arc::as_ptr(&arc_ref) as u64;
-    std::mem::forget(arc_ref);
-
-    ptr_addr
 }
 
 // ============================================================================
@@ -567,72 +579,82 @@ pub unsafe extern "C" fn rayzor_mutex_init(value: *mut u8) -> *mut u8 {
 /// - blocks until lock is acquired
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_mutex_lock(mutex: *mut u8) -> *mut u8 {
-    if mutex.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if mutex.is_null() {
+            return ptr::null_mut();
+        }
+
+        let mutex_handle = &*(mutex as *const MutexHandle);
+
+        // Lock the raw mutex (blocks until acquired)
+        mutex_handle.raw_mutex.lock();
+
+        let guard_handle = Box::new(MutexGuardHandle {
+            mutex: mutex_handle as *const MutexHandle,
+        });
+
+        Box::into_raw(guard_handle) as *mut u8
     }
-
-    let mutex_handle = &*(mutex as *const MutexHandle);
-
-    // Lock the raw mutex (blocks until acquired)
-    mutex_handle.raw_mutex.lock();
-
-    let guard_handle = Box::new(MutexGuardHandle {
-        mutex: mutex_handle as *const MutexHandle,
-    });
-
-    Box::into_raw(guard_handle) as *mut u8
 }
 
 /// Try to lock a mutex without blocking
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_mutex_try_lock(mutex: *mut u8) -> *mut u8 {
-    if mutex.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if mutex.is_null() {
+            return ptr::null_mut();
+        }
 
-    let mutex_handle = &*(mutex as *const MutexHandle);
+        let mutex_handle = &*(mutex as *const MutexHandle);
 
-    if mutex_handle.raw_mutex.try_lock() {
-        let guard_handle = Box::new(MutexGuardHandle {
-            mutex: mutex_handle as *const MutexHandle,
-        });
-        Box::into_raw(guard_handle) as *mut u8
-    } else {
-        ptr::null_mut()
+        if mutex_handle.raw_mutex.try_lock() {
+            let guard_handle = Box::new(MutexGuardHandle {
+                mutex: mutex_handle as *const MutexHandle,
+            });
+            Box::into_raw(guard_handle) as *mut u8
+        } else {
+            ptr::null_mut()
+        }
     }
 }
 
 /// Check if a mutex is currently locked
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_mutex_is_locked(mutex: *const u8) -> bool {
-    if mutex.is_null() {
-        return false;
-    }
+    unsafe {
+        if mutex.is_null() {
+            return false;
+        }
 
-    let mutex_handle = &*(mutex as *const MutexHandle);
-    mutex_handle.raw_mutex.is_locked()
+        let mutex_handle = &*(mutex as *const MutexHandle);
+        mutex_handle.raw_mutex.is_locked()
+    }
 }
 
 /// Get the value pointer from a mutex guard
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_mutex_guard_get(guard: *mut u8) -> *mut u8 {
-    if guard.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if guard.is_null() {
+            return ptr::null_mut();
+        }
 
-    let guard_handle = &*(guard as *const MutexGuardHandle);
-    (*guard_handle.mutex).value
+        let guard_handle = &*(guard as *const MutexGuardHandle);
+        (*guard_handle.mutex).value
+    }
 }
 
 /// Unlock a mutex guard
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_mutex_unlock(guard: *mut u8) {
-    if !guard.is_null() {
-        // Reconstruct Box and get the mutex reference
-        let guard_handle = Box::from_raw(guard as *mut MutexGuardHandle);
-        // Unlock the raw mutex
-        (*guard_handle.mutex).raw_mutex.unlock();
-        // Box will be dropped here
+    unsafe {
+        if !guard.is_null() {
+            // Reconstruct Box and get the mutex reference
+            let guard_handle = Box::from_raw(guard as *mut MutexGuardHandle);
+            // Unlock the raw mutex
+            (*guard_handle.mutex).raw_mutex.unlock();
+            // Box will be dropped here
+        }
     }
 }
 
@@ -678,184 +700,204 @@ pub unsafe extern "C" fn rayzor_channel_init(capacity: i32) -> *mut u8 {
 /// Send a value through a channel (blocking)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_send(channel: *mut u8, value: *mut u8) {
-    debug!(
-        "[rayzor_channel_send] Called with channel={:?}, value={:?}",
-        channel, value
-    );
+    unsafe {
+        debug!(
+            "[rayzor_channel_send] Called with channel={:?}, value={:?}",
+            channel, value
+        );
 
-    if channel.is_null() {
-        debug!("[rayzor_channel_send] channel is null, returning");
-        return;
+        if channel.is_null() {
+            debug!("[rayzor_channel_send] channel is null, returning");
+            return;
+        }
+
+        let channel_handle = &*(channel as *const ChannelHandle);
+        debug!("[rayzor_channel_send] Got channel_handle, locking...");
+        let mut state = channel_handle.state.lock().unwrap();
+        debug!("[rayzor_channel_send] Lock acquired");
+
+        // For bounded channels, wait while full
+        while state.capacity > 0 && state.buffer.len() >= state.capacity && !state.closed {
+            state = channel_handle.not_full.wait(state).unwrap();
+        }
+
+        if state.closed {
+            return;
+        }
+
+        state.buffer.push_back(value);
+        drop(state);
+
+        // Notify waiting receivers
+        channel_handle.not_empty.notify_one();
     }
-
-    let channel_handle = &*(channel as *const ChannelHandle);
-    debug!("[rayzor_channel_send] Got channel_handle, locking...");
-    let mut state = channel_handle.state.lock().unwrap();
-    debug!("[rayzor_channel_send] Lock acquired");
-
-    // For bounded channels, wait while full
-    while state.capacity > 0 && state.buffer.len() >= state.capacity && !state.closed {
-        state = channel_handle.not_full.wait(state).unwrap();
-    }
-
-    if state.closed {
-        return;
-    }
-
-    state.buffer.push_back(value);
-    drop(state);
-
-    // Notify waiting receivers
-    channel_handle.not_empty.notify_one();
 }
 
 /// Try to send a value through a channel (non-blocking)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_try_send(channel: *mut u8, value: *mut u8) -> bool {
-    if channel.is_null() {
-        return false;
+    unsafe {
+        if channel.is_null() {
+            return false;
+        }
+
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let mut state = channel_handle.state.lock().unwrap();
+
+        if state.closed {
+            return false;
+        }
+
+        // For bounded channels, check if full
+        if state.capacity > 0 && state.buffer.len() >= state.capacity {
+            return false;
+        }
+
+        state.buffer.push_back(value);
+        drop(state);
+        channel_handle.not_empty.notify_one();
+        true
     }
-
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let mut state = channel_handle.state.lock().unwrap();
-
-    if state.closed {
-        return false;
-    }
-
-    // For bounded channels, check if full
-    if state.capacity > 0 && state.buffer.len() >= state.capacity {
-        return false;
-    }
-
-    state.buffer.push_back(value);
-    drop(state);
-    channel_handle.not_empty.notify_one();
-    true
 }
 
 /// Receive a value from a channel (blocking)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_receive(channel: *mut u8) -> *mut u8 {
-    if channel.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if channel.is_null() {
+            return ptr::null_mut();
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let mut state = channel_handle.state.lock().unwrap();
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let mut state = channel_handle.state.lock().unwrap();
 
-    // Wait while buffer is empty and channel is not closed
-    while state.buffer.is_empty() && !state.closed {
-        state = channel_handle.not_empty.wait(state).unwrap();
-    }
+        // Wait while buffer is empty and channel is not closed
+        while state.buffer.is_empty() && !state.closed {
+            state = channel_handle.not_empty.wait(state).unwrap();
+        }
 
-    if let Some(value) = state.buffer.pop_front() {
-        drop(state);
-        channel_handle.not_full.notify_one();
-        value
-    } else {
-        ptr::null_mut()
+        if let Some(value) = state.buffer.pop_front() {
+            drop(state);
+            channel_handle.not_full.notify_one();
+            value
+        } else {
+            ptr::null_mut()
+        }
     }
 }
 
 /// Try to receive a value from a channel (non-blocking)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_try_receive(channel: *mut u8) -> *mut u8 {
-    if channel.is_null() {
-        return ptr::null_mut();
-    }
+    unsafe {
+        if channel.is_null() {
+            return ptr::null_mut();
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let mut state = channel_handle.state.lock().unwrap();
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let mut state = channel_handle.state.lock().unwrap();
 
-    if let Some(value) = state.buffer.pop_front() {
-        drop(state);
-        channel_handle.not_full.notify_one();
-        value
-    } else {
-        ptr::null_mut()
+        if let Some(value) = state.buffer.pop_front() {
+            drop(state);
+            channel_handle.not_full.notify_one();
+            value
+        } else {
+            ptr::null_mut()
+        }
     }
 }
 
 /// Close a channel
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_close(channel: *mut u8) {
-    if channel.is_null() {
-        return;
+    unsafe {
+        if channel.is_null() {
+            return;
+        }
+
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let mut state = channel_handle.state.lock().unwrap();
+        state.closed = true;
+        drop(state);
+
+        // Wake up all waiting threads
+        channel_handle.not_empty.notify_all();
+        channel_handle.not_full.notify_all();
     }
-
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let mut state = channel_handle.state.lock().unwrap();
-    state.closed = true;
-    drop(state);
-
-    // Wake up all waiting threads
-    channel_handle.not_empty.notify_all();
-    channel_handle.not_full.notify_all();
 }
 
 /// Check if a channel is closed
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_is_closed(channel: *const u8) -> bool {
-    if channel.is_null() {
-        return true;
-    }
+    unsafe {
+        if channel.is_null() {
+            return true;
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let state = channel_handle.state.lock().unwrap();
-    state.closed
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let state = channel_handle.state.lock().unwrap();
+        state.closed
+    }
 }
 
 /// Get the number of messages in the channel
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_len(channel: *const u8) -> i32 {
-    if channel.is_null() {
-        return 0;
-    }
+    unsafe {
+        if channel.is_null() {
+            return 0;
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let state = channel_handle.state.lock().unwrap();
-    state.buffer.len() as i32
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let state = channel_handle.state.lock().unwrap();
+        state.buffer.len() as i32
+    }
 }
 
 /// Get the channel capacity
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_capacity(channel: *const u8) -> i32 {
-    if channel.is_null() {
-        return 0;
-    }
+    unsafe {
+        if channel.is_null() {
+            return 0;
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let state = channel_handle.state.lock().unwrap();
-    if state.capacity == 0 {
-        -1 // Unbounded
-    } else {
-        state.capacity as i32
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let state = channel_handle.state.lock().unwrap();
+        if state.capacity == 0 {
+            -1 // Unbounded
+        } else {
+            state.capacity as i32
+        }
     }
 }
 
 /// Check if channel is empty
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_is_empty(channel: *const u8) -> bool {
-    if channel.is_null() {
-        return true;
-    }
+    unsafe {
+        if channel.is_null() {
+            return true;
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let state = channel_handle.state.lock().unwrap();
-    state.buffer.is_empty()
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let state = channel_handle.state.lock().unwrap();
+        state.buffer.is_empty()
+    }
 }
 
 /// Check if channel is full
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_channel_is_full(channel: *const u8) -> bool {
-    if channel.is_null() {
-        return false;
-    }
+    unsafe {
+        if channel.is_null() {
+            return false;
+        }
 
-    let channel_handle = &*(channel as *const ChannelHandle);
-    let state = channel_handle.state.lock().unwrap();
-    state.capacity > 0 && state.buffer.len() >= state.capacity
+        let channel_handle = &*(channel as *const ChannelHandle);
+        let state = channel_handle.state.lock().unwrap();
+        state.capacity > 0 && state.buffer.len() >= state.capacity
+    }
 }
 
 // ============================================================================
@@ -889,20 +931,22 @@ pub unsafe extern "C" fn rayzor_semaphore_init(initial_value: i32) -> *mut u8 {
 /// Acquire (decrement) the semaphore, blocking if count is zero
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_semaphore_acquire(semaphore: *mut u8) {
-    if semaphore.is_null() {
-        return;
+    unsafe {
+        if semaphore.is_null() {
+            return;
+        }
+
+        let sem = &*(semaphore as *const SemaphoreHandle);
+        let mut state = sem.state.lock().unwrap();
+
+        // Wait while count is zero
+        while state.count == 0 {
+            state = sem.not_zero.wait(state).unwrap();
+        }
+
+        // Decrement
+        state.count -= 1;
     }
-
-    let sem = &*(semaphore as *const SemaphoreHandle);
-    let mut state = sem.state.lock().unwrap();
-
-    // Wait while count is zero
-    while state.count == 0 {
-        state = sem.not_zero.wait(state).unwrap();
-    }
-
-    // Decrement
-    state.count -= 1;
 }
 
 /// Try to acquire the semaphore with optional timeout (in seconds)
@@ -912,41 +956,43 @@ pub unsafe extern "C" fn rayzor_semaphore_try_acquire(
     semaphore: *mut u8,
     timeout_seconds: f64,
 ) -> bool {
-    if semaphore.is_null() {
-        return false;
-    }
-
-    let sem = &*(semaphore as *const SemaphoreHandle);
-    let mut state = sem.state.lock().unwrap();
-
-    // If timeout is negative or zero, just try once without blocking
-    if timeout_seconds <= 0.0 {
-        if state.count > 0 {
-            state.count -= 1;
-            return true;
-        }
-        return false;
-    }
-
-    // Wait with timeout
-    let timeout = Duration::from_secs_f64(timeout_seconds);
-    let deadline = std::time::Instant::now() + timeout;
-
-    while state.count == 0 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return false; // Timeout
-        }
-
-        let result = sem.not_zero.wait_timeout(state, remaining).unwrap();
-        state = result.0;
-        if result.1.timed_out() && state.count == 0 {
+    unsafe {
+        if semaphore.is_null() {
             return false;
         }
-    }
 
-    state.count -= 1;
-    true
+        let sem = &*(semaphore as *const SemaphoreHandle);
+        let mut state = sem.state.lock().unwrap();
+
+        // If timeout is negative or zero, just try once without blocking
+        if timeout_seconds <= 0.0 {
+            if state.count > 0 {
+                state.count -= 1;
+                return true;
+            }
+            return false;
+        }
+
+        // Wait with timeout
+        let timeout = Duration::from_secs_f64(timeout_seconds);
+        let deadline = std::time::Instant::now() + timeout;
+
+        while state.count == 0 {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false; // Timeout
+            }
+
+            let result = sem.not_zero.wait_timeout(state, remaining).unwrap();
+            state = result.0;
+            if result.1.timed_out() && state.count == 0 {
+                return false;
+            }
+        }
+
+        state.count -= 1;
+        true
+    }
 }
 
 // ============================================================================
@@ -957,11 +1003,13 @@ pub unsafe extern "C" fn rayzor_semaphore_try_acquire(
 /// Returns true when acquired (always, since it blocks forever)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_lock_wait(semaphore: *mut u8) -> bool {
-    if semaphore.is_null() {
-        return false;
+    unsafe {
+        if semaphore.is_null() {
+            return false;
+        }
+        rayzor_semaphore_acquire(semaphore);
+        true
     }
-    rayzor_semaphore_acquire(semaphore);
-    true
 }
 
 // ============================================================================
@@ -972,35 +1020,39 @@ pub unsafe extern "C" fn sys_lock_wait(semaphore: *mut u8) -> bool {
 /// Returns true if acquired, false if count was zero
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_semaphore_try_acquire_nowait(semaphore: *mut u8) -> bool {
-    rayzor_semaphore_try_acquire(semaphore, 0.0)
+    unsafe { rayzor_semaphore_try_acquire(semaphore, 0.0) }
 }
 
 /// Release (increment) the semaphore
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_semaphore_release(semaphore: *mut u8) {
-    if semaphore.is_null() {
-        return;
+    unsafe {
+        if semaphore.is_null() {
+            return;
+        }
+
+        let sem = &*(semaphore as *const SemaphoreHandle);
+        let mut state = sem.state.lock().unwrap();
+        state.count += 1;
+        drop(state);
+
+        // Wake one waiting thread
+        sem.not_zero.notify_one();
     }
-
-    let sem = &*(semaphore as *const SemaphoreHandle);
-    let mut state = sem.state.lock().unwrap();
-    state.count += 1;
-    drop(state);
-
-    // Wake one waiting thread
-    sem.not_zero.notify_one();
 }
 
 /// Get the current count of the semaphore
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_semaphore_count(semaphore: *const u8) -> i32 {
-    if semaphore.is_null() {
-        return 0;
-    }
+    unsafe {
+        if semaphore.is_null() {
+            return 0;
+        }
 
-    let sem = &*(semaphore as *const SemaphoreHandle);
-    let state = sem.state.lock().unwrap();
-    state.count
+        let sem = &*(semaphore as *const SemaphoreHandle);
+        let state = sem.state.lock().unwrap();
+        state.count
+    }
 }
 
 // ============================================================================
@@ -1011,19 +1063,21 @@ pub unsafe extern "C" fn rayzor_semaphore_count(semaphore: *const u8) -> i32 {
 /// This version doesn't return a value, just runs a void->void closure
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_thread_create(closure: *const u8, closure_env: *const u8) -> *mut u8 {
-    rayzor_thread_spawn(closure, closure_env)
+    unsafe { rayzor_thread_spawn(closure, closure_env) }
 }
 
 /// Join a thread (wrapper for sys.thread.Thread compatibility)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_thread_join(handle: *mut u8) {
-    let _ = rayzor_thread_join(handle);
+    unsafe {
+        let _ = rayzor_thread_join(handle);
+    }
 }
 
 /// Check if thread is finished
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_thread_is_finished(handle: *const u8) -> bool {
-    rayzor_thread_is_finished(handle)
+    unsafe { rayzor_thread_is_finished(handle) }
 }
 
 /// Yield current thread
@@ -1061,18 +1115,20 @@ pub extern "C" fn sys_thread_current() -> *mut u8 {
 /// Create a simple mutex (no inner value)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_new() -> *mut u8 {
-    sys_mutex_alloc()
+    unsafe { sys_mutex_alloc() }
 }
 
 /// Acquire a mutex (blocking)
 /// Uses RawMutex::lock() directly - no guard storage needed
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_acquire(mutex: *mut u8) {
-    if !mutex.is_null() {
-        // Cast directly to MutexHandle (same struct as used by rayzor_mutex_*)
-        let mutex_handle = &*(mutex as *const MutexHandle);
-        // Lock the raw mutex (blocking)
-        mutex_handle.raw_mutex.lock();
+    unsafe {
+        if !mutex.is_null() {
+            // Cast directly to MutexHandle (same struct as used by rayzor_mutex_*)
+            let mutex_handle = &*(mutex as *const MutexHandle);
+            // Lock the raw mutex (blocking)
+            mutex_handle.raw_mutex.lock();
+        }
     }
 }
 
@@ -1080,25 +1136,29 @@ pub unsafe extern "C" fn sys_mutex_acquire(mutex: *mut u8) {
 /// Returns boxed Bool (Dynamic value): true if acquired, false if already locked
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_try_acquire(mutex: *mut u8) -> *mut u8 {
-    if mutex.is_null() {
-        return crate::type_system::haxe_box_bool_ptr(false);
+    unsafe {
+        if mutex.is_null() {
+            return crate::type_system::haxe_box_bool_ptr(false);
+        }
+
+        let mutex_handle = &*(mutex as *const MutexHandle);
+        let result = mutex_handle.raw_mutex.try_lock();
+
+        crate::type_system::haxe_box_bool_ptr(result)
     }
-
-    let mutex_handle = &*(mutex as *const MutexHandle);
-    let result = mutex_handle.raw_mutex.try_lock();
-
-    crate::type_system::haxe_box_bool_ptr(result)
 }
 
 /// Release a mutex
 /// Uses RawMutex::unlock() directly - thread-safe, no guard needed
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_mutex_release(mutex: *mut u8) {
-    if !mutex.is_null() {
-        let mutex_handle = &*(mutex as *const MutexHandle);
-        // Unlock the raw mutex
-        // SAFETY: Caller is responsible for only calling unlock when they hold the lock
-        mutex_handle.raw_mutex.unlock();
+    unsafe {
+        if !mutex.is_null() {
+            let mutex_handle = &*(mutex as *const MutexHandle);
+            // Unlock the raw mutex
+            // SAFETY: Caller is responsible for only calling unlock when they hold the lock
+            mutex_handle.raw_mutex.unlock();
+        }
     }
 }
 
@@ -1141,31 +1201,35 @@ pub unsafe extern "C" fn sys_deque_alloc() -> *mut u8 {
 /// Add element to the end of the deque
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_deque_add(deque: *mut u8, item: *mut u8) {
-    if deque.is_null() {
-        return;
+    unsafe {
+        if deque.is_null() {
+            return;
+        }
+
+        let handle = &*(deque as *const DequeHandle);
+        let mut queue = handle.deque.lock().unwrap();
+        queue.push_back(item);
+
+        // Notify one waiting thread
+        handle.not_empty.notify_one();
     }
-
-    let handle = &*(deque as *const DequeHandle);
-    let mut queue = handle.deque.lock().unwrap();
-    queue.push_back(item);
-
-    // Notify one waiting thread
-    handle.not_empty.notify_one();
 }
 
 /// Push element to the front of the deque
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_deque_push(deque: *mut u8, item: *mut u8) {
-    if deque.is_null() {
-        return;
+    unsafe {
+        if deque.is_null() {
+            return;
+        }
+
+        let handle = &*(deque as *const DequeHandle);
+        let mut queue = handle.deque.lock().unwrap();
+        queue.push_front(item);
+
+        // Notify one waiting thread
+        handle.not_empty.notify_one();
     }
-
-    let handle = &*(deque as *const DequeHandle);
-    let mut queue = handle.deque.lock().unwrap();
-    queue.push_front(item);
-
-    // Notify one waiting thread
-    handle.not_empty.notify_one();
 }
 
 /// Pop element from the front of the deque
@@ -1173,22 +1237,24 @@ pub unsafe extern "C" fn sys_deque_push(deque: *mut u8, item: *mut u8) {
 /// If block is false and deque is empty, returns null
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_deque_pop(deque: *mut u8, block: bool) -> *mut u8 {
-    if deque.is_null() {
-        return ptr::null_mut();
-    }
-
-    let handle = &*(deque as *const DequeHandle);
-    let mut queue = handle.deque.lock().unwrap();
-
-    if block {
-        // Block until an element is available
-        while queue.is_empty() {
-            queue = handle.not_empty.wait(queue).unwrap();
+    unsafe {
+        if deque.is_null() {
+            return ptr::null_mut();
         }
-        queue.pop_front().unwrap_or(ptr::null_mut())
-    } else {
-        // Non-blocking: return null if empty
-        queue.pop_front().unwrap_or(ptr::null_mut())
+
+        let handle = &*(deque as *const DequeHandle);
+        let mut queue = handle.deque.lock().unwrap();
+
+        if block {
+            // Block until an element is available
+            while queue.is_empty() {
+                queue = handle.not_empty.wait(queue).unwrap();
+            }
+            queue.pop_front().unwrap_or(ptr::null_mut())
+        } else {
+            // Non-blocking: return null if empty
+            queue.pop_front().unwrap_or(ptr::null_mut())
+        }
     }
 }
 
@@ -1221,90 +1287,102 @@ pub unsafe extern "C" fn sys_condition_alloc() -> *mut u8 {
 /// Acquire the internal mutex
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_acquire(condition: *mut u8) {
-    if condition.is_null() {
-        return;
-    }
+    unsafe {
+        if condition.is_null() {
+            return;
+        }
 
-    let handle = &mut *(condition as *mut ConditionHandle);
-    let guard = handle.mutex.lock().unwrap();
-    // Extend lifetime to 'static - this is safe because the guard is stored in the handle
-    // and will be released when sys_condition_release is called
-    let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
-    handle.guard = Some(guard);
+        let handle = &mut *(condition as *mut ConditionHandle);
+        let guard = handle.mutex.lock().unwrap();
+        // Extend lifetime to 'static - this is safe because the guard is stored in the handle
+        // and will be released when sys_condition_release is called
+        let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
+        handle.guard = Some(guard);
+    }
 }
 
 /// Try to acquire the internal mutex (non-blocking)
 /// Returns boxed Bool (Dynamic value)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_try_acquire(condition: *mut u8) -> *mut u8 {
-    if condition.is_null() {
-        return crate::type_system::haxe_box_bool_ptr(false);
+    unsafe {
+        if condition.is_null() {
+            return crate::type_system::haxe_box_bool_ptr(false);
+        }
+
+        let handle = &mut *(condition as *mut ConditionHandle);
+        let result = if let Ok(guard) = handle.mutex.try_lock() {
+            let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
+            handle.guard = Some(guard);
+            true
+        } else {
+            false
+        };
+
+        crate::type_system::haxe_box_bool_ptr(result)
     }
-
-    let handle = &mut *(condition as *mut ConditionHandle);
-    let result = if let Ok(guard) = handle.mutex.try_lock() {
-        let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
-        handle.guard = Some(guard);
-        true
-    } else {
-        false
-    };
-
-    crate::type_system::haxe_box_bool_ptr(result)
 }
 
 /// Release the internal mutex
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_release(condition: *mut u8) {
-    if condition.is_null() {
-        return;
-    }
+    unsafe {
+        if condition.is_null() {
+            return;
+        }
 
-    let handle = &mut *(condition as *mut ConditionHandle);
-    // Drop the guard to release the mutex
-    handle.guard = None;
+        let handle = &mut *(condition as *mut ConditionHandle);
+        // Drop the guard to release the mutex
+        handle.guard = None;
+    }
 }
 
 /// Wait on the condition variable
 /// Atomically releases the mutex and blocks until signaled
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_wait(condition: *mut u8) {
-    if condition.is_null() {
-        return;
-    }
+    unsafe {
+        if condition.is_null() {
+            return;
+        }
 
-    let handle = &mut *(condition as *mut ConditionHandle);
+        let handle = &mut *(condition as *mut ConditionHandle);
 
-    // Take the guard out (this releases the mutex for the condvar wait)
-    if let Some(guard) = handle.guard.take() {
-        // Wait on the condvar - this will automatically release and reacquire the mutex
-        let guard = handle.condvar.wait(guard).unwrap();
-        // Store the reacquired guard
-        let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
-        handle.guard = Some(guard);
+        // Take the guard out (this releases the mutex for the condvar wait)
+        if let Some(guard) = handle.guard.take() {
+            // Wait on the condvar - this will automatically release and reacquire the mutex
+            let guard = handle.condvar.wait(guard).unwrap();
+            // Store the reacquired guard
+            let guard: std::sync::MutexGuard<'static, ()> = std::mem::transmute(guard);
+            handle.guard = Some(guard);
+        }
     }
 }
 
 /// Signal one waiting thread
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_signal(condition: *mut u8) {
-    if condition.is_null() {
-        return;
-    }
+    unsafe {
+        if condition.is_null() {
+            return;
+        }
 
-    let handle = &*(condition as *const ConditionHandle);
-    handle.condvar.notify_one();
+        let handle = &*(condition as *const ConditionHandle);
+        handle.condvar.notify_one();
+    }
 }
 
 /// Broadcast to all waiting threads
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sys_condition_broadcast(condition: *mut u8) {
-    if condition.is_null() {
-        return;
-    }
+    unsafe {
+        if condition.is_null() {
+            return;
+        }
 
-    let handle = &*(condition as *const ConditionHandle);
-    handle.condvar.notify_all();
+        let handle = &*(condition as *const ConditionHandle);
+        handle.condvar.notify_all();
+    }
 }
 
 // ============================================================================
@@ -1354,41 +1432,11 @@ pub unsafe extern "C" fn rayzor_select_try_recv(
     channels_ptr: *const *mut u8,
     count: i32,
 ) -> *mut u8 {
-    if channels_ptr.is_null() || count <= 0 {
-        return alloc_select_result(-1, ptr::null_mut());
-    }
-    let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
-    for (i, &ch) in chans.iter().enumerate() {
-        if ch.is_null() {
-            continue;
+    unsafe {
+        if channels_ptr.is_null() || count <= 0 {
+            return alloc_select_result(-1, ptr::null_mut());
         }
-        let handle = &*(ch as *const ChannelHandle);
-        let mut state = match handle.state.lock() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Some(value) = state.buffer.pop_front() {
-            drop(state);
-            handle.not_full.notify_one();
-            return alloc_select_result(i as i64, value);
-        }
-    }
-    alloc_select_result(-1, ptr::null_mut())
-}
-
-/// Block until any channel has a value (polling loop with short sleeps).
-///
-/// # Safety
-/// Same as `rayzor_select_try_recv`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rayzor_select_recv(channels_ptr: *const *mut u8, count: i32) -> *mut u8 {
-    if channels_ptr.is_null() || count <= 0 {
-        return alloc_select_result(-1, ptr::null_mut());
-    }
-    let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
-    let mut backoff_us = 50u64;
-    loop {
-        // Fast path: try each channel.
+        let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
         for (i, &ch) in chans.iter().enumerate() {
             if ch.is_null() {
                 continue;
@@ -1403,20 +1451,54 @@ pub unsafe extern "C" fn rayzor_select_recv(channels_ptr: *const *mut u8, count:
                 handle.not_full.notify_one();
                 return alloc_select_result(i as i64, value);
             }
-            // If this channel is closed AND empty, treat as ready-with-null —
-            // matches Go semantics where a closed empty channel yields the
-            // zero value forever. Index returned so user can detect closure.
-            if state.closed {
-                drop(state);
-                return alloc_select_result(i as i64, ptr::null_mut());
-            }
         }
-        // Adaptive backoff up to 2ms; keeps latency low for short waits while
-        // not burning CPU on long waits. Replace with a shared select-condvar
-        // when we wire one through ChannelHandle.
-        thread::sleep(Duration::from_micros(backoff_us));
-        if backoff_us < 2000 {
-            backoff_us = (backoff_us * 2).min(2000);
+        alloc_select_result(-1, ptr::null_mut())
+    }
+}
+
+/// Block until any channel has a value (polling loop with short sleeps).
+///
+/// # Safety
+/// Same as `rayzor_select_try_recv`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rayzor_select_recv(channels_ptr: *const *mut u8, count: i32) -> *mut u8 {
+    unsafe {
+        if channels_ptr.is_null() || count <= 0 {
+            return alloc_select_result(-1, ptr::null_mut());
+        }
+        let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
+        let mut backoff_us = 50u64;
+        loop {
+            // Fast path: try each channel.
+            for (i, &ch) in chans.iter().enumerate() {
+                if ch.is_null() {
+                    continue;
+                }
+                let handle = &*(ch as *const ChannelHandle);
+                let mut state = match handle.state.lock() {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if let Some(value) = state.buffer.pop_front() {
+                    drop(state);
+                    handle.not_full.notify_one();
+                    return alloc_select_result(i as i64, value);
+                }
+                // If this channel is closed AND empty, treat as ready-with-null —
+                // matches Go semantics where a closed empty channel yields the
+                // zero value forever. Index returned so user can detect closure.
+                if state.closed {
+                    drop(state);
+                    return alloc_select_result(i as i64, ptr::null_mut());
+                }
+            }
+            // Adaptive backoff up to 2ms; keeps latency low for short waits while
+            // not burning CPU on long waits. Replace with a shared select-condvar
+            // when we wire one through ChannelHandle.
+            thread::sleep(Duration::from_micros(backoff_us));
+            if backoff_us < 2000 {
+                backoff_us = (backoff_us * 2).min(2000);
+            }
         }
     }
 }
@@ -1429,8 +1511,10 @@ pub unsafe extern "C" fn rayzor_select_recv(channels_ptr: *const *mut u8, count:
 /// `rayzor_select_try_recv` and not previously freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_select_result_free(result: *mut u8) {
-    if !result.is_null() {
-        drop(Box::from_raw(result as *mut SelectResultRaw));
+    unsafe {
+        if !result.is_null() {
+            drop(Box::from_raw(result as *mut SelectResultRaw));
+        }
     }
 }
 
@@ -1441,10 +1525,12 @@ pub unsafe extern "C" fn rayzor_select_result_free(result: *mut u8) {
 /// `rayzor_select_try_recv`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_select_result_index(result: *const u8) -> i64 {
-    if result.is_null() {
-        return -1;
+    unsafe {
+        if result.is_null() {
+            return -1;
+        }
+        (*(result as *const SelectResultRaw)).index
     }
-    (*(result as *const SelectResultRaw)).index
 }
 
 /// `SelectResult.value` getter. Returns null for the null sentinel.
@@ -1453,10 +1539,12 @@ pub unsafe extern "C" fn rayzor_select_result_index(result: *const u8) -> i64 {
 /// Same as `rayzor_select_result_index`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_select_result_value(result: *const u8) -> *mut u8 {
-    if result.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if result.is_null() {
+            return ptr::null_mut();
+        }
+        (*(result as *const SelectResultRaw)).value
     }
-    (*(result as *const SelectResultRaw)).value
 }
 
 // ============================================================================

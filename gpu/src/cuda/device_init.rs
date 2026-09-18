@@ -14,7 +14,7 @@ pub type CUcontext = *mut std::ffi::c_void;
 pub const CUDA_SUCCESS: CUresult = 0;
 
 // CUDA Driver API FFI bindings
-extern "C" {
+unsafe extern "C" {
     pub fn cuInit(flags: u32) -> CUresult;
     pub fn cuDeviceGetCount(count: *mut c_int) -> CUresult;
     pub fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> CUresult;

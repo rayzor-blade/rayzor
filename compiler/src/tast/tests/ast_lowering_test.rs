@@ -6,9 +6,9 @@
 //! - Proper handling of all Haxe language constructs
 
 use crate::tast::{
-    node::TypedFile, AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable,
+    AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable, node::TypedFile,
 };
-use parser::{parse_haxe_file, HaxeFile};
+use parser::{HaxeFile, parse_haxe_file};
 use std::cell::RefCell;
 use std::rc::Rc;
 

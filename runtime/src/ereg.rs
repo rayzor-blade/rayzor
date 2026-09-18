@@ -4,11 +4,11 @@
 //! EReg is an opaque pointer type: Box<HaxeEReg> cast to *mut u8.
 
 use regex::Regex;
-use std::alloc::{alloc, Layout};
+use std::alloc::{Layout, alloc};
 use std::ptr;
 
 use crate::haxe_array::HaxeArray;
-use crate::haxe_string::{haxe_string_from_bytes, HaxeString};
+use crate::haxe_string::{HaxeString, haxe_string_from_bytes};
 
 // ============================================================================
 // Internal types
@@ -25,11 +25,13 @@ struct HaxeEReg {
 
 /// Convert HaxeString pointer to Rust &str
 unsafe fn hs_to_str<'a>(s: *const HaxeString) -> &'a str {
-    if s.is_null() || (*s).ptr.is_null() || (*s).len == 0 {
-        return "";
+    unsafe {
+        if s.is_null() || (*s).ptr.is_null() || (*s).len == 0 {
+            return "";
+        }
+        let bytes = std::slice::from_raw_parts((*s).ptr, (*s).len);
+        std::str::from_utf8_unchecked(bytes)
     }
-    let bytes = std::slice::from_raw_parts((*s).ptr, (*s).len);
-    std::str::from_utf8_unchecked(bytes)
 }
 
 /// Create a new heap-allocated HaxeString from a Rust &str, return as *mut u8 (i64-sized pointer)
@@ -135,10 +137,10 @@ pub extern "C" fn haxe_ereg_matched(ereg: *mut u8, n: i32) -> *mut u8 {
         let ereg = &*(ereg as *mut HaxeEReg);
         if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input) {
             let idx = n as usize;
-            if idx < captures.len() {
-                if let Some((start, end)) = captures[idx] {
-                    return rust_str_to_hs(&input[start..end]);
-                }
+            if idx < captures.len()
+                && let Some((start, end)) = captures[idx]
+            {
+                return rust_str_to_hs(&input[start..end]);
             }
         }
         ptr::null_mut()
@@ -153,10 +155,10 @@ pub extern "C" fn haxe_ereg_matched_left(ereg: *mut u8) -> *mut u8 {
     }
     unsafe {
         let ereg = &*(ereg as *mut HaxeEReg);
-        if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input) {
-            if let Some(Some((start, _end))) = captures.first() {
-                return rust_str_to_hs(&input[..*start]);
-            }
+        if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input)
+            && let Some(Some((start, _end))) = captures.first()
+        {
+            return rust_str_to_hs(&input[..*start]);
         }
         rust_str_to_hs("")
     }
@@ -170,10 +172,10 @@ pub extern "C" fn haxe_ereg_matched_right(ereg: *mut u8) -> *mut u8 {
     }
     unsafe {
         let ereg = &*(ereg as *mut HaxeEReg);
-        if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input) {
-            if let Some(Some((_start, end))) = captures.first() {
-                return rust_str_to_hs(&input[*end..]);
-            }
+        if let (Some(captures), Some(input)) = (&ereg.last_captures, &ereg.last_input)
+            && let Some(Some((_start, end))) = captures.first()
+        {
+            return rust_str_to_hs(&input[*end..]);
         }
         rust_str_to_hs("")
     }
@@ -187,12 +189,12 @@ pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_le
     }
     unsafe {
         let ereg = &*(ereg as *mut HaxeEReg);
-        if let Some(captures) = &ereg.last_captures {
-            if let Some(Some((start, end))) = captures.first() {
-                *out_pos = *start as i32;
-                *out_len = (*end - *start) as i32;
-                return;
-            }
+        if let Some(captures) = &ereg.last_captures
+            && let Some(Some((start, end))) = captures.first()
+        {
+            *out_pos = *start as i32;
+            *out_len = (*end - *start) as i32;
+            return;
         }
         *out_pos = -1;
         *out_len = 0;

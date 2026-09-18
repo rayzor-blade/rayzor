@@ -31,13 +31,13 @@
 //! Test for TypeFlowGuard - using existing CFG infrastructure
 
 use compiler::tast::{
+    FlowSafetyError, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeFlowGuard, TypeId,
+    TypeTable,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
         TypedExpressionKind, TypedFile, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    FlowSafetyError, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeFlowGuard, TypeId,
-    TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

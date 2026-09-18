@@ -3,6 +3,7 @@
 //! This module contains the remaining expression parsers
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::char,
@@ -10,13 +11,12 @@ use nom::{
     error::context,
     multi::{many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
-    IResult, Parser,
 };
 
 use crate::custom_error::ContextualError;
 use crate::haxe_ast::*;
 use crate::haxe_parser::{
-    compiler_specific_identifier, identifier, keyword, position, symbol, ws, PResult,
+    PResult, compiler_specific_identifier, identifier, keyword, position, symbol, ws,
 };
 use crate::haxe_parser_expr::{expression, postfix_expr};
 use crate::haxe_parser_types::type_expr;
@@ -98,20 +98,20 @@ fn dollar_identifier<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
     // Try `$type` first — a standalone keyword that doesn't require braces.
     // Must check that 'type' is a complete word (not prefix of 'typeCheck' etc.).
-    if let Ok((rest, _)) = tag::<&str, &str, ContextualError<&str>>("type")(input) {
-        if rest.is_empty() || !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-            let end = position(full, rest);
-            return Ok((
-                rest,
-                Expr {
-                    kind: ExprKind::DollarIdent {
-                        name: "type".to_string(),
-                        arg: None,
-                    },
-                    span: Span::new(start, end),
+    if let Ok((rest, _)) = tag::<&str, &str, ContextualError<&str>>("type")(input)
+        && (rest.is_empty() || !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    {
+        let end = position(full, rest);
+        return Ok((
+            rest,
+            Expr {
+                kind: ExprKind::DollarIdent {
+                    name: "type".to_string(),
+                    arg: None,
                 },
-            ));
-        }
+                span: Span::new(start, end),
+            },
+        ));
     }
 
     // Macro reification identifiers: $v{...}, $i{...}, $a{...}, $b{...}, $p{...}, $e{...}
@@ -1113,16 +1113,13 @@ fn pattern<'a>(full: &'a str, input: &'a str) -> PResult<'a, Pattern> {
         map(keyword("null"), |_| Pattern::Null),
         // Type pattern: (var:Type)
         |input| {
-            if let Ok((input, _)) = symbol("(").parse(input) {
-                if let Ok((rest, var)) = identifier(input) {
-                    if let Ok((rest, _)) = symbol(":").parse(rest) {
-                        if let Ok((rest, type_hint)) = type_expr(full, rest) {
-                            if let Ok((rest, _)) = symbol(")").parse(rest) {
-                                return Ok((rest, Pattern::Type { var, type_hint }));
-                            }
-                        }
-                    }
-                }
+            if let Ok((input, _)) = symbol("(").parse(input)
+                && let Ok((rest, var)) = identifier(input)
+                && let Ok((rest, _)) = symbol(":").parse(rest)
+                && let Ok((rest, type_hint)) = type_expr(full, rest)
+                && let Ok((rest, _)) = symbol(")").parse(rest)
+            {
+                return Ok((rest, Pattern::Type { var, type_hint }));
             }
             Err(nom::Err::Error(ContextualError::new(
                 input,

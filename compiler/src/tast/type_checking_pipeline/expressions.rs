@@ -779,7 +779,7 @@ impl<'a> TypeCheckingPhase<'a> {
                         } = &class_type_info.kind
                         {
                             let symbol_id = *symbol_id; // Copy the SymbolId
-                                                        // Get the class definition to check its type parameter constraints
+                            // Get the class definition to check its type parameter constraints
                             if let Some(_class_symbol) =
                                 self.type_checker.symbol_table.get_symbol(symbol_id)
                             {

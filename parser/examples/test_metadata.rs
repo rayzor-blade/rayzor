@@ -1,4 +1,4 @@
-use parser::{parse_haxe_file_with_diagnostics, ErrorFormatter, TypeDeclaration};
+use parser::{ErrorFormatter, TypeDeclaration, parse_haxe_file_with_diagnostics};
 
 fn main() {
     println!("Testing @:coreType metadata parsing...");

@@ -190,10 +190,10 @@ fn collect_wasm_host_functions(
 /// (we ship `rayzor-wasm-opt`), with graceful degradation if it's missing.
 fn find_wasm_opt() -> PathBuf {
     // 1. Explicit override wins, verbatim.
-    if let Ok(bin) = std::env::var("RAYZOR_WASM_OPT_BIN") {
-        if !bin.is_empty() {
-            return PathBuf::from(bin);
-        }
+    if let Ok(bin) = std::env::var("RAYZOR_WASM_OPT_BIN")
+        && !bin.is_empty()
+    {
+        return PathBuf::from(bin);
     }
 
     let exe_name = if cfg!(windows) {
@@ -204,12 +204,12 @@ fn find_wasm_opt() -> PathBuf {
 
     // 2. Sibling of the current rayzor binary (dev `target/release`, installed
     //    bin dir, and `cargo install` ~/.cargo/bin all co-locate the two).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin_dir) = exe.parent() {
-            let sibling = bin_dir.join(exe_name);
-            if sibling.exists() {
-                return sibling;
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+    {
+        let sibling = bin_dir.join(exe_name);
+        if sibling.exists() {
+            return sibling;
         }
     }
 
@@ -392,13 +392,13 @@ pub fn cmd_run_wasm(
 
     // Debug aid: dump the linked module for offline disassembly of trap
     // backtraces (wasmtime reports merged-module function indices).
-    if let Ok(dump_path) = std::env::var("RAYZOR_WASM_DUMP") {
-        if !dump_path.is_empty() {
-            if let Err(e) = std::fs::write(&dump_path, &linked_wasm) {
-                eprintln!("[wasm] RAYZOR_WASM_DUMP write failed: {}", e);
-            } else {
-                eprintln!("[wasm] linked module dumped to {}", dump_path);
-            }
+    if let Ok(dump_path) = std::env::var("RAYZOR_WASM_DUMP")
+        && !dump_path.is_empty()
+    {
+        if let Err(e) = std::fs::write(&dump_path, &linked_wasm) {
+            eprintln!("[wasm] RAYZOR_WASM_DUMP write failed: {}", e);
+        } else {
+            eprintln!("[wasm] linked module dumped to {}", dump_path);
         }
     }
 
@@ -684,16 +684,16 @@ pub fn find_wasm_runtime() -> Option<PathBuf> {
     ];
 
     // Development: relative to the rayzor binary (works from any cwd)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin_dir) = exe.parent() {
-            // binary is in target/release/, repo root is ../../
-            let repo_root = bin_dir.join(
-                "../../runtime-wasm/target/wasm32-wasip1-threads/release/rayzor_runtime_wasm.wasm",
-            );
-            candidates.push(repo_root);
-            // Installed: alongside rayzor binary
-            candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+    {
+        // binary is in target/release/, repo root is ../../
+        let repo_root = bin_dir.join(
+            "../../runtime-wasm/target/wasm32-wasip1-threads/release/rayzor_runtime_wasm.wasm",
+        );
+        candidates.push(repo_root);
+        // Installed: alongside rayzor binary
+        candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
     }
 
     // User home
@@ -730,31 +730,31 @@ pub fn resolve_and_copy_host_modules(
 
     for module_name in js_imports.keys() {
         // Try rayzor.toml config first
-        if let Some(host_path) = config_hosts.get(module_name) {
-            if host_path.exists() {
-                let js_filename = host_path.file_name().unwrap().to_string_lossy().to_string();
-                let dest = build_dir.join(&js_filename);
-                if let Err(e) = std::fs::copy(host_path, &dest) {
-                    eprintln!(
-                        "  warning: failed to copy host {}: {}",
-                        host_path.display(),
-                        e
-                    );
-                    continue;
-                }
-
-                // Also copy companion .wasm file if it exists (wasm-bindgen output)
-                let bg_wasm = host_path.with_file_name(
-                    host_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
+        if let Some(host_path) = config_hosts.get(module_name)
+            && host_path.exists()
+        {
+            let js_filename = host_path.file_name().unwrap().to_string_lossy().to_string();
+            let dest = build_dir.join(&js_filename);
+            if let Err(e) = std::fs::copy(host_path, &dest) {
+                eprintln!(
+                    "  warning: failed to copy host {}: {}",
+                    host_path.display(),
+                    e
                 );
-                if bg_wasm.exists() {
-                    let bg_dest = build_dir.join(bg_wasm.file_name().unwrap());
-                    let _ = std::fs::copy(&bg_wasm, &bg_dest);
-                }
-
-                println!("  host: {} → {}", module_name, js_filename);
-                resolved.insert(module_name.clone(), js_filename);
+                continue;
             }
+
+            // Also copy companion .wasm file if it exists (wasm-bindgen output)
+            let bg_wasm = host_path.with_file_name(
+                host_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
+            );
+            if bg_wasm.exists() {
+                let bg_dest = build_dir.join(bg_wasm.file_name().unwrap());
+                let _ = std::fs::copy(&bg_wasm, &bg_dest);
+            }
+
+            println!("  host: {} → {}", module_name, js_filename);
+            resolved.insert(module_name.clone(), js_filename);
         }
         // TODO: also check rpkg JsHost entries
     }

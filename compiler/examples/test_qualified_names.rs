@@ -31,7 +31,7 @@
 // Test that qualified names are being populated correctly during AST lowering
 
 use compiler::tast::{
-    ast_lowering::AstLowering, scopes::ScopeTree, StringInterner, SymbolTable, TypeTable,
+    StringInterner, SymbolTable, TypeTable, ast_lowering::AstLowering, scopes::ScopeTree,
 };
 use parser::haxe_parser::parse_haxe_file;
 use std::cell::RefCell;

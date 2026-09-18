@@ -13,7 +13,7 @@
 
 use super::{SourceLocation, SymbolId};
 use crate::semantic_graph::CallType;
-use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map, new_id_set};
 use crate::tast::node::TypedExpression;
 use crate::tast::{BlockId, CallSiteId, DataFlowNodeId, TypeId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -864,10 +864,12 @@ mod tests {
         call_graph.compute_strongly_connected_components();
 
         assert!(call_graph.is_recursive(func_a));
-        assert!(call_graph
-            .recursion_info
-            .directly_recursive
-            .contains(&func_a));
+        assert!(
+            call_graph
+                .recursion_info
+                .directly_recursive
+                .contains(&func_a)
+        );
     }
 
     #[test]

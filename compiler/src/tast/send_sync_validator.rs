@@ -27,11 +27,11 @@
 //! ```
 
 use crate::tast::{
+    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     capture_analyzer::{CaptureAnalyzer, CapturedVariable},
     core_types::CoreTypeChecker,
     node::{TypedClass, TypedExpression, TypedFunction, TypedStatement},
     trait_checker::TraitChecker,
-    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

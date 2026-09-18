@@ -250,33 +250,37 @@ fn dtype_size(dtype: u8) -> usize {
 
 #[inline(always)]
 unsafe fn load_f32_at(data: *const u8, idx: usize, dtype: u8) -> f32 {
-    match dtype {
-        DTYPE_F32 => *(data as *const f32).add(idx),
-        DTYPE_F16 => f16::from_bits(*(data as *const u16).add(idx)).to_f32(),
-        DTYPE_BF16 => bf16::from_bits(*(data as *const u16).add(idx)).to_f32(),
-        DTYPE_I32 => *(data as *const i32).add(idx) as f32,
-        DTYPE_I8 => *(data as *const i8).add(idx) as f32,
-        DTYPE_U8 => *data.add(idx) as f32,
-        // FP8 reads go through a 256-entry LUT — ~16x faster than bit-twiddling.
-        // See `init_fp8_luts` for the precomputed tables.
-        DTYPE_FP8_E4M3 => FP8_E4M3_LUT[*data.add(idx) as usize],
-        DTYPE_FP8_E5M2 => FP8_E5M2_LUT[*data.add(idx) as usize],
-        _ => 0.0,
+    unsafe {
+        match dtype {
+            DTYPE_F32 => *(data as *const f32).add(idx),
+            DTYPE_F16 => f16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+            DTYPE_BF16 => bf16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+            DTYPE_I32 => *(data as *const i32).add(idx) as f32,
+            DTYPE_I8 => *(data as *const i8).add(idx) as f32,
+            DTYPE_U8 => *data.add(idx) as f32,
+            // FP8 reads go through a 256-entry LUT — ~16x faster than bit-twiddling.
+            // See `init_fp8_luts` for the precomputed tables.
+            DTYPE_FP8_E4M3 => FP8_E4M3_LUT[*data.add(idx) as usize],
+            DTYPE_FP8_E5M2 => FP8_E5M2_LUT[*data.add(idx) as usize],
+            _ => 0.0,
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn store_f32_at(data: *mut u8, idx: usize, dtype: u8, value: f32) {
-    match dtype {
-        DTYPE_F32 => *(data as *mut f32).add(idx) = value,
-        DTYPE_F16 => *(data as *mut u16).add(idx) = f16::from_f32(value).to_bits(),
-        DTYPE_BF16 => *(data as *mut u16).add(idx) = bf16::from_f32(value).to_bits(),
-        DTYPE_I32 => *(data as *mut i32).add(idx) = value as i32,
-        DTYPE_I8 => *(data as *mut i8).add(idx) = value as i8,
-        DTYPE_U8 => *data.add(idx) = value as u8,
-        DTYPE_FP8_E4M3 => *data.add(idx) = fp8_e4m3_from_f32(value),
-        DTYPE_FP8_E5M2 => *data.add(idx) = fp8_e5m2_from_f32(value),
-        _ => {}
+    unsafe {
+        match dtype {
+            DTYPE_F32 => *(data as *mut f32).add(idx) = value,
+            DTYPE_F16 => *(data as *mut u16).add(idx) = f16::from_f32(value).to_bits(),
+            DTYPE_BF16 => *(data as *mut u16).add(idx) = bf16::from_f32(value).to_bits(),
+            DTYPE_I32 => *(data as *mut i32).add(idx) = value as i32,
+            DTYPE_I8 => *(data as *mut i8).add(idx) = value as i8,
+            DTYPE_U8 => *data.add(idx) = value as u8,
+            DTYPE_FP8_E4M3 => *data.add(idx) = fp8_e4m3_from_f32(value),
+            DTYPE_FP8_E5M2 => *data.add(idx) = fp8_e5m2_from_f32(value),
+            _ => {}
+        }
     }
 }
 
@@ -484,11 +488,7 @@ const fn fp8_e4m3_to_f32_const(byte: u8) -> f32 {
     };
     let exp_val = if exp == 0 { -9i32 } else { exp as i32 - 10 };
     let magnitude = const_pow2(mant_num as f32, exp_val);
-    if sign == 0 {
-        magnitude
-    } else {
-        -magnitude
-    }
+    if sign == 0 { magnitude } else { -magnitude }
 }
 
 const fn fp8_e5m2_to_f32_const(byte: u8) -> f32 {
@@ -515,11 +515,7 @@ const fn fp8_e5m2_to_f32_const(byte: u8) -> f32 {
     };
     let exp_val = if exp == 0 { -16i32 } else { exp as i32 - 17 };
     let magnitude = const_pow2(mant_num as f32, exp_val);
-    if sign == 0 {
-        magnitude
-    } else {
-        -magnitude
-    }
+    if sign == 0 { magnitude } else { -magnitude }
 }
 
 /// `n * 2^k` in const context. Bit-manipulates the f32 representation
@@ -547,13 +543,15 @@ const fn const_pow2(n: f32, k: i32) -> f32 {
 /// storage representation specified by `dtype`. Used by ones/full/zeros.
 #[inline]
 unsafe fn fill_dtype(data: *mut u8, numel: usize, dtype: u8, value: f32) {
-    if value == 0.0 {
-        // Every supported storage format encodes +0.0 as all zero bytes.
-        std::ptr::write_bytes(data, 0, numel * dtype_size(dtype));
-        return;
-    }
-    for i in 0..numel {
-        store_f32_at(data, i, dtype, value);
+    unsafe {
+        if value == 0.0 {
+            // Every supported storage format encodes +0.0 as all zero bytes.
+            std::ptr::write_bytes(data, 0, numel * dtype_size(dtype));
+            return;
+        }
+        for i in 0..numel {
+            store_f32_at(data, i, dtype, value);
+        }
     }
 }
 
@@ -641,19 +639,21 @@ impl RayzorTensor {
     /// any stride (no element is reached through them), matching numpy's
     /// `is_contiguous` semantics.
     unsafe fn is_contiguous(&self) -> bool {
-        if self.ndim == 0 {
-            return true;
-        }
-        let shape = std::slice::from_raw_parts(self.shape, self.ndim);
-        let strides = std::slice::from_raw_parts(self.strides, self.ndim);
-        let mut expected: usize = 1;
-        for i in (0..self.ndim).rev() {
-            if shape[i] != 1 && strides[i] != expected {
-                return false;
+        unsafe {
+            if self.ndim == 0 {
+                return true;
             }
-            expected *= shape[i];
+            let shape = std::slice::from_raw_parts(self.shape, self.ndim);
+            let strides = std::slice::from_raw_parts(self.strides, self.ndim);
+            let mut expected: usize = 1;
+            for i in (0..self.ndim).rev() {
+                if shape[i] != 1 && strides[i] != expected {
+                    return false;
+                }
+                expected *= shape[i];
+            }
+            true
         }
-        true
     }
 }
 
@@ -678,28 +678,30 @@ use crate::tensor_pool::{self, PoolKey, PooledEntry, ShapeBuf};
 /// `owns_data`, then frees the wrapper itself. The `qtensor_meta_*` fields
 /// must be null for plain tensors (set by QTensor's parallel free path).
 unsafe fn tensor_pool_freer(entry: PooledEntry) {
-    if entry.ptr.is_null() {
-        return;
+    unsafe {
+        if entry.ptr.is_null() {
+            return;
+        }
+        // Defensive: a plain-tensor pool entry should never carry qtensor meta.
+        // If it ever does (bug elsewhere) we still want to release it rather
+        // than leak.
+        if !entry.qtensor_meta_ptr.is_null() {
+            free(entry.qtensor_meta_ptr);
+        }
+        let t = &*(entry.ptr as *const RayzorTensor);
+        if t.owns_data && !t.data.is_null() {
+            let bytes = t.numel * dtype_size(t.dtype);
+            free(t.data);
+            record_data_free(bytes);
+        }
+        if !t.shape.is_null() {
+            free(t.shape as *mut u8);
+        }
+        if !t.strides.is_null() {
+            free(t.strides as *mut u8);
+        }
+        free(entry.ptr);
     }
-    // Defensive: a plain-tensor pool entry should never carry qtensor meta.
-    // If it ever does (bug elsewhere) we still want to release it rather
-    // than leak.
-    if !entry.qtensor_meta_ptr.is_null() {
-        free(entry.qtensor_meta_ptr);
-    }
-    let t = &*(entry.ptr as *const RayzorTensor);
-    if t.owns_data && !t.data.is_null() {
-        let bytes = t.numel * dtype_size(t.dtype);
-        free(t.data);
-        record_data_free(bytes);
-    }
-    if !t.shape.is_null() {
-        free(t.shape as *mut u8);
-    }
-    if !t.strides.is_null() {
-        free(t.strides as *mut u8);
-    }
-    free(entry.ptr);
 }
 
 /// Compute the data-buffer byte count for a pooled tensor of `(dtype, shape)`.
@@ -852,149 +854,151 @@ unsafe fn alloc_tensor_with_zero_policy(
     fill: Option<f32>,
     zero_unfilled: bool,
 ) -> i64 {
-    // Env-gated allocation histogram for tensor-pool design audit. One CSV
-    // line per call: dtype,ndim,shape0,shape1,...
-    record_alloc_histogram(shape, dtype);
-    let ndim = shape.len();
-    let numel: usize = shape.iter().product();
-    let elem_size = dtype_size(dtype);
-    let data_bytes = numel * elem_size;
-    leak_on_alloc(pool_alloc_bytes(shape, dtype));
+    unsafe {
+        // Env-gated allocation histogram for tensor-pool design audit. One CSV
+        // line per call: dtype,ndim,shape0,shape1,...
+        record_alloc_histogram(shape, dtype);
+        let ndim = shape.len();
+        let numel: usize = shape.iter().product();
+        let elem_size = dtype_size(dtype);
+        let data_bytes = numel * elem_size;
+        leak_on_alloc(pool_alloc_bytes(shape, dtype));
 
-    // ---- Pool fast path ----
-    let key = PoolKey::from_shape(dtype, shape);
-    if let Some(entry) = tensor_pool::global().try_pop(key, shape) {
-        TENSOR_POOL_HITS.fetch_add(1, MemOrdering::Relaxed);
-        // The wrapper, data, shape, strides are all reused. The shape vec is
-        // already correct (matched in try_pop via the bucket-walk shape check)
-        // and the strides for a given shape are deterministic (row-major) —
-        // after `rayzor_tensor_clone`'s view-passthrough fix the pool never
-        // sees non-canonical strides on `owns_data=true` tensors. We still
-        // rewrite the strides here as defence-in-depth: the cost is `ndim`
-        // pointer-stores (≤ 10 for every shape Llama ever produces) which is
-        // negligible next to the data zero-fill below.
-        let tensor = entry.ptr as *mut RayzorTensor;
-        let t = &mut *tensor;
-        // Reset the data buffer per the requested fill semantics. The
-        // popped buffer is the original `numel * elem_size` block. Historical
-        // alloc_tensor(fill=None) zeroes for callers that expect clean output;
-        // full-overwrite kernels can opt out through alloc_tensor_uninit().
-        if !t.data.is_null() && data_bytes > 0 {
-            if let Some(val) = fill {
-                if val == 0.0 {
+        // ---- Pool fast path ----
+        let key = PoolKey::from_shape(dtype, shape);
+        if let Some(entry) = tensor_pool::global().try_pop(key, shape) {
+            TENSOR_POOL_HITS.fetch_add(1, MemOrdering::Relaxed);
+            // The wrapper, data, shape, strides are all reused. The shape vec is
+            // already correct (matched in try_pop via the bucket-walk shape check)
+            // and the strides for a given shape are deterministic (row-major) —
+            // after `rayzor_tensor_clone`'s view-passthrough fix the pool never
+            // sees non-canonical strides on `owns_data=true` tensors. We still
+            // rewrite the strides here as defence-in-depth: the cost is `ndim`
+            // pointer-stores (≤ 10 for every shape Llama ever produces) which is
+            // negligible next to the data zero-fill below.
+            let tensor = entry.ptr as *mut RayzorTensor;
+            let t = &mut *tensor;
+            // Reset the data buffer per the requested fill semantics. The
+            // popped buffer is the original `numel * elem_size` block. Historical
+            // alloc_tensor(fill=None) zeroes for callers that expect clean output;
+            // full-overwrite kernels can opt out through alloc_tensor_uninit().
+            if !t.data.is_null() && data_bytes > 0 {
+                if let Some(val) = fill {
+                    if val == 0.0 {
+                        std::ptr::write_bytes(t.data, 0, data_bytes);
+                    } else {
+                        fill_dtype(t.data, numel, dtype, val);
+                    }
+                } else if zero_unfilled {
                     std::ptr::write_bytes(t.data, 0, data_bytes);
-                } else {
-                    fill_dtype(t.data, numel, dtype, val);
                 }
-            } else if zero_unfilled {
-                std::ptr::write_bytes(t.data, 0, data_bytes);
             }
-        }
-        // Defensive strides rewrite: compute canonical row-major strides
-        // from `shape` and stamp them into the popped wrapper. The previous
-        // owner's strides MUST already match this layout (the pool only
-        // accepts `owns_data=true` entries and clone-of-view returns a
-        // fresh malloc not pool-routed) — debug builds assert this.
-        let canonical_strides = RayzorTensor::compute_strides(shape);
-        if !t.strides.is_null() {
-            debug_assert_eq!(
-                std::slice::from_raw_parts(t.strides, ndim),
-                canonical_strides.as_slice(),
-                "pool-hit strides drifted from canonical row-major for shape {:?}",
-                shape
-            );
-            for i in 0..ndim {
-                *t.strides.add(i) = canonical_strides[i];
+            // Defensive strides rewrite: compute canonical row-major strides
+            // from `shape` and stamp them into the popped wrapper. The previous
+            // owner's strides MUST already match this layout (the pool only
+            // accepts `owns_data=true` entries and clone-of-view returns a
+            // fresh malloc not pool-routed) — debug builds assert this.
+            let canonical_strides = RayzorTensor::compute_strides(shape);
+            if !t.strides.is_null() {
+                debug_assert_eq!(
+                    std::slice::from_raw_parts(t.strides, ndim),
+                    canonical_strides.as_slice(),
+                    "pool-hit strides drifted from canonical row-major for shape {:?}",
+                    shape
+                );
+                for i in 0..ndim {
+                    *t.strides.add(i) = canonical_strides[i];
+                }
             }
+            // Refresh device tagging — the wrapper inherits whatever the prior
+            // owner set; reset to the default so callers aren't surprised.
+            t.device = DEVICE_CPU;
+            t.numa_node = -1;
+            // owns_data MUST be true on the way out; this should already hold
+            // because we only push owning tensors into the pool.
+            t.owns_data = true;
+            // Phase 1 refcount reset: the previous owner reached refcount=0 and
+            // pushed; the new owner starts at 1. `parent` is always null for
+            // pool-hits because the pool only admits owning (non-view) wrappers.
+            t.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
+            t.parent = std::ptr::null_mut();
+            return tensor as i64;
         }
-        // Refresh device tagging — the wrapper inherits whatever the prior
-        // owner set; reset to the default so callers aren't surprised.
-        t.device = DEVICE_CPU;
-        t.numa_node = -1;
-        // owns_data MUST be true on the way out; this should already hold
-        // because we only push owning tensors into the pool.
-        t.owns_data = true;
-        // Phase 1 refcount reset: the previous owner reached refcount=0 and
-        // pushed; the new owner starts at 1. `parent` is always null for
-        // pool-hits because the pool only admits owning (non-view) wrappers.
-        t.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
-        t.parent = std::ptr::null_mut();
-        return tensor as i64;
+
+        // ---- Slow path: 4 mallocs ----
+
+        TENSOR_POOL_MISSES.fetch_add(1, MemOrdering::Relaxed);
+
+        // Allocate data
+        let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+        if data.is_null() {
+            return 0;
+        }
+        record_data_alloc(data_bytes);
+
+        // Fill data
+        if let Some(val) = fill {
+            fill_dtype(data, numel, dtype, val);
+        } else if zero_unfilled {
+            std::ptr::write_bytes(data, 0, data_bytes);
+        }
+
+        // Allocate shape array
+        let shape_ptr = malloc(ndim * std::mem::size_of::<usize>()) as *mut usize;
+        if shape_ptr.is_null() {
+            free(data);
+            return 0;
+        }
+        for i in 0..ndim {
+            *shape_ptr.add(i) = shape[i];
+        }
+
+        // Compute and allocate strides
+        let strides = RayzorTensor::compute_strides(shape);
+        let strides_ptr = malloc(ndim * std::mem::size_of::<usize>()) as *mut usize;
+        if strides_ptr.is_null() {
+            free(data);
+            free(shape_ptr as *mut u8);
+            return 0;
+        }
+        for i in 0..ndim {
+            *strides_ptr.add(i) = strides[i];
+        }
+
+        // Allocate tensor struct
+        let tensor = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if tensor.is_null() {
+            free(data);
+            free(shape_ptr as *mut u8);
+            free(strides_ptr as *mut u8);
+            return 0;
+        }
+
+        *tensor = RayzorTensor {
+            data,
+            shape: shape_ptr,
+            strides: strides_ptr,
+            ndim,
+            numel,
+            dtype,
+            owns_data: true,
+            device: DEVICE_CPU,
+            numa_node: -1,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+
+        tensor as i64
     }
-
-    // ---- Slow path: 4 mallocs ----
-
-    TENSOR_POOL_MISSES.fetch_add(1, MemOrdering::Relaxed);
-
-    // Allocate data
-    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
-    if data.is_null() {
-        return 0;
-    }
-    record_data_alloc(data_bytes);
-
-    // Fill data
-    if let Some(val) = fill {
-        fill_dtype(data, numel, dtype, val);
-    } else if zero_unfilled {
-        std::ptr::write_bytes(data, 0, data_bytes);
-    }
-
-    // Allocate shape array
-    let shape_ptr = malloc(ndim * std::mem::size_of::<usize>()) as *mut usize;
-    if shape_ptr.is_null() {
-        free(data);
-        return 0;
-    }
-    for i in 0..ndim {
-        *shape_ptr.add(i) = shape[i];
-    }
-
-    // Compute and allocate strides
-    let strides = RayzorTensor::compute_strides(shape);
-    let strides_ptr = malloc(ndim * std::mem::size_of::<usize>()) as *mut usize;
-    if strides_ptr.is_null() {
-        free(data);
-        free(shape_ptr as *mut u8);
-        return 0;
-    }
-    for i in 0..ndim {
-        *strides_ptr.add(i) = strides[i];
-    }
-
-    // Allocate tensor struct
-    let tensor = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if tensor.is_null() {
-        free(data);
-        free(shape_ptr as *mut u8);
-        free(strides_ptr as *mut u8);
-        return 0;
-    }
-
-    *tensor = RayzorTensor {
-        data,
-        shape: shape_ptr,
-        strides: strides_ptr,
-        ndim,
-        numel,
-        dtype,
-        owns_data: true,
-        device: DEVICE_CPU,
-        numa_node: -1,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-
-    tensor as i64
 }
 
 unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
-    alloc_tensor_with_zero_policy(shape, dtype, fill, true)
+    unsafe { alloc_tensor_with_zero_policy(shape, dtype, fill, true) }
 }
 
 #[inline]
 unsafe fn alloc_tensor_uninit(shape: &[usize], dtype: u8) -> i64 {
-    alloc_tensor_with_zero_policy(shape, dtype, None, false)
+    unsafe { alloc_tensor_with_zero_policy(shape, dtype, None, false) }
 }
 
 // ============================================================================
@@ -1015,10 +1019,12 @@ unsafe fn alloc_tensor_uninit(shape: &[usize], dtype: u8) -> i64 {
 /// missed null check.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
-    if t == 0 {
-        return std::ptr::null_mut();
+    unsafe {
+        if t == 0 {
+            return std::ptr::null_mut();
+        }
+        (*(t as *const RayzorTensor)).data
     }
-    (*(t as *const RayzorTensor)).data
 }
 
 /// Plugin ABI: read a tensor's dtype tag. Returns 255 (an unused
@@ -1026,29 +1032,35 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
 /// without UB.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
-    if t == 0 {
-        return u8::MAX;
+    unsafe {
+        if t == 0 {
+            return u8::MAX;
+        }
+        (*(t as *const RayzorTensor)).dtype
     }
-    (*(t as *const RayzorTensor)).dtype
 }
 
 /// Plugin ABI: read a tensor's ndim. Returns 0 for the null handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
-    if t == 0 {
-        return 0;
+    unsafe {
+        if t == 0 {
+            return 0;
+        }
+        (*(t as *const RayzorTensor)).ndim as u32
     }
-    (*(t as *const RayzorTensor)).ndim as u32
 }
 
 /// Plugin ABI: read a tensor's shape pointer. Returns null for the
 /// null handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
-    if t == 0 {
-        return std::ptr::null();
+    unsafe {
+        if t == 0 {
+            return std::ptr::null();
+        }
+        (*(t as *const RayzorTensor)).shape
     }
-    (*(t as *const RayzorTensor)).shape
 }
 
 /// Plugin ABI: 1 if the tensor's strides match row-major
@@ -1056,13 +1068,15 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
 /// for the null handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
-    if t == 0 {
-        return 0;
-    }
-    if (*(t as *const RayzorTensor)).is_contiguous() {
-        1
-    } else {
-        0
+    unsafe {
+        if t == 0 {
+            return 0;
+        }
+        if (*(t as *const RayzorTensor)).is_contiguous() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1076,11 +1090,13 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
     ndim: usize,
     dtype: u8,
 ) -> i64 {
-    if shape_ptr.is_null() || ndim == 0 {
-        return 0;
+    unsafe {
+        if shape_ptr.is_null() || ndim == 0 {
+            return 0;
+        }
+        let shape = std::slice::from_raw_parts(shape_ptr, ndim).to_vec();
+        alloc_tensor(&shape, dtype, Some(0.0))
     }
-    let shape = std::slice::from_raw_parts(shape_ptr, ndim).to_vec();
-    alloc_tensor(&shape, dtype, Some(0.0))
 }
 
 /// Tensor.zeros(shape_ptr: i64, ndim: i64, dtype: i64) -> i64
@@ -1089,8 +1105,10 @@ pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
 /// We read ndim elements, convert to usize, and create the tensor.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
-    let shape = read_shape(shape_ptr, ndim as usize);
-    alloc_tensor(&shape, dtype as u8, Some(0.0))
+    unsafe {
+        let shape = read_shape(shape_ptr, ndim as usize);
+        alloc_tensor(&shape, dtype as u8, Some(0.0))
+    }
 }
 
 /// Tensor.uninit(shape_ptr: i64, ndim: i64, dtype: i64) -> i64
@@ -1100,15 +1118,19 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i64, ndim: i64, dtype: i
 /// Tensor.zeros/full so stale pooled bytes never become observable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_uninit(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
-    let shape = read_shape(shape_ptr, ndim as usize);
-    alloc_tensor_uninit(&shape, dtype as u8)
+    unsafe {
+        let shape = read_shape(shape_ptr, ndim as usize);
+        alloc_tensor_uninit(&shape, dtype as u8)
+    }
 }
 
 /// Tensor.ones(shape_ptr, ndim, dtype) -> i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
-    let shape = read_shape(shape_ptr, ndim as usize);
-    alloc_tensor(&shape, dtype as u8, Some(1.0))
+    unsafe {
+        let shape = read_shape(shape_ptr, ndim as usize);
+        alloc_tensor(&shape, dtype as u8, Some(1.0))
+    }
 }
 
 /// Tensor.full(shape_ptr, ndim, value, dtype) -> i64
@@ -1119,35 +1141,39 @@ pub unsafe extern "C" fn rayzor_tensor_full(
     value: f64,
     dtype: i64,
 ) -> i64 {
-    let shape = read_shape(shape_ptr, ndim as usize);
-    alloc_tensor(&shape, dtype as u8, Some(value as f32))
+    unsafe {
+        let shape = read_shape(shape_ptr, ndim as usize);
+        alloc_tensor(&shape, dtype as u8, Some(value as f32))
+    }
 }
 
 /// Tensor.fromArray(data_ptr, data_len, dtype) -> i64
 /// Creates a 1-D tensor with shape=[data_len] from a flat array of f64 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i64, data_len: i64, dtype: i64) -> i64 {
-    let numel = data_len as usize;
-    let shape = vec![numel];
-    let dtype_u8 = dtype as u8;
+    unsafe {
+        let numel = data_len as usize;
+        let shape = vec![numel];
+        let dtype_u8 = dtype as u8;
 
-    let tensor_ptr = alloc_tensor(&shape, dtype_u8, None);
-    if tensor_ptr == 0 {
-        return 0;
+        let tensor_ptr = alloc_tensor(&shape, dtype_u8, None);
+        if tensor_ptr == 0 {
+            return 0;
+        }
+
+        let tensor = &*(tensor_ptr as *const RayzorTensor);
+
+        // Copy f64 data from Haxe Array<Float>, converting to target dtype.
+        // Goes through the generic store_f32_at helper so every supported
+        // dtype (F32 / F16 / BF16 / I32 / I8 / U8 / FP8_E4M3 / FP8_E5M2) is
+        // populated with the right storage format.
+        let src = data_ptr as *const f64;
+        for i in 0..numel {
+            store_f32_at(tensor.data, i, dtype_u8, *src.add(i) as f32);
+        }
+
+        tensor_ptr
     }
-
-    let tensor = &*(tensor_ptr as *const RayzorTensor);
-
-    // Copy f64 data from Haxe Array<Float>, converting to target dtype.
-    // Goes through the generic store_f32_at helper so every supported
-    // dtype (F32 / F16 / BF16 / I32 / I8 / U8 / FP8_E4M3 / FP8_E5M2) is
-    // populated with the right storage format.
-    let src = data_ptr as *const f64;
-    for i in 0..numel {
-        store_f32_at(tensor.data, i, dtype_u8, *src.add(i) as f32);
-    }
-
-    tensor_ptr
 }
 
 /// Materialise a fresh f32 Tensor from raw F16 bytes laid out in row-major
@@ -1164,33 +1190,35 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
     shape_ptr: i64,
     ndim: i64,
 ) -> i64 {
-    if bytes_handle == 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let shape = read_shape(shape_ptr, ndim as usize);
-    let numel: usize = shape.iter().product();
-    if bytes.len < numel * 2 {
-        return 0;
-    }
+    unsafe {
+        if bytes_handle == 0 {
+            return 0;
+        }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let shape = read_shape(shape_ptr, ndim as usize);
+        let numel: usize = shape.iter().product();
+        if bytes.len < numel * 2 {
+            return 0;
+        }
 
-    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
-    if tensor_ptr == 0 {
-        return 0;
+        let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let tensor = &*(tensor_ptr as *const RayzorTensor);
+        let dst = tensor.data as *mut f32;
+        let src = bytes.ptr;
+        for i in 0..numel {
+            let lo = *src.add(i * 2) as u16;
+            let hi = *src.add(i * 2 + 1) as u16;
+            let bits = lo | (hi << 8);
+            *dst.add(i) = half::f16::from_bits(bits).to_f32();
+        }
+        tensor_ptr
     }
-    let tensor = &*(tensor_ptr as *const RayzorTensor);
-    let dst = tensor.data as *mut f32;
-    let src = bytes.ptr;
-    for i in 0..numel {
-        let lo = *src.add(i * 2) as u16;
-        let hi = *src.add(i * 2 + 1) as u16;
-        let bits = lo | (hi << 8);
-        *dst.add(i) = half::f16::from_bits(bits).to_f32();
-    }
-    tensor_ptr
 }
 
 /// Materialise a fresh F32 Tensor from raw F32 bytes laid out row-major.
@@ -1205,25 +1233,27 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
     shape_ptr: i64,
     ndim: i64,
 ) -> i64 {
-    if bytes_handle == 0 {
-        return 0;
+    unsafe {
+        if bytes_handle == 0 {
+            return 0;
+        }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let shape = read_shape(shape_ptr, ndim as usize);
+        let numel: usize = shape.iter().product();
+        if bytes.len < numel * 4 {
+            return 0;
+        }
+        let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let tensor = &*(tensor_ptr as *const RayzorTensor);
+        std::ptr::copy_nonoverlapping(bytes.ptr, tensor.data, numel * 4);
+        tensor_ptr
     }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let shape = read_shape(shape_ptr, ndim as usize);
-    let numel: usize = shape.iter().product();
-    if bytes.len < numel * 4 {
-        return 0;
-    }
-    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
-    if tensor_ptr == 0 {
-        return 0;
-    }
-    let tensor = &*(tensor_ptr as *const RayzorTensor);
-    std::ptr::copy_nonoverlapping(bytes.ptr, tensor.data, numel * 4);
-    tensor_ptr
 }
 
 /// Materialise a fresh f32 Tensor from raw GGML Q8_0 bytes laid out in
@@ -1239,69 +1269,73 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
     shape_ptr: i64,
     ndim: i64,
 ) -> i64 {
-    if bytes_handle == 0 {
-        return 0;
-    }
-    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
-    if bytes.ptr.is_null() {
-        return 0;
-    }
-    let shape = read_shape(shape_ptr, ndim as usize);
-    let numel: usize = shape.iter().product();
-    if !numel.is_multiple_of(32) {
-        return 0;
-    }
-    let n_blocks = numel / 32;
-    let expected = n_blocks * 34;
-    if bytes.len < expected {
-        return 0;
-    }
-
-    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
-    if tensor_ptr == 0 {
-        return 0;
-    }
-    let tensor = &*(tensor_ptr as *const RayzorTensor);
-    let dst = tensor.data as *mut f32;
-    let src = bytes.ptr;
-    for b in 0..n_blocks {
-        let base = src.add(b * 34);
-        let lo = *base as u16;
-        let hi = *base.add(1) as u16;
-        let scale = half::f16::from_bits(lo | (hi << 8)).to_f32();
-        let q_base = base.add(2) as *const i8;
-        let out_base = dst.add(b * 32);
-        for j in 0..32 {
-            *out_base.add(j) = (*q_base.add(j)) as f32 * scale;
+    unsafe {
+        if bytes_handle == 0 {
+            return 0;
         }
+        let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+        if bytes.ptr.is_null() {
+            return 0;
+        }
+        let shape = read_shape(shape_ptr, ndim as usize);
+        let numel: usize = shape.iter().product();
+        if !numel.is_multiple_of(32) {
+            return 0;
+        }
+        let n_blocks = numel / 32;
+        let expected = n_blocks * 34;
+        if bytes.len < expected {
+            return 0;
+        }
+
+        let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let tensor = &*(tensor_ptr as *const RayzorTensor);
+        let dst = tensor.data as *mut f32;
+        let src = bytes.ptr;
+        for b in 0..n_blocks {
+            let base = src.add(b * 34);
+            let lo = *base as u16;
+            let hi = *base.add(1) as u16;
+            let scale = half::f16::from_bits(lo | (hi << 8)).to_f32();
+            let q_base = base.add(2) as *const i8;
+            let out_base = dst.add(b * 32);
+            for j in 0..32 {
+                *out_base.add(j) = (*q_base.add(j)) as f32 * scale;
+            }
+        }
+        tensor_ptr
     }
-    tensor_ptr
 }
 
 /// Tensor.rand(shape_ptr, ndim, dtype) -> i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
-    let shape = read_shape(shape_ptr, ndim as usize);
-    let tensor_ptr = alloc_tensor(&shape, dtype as u8, None);
-    if tensor_ptr == 0 {
-        return 0;
-    }
-
-    let tensor = &*(tensor_ptr as *const RayzorTensor);
-
-    // Simple LCG random for deterministic "random" init
-    if tensor.dtype == DTYPE_F32 {
-        let dst = tensor.data as *mut f32;
-        let mut seed: u64 = 0xDEADBEEF_CAFEBABE;
-        for i in 0..tensor.numel {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let bits = ((seed >> 33) as u32) & 0x7FFFFF; // 23 bits mantissa
-            let val = (bits as f32) / (0x800000 as f32); // [0, 1)
-            *dst.add(i) = val;
+    unsafe {
+        let shape = read_shape(shape_ptr, ndim as usize);
+        let tensor_ptr = alloc_tensor(&shape, dtype as u8, None);
+        if tensor_ptr == 0 {
+            return 0;
         }
-    }
 
-    tensor_ptr
+        let tensor = &*(tensor_ptr as *const RayzorTensor);
+
+        // Simple LCG random for deterministic "random" init
+        if tensor.dtype == DTYPE_F32 {
+            let dst = tensor.data as *mut f32;
+            let mut seed: u64 = 0xDEADBEEF_CAFEBABE;
+            for i in 0..tensor.numel {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let bits = ((seed >> 33) as u32) & 0x7FFFFF; // 23 bits mantissa
+                let val = (bits as f32) / (0x800000 as f32); // [0, 1)
+                *dst.add(i) = val;
+            }
+        }
+
+        tensor_ptr
+    }
 }
 
 // ============================================================================
@@ -1311,51 +1345,61 @@ pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i64, ndim: i64, dtype: i6
 /// tensor.ndim() -> i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_ndim(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.ndim as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.ndim as i64
 }
 
 /// tensor.numel() -> i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numel(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.numel as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.numel as i64
 }
 
 /// tensor.device() -> i64 (returns device tag: 0=CPU, 1=Metal, 2=Cuda, 3=WebGPU)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_device(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return DEVICE_CPU as i64;
+    unsafe {
+        if tensor_ptr == 0 {
+            return DEVICE_CPU as i64;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.device as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.device as i64
 }
 
 /// tensor.numa_node() -> i64 (NUMA node hint when device == CPU; -1 means "any")
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_numa_node(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return -1;
+    unsafe {
+        if tensor_ptr == 0 {
+            return -1;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.numa_node as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.numa_node as i64
 }
 
 /// tensor.dtype() -> i64 (returns dtype tag)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dtype(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.dtype as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.dtype as i64
 }
 
 /// tensor.shape() -> i64 (returns pointer to a heap-allocated HaxeArray of Int)
@@ -1364,57 +1408,61 @@ pub unsafe extern "C" fn rayzor_tensor_dtype(tensor_ptr: i64) -> i64 {
 /// HaxeArray layout: { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        let ndim = t.ndim;
+        let shape_slice = std::slice::from_raw_parts(t.shape, ndim);
+
+        // Allocate HaxeArray struct (4 fields x 8 bytes = 32 bytes)
+        let arr_ptr = malloc(32) as *mut usize;
+        if arr_ptr.is_null() {
+            return 0;
+        }
+
+        // Allocate data buffer for ndim i64 elements
+        let elem_size = std::mem::size_of::<i64>();
+        let cap = ndim.max(8); // match HaxeArray INITIAL_CAPACITY
+        let data_ptr = malloc(cap * elem_size);
+        if data_ptr.is_null() {
+            free(arr_ptr as *mut u8);
+            return 0;
+        }
+
+        // Copy shape values as i64
+        let data_i64 = data_ptr as *mut i64;
+        for (i, &val) in shape_slice[..ndim].iter().enumerate() {
+            *data_i64.add(i) = val as i64;
+        }
+
+        // Fill HaxeArray fields: ptr, len, cap, elem_size
+        *arr_ptr.add(0) = data_ptr as usize; // ptr
+        *arr_ptr.add(1) = ndim; // len
+        *arr_ptr.add(2) = cap; // cap
+        *arr_ptr.add(3) = elem_size; // elem_size
+
+        arr_ptr as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    let ndim = t.ndim;
-    let shape_slice = std::slice::from_raw_parts(t.shape, ndim);
-
-    // Allocate HaxeArray struct (4 fields x 8 bytes = 32 bytes)
-    let arr_ptr = malloc(32) as *mut usize;
-    if arr_ptr.is_null() {
-        return 0;
-    }
-
-    // Allocate data buffer for ndim i64 elements
-    let elem_size = std::mem::size_of::<i64>();
-    let cap = ndim.max(8); // match HaxeArray INITIAL_CAPACITY
-    let data_ptr = malloc(cap * elem_size);
-    if data_ptr.is_null() {
-        free(arr_ptr as *mut u8);
-        return 0;
-    }
-
-    // Copy shape values as i64
-    let data_i64 = data_ptr as *mut i64;
-    for (i, &val) in shape_slice[..ndim].iter().enumerate() {
-        *data_i64.add(i) = val as i64;
-    }
-
-    // Fill HaxeArray fields: ptr, len, cap, elem_size
-    *arr_ptr.add(0) = data_ptr as usize; // ptr
-    *arr_ptr.add(1) = ndim; // len
-    *arr_ptr.add(2) = cap; // cap
-    *arr_ptr.add(3) = elem_size; // elem_size
-
-    arr_ptr as i64
 }
 
 /// tensor.shape_ptr() -> i64 (returns raw pointer to shape data, for internal use)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ptr(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.shape as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.shape as i64
 }
 
 /// tensor.shape_ndim() -> i64 (helper: returns ndim for shape access)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
-    rayzor_tensor_ndim(tensor_ptr)
+    unsafe { rayzor_tensor_ndim(tensor_ptr) }
 }
 
 // ============================================================================
@@ -1431,34 +1479,36 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
 /// Returns 0.0 if `i` is out of range or the tensor handle is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GET_FLAT);
-    if tensor_ptr == 0 {
-        return 0.0;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GET_FLAT);
+        if tensor_ptr == 0 {
+            return 0.0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if i < 0 || (i as usize) >= t.numel {
+            return 0.0;
+        }
+        let idx = i as usize;
+        // Contiguous fast path: just data[idx * elem_size]. This is the
+        // common case for the logits vector that comes out of the
+        // final matmul and stays contiguous through the sampler.
+        if t.owns_data {
+            return load_f32_at(t.data, idx, t.dtype) as f64;
+        }
+        // Strided fallback: walk the strides to convert flat -> N-D offset.
+        let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+        let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
+        let mut remaining = idx;
+        let mut elem_offset: usize = 0;
+        for axis in (0..t.ndim).rev() {
+            let dim = shape_slice[axis];
+            let i_axis = remaining % dim;
+            remaining /= dim;
+            elem_offset += i_axis * strides_slice[axis];
+        }
+        load_f32_at(t.data, elem_offset, t.dtype) as f64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if i < 0 || (i as usize) >= t.numel {
-        return 0.0;
-    }
-    let idx = i as usize;
-    // Contiguous fast path: just data[idx * elem_size]. This is the
-    // common case for the logits vector that comes out of the
-    // final matmul and stays contiguous through the sampler.
-    if t.owns_data {
-        return load_f32_at(t.data, idx, t.dtype) as f64;
-    }
-    // Strided fallback: walk the strides to convert flat -> N-D offset.
-    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
-    let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
-    let mut remaining = idx;
-    let mut elem_offset: usize = 0;
-    for axis in (0..t.ndim).rev() {
-        let dim = shape_slice[axis];
-        let i_axis = remaining % dim;
-        remaining /= dim;
-        elem_offset += i_axis * strides_slice[axis];
-    }
-    load_f32_at(t.data, elem_offset, t.dtype) as f64
 }
 
 /// Flat-indexed scalar write — the store counterpart to
@@ -1469,29 +1519,31 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 
 /// out of range or the handle is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_set_flat(tensor_ptr: i64, i: i64, value: f64) {
-    if tensor_ptr == 0 {
-        return;
+    unsafe {
+        if tensor_ptr == 0 {
+            return;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if i < 0 || (i as usize) >= t.numel {
+            return;
+        }
+        let idx = i as usize;
+        if t.owns_data {
+            store_f32_at(t.data, idx, t.dtype, value as f32);
+            return;
+        }
+        let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+        let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
+        let mut remaining = idx;
+        let mut elem_offset: usize = 0;
+        for axis in (0..t.ndim).rev() {
+            let dim = shape_slice[axis];
+            let i_axis = remaining % dim;
+            remaining /= dim;
+            elem_offset += i_axis * strides_slice[axis];
+        }
+        store_f32_at(t.data, elem_offset, t.dtype, value as f32);
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if i < 0 || (i as usize) >= t.numel {
-        return;
-    }
-    let idx = i as usize;
-    if t.owns_data {
-        store_f32_at(t.data, idx, t.dtype, value as f32);
-        return;
-    }
-    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
-    let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
-    let mut remaining = idx;
-    let mut elem_offset: usize = 0;
-    for axis in (0..t.ndim).rev() {
-        let dim = shape_slice[axis];
-        let i_axis = remaining % dim;
-        remaining /= dim;
-        elem_offset += i_axis * strides_slice[axis];
-    }
-    store_f32_at(t.data, elem_offset, t.dtype, value as f32);
 }
 
 /// Top-K + repetition-penalty scan in a single FFI call.
@@ -1540,172 +1592,178 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
     recent_len: i64,
     repetition_penalty: f64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TOPK_SCAN);
-    if logits_ptr == 0 || out_logits_ptr == 0 || out_ids_ptr == 0 {
-        return -1;
-    }
-    let t = &*(logits_ptr as *const RayzorTensor);
-    // Gate the fast path on F32 + canonical row-major strides — NOT on
-    // `owns_data`. The sampler's input is `lastRow(logits)`, which goes
-    // through `slice` then `reshape`; both return contiguous VIEWS of the
-    // lm_head output's storage with `owns_data = false`. Checking
-    // `owns_data` here would bail out every time and route every sample
-    // through the per-element fallback (defeating the whole point of the
-    // primitive). The is_contiguous() check on strides catches the real
-    // failure case (a `permute` or strided slice in some future logits
-    // backend) without false-positiving on views of contiguous storage.
-    if t.dtype != DTYPE_F32 || !t.is_contiguous() {
-        return -1;
-    }
-
-    let n = t.numel;
-    let k = (k.max(0) as usize).min(n);
-    if k == 0 {
-        return 0;
-    }
-
-    let src = t.data as *const f32;
-    let out_logits = out_logits_ptr as *mut f64;
-    let out_ids = out_ids_ptr as *mut i64;
-
-    let penalize = repetition_penalty > 1.0 && recent_ids_ptr != 0 && recent_len > 0;
-    let rp = repetition_penalty;
-    let recent = if penalize {
-        Some(std::slice::from_raw_parts(
-            recent_ids_ptr as *const i64,
-            recent_len as usize,
-        ))
-    } else {
-        None
-    };
-
-    // Insert a candidate (lg, idx) into the top-K buffer. Caller has
-    // already filtered against the cutoff in the steady-state branch.
-    #[inline(always)]
-    unsafe fn insert_candidate(
-        lg: f64,
-        idx: i64,
-        out_logits: *mut f64,
-        out_ids: *mut i64,
-        end: usize,
-    ) {
-        let mut pos = end;
-        while pos > 0 && *out_logits.add(pos - 1) < lg {
-            *out_logits.add(pos) = *out_logits.add(pos - 1);
-            *out_ids.add(pos) = *out_ids.add(pos - 1);
-            pos -= 1;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TOPK_SCAN);
+        if logits_ptr == 0 || out_logits_ptr == 0 || out_ids_ptr == 0 {
+            return -1;
         }
-        *out_logits.add(pos) = lg;
-        *out_ids.add(pos) = idx;
-    }
+        let t = &*(logits_ptr as *const RayzorTensor);
+        // Gate the fast path on F32 + canonical row-major strides — NOT on
+        // `owns_data`. The sampler's input is `lastRow(logits)`, which goes
+        // through `slice` then `reshape`; both return contiguous VIEWS of the
+        // lm_head output's storage with `owns_data = false`. Checking
+        // `owns_data` here would bail out every time and route every sample
+        // through the per-element fallback (defeating the whole point of the
+        // primitive). The is_contiguous() check on strides catches the real
+        // failure case (a `permute` or strided slice in some future logits
+        // backend) without false-positiving on views of contiguous storage.
+        if t.dtype != DTYPE_F32 || !t.is_contiguous() {
+            return -1;
+        }
 
-    // Fill phase: insertion-sort the first k candidates so the cutoff
-    // (out_logits[k-1]) is well-defined before the steady-state loop.
-    let mut sz: usize = 0;
-    let fill_end = k.min(n);
-    for i in 0..fill_end {
-        let mut lg = (*src.add(i)) as f64;
-        if let Some(recent) = recent {
-            if recent_contains(recent, i as i64) {
-                lg = if lg > 0.0 { lg / rp } else { lg * rp };
+        let n = t.numel;
+        let k = (k.max(0) as usize).min(n);
+        if k == 0 {
+            return 0;
+        }
+
+        let src = t.data as *const f32;
+        let out_logits = out_logits_ptr as *mut f64;
+        let out_ids = out_ids_ptr as *mut i64;
+
+        let penalize = repetition_penalty > 1.0 && recent_ids_ptr != 0 && recent_len > 0;
+        let rp = repetition_penalty;
+        let recent = if penalize {
+            Some(std::slice::from_raw_parts(
+                recent_ids_ptr as *const i64,
+                recent_len as usize,
+            ))
+        } else {
+            None
+        };
+
+        // Insert a candidate (lg, idx) into the top-K buffer. Caller has
+        // already filtered against the cutoff in the steady-state branch.
+        #[inline(always)]
+        unsafe fn insert_candidate(
+            lg: f64,
+            idx: i64,
+            out_logits: *mut f64,
+            out_ids: *mut i64,
+            end: usize,
+        ) {
+            unsafe {
+                let mut pos = end;
+                while pos > 0 && *out_logits.add(pos - 1) < lg {
+                    *out_logits.add(pos) = *out_logits.add(pos - 1);
+                    *out_ids.add(pos) = *out_ids.add(pos - 1);
+                    pos -= 1;
+                }
+                *out_logits.add(pos) = lg;
+                *out_ids.add(pos) = idx;
             }
         }
-        insert_candidate(lg, i as i64, out_logits, out_ids, sz);
-        sz += 1;
-    }
 
-    if sz < k {
-        // n < k: tiny logits buffer; nothing more to do.
-        return sz as i64;
-    }
+        // Fill phase: insertion-sort the first k candidates so the cutoff
+        // (out_logits[k-1]) is well-defined before the steady-state loop.
+        let mut sz: usize = 0;
+        let fill_end = k.min(n);
+        for i in 0..fill_end {
+            let mut lg = (*src.add(i)) as f64;
+            if let Some(recent) = recent
+                && recent_contains(recent, i as i64)
+            {
+                lg = if lg > 0.0 { lg / rp } else { lg * rp };
+            }
+            insert_candidate(lg, i as i64, out_logits, out_ids, sz);
+            sz += 1;
+        }
 
-    // Steady-state loop. The cutoff = out_logits[k-1] is the lowest of
-    // the current top-K survivors. In typical decode (k=50, n=128k) about
-    // 0.5% of logits beat it; the rest are pure fast-reject and the
-    // NEON pre-filter discards them four at a time.
-    let mut i = fill_end;
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    {
-        use std::arch::aarch64::*;
-        while i + 4 <= n {
-            let cutoff = *out_logits.add(k - 1);
-            // Load 4 f32 logits, widen to 2× f64.
-            let lg32 = vld1q_f32(src.add(i));
-            let lg_lo = vcvt_f64_f32(vget_low_f32(lg32));
-            let lg_hi = vcvt_high_f64_f32(lg32);
-            // Apply repetition penalty when needed. The penalty branches
-            // on a per-lane `is in recent` lookup, which is hard to
-            // SIMD-fuse with the cutoff compare — fall back to scalar
-            // for the penalize path's pre-filter.
-            if penalize {
-                // Scalar fast path: still amortise the load by computing
-                // the four f64s in one vector pair and storing to a
-                // tiny stack buffer.
-                let mut buf = [0f64; 4];
-                vst1q_f64(buf.as_mut_ptr(), lg_lo);
-                vst1q_f64(buf.as_mut_ptr().add(2), lg_hi);
-                let recent = recent.unwrap_unchecked();
-                for (j, &raw) in buf.iter().enumerate() {
-                    let mut lg = raw;
-                    if recent_contains(recent, (i + j) as i64) {
-                        lg = if lg > 0.0 { lg / rp } else { lg * rp };
-                    }
-                    if lg > cutoff {
-                        insert_candidate(lg, (i + j) as i64, out_logits, out_ids, k - 1);
-                    }
-                }
-            } else {
-                // No penalty: SIMD pre-filter against the cutoff.
-                let cutoff_v = vdupq_n_f64(cutoff);
-                let mask_lo = vcgtq_f64(lg_lo, cutoff_v);
-                let mask_hi = vcgtq_f64(lg_hi, cutoff_v);
-                let any_passes =
-                    vmaxvq_u32(vreinterpretq_u32_u64(vorrq_u64(mask_lo, mask_hi))) != 0;
-                if any_passes {
+        if sz < k {
+            // n < k: tiny logits buffer; nothing more to do.
+            return sz as i64;
+        }
+
+        // Steady-state loop. The cutoff = out_logits[k-1] is the lowest of
+        // the current top-K survivors. In typical decode (k=50, n=128k) about
+        // 0.5% of logits beat it; the rest are pure fast-reject and the
+        // NEON pre-filter discards them four at a time.
+        let mut i = fill_end;
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        {
+            use std::arch::aarch64::*;
+            while i + 4 <= n {
+                let cutoff = *out_logits.add(k - 1);
+                // Load 4 f32 logits, widen to 2× f64.
+                let lg32 = vld1q_f32(src.add(i));
+                let lg_lo = vcvt_f64_f32(vget_low_f32(lg32));
+                let lg_hi = vcvt_high_f64_f32(lg32);
+                // Apply repetition penalty when needed. The penalty branches
+                // on a per-lane `is in recent` lookup, which is hard to
+                // SIMD-fuse with the cutoff compare — fall back to scalar
+                // for the penalize path's pre-filter.
+                if penalize {
+                    // Scalar fast path: still amortise the load by computing
+                    // the four f64s in one vector pair and storing to a
+                    // tiny stack buffer.
                     let mut buf = [0f64; 4];
                     vst1q_f64(buf.as_mut_ptr(), lg_lo);
                     vst1q_f64(buf.as_mut_ptr().add(2), lg_hi);
-                    for (j, &lg) in buf.iter().enumerate() {
-                        // Re-check against the latest cutoff — earlier
-                        // lanes in this same chunk may have raised it.
-                        if lg > *out_logits.add(k - 1) {
+                    let recent = recent.unwrap_unchecked();
+                    for (j, &raw) in buf.iter().enumerate() {
+                        let mut lg = raw;
+                        if recent_contains(recent, (i + j) as i64) {
+                            lg = if lg > 0.0 { lg / rp } else { lg * rp };
+                        }
+                        if lg > cutoff {
                             insert_candidate(lg, (i + j) as i64, out_logits, out_ids, k - 1);
                         }
                     }
+                } else {
+                    // No penalty: SIMD pre-filter against the cutoff.
+                    let cutoff_v = vdupq_n_f64(cutoff);
+                    let mask_lo = vcgtq_f64(lg_lo, cutoff_v);
+                    let mask_hi = vcgtq_f64(lg_hi, cutoff_v);
+                    let any_passes =
+                        vmaxvq_u32(vreinterpretq_u32_u64(vorrq_u64(mask_lo, mask_hi))) != 0;
+                    if any_passes {
+                        let mut buf = [0f64; 4];
+                        vst1q_f64(buf.as_mut_ptr(), lg_lo);
+                        vst1q_f64(buf.as_mut_ptr().add(2), lg_hi);
+                        for (j, &lg) in buf.iter().enumerate() {
+                            // Re-check against the latest cutoff — earlier
+                            // lanes in this same chunk may have raised it.
+                            if lg > *out_logits.add(k - 1) {
+                                insert_candidate(lg, (i + j) as i64, out_logits, out_ids, k - 1);
+                            }
+                        }
+                    }
                 }
+                i += 4;
             }
-            i += 4;
         }
-    }
-    // Scalar tail (and the path taken on non-aarch64).
-    while i < n {
-        let mut lg = (*src.add(i)) as f64;
-        if let Some(recent) = recent {
-            if recent_contains(recent, i as i64) {
+        // Scalar tail (and the path taken on non-aarch64).
+        while i < n {
+            let mut lg = (*src.add(i)) as f64;
+            if let Some(recent) = recent
+                && recent_contains(recent, i as i64)
+            {
                 lg = if lg > 0.0 { lg / rp } else { lg * rp };
             }
+            if lg > *out_logits.add(k - 1) {
+                insert_candidate(lg, i as i64, out_logits, out_ids, k - 1);
+            }
+            i += 1;
         }
-        if lg > *out_logits.add(k - 1) {
-            insert_candidate(lg, i as i64, out_logits, out_ids, k - 1);
-        }
-        i += 1;
-    }
 
-    sz as i64
+        sz as i64
+    }
 }
 
 /// tensor.get(indices_ptr, ndim) -> f64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, ndim: i64) -> f64 {
-    if tensor_ptr == 0 {
-        return 0.0;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0.0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
 
-    let indices = read_shape(indices_ptr, ndim as usize);
-    let off = t.offset(&indices);
-    load_f32_at(t.data, off, t.dtype) as f64
+        let indices = read_shape(indices_ptr, ndim as usize);
+        let off = t.offset(&indices);
+        load_f32_at(t.data, off, t.dtype) as f64
+    }
 }
 
 /// tensor.set(indices_ptr, ndim, value) -> void
@@ -1716,14 +1774,16 @@ pub unsafe extern "C" fn rayzor_tensor_set(
     ndim: i64,
     value: f64,
 ) {
-    if tensor_ptr == 0 {
-        return;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
+    unsafe {
+        if tensor_ptr == 0 {
+            return;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
 
-    let indices = read_shape(indices_ptr, ndim as usize);
-    let off = t.offset(&indices);
-    store_f32_at(t.data, off, t.dtype, value as f32);
+        let indices = read_shape(indices_ptr, ndim as usize);
+        let off = t.offset(&indices);
+        store_f32_at(t.data, off, t.dtype, value as f32);
+    }
 }
 
 /// Bulk copy `src.shape[0]` contiguous rows from `src` into `dst` starting at
@@ -1742,48 +1802,50 @@ pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
     src_ptr: i64,
     dst_row_offset: i64,
 ) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_append_along_0_f32");
-    if dst_ptr == 0 || src_ptr == 0 {
-        return -1;
-    }
-    let dst = &*(dst_ptr as *const RayzorTensor);
-    let src = &*(src_ptr as *const RayzorTensor);
-
-    if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
-        return -1;
-    }
-    if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
-        return -1;
-    }
-
-    let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
-    let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
-
-    // Trailing axes must match (shape[1..]) so the row layout is identical.
-    for i in 1..dst.ndim {
-        if dst_shape[i] != src_shape[i] {
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_append_along_0_f32");
+        if dst_ptr == 0 || src_ptr == 0 {
             return -1;
         }
+        let dst = &*(dst_ptr as *const RayzorTensor);
+        let src = &*(src_ptr as *const RayzorTensor);
+
+        if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
+            return -1;
+        }
+        if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
+            return -1;
+        }
+
+        let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
+        let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
+
+        // Trailing axes must match (shape[1..]) so the row layout is identical.
+        for i in 1..dst.ndim {
+            if dst_shape[i] != src_shape[i] {
+                return -1;
+            }
+        }
+
+        // Row stride in elements = product of shape[1..]. Equals dst.strides[0]
+        // for contiguous f32, but compute from shape so this is safe regardless.
+        let row_stride_elements: usize = dst_shape[1..].iter().product();
+        let n_rows_to_copy = src_shape[0];
+
+        if dst_row_offset < 0 {
+            return -1;
+        }
+        let dst_row_off = dst_row_offset as usize;
+        if dst_row_off + n_rows_to_copy > dst_shape[0] {
+            return -1;
+        }
+
+        let byte_count = n_rows_to_copy * row_stride_elements * 4;
+        let dst_offset_bytes = dst_row_off * row_stride_elements * 4;
+
+        std::ptr::copy_nonoverlapping(src.data, dst.data.add(dst_offset_bytes), byte_count);
+        0
     }
-
-    // Row stride in elements = product of shape[1..]. Equals dst.strides[0]
-    // for contiguous f32, but compute from shape so this is safe regardless.
-    let row_stride_elements: usize = dst_shape[1..].iter().product();
-    let n_rows_to_copy = src_shape[0];
-
-    if dst_row_offset < 0 {
-        return -1;
-    }
-    let dst_row_off = dst_row_offset as usize;
-    if dst_row_off + n_rows_to_copy > dst_shape[0] {
-        return -1;
-    }
-
-    let byte_count = n_rows_to_copy * row_stride_elements * 4;
-    let dst_offset_bytes = dst_row_off * row_stride_elements * 4;
-
-    std::ptr::copy_nonoverlapping(src.data, dst.data.add(dst_offset_bytes), byte_count);
-    0
 }
 
 /// Broadcast `src` along axis 0 by repeating each row `repeats` times,
@@ -1800,48 +1862,50 @@ pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
     src_ptr: i64,
     repeats: i64,
 ) -> i64 {
-    if dst_ptr == 0 || src_ptr == 0 {
-        return -1;
-    }
-    let dst = &*(dst_ptr as *const RayzorTensor);
-    let src = &*(src_ptr as *const RayzorTensor);
-
-    if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
-        return -1;
-    }
-    if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
-        return -1;
-    }
-    if repeats <= 0 {
-        return -1;
-    }
-
-    let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
-    let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
-
-    for i in 1..dst.ndim {
-        if dst_shape[i] != src_shape[i] {
+    unsafe {
+        if dst_ptr == 0 || src_ptr == 0 {
             return -1;
         }
-    }
+        let dst = &*(dst_ptr as *const RayzorTensor);
+        let src = &*(src_ptr as *const RayzorTensor);
 
-    let repeats = repeats as usize;
-    if src_shape[0].saturating_mul(repeats) > dst_shape[0] {
-        return -1;
-    }
-
-    let row_size_elements: usize = src_shape[1..].iter().product();
-    let row_size_bytes = row_size_elements * 4;
-
-    for i in 0..src_shape[0] {
-        let src_row = src.data.add(i * row_size_bytes);
-        for r in 0..repeats {
-            let dst_row_idx = i * repeats + r;
-            let dst_row = dst.data.add(dst_row_idx * row_size_bytes);
-            std::ptr::copy_nonoverlapping(src_row, dst_row, row_size_bytes);
+        if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
+            return -1;
         }
+        if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
+            return -1;
+        }
+        if repeats <= 0 {
+            return -1;
+        }
+
+        let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
+        let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
+
+        for i in 1..dst.ndim {
+            if dst_shape[i] != src_shape[i] {
+                return -1;
+            }
+        }
+
+        let repeats = repeats as usize;
+        if src_shape[0].saturating_mul(repeats) > dst_shape[0] {
+            return -1;
+        }
+
+        let row_size_elements: usize = src_shape[1..].iter().product();
+        let row_size_bytes = row_size_elements * 4;
+
+        for i in 0..src_shape[0] {
+            let src_row = src.data.add(i * row_size_bytes);
+            for r in 0..repeats {
+                let dst_row_idx = i * repeats + r;
+                let dst_row = dst.data.add(dst_row_idx * row_size_bytes);
+                std::ptr::copy_nonoverlapping(src_row, dst_row, row_size_bytes);
+            }
+        }
+        0
     }
-    0
 }
 
 /// GQA KV-head expansion. Source `src` has shape `[seqK, num_kv_heads, head_dim]`
@@ -1858,60 +1922,62 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
     src_ptr: i64,
     repeats: i64,
 ) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_expand_kv_heads_axis1_f32");
-    if src_ptr == 0 || repeats <= 0 {
-        return 0;
-    }
-    let src = &*(src_ptr as *const RayzorTensor);
-    if src.dtype != DTYPE_F32 || src.ndim != 3 {
-        return 0;
-    }
-
-    let src_shape = std::slice::from_raw_parts(src.shape, 3);
-    let src_strides = std::slice::from_raw_parts(src.strides, 3);
-    let seq_k = src_shape[0];
-    let num_kv_heads = src_shape[1];
-    let head_dim = src_shape[2];
-    let repeats = repeats as usize;
-    let num_q_heads = num_kv_heads * repeats;
-
-    // Innermost dim must be contiguous so each (qh, j) write is a single
-    // memcpy. If src was produced by a non-contiguous view (permute /
-    // transposeLast2), fall through to the scalar Haxe path by returning 0.
-    if src_strides[2] != 1 {
-        return 0;
-    }
-
-    let out_shape = [num_q_heads, seq_k, head_dim];
-    let result = alloc_tensor(&out_shape, DTYPE_F32, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
-    let dst = &*(result as *const RayzorTensor);
-
-    let src_stride_j = src_strides[0]; // elements between j and j+1
-    let src_stride_kvh = src_strides[1]; // elements between kvh and kvh+1
-                                         // Output is freshly allocated contiguous row-major:
-                                         //   dst[qh, j, d] at offset qh*seq_k*head_dim + j*head_dim + d
-    let row_bytes = head_dim * 4;
-    let dst_row_stride_elements = seq_k * head_dim;
-
-    for qh in 0..num_q_heads {
-        let kvh = qh / repeats;
-        let dst_head_off = qh * dst_row_stride_elements;
-        let src_head_off = kvh * src_stride_kvh;
-        for j in 0..seq_k {
-            let src_off = src_head_off + j * src_stride_j;
-            let dst_off = dst_head_off + j * head_dim;
-            std::ptr::copy_nonoverlapping(
-                src.data.add(src_off * 4),
-                dst.data.add(dst_off * 4),
-                row_bytes,
-            );
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_expand_kv_heads_axis1_f32");
+        if src_ptr == 0 || repeats <= 0 {
+            return 0;
         }
-    }
+        let src = &*(src_ptr as *const RayzorTensor);
+        if src.dtype != DTYPE_F32 || src.ndim != 3 {
+            return 0;
+        }
 
-    result
+        let src_shape = std::slice::from_raw_parts(src.shape, 3);
+        let src_strides = std::slice::from_raw_parts(src.strides, 3);
+        let seq_k = src_shape[0];
+        let num_kv_heads = src_shape[1];
+        let head_dim = src_shape[2];
+        let repeats = repeats as usize;
+        let num_q_heads = num_kv_heads * repeats;
+
+        // Innermost dim must be contiguous so each (qh, j) write is a single
+        // memcpy. If src was produced by a non-contiguous view (permute /
+        // transposeLast2), fall through to the scalar Haxe path by returning 0.
+        if src_strides[2] != 1 {
+            return 0;
+        }
+
+        let out_shape = [num_q_heads, seq_k, head_dim];
+        let result = alloc_tensor(&out_shape, DTYPE_F32, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
+        let dst = &*(result as *const RayzorTensor);
+
+        let src_stride_j = src_strides[0]; // elements between j and j+1
+        let src_stride_kvh = src_strides[1]; // elements between kvh and kvh+1
+        // Output is freshly allocated contiguous row-major:
+        //   dst[qh, j, d] at offset qh*seq_k*head_dim + j*head_dim + d
+        let row_bytes = head_dim * 4;
+        let dst_row_stride_elements = seq_k * head_dim;
+
+        for qh in 0..num_q_heads {
+            let kvh = qh / repeats;
+            let dst_head_off = qh * dst_row_stride_elements;
+            let src_head_off = kvh * src_stride_kvh;
+            for j in 0..seq_k {
+                let src_off = src_head_off + j * src_stride_j;
+                let dst_off = dst_head_off + j * head_dim;
+                std::ptr::copy_nonoverlapping(
+                    src.data.add(src_off * 4),
+                    dst.data.add(dst_off * 4),
+                    row_bytes,
+                );
+            }
+        }
+
+        result
+    }
 }
 
 // ============================================================================
@@ -1922,125 +1988,127 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
 #[unsafe(no_mangle)]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, ndim: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RESHAPE);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_reshape");
-    if tensor_ptr == 0 {
-        return 0;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-
-    let new_shape = read_shape(shape_ptr, ndim as usize);
-    let new_numel: usize = new_shape.iter().product();
-
-    // Verify numel matches
-    if new_numel != t.numel {
-        return 0; // shape mismatch
-    }
-
-    let new_ndim = new_shape.len();
-
-    // numpy/torch semantics: reshape only returns a view when the source
-    // memory is already laid out in the requested order — i.e. the source
-    // is contiguous in its CURRENT shape. After `permute([1, 0, 2])` the
-    // strides are non-canonical and the data isn't laid out in the new
-    // shape's order, so a view would mean every subsequent read using the
-    // freshly-computed contiguous strides lands on the wrong element.
-    // For the GQAttention out-projection that meant garbage hidden states
-    // (`context.permute([1,0,2]).reshape([seqQ, numQHeads*headDim])`),
-    // which is one of the dominant remaining coherence bugs.
-    //
-    // Detect non-contiguous sources and materialise: walk the source via
-    // its real strides into a fresh contiguous buffer, then return a
-    // contiguous tensor with the new shape.
-    let src_shape = std::slice::from_raw_parts(t.shape, t.ndim);
-    let src_strides = std::slice::from_raw_parts(t.strides, t.ndim);
-    let canonical_strides = RayzorTensor::compute_strides(src_shape);
-    let is_contig = src_strides == canonical_strides.as_slice();
-
-    if is_contig {
-        // Allocate new shape
-        let new_shape_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
-        if new_shape_ptr.is_null() {
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RESHAPE);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_reshape");
+        if tensor_ptr == 0 {
             return 0;
         }
-        for i in 0..new_ndim {
-            *new_shape_ptr.add(i) = new_shape[i];
+        let t = &*(tensor_ptr as *const RayzorTensor);
+
+        let new_shape = read_shape(shape_ptr, ndim as usize);
+        let new_numel: usize = new_shape.iter().product();
+
+        // Verify numel matches
+        if new_numel != t.numel {
+            return 0; // shape mismatch
         }
 
-        // Compute new strides
-        let strides = RayzorTensor::compute_strides(&new_shape);
-        let new_strides_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
-        if new_strides_ptr.is_null() {
-            free(new_shape_ptr as *mut u8);
-            return 0;
-        }
-        for i in 0..new_ndim {
-            *new_strides_ptr.add(i) = strides[i];
-        }
+        let new_ndim = new_shape.len();
 
-        // Allocate new tensor struct (view — shares data)
-        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-        if new_t.is_null() {
-            free(new_shape_ptr as *mut u8);
-            free(new_strides_ptr as *mut u8);
-            return 0;
-        }
+        // numpy/torch semantics: reshape only returns a view when the source
+        // memory is already laid out in the requested order — i.e. the source
+        // is contiguous in its CURRENT shape. After `permute([1, 0, 2])` the
+        // strides are non-canonical and the data isn't laid out in the new
+        // shape's order, so a view would mean every subsequent read using the
+        // freshly-computed contiguous strides lands on the wrong element.
+        // For the GQAttention out-projection that meant garbage hidden states
+        // (`context.permute([1,0,2]).reshape([seqQ, numQHeads*headDim])`),
+        // which is one of the dominant remaining coherence bugs.
+        //
+        // Detect non-contiguous sources and materialise: walk the source via
+        // its real strides into a fresh contiguous buffer, then return a
+        // contiguous tensor with the new shape.
+        let src_shape = std::slice::from_raw_parts(t.shape, t.ndim);
+        let src_strides = std::slice::from_raw_parts(t.strides, t.ndim);
+        let canonical_strides = RayzorTensor::compute_strides(src_shape);
+        let is_contig = src_strides == canonical_strides.as_slice();
 
-        *new_t = RayzorTensor {
-            data: t.data, // shared
-            shape: new_shape_ptr,
-            strides: new_strides_ptr,
-            ndim: new_ndim,
-            numel: new_numel,
-            dtype: t.dtype,
-            owns_data: false, // view
-            device: t.device,
-            numa_node: t.numa_node,
-            refcount: std::sync::atomic::AtomicUsize::new(1),
-            parent: tensor_ptr as *mut RayzorTensor,
-        };
-        // View bumps parent's refcount so the parent's data buffer stays
-        // alive until every view of it is also freed.
-        t.refcount
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        return new_t as i64;
-    }
-
-    // Materialise the strided source into a fresh contiguous tensor with
-    // the new shape. Walk the source's element-by-element using its real
-    // strides; write into the new tensor's row-major linear order.
-    let result = alloc_tensor(&new_shape, t.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-
-    // Multi-dim iteration via index vector over the SOURCE shape; the
-    // linear write index into the new contiguous buffer increments
-    // monotonically because both source and dest visit the same numel.
-    let src_ndim = t.ndim;
-    let mut idx = vec![0usize; src_ndim];
-    for linear in 0..t.numel {
-        // Compute source memory offset from current multi-index + strides.
-        let mut src_off = 0usize;
-        for (axis, &i) in idx.iter().enumerate() {
-            src_off += i * src_strides[axis];
-        }
-        let v = load_f32_at(t.data, src_off, t.dtype);
-        store_f32_at(r.data, linear, t.dtype, v);
-        // Increment multi-index (rightmost-axis varies fastest).
-        for axis in (0..src_ndim).rev() {
-            idx[axis] += 1;
-            if idx[axis] < src_shape[axis] {
-                break;
+        if is_contig {
+            // Allocate new shape
+            let new_shape_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
+            if new_shape_ptr.is_null() {
+                return 0;
             }
-            idx[axis] = 0;
-        }
-    }
+            for i in 0..new_ndim {
+                *new_shape_ptr.add(i) = new_shape[i];
+            }
 
-    result
+            // Compute new strides
+            let strides = RayzorTensor::compute_strides(&new_shape);
+            let new_strides_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
+            if new_strides_ptr.is_null() {
+                free(new_shape_ptr as *mut u8);
+                return 0;
+            }
+            for i in 0..new_ndim {
+                *new_strides_ptr.add(i) = strides[i];
+            }
+
+            // Allocate new tensor struct (view — shares data)
+            let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+            if new_t.is_null() {
+                free(new_shape_ptr as *mut u8);
+                free(new_strides_ptr as *mut u8);
+                return 0;
+            }
+
+            *new_t = RayzorTensor {
+                data: t.data, // shared
+                shape: new_shape_ptr,
+                strides: new_strides_ptr,
+                ndim: new_ndim,
+                numel: new_numel,
+                dtype: t.dtype,
+                owns_data: false, // view
+                device: t.device,
+                numa_node: t.numa_node,
+                refcount: std::sync::atomic::AtomicUsize::new(1),
+                parent: tensor_ptr as *mut RayzorTensor,
+            };
+            // View bumps parent's refcount so the parent's data buffer stays
+            // alive until every view of it is also freed.
+            t.refcount
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            return new_t as i64;
+        }
+
+        // Materialise the strided source into a fresh contiguous tensor with
+        // the new shape. Walk the source's element-by-element using its real
+        // strides; write into the new tensor's row-major linear order.
+        let result = alloc_tensor(&new_shape, t.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+
+        // Multi-dim iteration via index vector over the SOURCE shape; the
+        // linear write index into the new contiguous buffer increments
+        // monotonically because both source and dest visit the same numel.
+        let src_ndim = t.ndim;
+        let mut idx = vec![0usize; src_ndim];
+        for linear in 0..t.numel {
+            // Compute source memory offset from current multi-index + strides.
+            let mut src_off = 0usize;
+            for (axis, &i) in idx.iter().enumerate() {
+                src_off += i * src_strides[axis];
+            }
+            let v = load_f32_at(t.data, src_off, t.dtype);
+            store_f32_at(r.data, linear, t.dtype, v);
+            // Increment multi-index (rightmost-axis varies fastest).
+            for axis in (0..src_ndim).rev() {
+                idx[axis] += 1;
+                if idx[axis] < src_shape[axis] {
+                    break;
+                }
+                idx[axis] = 0;
+            }
+        }
+
+        result
+    }
 }
 
 /// tensor.permute(axes_ptr, ndim) -> i64 (n-D permutation — reorders shape/strides, view)
@@ -2051,61 +2119,63 @@ pub unsafe extern "C" fn rayzor_tensor_permute(
     axes_ptr: i64,
     axes_len: i64,
 ) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_permute");
-    if tensor_ptr == 0 {
-        return 0;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    let n = axes_len as usize;
-    if n != t.ndim {
-        return 0;
-    }
-
-    let axes_data = axes_ptr as *const i64;
-    let mut seen = vec![false; n];
-    let mut axes = vec![0usize; n];
-    for i in 0..n {
-        let ax = *axes_data.add(i) as usize;
-        if ax >= n || seen[ax] {
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_permute");
+        if tensor_ptr == 0 {
             return 0;
         }
-        seen[ax] = true;
-        axes[i] = ax;
-    }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        let n = axes_len as usize;
+        if n != t.ndim {
+            return 0;
+        }
 
-    let old_shape = std::slice::from_raw_parts(t.shape, n);
-    let old_strides = std::slice::from_raw_parts(t.strides, n);
+        let axes_data = axes_ptr as *const i64;
+        let mut seen = vec![false; n];
+        let mut axes = vec![0usize; n];
+        for i in 0..n {
+            let ax = *axes_data.add(i) as usize;
+            if ax >= n || seen[ax] {
+                return 0;
+            }
+            seen[ax] = true;
+            axes[i] = ax;
+        }
 
-    let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
-    let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
-    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
-        return 0;
-    }
-    for i in 0..n {
-        *new_shape_ptr.add(i) = old_shape[axes[i]];
-        *new_strides_ptr.add(i) = old_strides[axes[i]];
-    }
+        let old_shape = std::slice::from_raw_parts(t.shape, n);
+        let old_strides = std::slice::from_raw_parts(t.strides, n);
 
-    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if new_t.is_null() {
-        return 0;
+        let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+        let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+        if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+            return 0;
+        }
+        for i in 0..n {
+            *new_shape_ptr.add(i) = old_shape[axes[i]];
+            *new_strides_ptr.add(i) = old_strides[axes[i]];
+        }
+
+        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if new_t.is_null() {
+            return 0;
+        }
+        *new_t = RayzorTensor {
+            data: t.data,
+            shape: new_shape_ptr,
+            strides: new_strides_ptr,
+            ndim: n,
+            numel: t.numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: tensor_ptr as *mut RayzorTensor,
+        };
+        t.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        new_t as i64
     }
-    *new_t = RayzorTensor {
-        data: t.data,
-        shape: new_shape_ptr,
-        strides: new_strides_ptr,
-        ndim: n,
-        numel: t.numel,
-        dtype: t.dtype,
-        owns_data: false,
-        device: t.device,
-        numa_node: t.numa_node,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: tensor_ptr as *mut RayzorTensor,
-    };
-    t.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    new_t as i64
 }
 
 /// tensor.slice(dim, start, end) -> i64 (view over [start..end) along `dim`, view)
@@ -2117,117 +2187,121 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
     start: i64,
     end: i64,
 ) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_slice");
-    if tensor_ptr == 0 {
-        return 0;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    let d = dim as usize;
-    if d >= t.ndim {
-        return 0;
-    }
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_slice");
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        let d = dim as usize;
+        if d >= t.ndim {
+            return 0;
+        }
 
-    let old_shape = std::slice::from_raw_parts(t.shape, t.ndim);
-    let old_strides = std::slice::from_raw_parts(t.strides, t.ndim);
-    let dim_size = old_shape[d];
+        let old_shape = std::slice::from_raw_parts(t.shape, t.ndim);
+        let old_strides = std::slice::from_raw_parts(t.strides, t.ndim);
+        let dim_size = old_shape[d];
 
-    let s = start.max(0) as usize;
-    let e = (end as usize).min(dim_size);
-    if s >= e {
-        return 0;
-    }
-    let new_dim_size = e - s;
+        let s = start.max(0) as usize;
+        let e = (end as usize).min(dim_size);
+        if s >= e {
+            return 0;
+        }
+        let new_dim_size = e - s;
 
-    let new_shape_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
-    let new_strides_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
-    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
-        return 0;
-    }
-    for i in 0..t.ndim {
-        *new_shape_ptr.add(i) = if i == d { new_dim_size } else { old_shape[i] };
-        *new_strides_ptr.add(i) = old_strides[i];
-    }
+        let new_shape_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
+        let new_strides_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
+        if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+            return 0;
+        }
+        for i in 0..t.ndim {
+            *new_shape_ptr.add(i) = if i == d { new_dim_size } else { old_shape[i] };
+            *new_strides_ptr.add(i) = old_strides[i];
+        }
 
-    let mut new_numel = 1usize;
-    for i in 0..t.ndim {
-        new_numel *= *new_shape_ptr.add(i);
-    }
+        let mut new_numel = 1usize;
+        for i in 0..t.ndim {
+            new_numel *= *new_shape_ptr.add(i);
+        }
 
-    // Offset data pointer by s * stride[d] elements
-    let elem_size = dtype_size(t.dtype);
-    let byte_offset = s * old_strides[d] * elem_size;
-    let new_data = t.data.add(byte_offset);
+        // Offset data pointer by s * stride[d] elements
+        let elem_size = dtype_size(t.dtype);
+        let byte_offset = s * old_strides[d] * elem_size;
+        let new_data = t.data.add(byte_offset);
 
-    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if new_t.is_null() {
-        return 0;
+        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if new_t.is_null() {
+            return 0;
+        }
+        *new_t = RayzorTensor {
+            data: new_data,
+            shape: new_shape_ptr,
+            strides: new_strides_ptr,
+            ndim: t.ndim,
+            numel: new_numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: tensor_ptr as *mut RayzorTensor,
+        };
+        t.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        new_t as i64
     }
-    *new_t = RayzorTensor {
-        data: new_data,
-        shape: new_shape_ptr,
-        strides: new_strides_ptr,
-        ndim: t.ndim,
-        numel: new_numel,
-        dtype: t.dtype,
-        owns_data: false,
-        device: t.device,
-        numa_node: t.numa_node,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: tensor_ptr as *mut RayzorTensor,
-    };
-    t.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    new_t as i64
 }
 
 /// tensor.transpose() -> i64 (2D transpose — swaps shape/strides)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+
+        if t.ndim != 2 {
+            return tensor_ptr;
+        } // no-op for non-2D
+
+        let old_shape = std::slice::from_raw_parts(t.shape, 2);
+        let old_strides = std::slice::from_raw_parts(t.strides, 2);
+
+        let new_shape_ptr = malloc(2 * std::mem::size_of::<usize>()) as *mut usize;
+        let new_strides_ptr = malloc(2 * std::mem::size_of::<usize>()) as *mut usize;
+        if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+            return 0;
+        }
+
+        *new_shape_ptr.add(0) = old_shape[1];
+        *new_shape_ptr.add(1) = old_shape[0];
+        *new_strides_ptr.add(0) = old_strides[1];
+        *new_strides_ptr.add(1) = old_strides[0];
+
+        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if new_t.is_null() {
+            return 0;
+        }
+
+        *new_t = RayzorTensor {
+            data: t.data,
+            shape: new_shape_ptr,
+            strides: new_strides_ptr,
+            ndim: 2,
+            numel: t.numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: tensor_ptr as *mut RayzorTensor,
+        };
+        t.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        new_t as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-
-    if t.ndim != 2 {
-        return tensor_ptr;
-    } // no-op for non-2D
-
-    let old_shape = std::slice::from_raw_parts(t.shape, 2);
-    let old_strides = std::slice::from_raw_parts(t.strides, 2);
-
-    let new_shape_ptr = malloc(2 * std::mem::size_of::<usize>()) as *mut usize;
-    let new_strides_ptr = malloc(2 * std::mem::size_of::<usize>()) as *mut usize;
-    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
-        return 0;
-    }
-
-    *new_shape_ptr.add(0) = old_shape[1];
-    *new_shape_ptr.add(1) = old_shape[0];
-    *new_strides_ptr.add(0) = old_strides[1];
-    *new_strides_ptr.add(1) = old_strides[0];
-
-    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if new_t.is_null() {
-        return 0;
-    }
-
-    *new_t = RayzorTensor {
-        data: t.data,
-        shape: new_shape_ptr,
-        strides: new_strides_ptr,
-        ndim: 2,
-        numel: t.numel,
-        dtype: t.dtype,
-        owns_data: false,
-        device: t.device,
-        numa_node: t.numa_node,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: tensor_ptr as *mut RayzorTensor,
-    };
-    t.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    new_t as i64
 }
 
 // ============================================================================
@@ -2242,28 +2316,30 @@ unsafe fn prepare_binop<'a>(
     a_ptr: i64,
     b_ptr: i64,
 ) -> Option<(&'a [f32], &'a [f32], &'a mut [f32], i64)> {
-    if a_ptr == 0 || b_ptr == 0 {
-        return None;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
+    unsafe {
+        if a_ptr == 0 || b_ptr == 0 {
+            return None;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
 
-    if a.numel != b.numel || a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
-        return None;
-    }
+        if a.numel != b.numel || a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
+            return None;
+        }
 
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
-    if result == 0 {
-        return None;
-    }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, DTYPE_F32, None);
+        if result == 0 {
+            return None;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let n = a.numel;
-    let a_slice = std::slice::from_raw_parts(a.data as *const f32, n);
-    let b_slice = std::slice::from_raw_parts(b.data as *const f32, n);
-    let r_slice = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
-    Some((a_slice, b_slice, r_slice, result))
+        let r = &*(result as *const RayzorTensor);
+        let n = a.numel;
+        let a_slice = std::slice::from_raw_parts(a.data as *const f32, n);
+        let b_slice = std::slice::from_raw_parts(b.data as *const f32, n);
+        let r_slice = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
+        Some((a_slice, b_slice, r_slice, result))
+    }
 }
 
 /// Row-broadcast f32 binop: `a [..., D] op b [D]` → result with `a`'s shape.
@@ -2278,154 +2354,168 @@ unsafe fn tensor_binop_row_broadcast(
     b_ptr: i64,
     kernel: fn(&mut [f32], &[f32], &[f32]),
 ) -> i64 {
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
-        return 0;
-    }
-    if a.ndim == 0 || b.ndim != 1 {
-        return 0;
-    }
-    let a_shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let b_shape = std::slice::from_raw_parts(b.shape, 1);
-    let last = a_shape[a.ndim - 1];
-    if b_shape[0] != last || !a.numel.is_multiple_of(last) {
-        return 0;
-    }
+    unsafe {
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
+        if a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
+            return 0;
+        }
+        if a.ndim == 0 || b.ndim != 1 {
+            return 0;
+        }
+        let a_shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let b_shape = std::slice::from_raw_parts(b.shape, 1);
+        let last = a_shape[a.ndim - 1];
+        if b_shape[0] != last || !a.numel.is_multiple_of(last) {
+            return 0;
+        }
 
-    let result = alloc_tensor(a_shape, DTYPE_F32, None);
-    if result == 0 {
-        return 0;
+        let result = alloc_tensor(a_shape, DTYPE_F32, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let a_data = a.data as *const f32;
+        let b_data = b.data as *const f32;
+        let r_data = r.data as *mut f32;
+        let b_slice = std::slice::from_raw_parts(b_data, last);
+        let groups = a.numel / last;
+        for g in 0..groups {
+            let off = g * last;
+            let a_row = std::slice::from_raw_parts(a_data.add(off), last);
+            let r_row = std::slice::from_raw_parts_mut(r_data.add(off), last);
+            kernel(r_row, a_row, b_slice);
+        }
+        result
     }
-    let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let b_data = b.data as *const f32;
-    let r_data = r.data as *mut f32;
-    let b_slice = std::slice::from_raw_parts(b_data, last);
-    let groups = a.numel / last;
-    for g in 0..groups {
-        let off = g * last;
-        let a_row = std::slice::from_raw_parts(a_data.add(off), last);
-        let r_row = std::slice::from_raw_parts_mut(r_data.add(off), last);
-        kernel(r_row, a_row, b_slice);
-    }
-    result
 }
 
 /// Scalar fallback for elementwise binary ops on non-f32 dtypes.
 /// Both inputs must share dtype + numel. The output tensor is allocated
 /// in the same dtype, kernel runs in f32 in-register.
 unsafe fn tensor_binop_scalar(a_ptr: i64, b_ptr: i64, op: fn(f32, f32) -> f32) -> i64 {
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
+    unsafe {
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
+        if a.numel != b.numel || a.dtype != b.dtype {
+            return 0;
+        }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        for i in 0..a.numel {
+            let av = load_f32_at(a.data, i, a.dtype);
+            let bv = load_f32_at(b.data, i, a.dtype);
+            store_f32_at(r.data, i, a.dtype, op(av, bv));
+        }
+        result
     }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-    if a.numel != b.numel || a.dtype != b.dtype {
-        return 0;
-    }
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    for i in 0..a.numel {
-        let av = load_f32_at(a.data, i, a.dtype);
-        let bv = load_f32_at(b.data, i, a.dtype);
-        store_f32_at(r.data, i, a.dtype, op(av, bv));
-    }
-    result
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
-    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
-        crate::tensor_simd::add_slice(r_s, a_s, b_s);
-        return result;
+    unsafe {
+        if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+            crate::tensor_simd::add_slice(r_s, a_s, b_s);
+            return result;
+        }
+        let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::add_slice);
+        if broadcast != 0 {
+            return broadcast;
+        }
+        tensor_binop_scalar(a, b, |x, y| x + y)
     }
-    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::add_slice);
-    if broadcast != 0 {
-        return broadcast;
-    }
-    tensor_binop_scalar(a, b, |x, y| x + y)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
-    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
-        crate::tensor_simd::sub_slice(r_s, a_s, b_s);
-        return result;
+    unsafe {
+        if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+            crate::tensor_simd::sub_slice(r_s, a_s, b_s);
+            return result;
+        }
+        let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::sub_slice);
+        if broadcast != 0 {
+            return broadcast;
+        }
+        tensor_binop_scalar(a, b, |x, y| x - y)
     }
-    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::sub_slice);
-    if broadcast != 0 {
-        return broadcast;
-    }
-    tensor_binop_scalar(a, b, |x, y| x - y)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_mul");
-    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
-        crate::tensor_simd::mul_slice(r_s, a_s, b_s);
-        return result;
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_mul");
+        if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+            crate::tensor_simd::mul_slice(r_s, a_s, b_s);
+            return result;
+        }
+        let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::mul_slice);
+        if broadcast != 0 {
+            return broadcast;
+        }
+        tensor_binop_scalar(a, b, |x, y| x * y)
     }
-    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::mul_slice);
-    if broadcast != 0 {
-        return broadcast;
-    }
-    tensor_binop_scalar(a, b, |x, y| x * y)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu_mul(a: i64, b: i64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu_mul");
-    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
-        let n = a_s.len();
-        let threads = crate::worker_pool::auto_kernel_threads();
-        let threshold = crate::env_var(
-            "RZT_SILU_MUL_PAR_THRESHOLD",
-            "RAYZOR_SILU_MUL_PAR_THRESHOLD",
-        )
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(65_536);
-        if threads > 1 && n >= threshold {
-            let a_addr = a_s.as_ptr() as usize;
-            let b_addr = b_s.as_ptr() as usize;
-            let r_addr = r_s.as_mut_ptr() as usize;
-            crate::worker_pool::global().parallel_rows(n, threads, move |lo, hi| unsafe {
-                let a_ptr = a_addr as *const f32;
-                let b_ptr = b_addr as *const f32;
-                let r_ptr = r_addr as *mut f32;
-                for i in lo..hi {
-                    let x = *a_ptr.add(i);
-                    *r_ptr.add(i) = (x / (1.0 + (-x).exp())) * *b_ptr.add(i);
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu_mul");
+        if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+            let n = a_s.len();
+            let threads = crate::worker_pool::auto_kernel_threads();
+            let threshold = crate::env_var(
+                "RZT_SILU_MUL_PAR_THRESHOLD",
+                "RAYZOR_SILU_MUL_PAR_THRESHOLD",
+            )
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(65_536);
+            if threads > 1 && n >= threshold {
+                let a_addr = a_s.as_ptr() as usize;
+                let b_addr = b_s.as_ptr() as usize;
+                let r_addr = r_s.as_mut_ptr() as usize;
+                crate::worker_pool::global().parallel_rows(n, threads, move |lo, hi| {
+                    let a_ptr = a_addr as *const f32;
+                    let b_ptr = b_addr as *const f32;
+                    let r_ptr = r_addr as *mut f32;
+                    for i in lo..hi {
+                        let x = *a_ptr.add(i);
+                        *r_ptr.add(i) = (x / (1.0 + (-x).exp())) * *b_ptr.add(i);
+                    }
+                });
+            } else {
+                for i in 0..n {
+                    let x = a_s[i];
+                    r_s[i] = (x / (1.0 + (-x).exp())) * b_s[i];
                 }
-            });
-        } else {
-            for i in 0..n {
-                let x = a_s[i];
-                r_s[i] = (x / (1.0 + (-x).exp())) * b_s[i];
             }
+            return result;
         }
-        return result;
+        tensor_binop_scalar(a, b, |x, y| (x / (1.0 + (-x).exp())) * y)
     }
-    tensor_binop_scalar(a, b, |x, y| (x / (1.0 + (-x).exp())) * y)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
-    match prepare_binop(a, b) {
-        Some((a_s, b_s, r_s, result)) => {
-            crate::tensor_simd::div_slice(r_s, a_s, b_s);
-            result
+    unsafe {
+        match prepare_binop(a, b) {
+            Some((a_s, b_s, r_s, result)) => {
+                crate::tensor_simd::div_slice(r_s, a_s, b_s);
+                result
+            }
+            None => tensor_binop_scalar(a, b, |x, y| x / y),
         }
-        None => tensor_binop_scalar(a, b, |x, y| x / y),
     }
 }
 
@@ -2461,188 +2551,195 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
 /// first hit to flag the slow path. Other dtypes (I32, I8, U8, FP8) abort.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ADD_INTO);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_add_into");
-    if dest == 0 || src == 0 {
-        eprintln!(
-            "rayzor_tensor_add_into: null tensor pointer (dest={:#x}, src={:#x})",
-            dest, src
-        );
-        std::process::abort();
-    }
-    let d = &*(dest as *const RayzorTensor);
-    let s = &*(src as *const RayzorTensor);
-
-    // Under @:shared (Arc-backed Tensor), strict-move's compile-time
-    // single-owner guarantee is replaced by runtime refcounting. addInto
-    // mutates the receiver in place, so two aliased bindings to the
-    // same Arc would BOTH observe the mutation (silent UAF-class bug).
-    // Debug-builds trap on shared dest; release builds rely on caller
-    // discipline. Current nue/* call sites (TransformerBlock, LayerNorm,
-    // Linear) audit safe — receiver is always a freshly-produced kernel
-    // output with refcount==1. Trap exists to catch the next user-code
-    // call site that breaks the convention. Cost: one Acquire atomic
-    // load per addInto call (~5ns vs the kernel's microseconds).
-    debug_assert!(
-        d.refcount.load(std::sync::atomic::Ordering::Acquire) == 1,
-        "rayzor_tensor_add_into: dest has shared refcount > 1; in-place mutation would silently leak to aliased bindings. Use addInto only on uniquely-owned tensors (freshly produced or after deepClone)."
-    );
-
-    let d_shape = std::slice::from_raw_parts(d.shape, d.ndim);
-    let s_shape = std::slice::from_raw_parts(s.shape, s.ndim);
-
-    // (a) shape compatibility. Two accepted forms:
-    //   exact     — dest and src have identical shape (the general case).
-    //   broadcast — src is the trailing feature vector added to every row of
-    //               dest: a [F] (or [1,F]) bias over a [rows, F] activation.
-    //               Keyed on shape identity, NOT numel: the single-row case
-    //               (dest [1,F] += src [F]) has equal numel but different ndim
-    //               and is still a row-broadcast, not an exact add — this is
-    //               exactly the decode-step Qwen2 q/k/v-bias path.
-    let same_shape = d.ndim == s.ndim && (0..d.ndim).all(|i| d_shape[i] == s_shape[i]);
-    let broadcast = !same_shape
-        && s.numel > 0
-        && d.numel.is_multiple_of(s.numel)
-        && s.numel == d_shape[d.ndim - 1];
-    if broadcast && d.dtype != DTYPE_F32 {
-        eprintln!(
-            "rayzor_tensor_add_into: broadcast add only supported for F32 (dtype={})",
-            d.dtype
-        );
-        std::process::abort();
-    }
-    if !broadcast {
-        if d.ndim != s.ndim || d.numel != s.numel {
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ADD_INTO);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_add_into");
+        if dest == 0 || src == 0 {
             eprintln!(
-                "rayzor_tensor_add_into: shape mismatch — dest.ndim={}, src.ndim={}, dest.numel={}, src.numel={}",
-                d.ndim, s.ndim, d.numel, s.numel
+                "rayzor_tensor_add_into: null tensor pointer (dest={:#x}, src={:#x})",
+                dest, src
             );
             std::process::abort();
         }
-        for i in 0..d.ndim {
-            if d_shape[i] != s_shape[i] {
+        let d = &*(dest as *const RayzorTensor);
+        let s = &*(src as *const RayzorTensor);
+
+        // Under @:shared (Arc-backed Tensor), strict-move's compile-time
+        // single-owner guarantee is replaced by runtime refcounting. addInto
+        // mutates the receiver in place, so two aliased bindings to the
+        // same Arc would BOTH observe the mutation (silent UAF-class bug).
+        // Debug-builds trap on shared dest; release builds rely on caller
+        // discipline. Current nue/* call sites (TransformerBlock, LayerNorm,
+        // Linear) audit safe — receiver is always a freshly-produced kernel
+        // output with refcount==1. Trap exists to catch the next user-code
+        // call site that breaks the convention. Cost: one Acquire atomic
+        // load per addInto call (~5ns vs the kernel's microseconds).
+        debug_assert!(
+            d.refcount.load(std::sync::atomic::Ordering::Acquire) == 1,
+            "rayzor_tensor_add_into: dest has shared refcount > 1; in-place mutation would silently leak to aliased bindings. Use addInto only on uniquely-owned tensors (freshly produced or after deepClone)."
+        );
+
+        let d_shape = std::slice::from_raw_parts(d.shape, d.ndim);
+        let s_shape = std::slice::from_raw_parts(s.shape, s.ndim);
+
+        // (a) shape compatibility. Two accepted forms:
+        //   exact     — dest and src have identical shape (the general case).
+        //   broadcast — src is the trailing feature vector added to every row of
+        //               dest: a [F] (or [1,F]) bias over a [rows, F] activation.
+        //               Keyed on shape identity, NOT numel: the single-row case
+        //               (dest [1,F] += src [F]) has equal numel but different ndim
+        //               and is still a row-broadcast, not an exact add — this is
+        //               exactly the decode-step Qwen2 q/k/v-bias path.
+        let same_shape = d.ndim == s.ndim && (0..d.ndim).all(|i| d_shape[i] == s_shape[i]);
+        let broadcast = !same_shape
+            && s.numel > 0
+            && d.numel.is_multiple_of(s.numel)
+            && s.numel == d_shape[d.ndim - 1];
+        if broadcast && d.dtype != DTYPE_F32 {
+            eprintln!(
+                "rayzor_tensor_add_into: broadcast add only supported for F32 (dtype={})",
+                d.dtype
+            );
+            std::process::abort();
+        }
+        if !broadcast {
+            if d.ndim != s.ndim || d.numel != s.numel {
                 eprintln!(
-                    "rayzor_tensor_add_into: shape mismatch at dim {} — dest={:?}, src={:?}",
-                    i, d_shape, s_shape
+                    "rayzor_tensor_add_into: shape mismatch — dest.ndim={}, src.ndim={}, dest.numel={}, src.numel={}",
+                    d.ndim, s.ndim, d.numel, s.numel
                 );
                 std::process::abort();
             }
-        }
-    }
-
-    // (b) dtype compatibility
-    if d.dtype != s.dtype {
-        eprintln!(
-            "rayzor_tensor_add_into: dtype mismatch — dest.dtype={}, src.dtype={}",
-            d.dtype, s.dtype
-        );
-        std::process::abort();
-    }
-
-    // (c) dest contiguity
-    if !d.is_contiguous() {
-        let d_strides = std::slice::from_raw_parts(d.strides, d.ndim);
-        eprintln!(
-            "rayzor_tensor_add_into: dest must be contiguous — shape={:?}, strides={:?}",
-            d_shape, d_strides
-        );
-        std::process::abort();
-    }
-
-    // (d) aliasing — same backing buffer would double-count on SIMD
-    if d.data == s.data {
-        eprintln!(
-            "rayzor_tensor_add_into: dest and src share the same backing buffer ({:?}); aliasing would double-count",
-            d.data
-        );
-        std::process::abort();
-    }
-
-    // numel == 0 is a no-op; alloc_tensor allocates a 1-byte sentinel for
-    // empty tensors so the pointer is non-null but there's nothing to add.
-    if d.numel == 0 {
-        return;
-    }
-
-    match d.dtype {
-        DTYPE_F32 => {
-            let n = d.numel;
-            let dst_slice = std::slice::from_raw_parts_mut(d.data as *mut f32, n);
-            if broadcast {
-                // Per-feature bias: add the contiguous src[0..F] to every
-                // F-wide row of the contiguous dest. (src is always
-                // contiguous here — biases/norm weights are freshly loaded
-                // 1-D tensors.)
-                let f = s.numel;
-                let src_slice = std::slice::from_raw_parts(s.data as *const f32, f);
-                let mut off = 0usize;
-                while off + f <= n {
-                    crate::tensor_simd::add_assign_slice(&mut dst_slice[off..off + f], src_slice);
-                    off += f;
+            for i in 0..d.ndim {
+                if d_shape[i] != s_shape[i] {
+                    eprintln!(
+                        "rayzor_tensor_add_into: shape mismatch at dim {} — dest={:?}, src={:?}",
+                        i, d_shape, s_shape
+                    );
+                    std::process::abort();
                 }
-            } else if s.is_contiguous() {
-                // Fast path: both contiguous F32. `add_assign_slice` takes a
-                // single `&mut [f32]` + `&[f32]` pair, so there is no aliased
-                // mutable+immutable reference to the dst memory — the SIMD
-                // intrinsics inside operate on raw pointers derived once from
-                // `dst_slice.as_mut_ptr()`.
-                let src_slice = std::slice::from_raw_parts(s.data as *const f32, n);
-                crate::tensor_simd::add_assign_slice(dst_slice, src_slice);
-            } else {
-                // Strided src gather: walk via src strides, accumulate into
-                // dest's contiguous slot. Recompute the multi-index from the
-                // linear contiguous counter using dest's shape (which equals
-                // src's shape — verified above).
+            }
+        }
+
+        // (b) dtype compatibility
+        if d.dtype != s.dtype {
+            eprintln!(
+                "rayzor_tensor_add_into: dtype mismatch — dest.dtype={}, src.dtype={}",
+                d.dtype, s.dtype
+            );
+            std::process::abort();
+        }
+
+        // (c) dest contiguity
+        if !d.is_contiguous() {
+            let d_strides = std::slice::from_raw_parts(d.strides, d.ndim);
+            eprintln!(
+                "rayzor_tensor_add_into: dest must be contiguous — shape={:?}, strides={:?}",
+                d_shape, d_strides
+            );
+            std::process::abort();
+        }
+
+        // (d) aliasing — same backing buffer would double-count on SIMD
+        if d.data == s.data {
+            eprintln!(
+                "rayzor_tensor_add_into: dest and src share the same backing buffer ({:?}); aliasing would double-count",
+                d.data
+            );
+            std::process::abort();
+        }
+
+        // numel == 0 is a no-op; alloc_tensor allocates a 1-byte sentinel for
+        // empty tensors so the pointer is non-null but there's nothing to add.
+        if d.numel == 0 {
+            return;
+        }
+
+        match d.dtype {
+            DTYPE_F32 => {
+                let n = d.numel;
+                let dst_slice = std::slice::from_raw_parts_mut(d.data as *mut f32, n);
+                if broadcast {
+                    // Per-feature bias: add the contiguous src[0..F] to every
+                    // F-wide row of the contiguous dest. (src is always
+                    // contiguous here — biases/norm weights are freshly loaded
+                    // 1-D tensors.)
+                    let f = s.numel;
+                    let src_slice = std::slice::from_raw_parts(s.data as *const f32, f);
+                    let mut off = 0usize;
+                    while off + f <= n {
+                        crate::tensor_simd::add_assign_slice(
+                            &mut dst_slice[off..off + f],
+                            src_slice,
+                        );
+                        off += f;
+                    }
+                } else if s.is_contiguous() {
+                    // Fast path: both contiguous F32. `add_assign_slice` takes a
+                    // single `&mut [f32]` + `&[f32]` pair, so there is no aliased
+                    // mutable+immutable reference to the dst memory — the SIMD
+                    // intrinsics inside operate on raw pointers derived once from
+                    // `dst_slice.as_mut_ptr()`.
+                    let src_slice = std::slice::from_raw_parts(s.data as *const f32, n);
+                    crate::tensor_simd::add_assign_slice(dst_slice, src_slice);
+                } else {
+                    // Strided src gather: walk via src strides, accumulate into
+                    // dest's contiguous slot. Recompute the multi-index from the
+                    // linear contiguous counter using dest's shape (which equals
+                    // src's shape — verified above).
+                    let s_strides = std::slice::from_raw_parts(s.strides, s.ndim);
+                    let s_data = s.data as *const f32;
+                    let mut idx = vec![0usize; d.ndim];
+                    for (flat, dst_elem) in dst_slice.iter_mut().enumerate() {
+                        // Compute multi-index in dest's row-major layout
+                        let mut rem = flat;
+                        for k in 0..d.ndim {
+                            let stride: usize = d_shape[k + 1..].iter().product();
+                            idx[k] = rem / stride;
+                            rem %= stride;
+                        }
+                        // Apply src strides
+                        let mut s_off: usize = 0;
+                        for k in 0..s.ndim {
+                            s_off += idx[k] * s_strides[k];
+                        }
+                        *dst_elem += *s_data.add(s_off);
+                    }
+                }
+            }
+            DTYPE_F16 | DTYPE_BF16 => {
+                eprintln!(
+                    "rayzor_tensor_add_into: F16/BF16 not yet supported, falling back to scalar"
+                );
+                // Scalar fallback: respects src strides via load_f32_at on the
+                // gathered offset. Dest is contiguous so the linear counter
+                // doubles as the dest offset.
                 let s_strides = std::slice::from_raw_parts(s.strides, s.ndim);
-                let s_data = s.data as *const f32;
                 let mut idx = vec![0usize; d.ndim];
-                for (flat, dst_elem) in dst_slice.iter_mut().enumerate() {
-                    // Compute multi-index in dest's row-major layout
+                for flat in 0..d.numel {
                     let mut rem = flat;
                     for k in 0..d.ndim {
                         let stride: usize = d_shape[k + 1..].iter().product();
                         idx[k] = rem / stride;
                         rem %= stride;
                     }
-                    // Apply src strides
                     let mut s_off: usize = 0;
                     for k in 0..s.ndim {
                         s_off += idx[k] * s_strides[k];
                     }
-                    *dst_elem += *s_data.add(s_off);
+                    let dv = load_f32_at(d.data, flat, d.dtype);
+                    let sv = load_f32_at(s.data, s_off, s.dtype);
+                    store_f32_at(d.data, flat, d.dtype, dv + sv);
                 }
             }
-        }
-        DTYPE_F16 | DTYPE_BF16 => {
-            eprintln!("rayzor_tensor_add_into: F16/BF16 not yet supported, falling back to scalar");
-            // Scalar fallback: respects src strides via load_f32_at on the
-            // gathered offset. Dest is contiguous so the linear counter
-            // doubles as the dest offset.
-            let s_strides = std::slice::from_raw_parts(s.strides, s.ndim);
-            let mut idx = vec![0usize; d.ndim];
-            for flat in 0..d.numel {
-                let mut rem = flat;
-                for k in 0..d.ndim {
-                    let stride: usize = d_shape[k + 1..].iter().product();
-                    idx[k] = rem / stride;
-                    rem %= stride;
-                }
-                let mut s_off: usize = 0;
-                for k in 0..s.ndim {
-                    s_off += idx[k] * s_strides[k];
-                }
-                let dv = load_f32_at(d.data, flat, d.dtype);
-                let sv = load_f32_at(s.data, s_off, s.dtype);
-                store_f32_at(d.data, flat, d.dtype, dv + sv);
+            _ => {
+                eprintln!(
+                    "rayzor_tensor_add_into: unsupported dtype {} (only F32, F16, BF16 currently handled)",
+                    d.dtype
+                );
+                std::process::abort();
             }
-        }
-        _ => {
-            eprintln!(
-                "rayzor_tensor_add_into: unsupported dtype {} (only F32, F16, BF16 currently handled)",
-                d.dtype
-            );
-            std::process::abort();
         }
     }
 }
@@ -2652,126 +2749,134 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
 // ============================================================================
 
 unsafe fn tensor_unary(a_ptr: i64, op: fn(f32) -> f32) -> i64 {
-    if a_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-
-    let r = &*(result as *const RayzorTensor);
-
-    if a.dtype == DTYPE_F32 {
-        // Fast path: contiguous f32 → SIMD-friendly straight loop. The
-        // SIMD-specialised unary kernels live in tensor_simd; non-SIMD
-        // ops (e.g. transcendentals) stay scalar but in-register.
-        let a_data = a.data as *const f32;
-        let r_data = r.data as *mut f32;
-        for i in 0..a.numel {
-            *r_data.add(i) = op(*a_data.add(i));
+    unsafe {
+        if a_ptr == 0 {
+            return 0;
         }
-    } else {
-        // Generic dtype path — convert to f32, compute, convert back.
-        for i in 0..a.numel {
-            let v = load_f32_at(a.data, i, a.dtype);
-            store_f32_at(r.data, i, a.dtype, op(v));
-        }
-    }
+        let a = &*(a_ptr as *const RayzorTensor);
 
-    result
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+
+        let r = &*(result as *const RayzorTensor);
+
+        if a.dtype == DTYPE_F32 {
+            // Fast path: contiguous f32 → SIMD-friendly straight loop. The
+            // SIMD-specialised unary kernels live in tensor_simd; non-SIMD
+            // ops (e.g. transcendentals) stay scalar but in-register.
+            let a_data = a.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for i in 0..a.numel {
+                *r_data.add(i) = op(*a_data.add(i));
+            }
+        } else {
+            // Generic dtype path — convert to f32, compute, convert back.
+            for i in 0..a.numel {
+                let v = load_f32_at(a.data, i, a.dtype);
+                store_f32_at(r.data, i, a.dtype, op(v));
+            }
+        }
+
+        result
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sqrt(a: i64) -> i64 {
-    tensor_unary(a, |x| x.sqrt())
+    unsafe { tensor_unary(a, |x| x.sqrt()) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_exp(a: i64) -> i64 {
-    tensor_unary(a, |x| x.exp())
+    unsafe { tensor_unary(a, |x| x.exp()) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_log(a: i64) -> i64 {
-    tensor_unary(a, |x| x.ln())
+    unsafe { tensor_unary(a, |x| x.ln()) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_relu(a_ptr: i64) -> i64 {
-    if a_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let n = a.numel;
-
-    if a.dtype == DTYPE_F32 {
-        let a_s = std::slice::from_raw_parts(a.data as *const f32, n);
-        let r_s = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
-        crate::tensor_simd::relu_slice(r_s, a_s);
-    } else {
-        for i in 0..n {
-            let v = load_f32_at(a.data, i, a.dtype);
-            store_f32_at(r.data, i, a.dtype, v.max(0.0));
+    unsafe {
+        if a_ptr == 0 {
+            return 0;
         }
+        let a = &*(a_ptr as *const RayzorTensor);
+
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let n = a.numel;
+
+        if a.dtype == DTYPE_F32 {
+            let a_s = std::slice::from_raw_parts(a.data as *const f32, n);
+            let r_s = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
+            crate::tensor_simd::relu_slice(r_s, a_s);
+        } else {
+            for i in 0..n {
+                let v = load_f32_at(a.data, i, a.dtype);
+                store_f32_at(r.data, i, a.dtype, v.max(0.0));
+            }
+        }
+        result
     }
-    result
 }
 
 /// GELU (approximate, tanh-based) — matches PyTorch `gelu(approximate='tanh')`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
-    tensor_unary(a, |x| {
-        let c = (2.0f32 / std::f32::consts::PI).sqrt();
-        let inner = c * (x + 0.044715 * x * x * x);
-        0.5 * x * (1.0 + inner.tanh())
-    })
+    unsafe {
+        tensor_unary(a, |x| {
+            let c = (2.0f32 / std::f32::consts::PI).sqrt();
+            let inner = c * (x + 0.044715 * x * x * x);
+            0.5 * x * (1.0 + inner.tanh())
+        })
+    }
 }
 
 /// SiLU / swish: x * sigmoid(x).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
-    // NEON silu (vectorized Cephes exp) exists behind RZT_NEON_SILU=1
-    // but is OFF by default: decode A/B on Llama 3.2 1B lost all three
-    // ABBA pairs (-3/-12/-6 tok/s under thermal drift). The 17µs/call
-    // sizing that motivated it came from a KERNEL_TIMING run whose
-    // per-call inflation overstated the true cost (~0.1ms/token, under
-    // the noise floor), and NEON divide latency eats the exp saving at
-    // ffn=8192. Re-evaluate on models with larger FFN widths. Output is
-    // ~1-2 ULP off libm (canonical-prompt gate passed when tested).
-    #[cfg(target_arch = "aarch64")]
-    {
-        if a != 0 && neon_silu_opted_in() {
-            let t = &*(a as *const RayzorTensor);
-            if t.dtype == DTYPE_F32 && t.is_contiguous() {
-                let shape = std::slice::from_raw_parts(t.shape, t.ndim);
-                let result = alloc_tensor(shape, t.dtype, None);
-                if result != 0 {
-                    let r = &*(result as *const RayzorTensor);
-                    crate::tensor_simd::silu_slice_neon(
-                        t.data as *const f32,
-                        r.data as *mut f32,
-                        t.numel,
-                    );
-                    return result;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
+        // NEON silu (vectorized Cephes exp) exists behind RZT_NEON_SILU=1
+        // but is OFF by default: decode A/B on Llama 3.2 1B lost all three
+        // ABBA pairs (-3/-12/-6 tok/s under thermal drift). The 17µs/call
+        // sizing that motivated it came from a KERNEL_TIMING run whose
+        // per-call inflation overstated the true cost (~0.1ms/token, under
+        // the noise floor), and NEON divide latency eats the exp saving at
+        // ffn=8192. Re-evaluate on models with larger FFN widths. Output is
+        // ~1-2 ULP off libm (canonical-prompt gate passed when tested).
+        #[cfg(target_arch = "aarch64")]
+        {
+            if a != 0 && neon_silu_opted_in() {
+                let t = &*(a as *const RayzorTensor);
+                if t.dtype == DTYPE_F32 && t.is_contiguous() {
+                    let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+                    let result = alloc_tensor(shape, t.dtype, None);
+                    if result != 0 {
+                        let r = &*(result as *const RayzorTensor);
+                        crate::tensor_simd::silu_slice_neon(
+                            t.data as *const f32,
+                            r.data as *mut f32,
+                            t.numel,
+                        );
+                        return result;
+                    }
                 }
             }
         }
+        tensor_unary(a, |x| x / (1.0 + (-x).exp()))
     }
-    tensor_unary(a, |x| x / (1.0 + (-x).exp()))
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -2785,194 +2890,200 @@ fn neon_silu_opted_in() -> bool {
 /// Softmax over the last dimension.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SOFTMAX);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_softmax");
-    if a_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    if a.ndim == 0 {
-        return 0;
-    }
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SOFTMAX);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_softmax");
+        if a_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        if a.ndim == 0 {
+            return 0;
+        }
 
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let last = shape[a.ndim - 1];
-    let groups = a.numel.checked_div(last).unwrap_or(0);
+        let r = &*(result as *const RayzorTensor);
+        let last = shape[a.ndim - 1];
+        let groups = a.numel.checked_div(last).unwrap_or(0);
 
-    if a.dtype == DTYPE_F32 {
-        let a_data = a.data as *const f32;
-        let r_data = r.data as *mut f32;
-        for g in 0..groups {
-            let base = g * last;
-            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-            let maxv = crate::tensor_simd::max_slice(a_row);
-            for i in 0..last {
-                r_row[i] = (a_row[i] - maxv).exp();
-            }
-            let sum = crate::tensor_simd::sum_slice(r_row);
-            if sum > 0.0 {
-                let inv = 1.0 / sum;
-                for v in r_row.iter_mut() {
-                    *v *= inv;
+        if a.dtype == DTYPE_F32 {
+            let a_data = a.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for g in 0..groups {
+                let base = g * last;
+                let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+                let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+                let maxv = crate::tensor_simd::max_slice(a_row);
+                for i in 0..last {
+                    r_row[i] = (a_row[i] - maxv).exp();
+                }
+                let sum = crate::tensor_simd::sum_slice(r_row);
+                if sum > 0.0 {
+                    let inv = 1.0 / sum;
+                    for v in r_row.iter_mut() {
+                        *v *= inv;
+                    }
                 }
             }
+            return result;
         }
-        return result;
-    }
 
-    // Generic dtype path: f32-in-register softmax with storage conversion.
-    let mut row_buf = vec![0.0f32; last];
-    for g in 0..groups {
-        let base = g * last;
-        for (i, slot) in row_buf.iter_mut().enumerate() {
-            *slot = load_f32_at(a.data, base + i, a.dtype);
-        }
-        let mut maxv = f32::NEG_INFINITY;
-        for &v in &row_buf {
-            if v > maxv {
-                maxv = v;
+        // Generic dtype path: f32-in-register softmax with storage conversion.
+        let mut row_buf = vec![0.0f32; last];
+        for g in 0..groups {
+            let base = g * last;
+            for (i, slot) in row_buf.iter_mut().enumerate() {
+                *slot = load_f32_at(a.data, base + i, a.dtype);
+            }
+            let mut maxv = f32::NEG_INFINITY;
+            for &v in &row_buf {
+                if v > maxv {
+                    maxv = v;
+                }
+            }
+            let mut sum = 0.0f32;
+            for v in row_buf.iter_mut() {
+                *v = (*v - maxv).exp();
+                sum += *v;
+            }
+            let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+            for (i, &v) in row_buf.iter().enumerate() {
+                store_f32_at(r.data, base + i, a.dtype, v * inv);
             }
         }
-        let mut sum = 0.0f32;
-        for v in row_buf.iter_mut() {
-            *v = (*v - maxv).exp();
-            sum += *v;
-        }
-        let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
-        for (i, &v) in row_buf.iter().enumerate() {
-            store_f32_at(r.data, base + i, a.dtype, v * inv);
-        }
+        result
     }
-    result
 }
 
 /// Layer normalization over the last dimension. (x - mean) / sqrt(var + eps).
 /// `eps` is passed as f64 from Haxe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
-    if a_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    if a.ndim == 0 {
-        return 0;
-    }
+    unsafe {
+        if a_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        if a.ndim == 0 {
+            return 0;
+        }
 
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let last = shape[a.ndim - 1];
-    let groups = a.numel.checked_div(last).unwrap_or(0);
-    let eps_f32 = eps as f32;
-    let n = last as f32;
+        let r = &*(result as *const RayzorTensor);
+        let last = shape[a.ndim - 1];
+        let groups = a.numel.checked_div(last).unwrap_or(0);
+        let eps_f32 = eps as f32;
+        let n = last as f32;
 
-    if a.dtype == DTYPE_F32 {
-        let a_data = a.data as *const f32;
-        let r_data = r.data as *mut f32;
+        if a.dtype == DTYPE_F32 {
+            let a_data = a.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for g in 0..groups {
+                let base = g * last;
+                let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+                let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+                let mean = crate::tensor_simd::sum_slice(a_row) / n;
+                crate::tensor_simd::sub_const_slice(r_row, a_row, mean);
+                let var = crate::tensor_simd::sum_of_squares(r_row) / n;
+                let inv = 1.0 / (var + eps_f32).sqrt();
+                for v in r_row.iter_mut() {
+                    *v *= inv;
+                }
+            }
+            return result;
+        }
+
+        // Generic dtype path: f32-in-register stats with storage conversion.
+        let mut row_buf = vec![0.0f32; last];
         for g in 0..groups {
             let base = g * last;
-            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-            let mean = crate::tensor_simd::sum_slice(a_row) / n;
-            crate::tensor_simd::sub_const_slice(r_row, a_row, mean);
-            let var = crate::tensor_simd::sum_of_squares(r_row) / n;
-            let inv = 1.0 / (var + eps_f32).sqrt();
-            for v in r_row.iter_mut() {
-                *v *= inv;
+            let mut sum = 0.0f32;
+            for (i, slot) in row_buf.iter_mut().enumerate() {
+                *slot = load_f32_at(a.data, base + i, a.dtype);
+                sum += *slot;
+            }
+            let mean = sum / n;
+            let mut sumsq = 0.0f32;
+            for v in row_buf.iter_mut() {
+                *v -= mean;
+                sumsq += *v * *v;
+            }
+            let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
+            for (i, &v) in row_buf.iter().enumerate() {
+                store_f32_at(r.data, base + i, a.dtype, v * inv);
             }
         }
-        return result;
+        result
     }
-
-    // Generic dtype path: f32-in-register stats with storage conversion.
-    let mut row_buf = vec![0.0f32; last];
-    for g in 0..groups {
-        let base = g * last;
-        let mut sum = 0.0f32;
-        for (i, slot) in row_buf.iter_mut().enumerate() {
-            *slot = load_f32_at(a.data, base + i, a.dtype);
-            sum += *slot;
-        }
-        let mean = sum / n;
-        let mut sumsq = 0.0f32;
-        for v in row_buf.iter_mut() {
-            *v -= mean;
-            sumsq += *v * *v;
-        }
-        let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
-        for (i, &v) in row_buf.iter().enumerate() {
-            store_f32_at(r.data, base + i, a.dtype, v * inv);
-        }
-    }
-    result
 }
 
 /// RMS normalization over the last dimension. x / sqrt(mean(x^2) + eps).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm");
-    if a_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    if a.ndim == 0 {
-        return 0;
-    }
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm");
+        if a_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        if a.ndim == 0 {
+            return 0;
+        }
 
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, a.dtype, None);
-    if result == 0 {
-        return 0;
-    }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let result = alloc_tensor(shape, a.dtype, None);
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let last = shape[a.ndim - 1];
-    let groups = a.numel.checked_div(last).unwrap_or(0);
-    let eps_f32 = eps as f32;
-    let n = last as f32;
+        let r = &*(result as *const RayzorTensor);
+        let last = shape[a.ndim - 1];
+        let groups = a.numel.checked_div(last).unwrap_or(0);
+        let eps_f32 = eps as f32;
+        let n = last as f32;
 
-    if a.dtype == DTYPE_F32 {
-        let a_data = a.data as *const f32;
-        let r_data = r.data as *mut f32;
+        if a.dtype == DTYPE_F32 {
+            let a_data = a.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for g in 0..groups {
+                let base = g * last;
+                let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+                let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+                let ms = crate::tensor_simd::sum_of_squares(a_row) / n;
+                let inv = 1.0 / (ms + eps_f32).sqrt();
+                crate::tensor_simd::mul_const_slice(r_row, a_row, inv);
+            }
+            return result;
+        }
+
         for g in 0..groups {
             let base = g * last;
-            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-            let ms = crate::tensor_simd::sum_of_squares(a_row) / n;
-            let inv = 1.0 / (ms + eps_f32).sqrt();
-            crate::tensor_simd::mul_const_slice(r_row, a_row, inv);
+            let mut sumsq = 0.0f32;
+            for i in 0..last {
+                let v = load_f32_at(a.data, base + i, a.dtype);
+                sumsq += v * v;
+            }
+            let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
+            for i in 0..last {
+                let v = load_f32_at(a.data, base + i, a.dtype);
+                store_f32_at(r.data, base + i, a.dtype, v * inv);
+            }
         }
-        return result;
+        result
     }
-
-    for g in 0..groups {
-        let base = g * last;
-        let mut sumsq = 0.0f32;
-        for i in 0..last {
-            let v = load_f32_at(a.data, base + i, a.dtype);
-            sumsq += v * v;
-        }
-        let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
-        for i in 0..last {
-            let v = load_f32_at(a.data, base + i, a.dtype);
-            store_f32_at(r.data, base + i, a.dtype, v * inv);
-        }
-    }
-    result
 }
 
 /// RMS normalization with a fused per-channel gain over the last dimension.
@@ -2982,47 +3093,49 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_weight(
     weight_ptr: i64,
     eps: f64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm_weight");
-    if a_ptr == 0 || weight_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let weight = &*(weight_ptr as *const RayzorTensor);
-    if a.ndim == 0
-        || a.dtype != DTYPE_F32
-        || weight.dtype != DTYPE_F32
-        || !a.is_contiguous()
-        || !weight.is_contiguous()
-    {
-        return 0;
-    }
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm_weight");
+        if a_ptr == 0 || weight_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let weight = &*(weight_ptr as *const RayzorTensor);
+        if a.ndim == 0
+            || a.dtype != DTYPE_F32
+            || weight.dtype != DTYPE_F32
+            || !a.is_contiguous()
+            || !weight.is_contiguous()
+        {
+            return 0;
+        }
 
-    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let last = shape[a.ndim - 1];
-    if last == 0 || weight.numel != last {
-        return 0;
-    }
+        let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+        let last = shape[a.ndim - 1];
+        if last == 0 || weight.numel != last {
+            return 0;
+        }
 
-    let result = alloc_tensor(shape, DTYPE_F32, None);
-    if result == 0 {
-        return 0;
-    }
+        let result = alloc_tensor(shape, DTYPE_F32, None);
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let groups = a.numel.checked_div(last).unwrap_or(0);
-    let eps_f32 = eps as f32;
-    let a_data = a.data as *const f32;
-    let w_slice = std::slice::from_raw_parts(weight.data as *const f32, last);
-    let r_data = r.data as *mut f32;
-    for g in 0..groups {
-        let base = g * last;
-        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-        rms_norm::rms_norm_row_f32(r_row, a_row, w_slice, eps_f32, f32::sqrt);
+        let r = &*(result as *const RayzorTensor);
+        let groups = a.numel.checked_div(last).unwrap_or(0);
+        let eps_f32 = eps as f32;
+        let a_data = a.data as *const f32;
+        let w_slice = std::slice::from_raw_parts(weight.data as *const f32, last);
+        let r_data = r.data as *mut f32;
+        for g in 0..groups {
+            let base = g * last;
+            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+            rms_norm::rms_norm_row_f32(r_row, a_row, w_slice, eps_f32, f32::sqrt);
+        }
+        result
     }
-    result
 }
 
 /// Apply rotary position embedding (RoPE) to a 3-D tensor of shape
@@ -3051,101 +3164,103 @@ unsafe fn rope_impl(
     position_offset: i64,
     neox: bool,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ROPE);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rope");
-    if x_ptr == 0 || cos_ptr == 0 || sin_ptr == 0 {
-        return 0;
-    }
-    let x = &*(x_ptr as *const RayzorTensor);
-    let cos = &*(cos_ptr as *const RayzorTensor);
-    let sin = &*(sin_ptr as *const RayzorTensor);
-
-    // Expect at least 2 dims; treat last as head_dim, second-to-last as num_heads,
-    // and any leading dim as seq_len (collapsed). Cos/sin must be 2-D
-    // [max_seq_len, head_dim/2].
-    if x.ndim < 2 || cos.ndim != 2 || sin.ndim != 2 {
-        return 0;
-    }
-    let x_shape = std::slice::from_raw_parts(x.shape, x.ndim);
-    let head_dim = x_shape[x.ndim - 1];
-    if !head_dim.is_multiple_of(2) {
-        return 0;
-    }
-    let half = head_dim / 2;
-    let num_heads = if x.ndim >= 3 { x_shape[x.ndim - 2] } else { 1 };
-    let seq_len: usize = x_shape[..x.ndim.saturating_sub(2)]
-        .iter()
-        .product::<usize>()
-        .max(1)
-        * (if x.ndim >= 3 { 1 } else { x_shape[0] });
-    let cos_shape = std::slice::from_raw_parts(cos.shape, 2);
-    let sin_shape = std::slice::from_raw_parts(sin.shape, 2);
-    if cos_shape[1] != half || sin_shape[1] != half {
-        return 0;
-    }
-    let cos_max = cos_shape[0];
-    let pos_off = position_offset.max(0) as usize;
-
-    let result = alloc_tensor(x_shape, x.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-
-    let elements_per_head = head_dim;
-    let elements_per_row = num_heads * elements_per_head;
-
-    for s in 0..seq_len {
-        let pos = s + pos_off;
-        if pos >= cos_max {
-            // Position out of range — fall back to identity rotation by copying x.
-            for i in 0..elements_per_row {
-                let off = s * elements_per_row + i;
-                let v = load_f32_at(x.data, off, x.dtype);
-                store_f32_at(r.data, off, x.dtype, v);
-            }
-            continue;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ROPE);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rope");
+        if x_ptr == 0 || cos_ptr == 0 || sin_ptr == 0 {
+            return 0;
         }
-        for h in 0..num_heads {
-            for i in 0..half {
-                let cos_v = load_f32_at(cos.data, pos * half + i, cos.dtype);
-                let sin_v = load_f32_at(sin.data, pos * half + i, sin.dtype);
-                let base = s * elements_per_row + h * elements_per_head;
-                // GGUF Llama models use the *interleaved* RoPE convention
-                // (llama.cpp's GGML_ROPE_TYPE_NORMAL = 0): consecutive
-                // dimensions are paired (x[2i], x[2i+1]). The HF
-                // `transformers/models/llama/modeling_llama.py::rotate_half`
-                // path is half-split (x[i], x[i+half]), but the
-                // HF-to-GGUF converter permutes the Q/K weight matrices
-                // so the GGUF weights work with the interleaved layout
-                // — i.e. the model file already bakes in the convention
-                // it expects. Loading those weights and applying half-
-                // split RoPE rotates along the wrong pairs of dims, which
-                // shows up as a 78% relative error on `Qcur-rope.sum()`
-                // vs the llama.cpp reference and a degenerate downstream
-                // attention pattern. See ggml-cpu/ops.cpp `ggml_compute_forward_rope`
-                // and the `rope type = 0` print_info in `llama-eval-callback -lv 4`.
-                // Pairing depends on the model's RoPE convention:
-                //   NORM/interleaved (Llama, Mistral) — consecutive dims
-                //     (x[2i], x[2i+1]); GGUF weights are permuted to suit it.
-                //   NEOX/half-split (Qwen2, GPT-NeoX, Falcon) — dims a half
-                //     apart (x[i], x[i+half]); GGUF weights are NOT permuted.
-                // The cos/sin table is identical for both (freq indexed by i);
-                // only which two dims rotate together changes.
-                let (off_lo, off_hi) = if neox {
-                    (base + i, base + half + i)
-                } else {
-                    (base + 2 * i, base + 2 * i + 1)
-                };
-                let xlo = load_f32_at(x.data, off_lo, x.dtype);
-                let xhi = load_f32_at(x.data, off_hi, x.dtype);
-                store_f32_at(r.data, off_lo, x.dtype, xlo * cos_v - xhi * sin_v);
-                store_f32_at(r.data, off_hi, x.dtype, xlo * sin_v + xhi * cos_v);
+        let x = &*(x_ptr as *const RayzorTensor);
+        let cos = &*(cos_ptr as *const RayzorTensor);
+        let sin = &*(sin_ptr as *const RayzorTensor);
+
+        // Expect at least 2 dims; treat last as head_dim, second-to-last as num_heads,
+        // and any leading dim as seq_len (collapsed). Cos/sin must be 2-D
+        // [max_seq_len, head_dim/2].
+        if x.ndim < 2 || cos.ndim != 2 || sin.ndim != 2 {
+            return 0;
+        }
+        let x_shape = std::slice::from_raw_parts(x.shape, x.ndim);
+        let head_dim = x_shape[x.ndim - 1];
+        if !head_dim.is_multiple_of(2) {
+            return 0;
+        }
+        let half = head_dim / 2;
+        let num_heads = if x.ndim >= 3 { x_shape[x.ndim - 2] } else { 1 };
+        let seq_len: usize = x_shape[..x.ndim.saturating_sub(2)]
+            .iter()
+            .product::<usize>()
+            .max(1)
+            * (if x.ndim >= 3 { 1 } else { x_shape[0] });
+        let cos_shape = std::slice::from_raw_parts(cos.shape, 2);
+        let sin_shape = std::slice::from_raw_parts(sin.shape, 2);
+        if cos_shape[1] != half || sin_shape[1] != half {
+            return 0;
+        }
+        let cos_max = cos_shape[0];
+        let pos_off = position_offset.max(0) as usize;
+
+        let result = alloc_tensor(x_shape, x.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+
+        let elements_per_head = head_dim;
+        let elements_per_row = num_heads * elements_per_head;
+
+        for s in 0..seq_len {
+            let pos = s + pos_off;
+            if pos >= cos_max {
+                // Position out of range — fall back to identity rotation by copying x.
+                for i in 0..elements_per_row {
+                    let off = s * elements_per_row + i;
+                    let v = load_f32_at(x.data, off, x.dtype);
+                    store_f32_at(r.data, off, x.dtype, v);
+                }
+                continue;
+            }
+            for h in 0..num_heads {
+                for i in 0..half {
+                    let cos_v = load_f32_at(cos.data, pos * half + i, cos.dtype);
+                    let sin_v = load_f32_at(sin.data, pos * half + i, sin.dtype);
+                    let base = s * elements_per_row + h * elements_per_head;
+                    // GGUF Llama models use the *interleaved* RoPE convention
+                    // (llama.cpp's GGML_ROPE_TYPE_NORMAL = 0): consecutive
+                    // dimensions are paired (x[2i], x[2i+1]). The HF
+                    // `transformers/models/llama/modeling_llama.py::rotate_half`
+                    // path is half-split (x[i], x[i+half]), but the
+                    // HF-to-GGUF converter permutes the Q/K weight matrices
+                    // so the GGUF weights work with the interleaved layout
+                    // — i.e. the model file already bakes in the convention
+                    // it expects. Loading those weights and applying half-
+                    // split RoPE rotates along the wrong pairs of dims, which
+                    // shows up as a 78% relative error on `Qcur-rope.sum()`
+                    // vs the llama.cpp reference and a degenerate downstream
+                    // attention pattern. See ggml-cpu/ops.cpp `ggml_compute_forward_rope`
+                    // and the `rope type = 0` print_info in `llama-eval-callback -lv 4`.
+                    // Pairing depends on the model's RoPE convention:
+                    //   NORM/interleaved (Llama, Mistral) — consecutive dims
+                    //     (x[2i], x[2i+1]); GGUF weights are permuted to suit it.
+                    //   NEOX/half-split (Qwen2, GPT-NeoX, Falcon) — dims a half
+                    //     apart (x[i], x[i+half]); GGUF weights are NOT permuted.
+                    // The cos/sin table is identical for both (freq indexed by i);
+                    // only which two dims rotate together changes.
+                    let (off_lo, off_hi) = if neox {
+                        (base + i, base + half + i)
+                    } else {
+                        (base + 2 * i, base + 2 * i + 1)
+                    };
+                    let xlo = load_f32_at(x.data, off_lo, x.dtype);
+                    let xhi = load_f32_at(x.data, off_hi, x.dtype);
+                    store_f32_at(r.data, off_lo, x.dtype, xlo * cos_v - xhi * sin_v);
+                    store_f32_at(r.data, off_hi, x.dtype, xlo * sin_v + xhi * cos_v);
+                }
             }
         }
+        result
     }
-    result
 }
 
 /// Interleaved (NORM) RoPE — Llama/Mistral. GGUF permutes Q/K to suit.
@@ -3156,7 +3271,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
     sin_ptr: i64,
     position_offset: i64,
 ) -> i64 {
-    rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, false)
+    unsafe { rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, false) }
 }
 
 /// Half-split (NEOX) RoPE — Qwen2/GPT-NeoX/Falcon. GGUF leaves Q/K unpermuted.
@@ -3167,7 +3282,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_neox(
     sin_ptr: i64,
     position_offset: i64,
 ) -> i64 {
-    rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, true)
+    unsafe { rope_impl(x_ptr, cos_ptr, sin_ptr, position_offset, true) }
 }
 
 /// Fused flash-style scaled dot-product attention for the **decode** case
@@ -3216,173 +3331,175 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     v_ptr: i64,
     scale: f64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::FLASH_ATTN_DECODE);
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_flash_attn_decode");
-    if q_ptr == 0 || k_ptr == 0 || v_ptr == 0 {
-        return 0;
-    }
-    let q = &*(q_ptr as *const RayzorTensor);
-    let k = &*(k_ptr as *const RayzorTensor);
-    let v = &*(v_ptr as *const RayzorTensor);
-
-    // dtype gate: F32 only for now (the rest of GQAttention is F32).
-    if q.dtype != DTYPE_F32 || k.dtype != DTYPE_F32 || v.dtype != DTYPE_F32 {
-        return 0;
-    }
-    // shape gates
-    if q.ndim != 3 || k.ndim != 3 || v.ndim != 3 {
-        return 0;
-    }
-    let q_shape = std::slice::from_raw_parts(q.shape, 3);
-    let k_shape = std::slice::from_raw_parts(k.shape, 3);
-    let v_shape = std::slice::from_raw_parts(v.shape, 3);
-
-    let seq_q = q_shape[0];
-    let num_q_heads = q_shape[1];
-    let head_dim = q_shape[2];
-    let cache_len = k_shape[0];
-    let num_kv_heads = k_shape[1];
-
-    // Decode-only by design.
-    if seq_q != 1 {
-        return 0;
-    }
-    // Shapes must agree.
-    if v_shape[0] != cache_len || v_shape[1] != num_kv_heads || v_shape[2] != head_dim {
-        return 0;
-    }
-    if k_shape[2] != head_dim {
-        return 0;
-    }
-    // GQA group must divide.
-    if num_kv_heads == 0 || !num_q_heads.is_multiple_of(num_kv_heads) {
-        return 0;
-    }
-    let group = num_q_heads / num_kv_heads;
-
-    // Contiguity gate: Q must be contiguous (seq_q=1 makes its layout flat
-    // along the head_dim×num_q_heads axes), K/V along the inner two axes —
-    // the cache slice view is row-major along (head, dim) so just check that.
-    if !q.is_contiguous() {
-        return 0;
-    }
-    let k_strides = std::slice::from_raw_parts(k.strides, 3);
-    let v_strides = std::slice::from_raw_parts(v.strides, 3);
-    let kv_row_stride = (num_kv_heads * head_dim) as usize;
-    if k_strides[1] != head_dim || k_strides[2] != 1 {
-        return 0;
-    }
-    if v_strides[1] != head_dim || v_strides[2] != 1 {
-        return 0;
-    }
-    // The cache-slice view keeps stride[0] = num_kv_heads*head_dim (the
-    // original backing's row stride). If something else passes a strided
-    // view we bail to avoid scrambled reads.
-    if k_strides[0] != kv_row_stride || v_strides[0] != kv_row_stride {
-        return 0;
-    }
-
-    // Allocate output [1, num_q_heads, head_dim].
-    let out_shape = [1usize, num_q_heads, head_dim];
-    let result = alloc_tensor(&out_shape, DTYPE_F32, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-
-    let q_data = q.data as *const f32;
-    let k_data = k.data as *const f32;
-    let v_data = v.data as *const f32;
-    let out_data = r.data as *mut f32;
-
-    // Each q_head writes a disjoint head_dim slice of `out_data`
-    // (`out_data[q_head * head_dim .. q_head * head_dim + head_dim]`)
-    // and reads only Q[q_head] + K[*, kv_head] + V[*, kv_head] — no
-    // cross-q_head reduction. So workers can fan out over the q_head
-    // axis without synchronisation.
-    //
-    // Parallelisation gate: short cache_len pays the worker_pool
-    // wake/join cost more than the kernel saves. Empirical A/B on
-    // M1 Pro (Voronoi long-form, parallel vs single-thread flash):
-    //
-    //   N=300 (cache ~316):  median +0.4% (sub-noise), thermal
-    //                        pairs lose 8% — workers compete with
-    //                        throttled matmul for cores
-    //   N=600 (cache ~616):  median +12.1%, two paired wins at +14%
-    //
-    // Crossover is around cache_len 400-500. Gate at cache_len ≥ 256
-    // so the per-q_head work (2 × cache_len × head_dim FMAs ≈ 32k
-    // for head_dim=64) is large enough to amortise the fork-join
-    // and stays out of the thermally-fragile short-cache regime.
-    // Below the gate, single-thread is both faster on cool runs
-    // AND more thermally stable.
-    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
-    let mut t = auto_threads.min(num_q_heads);
-    if cache_len < 256 || num_q_heads < 4 {
-        t = 1;
-    }
-    let scale_f32 = scale as f32;
-    if t <= 1 {
-        // Sequential fallback. Single scores scratch shared across q_heads.
-        let mut scores: Vec<f32> = vec![0.0; cache_len];
-        for q_head in 0..num_q_heads {
-            flash_attn_decode_one_qhead(
-                q_head,
-                group,
-                head_dim,
-                cache_len,
-                kv_row_stride,
-                scale_f32,
-                q_data,
-                k_data,
-                v_data,
-                out_data,
-                &mut scores,
-            );
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::FLASH_ATTN_DECODE);
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_flash_attn_decode");
+        if q_ptr == 0 || k_ptr == 0 || v_ptr == 0 {
+            return 0;
         }
-        return result;
-    }
+        let q = &*(q_ptr as *const RayzorTensor);
+        let k = &*(k_ptr as *const RayzorTensor);
+        let v = &*(v_ptr as *const RayzorTensor);
 
-    // Parallel fan-out. SAFETY: the raw `*const f32` / `*mut f32`
-    // pointers don't implement `Send`, so capture as `usize` and
-    // reconstitute inside the worker closure. Disjoint writes on
-    // `out_data` are guaranteed by the q_head split (each q_head
-    // owns a unique `[q_head * head_dim, (q_head+1) * head_dim)`
-    // band). Worker_pool::parallel_rows blocks until all jobs
-    // finish, so the borrowed pointers stay valid throughout.
-    let q_data_us = q_data as usize;
-    let k_data_us = k_data as usize;
-    let v_data_us = v_data as usize;
-    let out_data_us = out_data as usize;
-    crate::worker_pool::global().parallel_rows(num_q_heads, t, move |lo, hi| unsafe {
-        let q_ptr = q_data_us as *const f32;
-        let k_ptr = k_data_us as *const f32;
-        let v_ptr = v_data_us as *const f32;
-        let out_ptr = out_data_us as *mut f32;
-        // Per-worker scratch — reused across the worker's q_head
-        // range. One alloc per worker per call (~4 allocs total at
-        // t=6 worker spawn instead of 1; the cost amortises against
-        // the saved single-thread serialization).
-        let mut scores: Vec<f32> = vec![0.0; cache_len];
-        for q_head in lo..hi {
-            flash_attn_decode_one_qhead(
-                q_head,
-                group,
-                head_dim,
-                cache_len,
-                kv_row_stride,
-                scale_f32,
-                q_ptr,
-                k_ptr,
-                v_ptr,
-                out_ptr,
-                &mut scores,
-            );
+        // dtype gate: F32 only for now (the rest of GQAttention is F32).
+        if q.dtype != DTYPE_F32 || k.dtype != DTYPE_F32 || v.dtype != DTYPE_F32 {
+            return 0;
         }
-    });
+        // shape gates
+        if q.ndim != 3 || k.ndim != 3 || v.ndim != 3 {
+            return 0;
+        }
+        let q_shape = std::slice::from_raw_parts(q.shape, 3);
+        let k_shape = std::slice::from_raw_parts(k.shape, 3);
+        let v_shape = std::slice::from_raw_parts(v.shape, 3);
 
-    result
+        let seq_q = q_shape[0];
+        let num_q_heads = q_shape[1];
+        let head_dim = q_shape[2];
+        let cache_len = k_shape[0];
+        let num_kv_heads = k_shape[1];
+
+        // Decode-only by design.
+        if seq_q != 1 {
+            return 0;
+        }
+        // Shapes must agree.
+        if v_shape[0] != cache_len || v_shape[1] != num_kv_heads || v_shape[2] != head_dim {
+            return 0;
+        }
+        if k_shape[2] != head_dim {
+            return 0;
+        }
+        // GQA group must divide.
+        if num_kv_heads == 0 || !num_q_heads.is_multiple_of(num_kv_heads) {
+            return 0;
+        }
+        let group = num_q_heads / num_kv_heads;
+
+        // Contiguity gate: Q must be contiguous (seq_q=1 makes its layout flat
+        // along the head_dim×num_q_heads axes), K/V along the inner two axes —
+        // the cache slice view is row-major along (head, dim) so just check that.
+        if !q.is_contiguous() {
+            return 0;
+        }
+        let k_strides = std::slice::from_raw_parts(k.strides, 3);
+        let v_strides = std::slice::from_raw_parts(v.strides, 3);
+        let kv_row_stride = (num_kv_heads * head_dim) as usize;
+        if k_strides[1] != head_dim || k_strides[2] != 1 {
+            return 0;
+        }
+        if v_strides[1] != head_dim || v_strides[2] != 1 {
+            return 0;
+        }
+        // The cache-slice view keeps stride[0] = num_kv_heads*head_dim (the
+        // original backing's row stride). If something else passes a strided
+        // view we bail to avoid scrambled reads.
+        if k_strides[0] != kv_row_stride || v_strides[0] != kv_row_stride {
+            return 0;
+        }
+
+        // Allocate output [1, num_q_heads, head_dim].
+        let out_shape = [1usize, num_q_heads, head_dim];
+        let result = alloc_tensor(&out_shape, DTYPE_F32, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+
+        let q_data = q.data as *const f32;
+        let k_data = k.data as *const f32;
+        let v_data = v.data as *const f32;
+        let out_data = r.data as *mut f32;
+
+        // Each q_head writes a disjoint head_dim slice of `out_data`
+        // (`out_data[q_head * head_dim .. q_head * head_dim + head_dim]`)
+        // and reads only Q[q_head] + K[*, kv_head] + V[*, kv_head] — no
+        // cross-q_head reduction. So workers can fan out over the q_head
+        // axis without synchronisation.
+        //
+        // Parallelisation gate: short cache_len pays the worker_pool
+        // wake/join cost more than the kernel saves. Empirical A/B on
+        // M1 Pro (Voronoi long-form, parallel vs single-thread flash):
+        //
+        //   N=300 (cache ~316):  median +0.4% (sub-noise), thermal
+        //                        pairs lose 8% — workers compete with
+        //                        throttled matmul for cores
+        //   N=600 (cache ~616):  median +12.1%, two paired wins at +14%
+        //
+        // Crossover is around cache_len 400-500. Gate at cache_len ≥ 256
+        // so the per-q_head work (2 × cache_len × head_dim FMAs ≈ 32k
+        // for head_dim=64) is large enough to amortise the fork-join
+        // and stays out of the thermally-fragile short-cache regime.
+        // Below the gate, single-thread is both faster on cool runs
+        // AND more thermally stable.
+        let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
+        let mut t = auto_threads.min(num_q_heads);
+        if cache_len < 256 || num_q_heads < 4 {
+            t = 1;
+        }
+        let scale_f32 = scale as f32;
+        if t <= 1 {
+            // Sequential fallback. Single scores scratch shared across q_heads.
+            let mut scores: Vec<f32> = vec![0.0; cache_len];
+            for q_head in 0..num_q_heads {
+                flash_attn_decode_one_qhead(
+                    q_head,
+                    group,
+                    head_dim,
+                    cache_len,
+                    kv_row_stride,
+                    scale_f32,
+                    q_data,
+                    k_data,
+                    v_data,
+                    out_data,
+                    &mut scores,
+                );
+            }
+            return result;
+        }
+
+        // Parallel fan-out. SAFETY: the raw `*const f32` / `*mut f32`
+        // pointers don't implement `Send`, so capture as `usize` and
+        // reconstitute inside the worker closure. Disjoint writes on
+        // `out_data` are guaranteed by the q_head split (each q_head
+        // owns a unique `[q_head * head_dim, (q_head+1) * head_dim)`
+        // band). Worker_pool::parallel_rows blocks until all jobs
+        // finish, so the borrowed pointers stay valid throughout.
+        let q_data_us = q_data as usize;
+        let k_data_us = k_data as usize;
+        let v_data_us = v_data as usize;
+        let out_data_us = out_data as usize;
+        crate::worker_pool::global().parallel_rows(num_q_heads, t, move |lo, hi| {
+            let q_ptr = q_data_us as *const f32;
+            let k_ptr = k_data_us as *const f32;
+            let v_ptr = v_data_us as *const f32;
+            let out_ptr = out_data_us as *mut f32;
+            // Per-worker scratch — reused across the worker's q_head
+            // range. One alloc per worker per call (~4 allocs total at
+            // t=6 worker spawn instead of 1; the cost amortises against
+            // the saved single-thread serialization).
+            let mut scores: Vec<f32> = vec![0.0; cache_len];
+            for q_head in lo..hi {
+                flash_attn_decode_one_qhead(
+                    q_head,
+                    group,
+                    head_dim,
+                    cache_len,
+                    kv_row_stride,
+                    scale_f32,
+                    q_ptr,
+                    k_ptr,
+                    v_ptr,
+                    out_ptr,
+                    &mut scores,
+                );
+            }
+        });
+
+        result
+    }
 }
 
 /// Inner per-q_head body shared between the sequential and parallel
@@ -3409,20 +3526,22 @@ unsafe fn flash_attn_decode_one_qhead(
     out_data: *mut f32,
     scores: &mut [f32],
 ) {
-    rayzor_runtime_core::tensor::flash_attn::flash_attn_decode_one_qhead(
-        q_head,
-        group,
-        head_dim,
-        cache_len,
-        kv_row_stride,
-        scale_f32,
-        q_data,
-        k_data,
-        v_data,
-        out_data,
-        scores,
-        |x| x.exp(),
-    );
+    unsafe {
+        rayzor_runtime_core::tensor::flash_attn::flash_attn_decode_one_qhead(
+            q_head,
+            group,
+            head_dim,
+            cache_len,
+            kv_row_stride,
+            scale_f32,
+            q_data,
+            k_data,
+            v_data,
+            out_data,
+            scores,
+            |x| x.exp(),
+        );
+    }
 }
 
 /// Generate the RoPE cos/sin tables for a given head dimension and maximum
@@ -3444,7 +3563,9 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ false)
+    unsafe {
+        rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ false)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -3453,7 +3574,9 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ true)
+    unsafe {
+        rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ true)
+    }
 }
 
 /// F16-stored variants of the RoPE LUTs. Same math, half the memory.
@@ -3472,7 +3595,9 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ false)
+    unsafe {
+        rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ false)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -3481,32 +3606,36 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table_f16(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ true)
+    unsafe {
+        rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ true)
+    }
 }
 
 unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, dtype: u8, want_sin: bool) -> i64 {
-    if head_dim <= 0 || max_seq_len <= 0 || head_dim % 2 != 0 {
-        return 0;
-    }
-    let head_dim = head_dim as usize;
-    let max_seq_len = max_seq_len as usize;
-    let half = head_dim / 2;
-    let shape = [max_seq_len, half];
-    let result = alloc_tensor(&shape, dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let head_dim_f = head_dim as f64;
-    for p in 0..max_seq_len {
-        for i in 0..half {
-            let theta = 1.0_f64 / base.powf((2 * i) as f64 / head_dim_f);
-            let angle = (p as f64) * theta;
-            let v = if want_sin { angle.sin() } else { angle.cos() };
-            store_f32_at(r.data, p * half + i, dtype, v as f32);
+    unsafe {
+        if head_dim <= 0 || max_seq_len <= 0 || head_dim % 2 != 0 {
+            return 0;
         }
+        let head_dim = head_dim as usize;
+        let max_seq_len = max_seq_len as usize;
+        let half = head_dim / 2;
+        let shape = [max_seq_len, half];
+        let result = alloc_tensor(&shape, dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let head_dim_f = head_dim as f64;
+        for p in 0..max_seq_len {
+            for i in 0..half {
+                let theta = 1.0_f64 / base.powf((2 * i) as f64 / head_dim_f);
+                let angle = (p as f64) * theta;
+                let v = if want_sin { angle.sin() } else { angle.cos() };
+                store_f32_at(r.data, p * half + i, dtype, v as f32);
+            }
+        }
+        result
     }
-    result
 }
 
 /// Batched 3-D matmul: `a [batch, M, K]` × `b [batch, K, N]` → `[batch, M, N]`.
@@ -3518,90 +3647,98 @@ unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, dtype: u8, want
 /// user code.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-    if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
-        return 0;
-    }
-    let a_shape = std::slice::from_raw_parts(a.shape, 3);
-    let b_shape = std::slice::from_raw_parts(b.shape, 3);
-    let a_strides = std::slice::from_raw_parts(a.strides, 3);
-    let b_strides = std::slice::from_raw_parts(b.strides, 3);
-    let batch = a_shape[0];
-    let m = a_shape[1];
-    let k = a_shape[2];
-    let n = b_shape[2];
-    if b_shape[0] != batch || b_shape[1] != k {
-        return 0;
-    }
-    let out_shape = [batch, m, n];
-    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let dtype = a.dtype;
+    unsafe {
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
+        if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
+            return 0;
+        }
+        let a_shape = std::slice::from_raw_parts(a.shape, 3);
+        let b_shape = std::slice::from_raw_parts(b.shape, 3);
+        let a_strides = std::slice::from_raw_parts(a.strides, 3);
+        let b_strides = std::slice::from_raw_parts(b.strides, 3);
+        let batch = a_shape[0];
+        let m = a_shape[1];
+        let k = a_shape[2];
+        let n = b_shape[2];
+        if b_shape[0] != batch || b_shape[1] != k {
+            return 0;
+        }
+        let out_shape = [batch, m, n];
+        let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let dtype = a.dtype;
 
-    // Result is contiguous (freshly allocated). Walk per batch using
-    // each input's *actual* strides — bmm callers in the transformer hot
-    // path (GQAttention's qByHead.bmm(kT) and attn.bmm(vAllExpanded)) feed
-    // non-contiguous views from `.permute` / `.transposeLast2`. Previously
-    // bmm assumed `[batch, M, K]` row-major contiguous and read the wrong
-    // memory; attention scores were garbage, leading to incoherent
-    // generation regardless of how correct the rest of the pipeline was.
-    let a_b_stride = a_strides[0];
-    let a_m_stride = a_strides[1];
-    let a_k_stride = a_strides[2];
-    let b_b_stride = b_strides[0];
-    let b_k_stride = b_strides[1];
-    let b_n_stride = b_strides[2];
+        // Result is contiguous (freshly allocated). Walk per batch using
+        // each input's *actual* strides — bmm callers in the transformer hot
+        // path (GQAttention's qByHead.bmm(kT) and attn.bmm(vAllExpanded)) feed
+        // non-contiguous views from `.permute` / `.transposeLast2`. Previously
+        // bmm assumed `[batch, M, K]` row-major contiguous and read the wrong
+        // memory; attention scores were garbage, leading to incoherent
+        // generation regardless of how correct the rest of the pipeline was.
+        let a_b_stride = a_strides[0];
+        let a_m_stride = a_strides[1];
+        let a_k_stride = a_strides[2];
+        let b_b_stride = b_strides[0];
+        let b_k_stride = b_strides[1];
+        let b_n_stride = b_strides[2];
 
-    let a_contig_inner = a_k_stride == 1;
-    let b_contig_inner = b_n_stride == 1;
+        let a_contig_inner = a_k_stride == 1;
+        let b_contig_inner = b_n_stride == 1;
 
-    for batch_i in 0..batch {
-        let a_batch_off = batch_i * a_b_stride;
-        let b_batch_off = batch_i * b_b_stride;
-        let c_batch_off = batch_i * m * n;
+        for batch_i in 0..batch {
+            let a_batch_off = batch_i * a_b_stride;
+            let b_batch_off = batch_i * b_b_stride;
+            let c_batch_off = batch_i * m * n;
 
-        if dtype == DTYPE_F32 && a_contig_inner && b_contig_inner {
-            // Inner dim contiguous on both → SIMD axpy fast path.
-            let a_f = a.data as *const f32;
-            let b_f = b.data as *const f32;
-            let c_f = r.data as *mut f32;
+            if dtype == DTYPE_F32 && a_contig_inner && b_contig_inner {
+                // Inner dim contiguous on both → SIMD axpy fast path.
+                let a_f = a.data as *const f32;
+                let b_f = b.data as *const f32;
+                let c_f = r.data as *mut f32;
+                for i in 0..m {
+                    let c_row_off = c_batch_off + i * n;
+                    let a_row_off = a_batch_off + i * a_m_stride;
+                    for p in 0..k {
+                        let a_ik = *a_f.add(a_row_off + p);
+                        let b_row_off = b_batch_off + p * b_k_stride;
+                        let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
+                        let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
+                        crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                    }
+                }
+                continue;
+            }
+
+            // General strided / non-F32 path.
             for i in 0..m {
-                let c_row_off = c_batch_off + i * n;
-                let a_row_off = a_batch_off + i * a_m_stride;
-                for p in 0..k {
-                    let a_ik = *a_f.add(a_row_off + p);
-                    let b_row_off = b_batch_off + p * b_k_stride;
-                    let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
-                    let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
-                    crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        let av = load_f32_at(
+                            a.data,
+                            a_batch_off + i * a_m_stride + p * a_k_stride,
+                            dtype,
+                        );
+                        let bv = load_f32_at(
+                            b.data,
+                            b_batch_off + p * b_k_stride + j * b_n_stride,
+                            dtype,
+                        );
+                        acc += av * bv;
+                    }
+                    store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
                 }
             }
-            continue;
         }
-
-        // General strided / non-F32 path.
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc = 0.0f32;
-                for p in 0..k {
-                    let av =
-                        load_f32_at(a.data, a_batch_off + i * a_m_stride + p * a_k_stride, dtype);
-                    let bv =
-                        load_f32_at(b.data, b_batch_off + p * b_k_stride + j * b_n_stride, dtype);
-                    acc += av * bv;
-                }
-                store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
-            }
-        }
+        result
     }
-    result
 }
 
 /// Threaded variant of `rayzor_tensor_bmm`. Same `[batch, M, K] @ [batch, K, N]
@@ -3617,166 +3754,168 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
 /// rather than silently falling through.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, threads: i64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_bmm_threaded");
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-    if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
-        return 0;
-    }
-    if a.dtype != DTYPE_F32 {
-        return 0;
-    }
-    let a_shape = std::slice::from_raw_parts(a.shape, 3);
-    let b_shape = std::slice::from_raw_parts(b.shape, 3);
-    let a_strides = std::slice::from_raw_parts(a.strides, 3);
-    let b_strides = std::slice::from_raw_parts(b.strides, 3);
-    let batch = a_shape[0];
-    let m = a_shape[1];
-    let k = a_shape[2];
-    let n = b_shape[2];
-    if b_shape[0] != batch || b_shape[1] != k {
-        return 0;
-    }
-    let out_shape = [batch, m, n];
-    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let dtype = a.dtype;
-
-    let a_b_stride = a_strides[0];
-    let a_m_stride = a_strides[1];
-    let a_k_stride = a_strides[2];
-    let b_b_stride = b_strides[0];
-    let b_k_stride = b_strides[1];
-    let b_n_stride = b_strides[2];
-
-    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
-    let total_rows = batch * m;
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        auto_threads
-    };
-    if t > total_rows {
-        t = total_rows.max(1);
-    }
-
-    // Sequential fast path: skip fork/join when work is too small to amortize.
-    // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
-    // cost (each worker needs >=~10 rows worth of FMA to dominate the join).
-    const MIN_PARALLEL_ROWS: usize = 64;
-    if t <= 1 || total_rows < MIN_PARALLEL_ROWS {
-        let a_contig_inner = a_k_stride == 1;
-        let b_contig_inner = b_n_stride == 1;
-        for batch_i in 0..batch {
-            let a_batch_off = batch_i * a_b_stride;
-            let b_batch_off = batch_i * b_b_stride;
-            let c_batch_off = batch_i * m * n;
-            if a_contig_inner && b_contig_inner {
-                let a_f = a.data as *const f32;
-                let b_f = b.data as *const f32;
-                let c_f = r.data as *mut f32;
-                for i in 0..m {
-                    let c_row_off = c_batch_off + i * n;
-                    let a_row_off = a_batch_off + i * a_m_stride;
-                    for p in 0..k {
-                        let a_ik = *a_f.add(a_row_off + p);
-                        let b_row_off = b_batch_off + p * b_k_stride;
-                        let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
-                        let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
-                        crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
-                    }
-                }
-            } else {
-                for i in 0..m {
-                    for j in 0..n {
-                        let mut acc = 0.0f32;
-                        for p in 0..k {
-                            let av = load_f32_at(
-                                a.data,
-                                a_batch_off + i * a_m_stride + p * a_k_stride,
-                                dtype,
-                            );
-                            let bv = load_f32_at(
-                                b.data,
-                                b_batch_off + p * b_k_stride + j * b_n_stride,
-                                dtype,
-                            );
-                            acc += av * bv;
-                        }
-                        store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
-                    }
-                }
-            }
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_bmm_threaded");
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
         }
-        return result;
-    }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
+        if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
+            return 0;
+        }
+        if a.dtype != DTYPE_F32 {
+            return 0;
+        }
+        let a_shape = std::slice::from_raw_parts(a.shape, 3);
+        let b_shape = std::slice::from_raw_parts(b.shape, 3);
+        let a_strides = std::slice::from_raw_parts(a.strides, 3);
+        let b_strides = std::slice::from_raw_parts(b.strides, 3);
+        let batch = a_shape[0];
+        let m = a_shape[1];
+        let k = a_shape[2];
+        let n = b_shape[2];
+        if b_shape[0] != batch || b_shape[1] != k {
+            return 0;
+        }
+        let out_shape = [batch, m, n];
+        let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let dtype = a.dtype;
 
-    let a_data = a.data as usize;
-    let b_data = b.data as usize;
-    let r_data = r.data as usize;
-    let m_dim = m;
-    let n_dim = n;
-    let k_dim = k;
-    let a_contig_inner = a_k_stride == 1;
-    let b_contig_inner = b_n_stride == 1;
+        let a_b_stride = a_strides[0];
+        let a_m_stride = a_strides[1];
+        let a_k_stride = a_strides[2];
+        let b_b_stride = b_strides[0];
+        let b_k_stride = b_strides[1];
+        let b_n_stride = b_strides[2];
 
-    crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| {
-        // SAFETY: each worker writes Y[batch_i, m_i, 0..N] for the (batch_i, m_i)
-        // pairs it owns; ranges are disjoint across workers so there is no
-        // aliasing on the output. Inputs A and B are read-only.
-        unsafe {
-            for flat in lo..hi {
-                let batch_i = flat / m_dim;
-                let m_i = flat % m_dim;
+        let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
+        let total_rows = batch * m;
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            auto_threads
+        };
+        if t > total_rows {
+            t = total_rows.max(1);
+        }
+
+        // Sequential fast path: skip fork/join when work is too small to amortize.
+        // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
+        // cost (each worker needs >=~10 rows worth of FMA to dominate the join).
+        const MIN_PARALLEL_ROWS: usize = 64;
+        if t <= 1 || total_rows < MIN_PARALLEL_ROWS {
+            let a_contig_inner = a_k_stride == 1;
+            let b_contig_inner = b_n_stride == 1;
+            for batch_i in 0..batch {
                 let a_batch_off = batch_i * a_b_stride;
                 let b_batch_off = batch_i * b_b_stride;
-                let c_batch_off = batch_i * m_dim * n_dim;
-                let c_row_off = c_batch_off + m_i * n_dim;
-                let a_row_off = a_batch_off + m_i * a_m_stride;
+                let c_batch_off = batch_i * m * n;
                 if a_contig_inner && b_contig_inner {
-                    let a_f = a_data as *const f32;
-                    let b_f = b_data as *const f32;
-                    let c_f = r_data as *mut f32;
-                    for p in 0..k_dim {
-                        let a_ik = *a_f.add(a_row_off + p);
-                        let b_row_off = b_batch_off + p * b_k_stride;
-                        let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n_dim);
-                        let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n_dim);
-                        crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                    let a_f = a.data as *const f32;
+                    let b_f = b.data as *const f32;
+                    let c_f = r.data as *mut f32;
+                    for i in 0..m {
+                        let c_row_off = c_batch_off + i * n;
+                        let a_row_off = a_batch_off + i * a_m_stride;
+                        for p in 0..k {
+                            let a_ik = *a_f.add(a_row_off + p);
+                            let b_row_off = b_batch_off + p * b_k_stride;
+                            let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
+                            let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
+                            crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                        }
                     }
                 } else {
-                    let a_ptr = a_data as *const u8;
-                    let b_ptr = b_data as *const u8;
-                    let r_ptr = r_data as *mut u8;
-                    for j in 0..n_dim {
-                        let mut acc = 0.0f32;
-                        for p in 0..k_dim {
-                            let av = load_f32_at(
-                                a_ptr,
-                                a_batch_off + m_i * a_m_stride + p * a_k_stride,
-                                dtype,
-                            );
-                            let bv = load_f32_at(
-                                b_ptr,
-                                b_batch_off + p * b_k_stride + j * b_n_stride,
-                                dtype,
-                            );
-                            acc += av * bv;
+                    for i in 0..m {
+                        for j in 0..n {
+                            let mut acc = 0.0f32;
+                            for p in 0..k {
+                                let av = load_f32_at(
+                                    a.data,
+                                    a_batch_off + i * a_m_stride + p * a_k_stride,
+                                    dtype,
+                                );
+                                let bv = load_f32_at(
+                                    b.data,
+                                    b_batch_off + p * b_k_stride + j * b_n_stride,
+                                    dtype,
+                                );
+                                acc += av * bv;
+                            }
+                            store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
                         }
-                        store_f32_at(r_ptr, c_row_off + j, dtype, acc);
                     }
                 }
             }
+            return result;
         }
-    });
 
-    result
+        let a_data = a.data as usize;
+        let b_data = b.data as usize;
+        let r_data = r.data as usize;
+        let m_dim = m;
+        let n_dim = n;
+        let k_dim = k;
+        let a_contig_inner = a_k_stride == 1;
+        let b_contig_inner = b_n_stride == 1;
+
+        crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| {
+            // SAFETY: each worker writes Y[batch_i, m_i, 0..N] for the (batch_i, m_i)
+            // pairs it owns; ranges are disjoint across workers so there is no
+            // aliasing on the output. Inputs A and B are read-only.
+            {
+                for flat in lo..hi {
+                    let batch_i = flat / m_dim;
+                    let m_i = flat % m_dim;
+                    let a_batch_off = batch_i * a_b_stride;
+                    let b_batch_off = batch_i * b_b_stride;
+                    let c_batch_off = batch_i * m_dim * n_dim;
+                    let c_row_off = c_batch_off + m_i * n_dim;
+                    let a_row_off = a_batch_off + m_i * a_m_stride;
+                    if a_contig_inner && b_contig_inner {
+                        let a_f = a_data as *const f32;
+                        let b_f = b_data as *const f32;
+                        let c_f = r_data as *mut f32;
+                        for p in 0..k_dim {
+                            let a_ik = *a_f.add(a_row_off + p);
+                            let b_row_off = b_batch_off + p * b_k_stride;
+                            let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n_dim);
+                            let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n_dim);
+                            crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                        }
+                    } else {
+                        let a_ptr = a_data as *const u8;
+                        let b_ptr = b_data as *const u8;
+                        let r_ptr = r_data as *mut u8;
+                        for j in 0..n_dim {
+                            let mut acc = 0.0f32;
+                            for p in 0..k_dim {
+                                let av = load_f32_at(
+                                    a_ptr,
+                                    a_batch_off + m_i * a_m_stride + p * a_k_stride,
+                                    dtype,
+                                );
+                                let bv = load_f32_at(
+                                    b_ptr,
+                                    b_batch_off + p * b_k_stride + j * b_n_stride,
+                                    dtype,
+                                );
+                                acc += av * bv;
+                            }
+                            store_f32_at(r_ptr, c_row_off + j, dtype, acc);
+                        }
+                    }
+                }
+            }
+        });
+
+        result
+    }
 }
 
 /// In-place causal mask. Treats the last two dimensions of `t` as
@@ -3791,34 +3930,36 @@ pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, thre
 /// Returns the same tensor pointer (mutates in place) for convenience.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset: i64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_causal_mask_");
-    if t_ptr == 0 {
-        return 0;
-    }
-    let t = &*(t_ptr as *const RayzorTensor);
-    if t.ndim < 2 {
-        return 0;
-    }
-    let shape = std::slice::from_raw_parts(t.shape, t.ndim);
-    let cols = shape[t.ndim - 1];
-    let rows = shape[t.ndim - 2];
-    let outer: usize = shape[..t.ndim.saturating_sub(2)]
-        .iter()
-        .product::<usize>()
-        .max(1);
-    let pos = position_offset.max(0) as usize;
-    let neg_inf = f32::NEG_INFINITY;
-    for o in 0..outer {
-        let base = o * rows * cols;
-        for i in 0..rows {
-            // Mask everything strictly after the diagonal (+ position_offset).
-            let first_masked = (i + pos + 1).min(cols);
-            for j in first_masked..cols {
-                store_f32_at(t.data, base + i * cols + j, t.dtype, neg_inf);
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_causal_mask_");
+        if t_ptr == 0 {
+            return 0;
+        }
+        let t = &*(t_ptr as *const RayzorTensor);
+        if t.ndim < 2 {
+            return 0;
+        }
+        let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+        let cols = shape[t.ndim - 1];
+        let rows = shape[t.ndim - 2];
+        let outer: usize = shape[..t.ndim.saturating_sub(2)]
+            .iter()
+            .product::<usize>()
+            .max(1);
+        let pos = position_offset.max(0) as usize;
+        let neg_inf = f32::NEG_INFINITY;
+        for o in 0..outer {
+            let base = o * rows * cols;
+            for i in 0..rows {
+                // Mask everything strictly after the diagonal (+ position_offset).
+                let first_masked = (i + pos + 1).min(cols);
+                for j in first_masked..cols {
+                    store_f32_at(t.data, base + i * cols + j, t.dtype, neg_inf);
+                }
             }
         }
+        t_ptr
     }
-    t_ptr
 }
 
 /// Scale every element by a scalar f32. Allocates a fresh tensor; no
@@ -3826,32 +3967,34 @@ pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset:
 /// after the new allocation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
-    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_scale");
-    if t_ptr == 0 {
-        return 0;
+    unsafe {
+        let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_scale");
+        if t_ptr == 0 {
+            return 0;
+        }
+        let t = &*(t_ptr as *const RayzorTensor);
+        let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+        let result = alloc_tensor(shape, t.dtype, None);
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let f = factor as f32;
+        if t.dtype == DTYPE_F32 {
+            let src = t.data as *const f32;
+            let dst = r.data as *mut f32;
+            let n = t.numel;
+            let src_slice = std::slice::from_raw_parts(src, n);
+            let dst_slice = std::slice::from_raw_parts_mut(dst, n);
+            crate::tensor_simd::mul_const_slice(dst_slice, src_slice, f);
+            return result;
+        }
+        for i in 0..t.numel {
+            let v = load_f32_at(t.data, i, t.dtype);
+            store_f32_at(r.data, i, t.dtype, v * f);
+        }
+        result
     }
-    let t = &*(t_ptr as *const RayzorTensor);
-    let shape = std::slice::from_raw_parts(t.shape, t.ndim);
-    let result = alloc_tensor(shape, t.dtype, None);
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let f = factor as f32;
-    if t.dtype == DTYPE_F32 {
-        let src = t.data as *const f32;
-        let dst = r.data as *mut f32;
-        let n = t.numel;
-        let src_slice = std::slice::from_raw_parts(src, n);
-        let dst_slice = std::slice::from_raw_parts_mut(dst, n);
-        crate::tensor_simd::mul_const_slice(dst_slice, src_slice, f);
-        return result;
-    }
-    for i in 0..t.numel {
-        let v = load_f32_at(t.data, i, t.dtype);
-        store_f32_at(r.data, i, t.dtype, v * f);
-    }
-    result
 }
 
 /// Transpose the last two dimensions (zero-copy view). Equivalent to
@@ -3863,54 +4006,56 @@ pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
 /// every time.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
-    if t_ptr == 0 {
-        return 0;
-    }
-    let t = &*(t_ptr as *const RayzorTensor);
-    if t.ndim < 2 {
-        return t_ptr;
-    }
-    let n = t.ndim;
-    let old_shape = std::slice::from_raw_parts(t.shape, n);
-    let old_strides = std::slice::from_raw_parts(t.strides, n);
+    unsafe {
+        if t_ptr == 0 {
+            return 0;
+        }
+        let t = &*(t_ptr as *const RayzorTensor);
+        if t.ndim < 2 {
+            return t_ptr;
+        }
+        let n = t.ndim;
+        let old_shape = std::slice::from_raw_parts(t.shape, n);
+        let old_strides = std::slice::from_raw_parts(t.strides, n);
 
-    let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
-    let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
-    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
-        return 0;
-    }
-    for i in 0..n {
-        *new_shape_ptr.add(i) = old_shape[i];
-        *new_strides_ptr.add(i) = old_strides[i];
-    }
-    // Swap the last two.
-    *new_shape_ptr.add(n - 1) = old_shape[n - 2];
-    *new_shape_ptr.add(n - 2) = old_shape[n - 1];
-    *new_strides_ptr.add(n - 1) = old_strides[n - 2];
-    *new_strides_ptr.add(n - 2) = old_strides[n - 1];
+        let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+        let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+        if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+            return 0;
+        }
+        for i in 0..n {
+            *new_shape_ptr.add(i) = old_shape[i];
+            *new_strides_ptr.add(i) = old_strides[i];
+        }
+        // Swap the last two.
+        *new_shape_ptr.add(n - 1) = old_shape[n - 2];
+        *new_shape_ptr.add(n - 2) = old_shape[n - 1];
+        *new_strides_ptr.add(n - 1) = old_strides[n - 2];
+        *new_strides_ptr.add(n - 2) = old_strides[n - 1];
 
-    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if new_t.is_null() {
-        free(new_shape_ptr as *mut u8);
-        free(new_strides_ptr as *mut u8);
-        return 0;
+        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if new_t.is_null() {
+            free(new_shape_ptr as *mut u8);
+            free(new_strides_ptr as *mut u8);
+            return 0;
+        }
+        *new_t = RayzorTensor {
+            data: t.data,
+            shape: new_shape_ptr,
+            strides: new_strides_ptr,
+            ndim: n,
+            numel: t.numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: t_ptr as *mut RayzorTensor,
+        };
+        t.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        new_t as i64
     }
-    *new_t = RayzorTensor {
-        data: t.data,
-        shape: new_shape_ptr,
-        strides: new_strides_ptr,
-        ndim: n,
-        numel: t.numel,
-        dtype: t.dtype,
-        owns_data: false,
-        device: t.device,
-        numa_node: t.numa_node,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: t_ptr as *mut RayzorTensor,
-    };
-    t.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    new_t as i64
 }
 
 /// Row-gather: fetch the rows of `table` named by `indices` and stack
@@ -3930,46 +4075,48 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows(
     indices_ptr: i64,
     indices_len: i64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GATHER_ROWS);
-    if table_ptr == 0 || indices_ptr == 0 || indices_len <= 0 {
-        return 0;
-    }
-    let table = &*(table_ptr as *const RayzorTensor);
-    if table.ndim == 0 {
-        return 0;
-    }
-    let table_shape = std::slice::from_raw_parts(table.shape, table.ndim);
-    let n_rows = table_shape[0];
-    let row_numel: usize = table_shape[1..].iter().product::<usize>().max(1);
-    let elem = dtype_size(table.dtype);
-    let row_bytes = row_numel * elem;
-    let k = indices_len as usize;
-
-    // Out shape: [K, ...table_shape[1..]]
-    let mut out_shape = Vec::with_capacity(table.ndim);
-    out_shape.push(k);
-    for &dim in &table_shape[1..] {
-        out_shape.push(dim);
-    }
-    let result = alloc_tensor(&out_shape, table.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
-    let r = &*(result as *const RayzorTensor);
-    let indices = indices_ptr as *const i64;
-
-    for i in 0..k {
-        let idx_raw = *indices.add(i);
-        if idx_raw < 0 || (idx_raw as usize) >= n_rows {
-            // Out of range — leave the corresponding output row zeroed.
-            continue;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GATHER_ROWS);
+        if table_ptr == 0 || indices_ptr == 0 || indices_len <= 0 {
+            return 0;
         }
-        let src = table.data.add((idx_raw as usize) * row_bytes);
-        let dst = r.data.add(i * row_bytes);
-        std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+        let table = &*(table_ptr as *const RayzorTensor);
+        if table.ndim == 0 {
+            return 0;
+        }
+        let table_shape = std::slice::from_raw_parts(table.shape, table.ndim);
+        let n_rows = table_shape[0];
+        let row_numel: usize = table_shape[1..].iter().product::<usize>().max(1);
+        let elem = dtype_size(table.dtype);
+        let row_bytes = row_numel * elem;
+        let k = indices_len as usize;
+
+        // Out shape: [K, ...table_shape[1..]]
+        let mut out_shape = Vec::with_capacity(table.ndim);
+        out_shape.push(k);
+        for &dim in &table_shape[1..] {
+            out_shape.push(dim);
+        }
+        let result = alloc_tensor(&out_shape, table.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
+        let r = &*(result as *const RayzorTensor);
+        let indices = indices_ptr as *const i64;
+
+        for i in 0..k {
+            let idx_raw = *indices.add(i);
+            if idx_raw < 0 || (idx_raw as usize) >= n_rows {
+                // Out of range — leave the corresponding output row zeroed.
+                continue;
+            }
+            let src = table.data.add((idx_raw as usize) * row_bytes);
+            let dst = r.data.add(i * row_bytes);
+            std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+        }
+        result
     }
-    result
 }
 
 // ============================================================================
@@ -3979,106 +4126,116 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows(
 /// tensor.sum() -> f64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
-    if tensor_ptr == 0 {
-        return 0.0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0.0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if t.dtype == DTYPE_F32 {
+            let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+            return crate::tensor_simd::sum_slice(data) as f64;
+        }
+        let mut acc = 0.0f64;
+        for i in 0..t.numel {
+            acc += load_f32_at(t.data, i, t.dtype) as f64;
+        }
+        acc
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.dtype == DTYPE_F32 {
-        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-        return crate::tensor_simd::sum_slice(data) as f64;
-    }
-    let mut acc = 0.0f64;
-    for i in 0..t.numel {
-        acc += load_f32_at(t.data, i, t.dtype) as f64;
-    }
-    acc
 }
 
 /// tensor.max() -> f64 (returns -inf for empty tensors)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
-    if tensor_ptr == 0 {
-        return f64::NEG_INFINITY;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.numel == 0 {
-        return f64::NEG_INFINITY;
-    }
-    if t.dtype == DTYPE_F32 {
-        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-        return crate::tensor_simd::max_slice(data) as f64;
-    }
-    let mut m = f32::NEG_INFINITY;
-    for i in 0..t.numel {
-        let v = load_f32_at(t.data, i, t.dtype);
-        if v > m {
-            m = v;
+    unsafe {
+        if tensor_ptr == 0 {
+            return f64::NEG_INFINITY;
         }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if t.numel == 0 {
+            return f64::NEG_INFINITY;
+        }
+        if t.dtype == DTYPE_F32 {
+            let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+            return crate::tensor_simd::max_slice(data) as f64;
+        }
+        let mut m = f32::NEG_INFINITY;
+        for i in 0..t.numel {
+            let v = load_f32_at(t.data, i, t.dtype);
+            if v > m {
+                m = v;
+            }
+        }
+        m as f64
     }
-    m as f64
 }
 
 /// tensor.min() -> f64 (returns +inf for empty tensors)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
-    if tensor_ptr == 0 {
-        return f64::INFINITY;
-    }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.numel == 0 {
-        return f64::INFINITY;
-    }
-    if t.dtype == DTYPE_F32 {
-        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-        return crate::tensor_simd::min_slice(data) as f64;
-    }
-    let mut m = f32::INFINITY;
-    for i in 0..t.numel {
-        let v = load_f32_at(t.data, i, t.dtype);
-        if v < m {
-            m = v;
+    unsafe {
+        if tensor_ptr == 0 {
+            return f64::INFINITY;
         }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if t.numel == 0 {
+            return f64::INFINITY;
+        }
+        if t.dtype == DTYPE_F32 {
+            let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+            return crate::tensor_simd::min_slice(data) as f64;
+        }
+        let mut m = f32::INFINITY;
+        for i in 0..t.numel {
+            let v = load_f32_at(t.data, i, t.dtype);
+            if v < m {
+                m = v;
+            }
+        }
+        m as f64
     }
-    m as f64
 }
 
 /// tensor.mean() -> f64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_mean(tensor_ptr: i64) -> f64 {
-    if tensor_ptr == 0 {
-        return 0.0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0.0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        if t.numel == 0 {
+            return 0.0;
+        }
+        rayzor_tensor_sum(tensor_ptr) / (t.numel as f64)
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.numel == 0 {
-        return 0.0;
-    }
-    rayzor_tensor_sum(tensor_ptr) / (t.numel as f64)
 }
 
 /// tensor.dot(other) -> f64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0.0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-    if a.numel != b.numel || a.dtype != b.dtype {
-        return 0.0;
-    }
+    unsafe {
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0.0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
+        if a.numel != b.numel || a.dtype != b.dtype {
+            return 0.0;
+        }
 
-    if a.dtype == DTYPE_F32 {
-        let a_s = std::slice::from_raw_parts(a.data as *const f32, a.numel);
-        let b_s = std::slice::from_raw_parts(b.data as *const f32, b.numel);
-        return crate::tensor_simd::dot_slice(a_s, b_s) as f64;
+        if a.dtype == DTYPE_F32 {
+            let a_s = std::slice::from_raw_parts(a.data as *const f32, a.numel);
+            let b_s = std::slice::from_raw_parts(b.data as *const f32, b.numel);
+            return crate::tensor_simd::dot_slice(a_s, b_s) as f64;
+        }
+        let mut acc = 0.0f64;
+        for i in 0..a.numel {
+            let av = load_f32_at(a.data, i, a.dtype) as f64;
+            let bv = load_f32_at(b.data, i, a.dtype) as f64;
+            acc += av * bv;
+        }
+        acc
     }
-    let mut acc = 0.0f64;
-    for i in 0..a.numel {
-        let av = load_f32_at(a.data, i, a.dtype) as f64;
-        let bv = load_f32_at(b.data, i, a.dtype) as f64;
-        acc += av * bv;
-    }
-    acc
 }
 
 // ============================================================================
@@ -4089,138 +4246,140 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
 /// Naive O(n³) matmul for [M,K] × [K,N] -> [M,N]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL);
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL);
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
 
-    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
-        return 0;
-    }
+        if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
+            return 0;
+        }
 
-    let a_shape = std::slice::from_raw_parts(a.shape, 2);
-    let b_shape = std::slice::from_raw_parts(b.shape, 2);
-    let m = a_shape[0];
-    let k = a_shape[1];
-    let n = b_shape[1];
+        let a_shape = std::slice::from_raw_parts(a.shape, 2);
+        let b_shape = std::slice::from_raw_parts(b.shape, 2);
+        let m = a_shape[0];
+        let k = a_shape[1];
+        let n = b_shape[1];
 
-    if k != b_shape[0] {
-        return 0;
-    } // dimension mismatch
+        if k != b_shape[0] {
+            return 0;
+        } // dimension mismatch
 
-    let out_shape = [m, n];
-    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
+        let out_shape = [m, n];
+        let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let a_strides = std::slice::from_raw_parts(a.strides, 2);
-    let b_strides = std::slice::from_raw_parts(b.strides, 2);
+        let r = &*(result as *const RayzorTensor);
+        let a_strides = std::slice::from_raw_parts(a.strides, 2);
+        let b_strides = std::slice::from_raw_parts(b.strides, 2);
 
-    if a.dtype == DTYPE_F32 {
-        let a_data = a.data as *const f32;
-        let b_data = b.data as *const f32;
-        let r_data = r.data as *mut f32;
+        if a.dtype == DTYPE_F32 {
+            let a_data = a.data as *const f32;
+            let b_data = b.data as *const f32;
+            let r_data = r.data as *mut f32;
 
-        // Fast path: both A and B row-major (innermost stride == 1). Loop
-        // order is (i, k, j) so the inner `j` loop accumulates into a
-        // contiguous row of R with broadcast a_ik — the textbook
-        // SIMD-friendly matmul.
-        if a_strides[1] == 1 && b_strides[1] == 1 {
-            let r_row_size = n;
+            // Fast path: both A and B row-major (innermost stride == 1). Loop
+            // order is (i, k, j) so the inner `j` loop accumulates into a
+            // contiguous row of R with broadcast a_ik — the textbook
+            // SIMD-friendly matmul.
+            if a_strides[1] == 1 && b_strides[1] == 1 {
+                let r_row_size = n;
+                for i in 0..m {
+                    let a_row = a_data.add(i * a_strides[0]);
+                    let r_row = r_data.add(i * r_row_size);
+                    for p in 0..k {
+                        let a_ik = *a_row.add(p);
+                        let b_row = b_data.add(p * b_strides[0]);
+                        let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                        let b_slice = std::slice::from_raw_parts(b_row, n);
+                        crate::tensor_simd::axpy_slice(r_slice, a_ik, b_slice);
+                    }
+                }
+                return result;
+            }
+
+            // Strided fallback (e.g. transposed views).
             for i in 0..m {
-                let a_row = a_data.add(i * a_strides[0]);
-                let r_row = r_data.add(i * r_row_size);
-                for p in 0..k {
-                    let a_ik = *a_row.add(p);
-                    let b_row = b_data.add(p * b_strides[0]);
-                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
-                    let b_slice = std::slice::from_raw_parts(b_row, n);
-                    crate::tensor_simd::axpy_slice(r_slice, a_ik, b_slice);
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for p in 0..k {
+                        let a_val = *a_data.add(i * a_strides[0] + p * a_strides[1]);
+                        let b_val = *b_data.add(p * b_strides[0] + j * b_strides[1]);
+                        sum += a_val * b_val;
+                    }
+                    *r_data.add(i * n + j) = sum;
                 }
             }
             return result;
         }
 
-        // Strided fallback (e.g. transposed views).
+        // F16 / BF16 row-major fast path: axpy specialisation that stages
+        // through f32 via NEON vcvt_f32_f16 / F16C _mm_cvtph_ps in batches of 64.
+        // This is the matmul hot path for LLM inference (every row update is an
+        // f16 axpy against a half-precision weight row).
+        if a_strides[1] == 1 && b_strides[1] == 1 {
+            if a.dtype == DTYPE_F16 {
+                let a_data = a.data as *const u16;
+                let b_data = b.data as *const u16;
+                let r_data = r.data as *mut u16;
+                for i in 0..m {
+                    let a_row = a_data.add(i * a_strides[0]);
+                    let r_row = r_data.add(i * n);
+                    for p in 0..k {
+                        let a_ik = half::f16::from_bits(*a_row.add(p)).to_f32();
+                        let b_row = b_data.add(p * b_strides[0]);
+                        let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                        let b_slice = std::slice::from_raw_parts(b_row, n);
+                        crate::tensor_simd::axpy_f16_slice(r_slice, a_ik, b_slice);
+                    }
+                }
+                return result;
+            }
+            if a.dtype == DTYPE_BF16 {
+                let a_data = a.data as *const u16;
+                let b_data = b.data as *const u16;
+                let r_data = r.data as *mut u16;
+                for i in 0..m {
+                    let a_row = a_data.add(i * a_strides[0]);
+                    let r_row = r_data.add(i * n);
+                    for p in 0..k {
+                        let a_ik = half::bf16::from_bits(*a_row.add(p)).to_f32();
+                        let b_row = b_data.add(p * b_strides[0]);
+                        let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                        let b_slice = std::slice::from_raw_parts(b_row, n);
+                        crate::tensor_simd::axpy_bf16_slice(r_slice, a_ik, b_slice);
+                    }
+                }
+                return result;
+            }
+        }
+
+        // Generic dtype path: convert each element to f32 in-register, accumulate
+        // in f32, store back as the source dtype. Covers strided F16/BF16 views
+        // and the integer/FP8 dtypes.
+        let dtype = a.dtype;
         for i in 0..m {
             for j in 0..n {
                 let mut sum = 0.0f32;
                 for p in 0..k {
-                    let a_val = *a_data.add(i * a_strides[0] + p * a_strides[1]);
-                    let b_val = *b_data.add(p * b_strides[0] + j * b_strides[1]);
+                    let a_off = i * a_strides[0] + p * a_strides[1];
+                    let b_off = p * b_strides[0] + j * b_strides[1];
+                    let a_val = load_f32_at(a.data, a_off, dtype);
+                    let b_val = load_f32_at(b.data, b_off, dtype);
                     sum += a_val * b_val;
                 }
-                *r_data.add(i * n + j) = sum;
+                store_f32_at(r.data, i * n + j, dtype, sum);
             }
         }
-        return result;
-    }
 
-    // F16 / BF16 row-major fast path: axpy specialisation that stages
-    // through f32 via NEON vcvt_f32_f16 / F16C _mm_cvtph_ps in batches of 64.
-    // This is the matmul hot path for LLM inference (every row update is an
-    // f16 axpy against a half-precision weight row).
-    if a_strides[1] == 1 && b_strides[1] == 1 {
-        if a.dtype == DTYPE_F16 {
-            let a_data = a.data as *const u16;
-            let b_data = b.data as *const u16;
-            let r_data = r.data as *mut u16;
-            for i in 0..m {
-                let a_row = a_data.add(i * a_strides[0]);
-                let r_row = r_data.add(i * n);
-                for p in 0..k {
-                    let a_ik = half::f16::from_bits(*a_row.add(p)).to_f32();
-                    let b_row = b_data.add(p * b_strides[0]);
-                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
-                    let b_slice = std::slice::from_raw_parts(b_row, n);
-                    crate::tensor_simd::axpy_f16_slice(r_slice, a_ik, b_slice);
-                }
-            }
-            return result;
-        }
-        if a.dtype == DTYPE_BF16 {
-            let a_data = a.data as *const u16;
-            let b_data = b.data as *const u16;
-            let r_data = r.data as *mut u16;
-            for i in 0..m {
-                let a_row = a_data.add(i * a_strides[0]);
-                let r_row = r_data.add(i * n);
-                for p in 0..k {
-                    let a_ik = half::bf16::from_bits(*a_row.add(p)).to_f32();
-                    let b_row = b_data.add(p * b_strides[0]);
-                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
-                    let b_slice = std::slice::from_raw_parts(b_row, n);
-                    crate::tensor_simd::axpy_bf16_slice(r_slice, a_ik, b_slice);
-                }
-            }
-            return result;
-        }
+        result
     }
-
-    // Generic dtype path: convert each element to f32 in-register, accumulate
-    // in f32, store back as the source dtype. Covers strided F16/BF16 views
-    // and the integer/FP8 dtypes.
-    let dtype = a.dtype;
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for p in 0..k {
-                let a_off = i * a_strides[0] + p * a_strides[1];
-                let b_off = p * b_strides[0] + j * b_strides[1];
-                let a_val = load_f32_at(a.data, a_off, dtype);
-                let b_val = load_f32_at(b.data, b_off, dtype);
-                sum += a_val * b_val;
-            }
-            store_f32_at(r.data, i * n + j, dtype, sum);
-        }
-    }
-
-    result
 }
 
 /// Matmul with transposed RHS: `y[i, j] = sum_k a[i, k] * b[j, k]`.
@@ -4238,70 +4397,72 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
 /// avoids the strided B access entirely.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T);
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T);
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
+        }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
 
-    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
-        return 0;
-    }
+        if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
+            return 0;
+        }
 
-    let a_shape = std::slice::from_raw_parts(a.shape, 2);
-    let b_shape = std::slice::from_raw_parts(b.shape, 2);
-    let m = a_shape[0];
-    let k = a_shape[1];
-    let n = b_shape[0];
+        let a_shape = std::slice::from_raw_parts(a.shape, 2);
+        let b_shape = std::slice::from_raw_parts(b.shape, 2);
+        let m = a_shape[0];
+        let k = a_shape[1];
+        let n = b_shape[0];
 
-    if k != b_shape[1] {
-        return 0;
-    }
+        if k != b_shape[1] {
+            return 0;
+        }
 
-    let out_shape = [m, n];
-    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
+        let out_shape = [m, n];
+        let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
 
-    let r = &*(result as *const RayzorTensor);
-    let a_strides = std::slice::from_raw_parts(a.strides, 2);
-    let b_strides = std::slice::from_raw_parts(b.strides, 2);
+        let r = &*(result as *const RayzorTensor);
+        let a_strides = std::slice::from_raw_parts(a.strides, 2);
+        let b_strides = std::slice::from_raw_parts(b.strides, 2);
 
-    if a.dtype == DTYPE_F32 && a_strides[1] == 1 && b_strides[1] == 1 {
-        let a_data = a.data as *const f32;
-        let b_data = b.data as *const f32;
-        let r_data = r.data as *mut f32;
+        if a.dtype == DTYPE_F32 && a_strides[1] == 1 && b_strides[1] == 1 {
+            let a_data = a.data as *const f32;
+            let b_data = b.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for i in 0..m {
+                let a_row = std::slice::from_raw_parts(a_data.add(i * a_strides[0]), k);
+                for j in 0..n {
+                    let b_row = std::slice::from_raw_parts(b_data.add(j * b_strides[0]), k);
+                    let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
+                    *r_data.add(i * n + j) = sum;
+                }
+            }
+            return result;
+        }
+
+        // Generic fallback for non-F32 / strided inputs.
+        let dtype = a.dtype;
         for i in 0..m {
-            let a_row = std::slice::from_raw_parts(a_data.add(i * a_strides[0]), k);
             for j in 0..n {
-                let b_row = std::slice::from_raw_parts(b_data.add(j * b_strides[0]), k);
-                let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
-                *r_data.add(i * n + j) = sum;
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    let a_off = i * a_strides[0] + p * a_strides[1];
+                    let b_off = j * b_strides[0] + p * b_strides[1];
+                    let a_val = load_f32_at(a.data, a_off, dtype);
+                    let b_val = load_f32_at(b.data, b_off, dtype);
+                    sum += a_val * b_val;
+                }
+                store_f32_at(r.data, i * n + j, dtype, sum);
             }
         }
-        return result;
-    }
 
-    // Generic fallback for non-F32 / strided inputs.
-    let dtype = a.dtype;
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for p in 0..k {
-                let a_off = i * a_strides[0] + p * a_strides[1];
-                let b_off = j * b_strides[0] + p * b_strides[1];
-                let a_val = load_f32_at(a.data, a_off, dtype);
-                let b_val = load_f32_at(b.data, b_off, dtype);
-                sum += a_val * b_val;
-            }
-            store_f32_at(r.data, i * n + j, dtype, sum);
-        }
+        result
     }
-
-    result
 }
 
 /// Threaded variant of `rayzor_tensor_matmul_t`. Same `[M, K] @ [N, K] -> [M, N]`
@@ -4322,152 +4483,155 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
     b_ptr: i64,
     threads: i64,
 ) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T_THREADED);
-    if a_ptr == 0 || b_ptr == 0 {
-        return 0;
-    }
-    let a = &*(a_ptr as *const RayzorTensor);
-    let b = &*(b_ptr as *const RayzorTensor);
-
-    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
-        return 0;
-    }
-
-    let a_shape = std::slice::from_raw_parts(a.shape, 2);
-    let b_shape = std::slice::from_raw_parts(b.shape, 2);
-    let m = a_shape[0];
-    let k = a_shape[1];
-    let n = b_shape[0];
-
-    if k != b_shape[1] {
-        return 0;
-    }
-
-    let out_shape = [m, n];
-    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
-    if result == 0 {
-        return 0;
-    }
-
-    let r = &*(result as *const RayzorTensor);
-    let a_strides = std::slice::from_raw_parts(a.strides, 2);
-    let b_strides = std::slice::from_raw_parts(b.strides, 2);
-    let dtype = a.dtype;
-    let a_row_stride = a_strides[0];
-    let a_col_stride = a_strides[1];
-    let b_row_stride = b_strides[0];
-    let b_col_stride = b_strides[1];
-    let f32_contig = dtype == DTYPE_F32 && a_col_stride == 1 && b_col_stride == 1;
-
-    // AMX f16 fast path (macOS, prefill-shaped GEMM): narrow fully-contiguous F32
-    // to f16 and run BNNSMatMul, which is internally parallel — so it pre-empts
-    // the fork/join below. Gated on m >= RZT_AMX_MIN_BATCH; RZT_AMX_PREFILL=0 opts
-    // out (restoring the exact-F32 NEON reduction). This is the variant the Haxe
-    // `matmulT` wrapper routes through, so it covers every transformer Linear.
-    #[cfg(target_os = "macos")]
-    if f32_contig && a_row_stride == k && b_row_stride == k {
-        let a_data = a.data as *const f32;
-        let b_data = b.data as *const f32;
-        let r_data = r.data as *mut f32;
-        if crate::quant::amx_matmul_t_f32(a_data, b_data, m, k, n, r_data) {
-            return result;
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T_THREADED);
+        if a_ptr == 0 || b_ptr == 0 {
+            return 0;
         }
-    }
+        let a = &*(a_ptr as *const RayzorTensor);
+        let b = &*(b_ptr as *const RayzorTensor);
 
-    let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
-    let mut t = if threads > 0 {
-        (threads as usize).min(64)
-    } else {
-        auto_threads
-    };
-    if t > m {
-        t = m.max(1);
-    }
+        if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
+            return 0;
+        }
 
-    // Sequential fast path: skip fork/join when work is too small to amortize.
-    // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
-    // cost (mirrors `rayzor_tensor_bmm_threaded`).
-    const MIN_PARALLEL_ROWS: usize = 64;
-    if t <= 1 || m < MIN_PARALLEL_ROWS {
-        if f32_contig {
+        let a_shape = std::slice::from_raw_parts(a.shape, 2);
+        let b_shape = std::slice::from_raw_parts(b.shape, 2);
+        let m = a_shape[0];
+        let k = a_shape[1];
+        let n = b_shape[0];
+
+        if k != b_shape[1] {
+            return 0;
+        }
+
+        let out_shape = [m, n];
+        let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+        if result == 0 {
+            return 0;
+        }
+
+        let r = &*(result as *const RayzorTensor);
+        let a_strides = std::slice::from_raw_parts(a.strides, 2);
+        let b_strides = std::slice::from_raw_parts(b.strides, 2);
+        let dtype = a.dtype;
+        let a_row_stride = a_strides[0];
+        let a_col_stride = a_strides[1];
+        let b_row_stride = b_strides[0];
+        let b_col_stride = b_strides[1];
+        let f32_contig = dtype == DTYPE_F32 && a_col_stride == 1 && b_col_stride == 1;
+
+        // AMX f16 fast path (macOS, prefill-shaped GEMM): narrow fully-contiguous F32
+        // to f16 and run BNNSMatMul, which is internally parallel — so it pre-empts
+        // the fork/join below. Gated on m >= RZT_AMX_MIN_BATCH; RZT_AMX_PREFILL=0 opts
+        // out (restoring the exact-F32 NEON reduction). This is the variant the Haxe
+        // `matmulT` wrapper routes through, so it covers every transformer Linear.
+        #[cfg(target_os = "macos")]
+        if f32_contig && a_row_stride == k && b_row_stride == k {
             let a_data = a.data as *const f32;
             let b_data = b.data as *const f32;
             let r_data = r.data as *mut f32;
-            for i in 0..m {
-                let a_row = std::slice::from_raw_parts(a_data.add(i * a_row_stride), k);
-                for j in 0..n {
-                    let b_row = std::slice::from_raw_parts(b_data.add(j * b_row_stride), k);
-                    let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
-                    *r_data.add(i * n + j) = sum;
-                }
-            }
-        } else {
-            for i in 0..m {
-                for j in 0..n {
-                    let mut sum = 0.0f32;
-                    for p in 0..k {
-                        let a_off = i * a_row_stride + p * a_col_stride;
-                        let b_off = j * b_row_stride + p * b_col_stride;
-                        let a_val = load_f32_at(a.data, a_off, dtype);
-                        let b_val = load_f32_at(b.data, b_off, dtype);
-                        sum += a_val * b_val;
-                    }
-                    store_f32_at(r.data, i * n + j, dtype, sum);
-                }
+            if crate::quant::amx_matmul_t_f32(a_data, b_data, m, k, n, r_data) {
+                return result;
             }
         }
-        return result;
-    }
 
-    let a_data = a.data as usize;
-    let b_data = b.data as usize;
-    let r_data = r.data as usize;
-    let m_dim = m;
-    let n_dim = n;
-    let k_dim = k;
+        let auto_threads: usize = crate::worker_pool::auto_kernel_threads();
+        let mut t = if threads > 0 {
+            (threads as usize).min(64)
+        } else {
+            auto_threads
+        };
+        if t > m {
+            t = m.max(1);
+        }
 
-    crate::worker_pool::global().parallel_rows(m_dim, t, move |lo, hi| {
-        // SAFETY: each worker writes Y[i, 0..N] for the `i` rows in its band;
-        // bands are disjoint so there is no aliasing on the output. Inputs A
-        // and B are read-only. The scalar reduction per (i, j) stays inside a
-        // single worker, so the f32 accumulation order matches the sequential
-        // `rayzor_tensor_matmul_t` body byte-for-byte.
-        unsafe {
+        // Sequential fast path: skip fork/join when work is too small to amortize.
+        // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
+        // cost (mirrors `rayzor_tensor_bmm_threaded`).
+        const MIN_PARALLEL_ROWS: usize = 64;
+        if t <= 1 || m < MIN_PARALLEL_ROWS {
             if f32_contig {
-                let a_f = a_data as *const f32;
-                let b_f = b_data as *const f32;
-                let c_f = r_data as *mut f32;
-                for i in lo..hi {
-                    let a_row = std::slice::from_raw_parts(a_f.add(i * a_row_stride), k_dim);
-                    for j in 0..n_dim {
-                        let b_row = std::slice::from_raw_parts(b_f.add(j * b_row_stride), k_dim);
+                let a_data = a.data as *const f32;
+                let b_data = b.data as *const f32;
+                let r_data = r.data as *mut f32;
+                for i in 0..m {
+                    let a_row = std::slice::from_raw_parts(a_data.add(i * a_row_stride), k);
+                    for j in 0..n {
+                        let b_row = std::slice::from_raw_parts(b_data.add(j * b_row_stride), k);
                         let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
-                        *c_f.add(i * n_dim + j) = sum;
+                        *r_data.add(i * n + j) = sum;
                     }
                 }
             } else {
-                let a_ptr = a_data as *const u8;
-                let b_ptr = b_data as *const u8;
-                let r_ptr = r_data as *mut u8;
-                for i in lo..hi {
-                    for j in 0..n_dim {
+                for i in 0..m {
+                    for j in 0..n {
                         let mut sum = 0.0f32;
-                        for p in 0..k_dim {
+                        for p in 0..k {
                             let a_off = i * a_row_stride + p * a_col_stride;
                             let b_off = j * b_row_stride + p * b_col_stride;
-                            let a_val = load_f32_at(a_ptr, a_off, dtype);
-                            let b_val = load_f32_at(b_ptr, b_off, dtype);
+                            let a_val = load_f32_at(a.data, a_off, dtype);
+                            let b_val = load_f32_at(b.data, b_off, dtype);
                             sum += a_val * b_val;
                         }
-                        store_f32_at(r_ptr, i * n_dim + j, dtype, sum);
+                        store_f32_at(r.data, i * n + j, dtype, sum);
                     }
                 }
             }
+            return result;
         }
-    });
 
-    result
+        let a_data = a.data as usize;
+        let b_data = b.data as usize;
+        let r_data = r.data as usize;
+        let m_dim = m;
+        let n_dim = n;
+        let k_dim = k;
+
+        crate::worker_pool::global().parallel_rows(m_dim, t, move |lo, hi| {
+            // SAFETY: each worker writes Y[i, 0..N] for the `i` rows in its band;
+            // bands are disjoint so there is no aliasing on the output. Inputs A
+            // and B are read-only. The scalar reduction per (i, j) stays inside a
+            // single worker, so the f32 accumulation order matches the sequential
+            // `rayzor_tensor_matmul_t` body byte-for-byte.
+            {
+                if f32_contig {
+                    let a_f = a_data as *const f32;
+                    let b_f = b_data as *const f32;
+                    let c_f = r_data as *mut f32;
+                    for i in lo..hi {
+                        let a_row = std::slice::from_raw_parts(a_f.add(i * a_row_stride), k_dim);
+                        for j in 0..n_dim {
+                            let b_row =
+                                std::slice::from_raw_parts(b_f.add(j * b_row_stride), k_dim);
+                            let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
+                            *c_f.add(i * n_dim + j) = sum;
+                        }
+                    }
+                } else {
+                    let a_ptr = a_data as *const u8;
+                    let b_ptr = b_data as *const u8;
+                    let r_ptr = r_data as *mut u8;
+                    for i in lo..hi {
+                        for j in 0..n_dim {
+                            let mut sum = 0.0f32;
+                            for p in 0..k_dim {
+                                let a_off = i * a_row_stride + p * a_col_stride;
+                                let b_off = j * b_row_stride + p * b_col_stride;
+                                let a_val = load_f32_at(a_ptr, a_off, dtype);
+                                let b_val = load_f32_at(b_ptr, b_off, dtype);
+                                sum += a_val * b_val;
+                            }
+                            store_f32_at(r_ptr, i * n_dim + j, dtype, sum);
+                        }
+                    }
+                }
+            }
+        });
+
+        result
+    }
 }
 
 // ============================================================================
@@ -4477,11 +4641,13 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
 /// tensor.data() -> i64 (raw pointer to data buffer)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
-    if tensor_ptr == 0 {
-        return 0;
+    unsafe {
+        if tensor_ptr == 0 {
+            return 0;
+        }
+        let t = &*(tensor_ptr as *const RayzorTensor);
+        t.data as i64
     }
-    let t = &*(tensor_ptr as *const RayzorTensor);
-    t.data as i64
 }
 
 /// Atomic-refcount clone: bump `src`'s refcount and return the same pointer.
@@ -4499,16 +4665,18 @@ pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
 /// including compact-to-contiguous on views).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
-    if src == 0 {
-        return 0;
+    unsafe {
+        if src == 0 {
+            return 0;
+        }
+        let s = &*(src as *const RayzorTensor);
+        // Relaxed: matches Boost intrusive_ptr — the increment doesn't need to
+        // observe anything published before it; the AcqRel pairing only matters
+        // on the decrement-to-zero gate in `rayzor_tensor_free`.
+        s.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        src
     }
-    let s = &*(src as *const RayzorTensor);
-    // Relaxed: matches Boost intrusive_ptr — the increment doesn't need to
-    // observe anything published before it; the AcqRel pairing only matters
-    // on the decrement-to-zero gate in `rayzor_tensor_free`.
-    s.refcount
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    src
 }
 
 /// `Tensor.clone(src)` Haxe entry point. Routes to the Arc-increment path
@@ -4517,9 +4685,11 @@ pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
 /// `@:derive([Clone])` lowering in hir_to_mir.rs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_CLONE);
-    rayzor_tensor_arc_clone(src)
+    unsafe {
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_CLONE);
+        rayzor_tensor_arc_clone(src)
+    }
 }
 
 /// Disjoint-storage deep clone. Materialises a fresh, fully-owning,
@@ -4542,115 +4712,117 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
 ///   contiguous buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i64) -> i64 {
-    if src == 0 {
-        return 0;
-    }
-    let s = &*(src as *const RayzorTensor);
+    unsafe {
+        if src == 0 {
+            return 0;
+        }
+        let s = &*(src as *const RayzorTensor);
 
-    let elem_size = dtype_size(s.dtype);
-    let ndim = s.ndim;
+        let elem_size = dtype_size(s.dtype);
+        let ndim = s.ndim;
 
-    // Canonical row-major strides for the destination, computed from src.shape.
-    // We compute it directly (rather than calling RayzorTensor::compute_strides
-    // on a borrowed slice) so we can also size the destination buffer in the
-    // same pass and keep this function ABI-shape-only.
-    let src_shape_slice: &[usize] = if ndim == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(s.shape, ndim)
-    };
-    let canonical_strides: Vec<usize> = RayzorTensor::compute_strides(src_shape_slice);
-
-    let data_bytes: usize = s.numel * elem_size;
-
-    // Allocate fresh data buffer.
-    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
-    if data.is_null() {
-        return 0;
-    }
-
-    // Copy body: contiguous fast-path = memcpy, otherwise strided gather.
-    if data_bytes > 0 && !s.data.is_null() {
-        if s.is_contiguous() {
-            std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+        // Canonical row-major strides for the destination, computed from src.shape.
+        // We compute it directly (rather than calling RayzorTensor::compute_strides
+        // on a borrowed slice) so we can also size the destination buffer in the
+        // same pass and keep this function ABI-shape-only.
+        let src_shape_slice: &[usize] = if ndim == 0 {
+            &[]
         } else {
-            // Strided gather: walk src by its strides, write contiguously
-            // into the dest buffer. Dtype-agnostic byte copy across the
-            // plain RayzorTensor dtypes (F32/F16/BF16/I32/I64/U8); quantised
-            // tensors live in RayzorQTensor and never reach this path.
-            let src_strides = std::slice::from_raw_parts(s.strides, ndim);
-            let mut idx = vec![0usize; ndim];
-            for linear in 0..s.numel {
-                // Source byte offset = Σᵢ idx[i] * src_strides[i] * elem_size.
-                let mut src_elem_off: usize = 0;
-                for axis in 0..ndim {
-                    src_elem_off += idx[axis] * src_strides[axis];
-                }
-                std::ptr::copy_nonoverlapping(
-                    s.data.add(src_elem_off * elem_size),
-                    data.add(linear * elem_size),
-                    elem_size,
-                );
-                // Increment multi-index (rightmost-axis varies fastest, so
-                // dest writes stay sequential).
-                for axis in (0..ndim).rev() {
-                    idx[axis] += 1;
-                    if idx[axis] < src_shape_slice[axis] {
-                        break;
+            std::slice::from_raw_parts(s.shape, ndim)
+        };
+        let canonical_strides: Vec<usize> = RayzorTensor::compute_strides(src_shape_slice);
+
+        let data_bytes: usize = s.numel * elem_size;
+
+        // Allocate fresh data buffer.
+        let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+        if data.is_null() {
+            return 0;
+        }
+
+        // Copy body: contiguous fast-path = memcpy, otherwise strided gather.
+        if data_bytes > 0 && !s.data.is_null() {
+            if s.is_contiguous() {
+                std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+            } else {
+                // Strided gather: walk src by its strides, write contiguously
+                // into the dest buffer. Dtype-agnostic byte copy across the
+                // plain RayzorTensor dtypes (F32/F16/BF16/I32/I64/U8); quantised
+                // tensors live in RayzorQTensor and never reach this path.
+                let src_strides = std::slice::from_raw_parts(s.strides, ndim);
+                let mut idx = vec![0usize; ndim];
+                for linear in 0..s.numel {
+                    // Source byte offset = Σᵢ idx[i] * src_strides[i] * elem_size.
+                    let mut src_elem_off: usize = 0;
+                    for axis in 0..ndim {
+                        src_elem_off += idx[axis] * src_strides[axis];
                     }
-                    idx[axis] = 0;
+                    std::ptr::copy_nonoverlapping(
+                        s.data.add(src_elem_off * elem_size),
+                        data.add(linear * elem_size),
+                        elem_size,
+                    );
+                    // Increment multi-index (rightmost-axis varies fastest, so
+                    // dest writes stay sequential).
+                    for axis in (0..ndim).rev() {
+                        idx[axis] += 1;
+                        if idx[axis] < src_shape_slice[axis] {
+                            break;
+                        }
+                        idx[axis] = 0;
+                    }
                 }
             }
         }
-    }
 
-    // Allocate fresh shape array and copy from src.
-    let shape_bytes = ndim * std::mem::size_of::<usize>();
-    let shape_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
-    if shape_ptr.is_null() {
-        free(data);
-        return 0;
-    }
-    if ndim > 0 && !s.shape.is_null() {
-        std::ptr::copy_nonoverlapping(s.shape, shape_ptr, ndim);
-    }
+        // Allocate fresh shape array and copy from src.
+        let shape_bytes = ndim * std::mem::size_of::<usize>();
+        let shape_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
+        if shape_ptr.is_null() {
+            free(data);
+            return 0;
+        }
+        if ndim > 0 && !s.shape.is_null() {
+            std::ptr::copy_nonoverlapping(s.shape, shape_ptr, ndim);
+        }
 
-    // Allocate fresh strides array seeded with the canonical row-major
-    // strides we computed above — NOT inherited from src.
-    let strides_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
-    if strides_ptr.is_null() {
-        free(data);
-        free(shape_ptr as *mut u8);
-        return 0;
-    }
-    if ndim > 0 {
-        std::ptr::copy_nonoverlapping(canonical_strides.as_ptr(), strides_ptr, ndim);
-    }
+        // Allocate fresh strides array seeded with the canonical row-major
+        // strides we computed above — NOT inherited from src.
+        let strides_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
+        if strides_ptr.is_null() {
+            free(data);
+            free(shape_ptr as *mut u8);
+            return 0;
+        }
+        if ndim > 0 {
+            std::ptr::copy_nonoverlapping(canonical_strides.as_ptr(), strides_ptr, ndim);
+        }
 
-    // Allocate the wrapper struct itself.
-    let tensor = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if tensor.is_null() {
-        free(data);
-        free(shape_ptr as *mut u8);
-        free(strides_ptr as *mut u8);
-        return 0;
+        // Allocate the wrapper struct itself.
+        let tensor = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if tensor.is_null() {
+            free(data);
+            free(shape_ptr as *mut u8);
+            free(strides_ptr as *mut u8);
+            return 0;
+        }
+
+        *tensor = RayzorTensor {
+            data,
+            shape: shape_ptr,
+            strides: strides_ptr,
+            ndim,
+            numel: s.numel,
+            dtype: s.dtype,
+            owns_data: true,
+            device: s.device,
+            numa_node: s.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: std::ptr::null_mut(),
+        };
+
+        tensor as i64
     }
-
-    *tensor = RayzorTensor {
-        data,
-        shape: shape_ptr,
-        strides: strides_ptr,
-        ndim,
-        numel: s.numel,
-        dtype: s.dtype,
-        owns_data: true,
-        device: s.device,
-        numa_node: s.numa_node,
-        refcount: std::sync::atomic::AtomicUsize::new(1),
-        parent: std::ptr::null_mut(),
-    };
-
-    tensor as i64
 }
 
 /// tensor.free() -> void
@@ -4670,72 +4842,74 @@ pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i64) -> i64 {
 ///   the same physical release this function would have run inline.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
-    if tensor_ptr == 0 {
-        return;
-    }
-    crate::kernel_timing::init();
-    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_FREE);
-    TENSOR_FREE_INVOCATIONS.fetch_add(1, MemOrdering::Relaxed);
-    let t = &*(tensor_ptr as *const RayzorTensor);
-
-    // Phase 1 ARC: decrement first. Only the thread that drops the count
-    // from 1 → 0 proceeds to actually release storage. AcqRel pairs with
-    // the Relaxed increments in `rayzor_tensor_arc_clone` / view producers:
-    // the Release half of the final dec publishes all prior writes through
-    // this wrapper; the Acquire half (only observed by the dec-to-zero
-    // thread, which is the sole survivor) prevents reordering of the
-    // free below.
-    let prev = t.refcount.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    if prev != 1 {
-        TENSOR_FREE_REFCOUNT_NONZERO.fetch_add(1, MemOrdering::Relaxed);
-        // Other handles still alive. Nothing to do.
-        return;
-    }
-
-    // We are the sole owner. Snapshot the parent handle (if any) before
-    // we tear down our own wrapper — we'll decrement the parent's refcount
-    // AFTER releasing our own storage so a recursive view-of-view chain
-    // unwinds depth-first.
-    let parent = t.parent;
-    let owns_data = t.owns_data;
-
-    if !owns_data {
-        // Views: drop wrapper + shape/strides; leave data alone — the
-        // parent (whose refcount we hold) still owns it.
-        if !t.shape.is_null() {
-            free(t.shape as *mut u8);
+    unsafe {
+        if tensor_ptr == 0 {
+            return;
         }
-        if !t.strides.is_null() {
-            free(t.strides as *mut u8);
+        crate::kernel_timing::init();
+        let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_FREE);
+        TENSOR_FREE_INVOCATIONS.fetch_add(1, MemOrdering::Relaxed);
+        let t = &*(tensor_ptr as *const RayzorTensor);
+
+        // Phase 1 ARC: decrement first. Only the thread that drops the count
+        // from 1 → 0 proceeds to actually release storage. AcqRel pairs with
+        // the Relaxed increments in `rayzor_tensor_arc_clone` / view producers:
+        // the Release half of the final dec publishes all prior writes through
+        // this wrapper; the Acquire half (only observed by the dec-to-zero
+        // thread, which is the sole survivor) prevents reordering of the
+        // free below.
+        let prev = t.refcount.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if prev != 1 {
+            TENSOR_FREE_REFCOUNT_NONZERO.fetch_add(1, MemOrdering::Relaxed);
+            // Other handles still alive. Nothing to do.
+            return;
         }
-        free(tensor_ptr as *mut u8);
-        // Drop our reference on the parent. May cascade-free if we were
-        // the last view.
+
+        // We are the sole owner. Snapshot the parent handle (if any) before
+        // we tear down our own wrapper — we'll decrement the parent's refcount
+        // AFTER releasing our own storage so a recursive view-of-view chain
+        // unwinds depth-first.
+        let parent = t.parent;
+        let owns_data = t.owns_data;
+
+        if !owns_data {
+            // Views: drop wrapper + shape/strides; leave data alone — the
+            // parent (whose refcount we hold) still owns it.
+            if !t.shape.is_null() {
+                free(t.shape as *mut u8);
+            }
+            if !t.strides.is_null() {
+                free(t.strides as *mut u8);
+            }
+            free(tensor_ptr as *mut u8);
+            // Drop our reference on the parent. May cascade-free if we were
+            // the last view.
+            if !parent.is_null() {
+                rayzor_tensor_free(parent as i64);
+            }
+            return;
+        }
+
+        // Owning tensor: route through the pool. Build a PooledEntry and let
+        // `tensor_pool::global().push()` decide whether to park or free.
+        let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+        let key = PoolKey::from_shape(t.dtype, shape_slice);
+        let alloc_bytes = pool_alloc_bytes(shape_slice, t.dtype);
+        leak_on_free(alloc_bytes);
+        let entry = PooledEntry {
+            ptr: tensor_ptr as *mut u8,
+            shape: ShapeBuf::from_slice(shape_slice),
+            alloc_bytes,
+            qtensor_meta_ptr: std::ptr::null_mut(),
+            qtensor_meta_bytes: 0,
+        };
+        tensor_pool::global().push(key, entry, tensor_pool_freer);
+        // Owning tensors have `parent == null` by construction, so no parent
+        // decrement is needed here. (Defensive sanity: if parent ever drifts
+        // non-null on an owning tensor, the dec below catches it.)
         if !parent.is_null() {
             rayzor_tensor_free(parent as i64);
         }
-        return;
-    }
-
-    // Owning tensor: route through the pool. Build a PooledEntry and let
-    // `tensor_pool::global().push()` decide whether to park or free.
-    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
-    let key = PoolKey::from_shape(t.dtype, shape_slice);
-    let alloc_bytes = pool_alloc_bytes(shape_slice, t.dtype);
-    leak_on_free(alloc_bytes);
-    let entry = PooledEntry {
-        ptr: tensor_ptr as *mut u8,
-        shape: ShapeBuf::from_slice(shape_slice),
-        alloc_bytes,
-        qtensor_meta_ptr: std::ptr::null_mut(),
-        qtensor_meta_bytes: 0,
-    };
-    tensor_pool::global().push(key, entry, tensor_pool_freer);
-    // Owning tensors have `parent == null` by construction, so no parent
-    // decrement is needed here. (Defensive sanity: if parent ever drifts
-    // non-null on an owning tensor, the dec below catches it.)
-    if !parent.is_null() {
-        rayzor_tensor_free(parent as i64);
     }
 }
 
@@ -4758,11 +4932,13 @@ pub unsafe extern "C" fn rayzor_tensor_pool_reset() {
 /// Read shape from a Haxe Array<Int> data pointer.
 /// The pointer points to the raw i64 data of the array.
 unsafe fn read_shape(ptr: i64, ndim: usize) -> Vec<usize> {
-    if ptr == 0 || ndim == 0 {
-        return vec![];
+    unsafe {
+        if ptr == 0 || ndim == 0 {
+            return vec![];
+        }
+        let data = ptr as *const i64;
+        (0..ndim).map(|i| *data.add(i) as usize).collect()
     }
-    let data = ptr as *const i64;
-    (0..ndim).map(|i| *data.add(i) as usize).collect()
 }
 
 #[cfg(test)]

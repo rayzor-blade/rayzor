@@ -106,12 +106,11 @@ fn collect(root: &Path, dir: &Path, entries: &mut BTreeMap<String, Vec<u8>>) {
         let path = entry.path();
         if path.is_dir() {
             collect(root, &path, entries);
-        } else if path.extension().is_some_and(|e| e == "blade") {
-            if let (Ok(rel), Ok(bytes)) = (path.strip_prefix(root), std::fs::read(&path)) {
-                if let Some(key) = rel.to_str() {
-                    entries.insert(key.replace('\\', "/"), bytes);
-                }
-            }
+        } else if path.extension().is_some_and(|e| e == "blade")
+            && let (Ok(rel), Ok(bytes)) = (path.strip_prefix(root), std::fs::read(&path))
+            && let Some(key) = rel.to_str()
+        {
+            entries.insert(key.replace('\\', "/"), bytes);
         }
     }
 }

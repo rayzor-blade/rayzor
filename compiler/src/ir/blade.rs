@@ -296,7 +296,7 @@ struct BladeModule {
     cached_maps: Option<BladeCachedMaps>,
 }
 
-pub use bsym::{build_metadata_timestamp, BladeError};
+pub use bsym::{BladeError, build_metadata_timestamp};
 
 /// Save a MIR module to a .blade file
 ///
@@ -447,9 +447,9 @@ pub fn compute_body_hash(func: &crate::ir::IrFunction) -> u64 {
 // The `.bsym` symbol manifest lives in the `bsym` crate so the compiler's
 // build script can produce it without depending on the compiler itself.
 pub use bsym::{
-    load_symbol_manifest, load_symbol_manifest_from_bytes, save_symbol_manifest, BladeAbstractInfo,
-    BladeClassInfo, BladeEnumInfo, BladeEnumVariantInfo, BladeFieldInfo, BladeMethodInfo,
-    BladeModuleSymbols, BladeParamInfo, BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
+    BladeAbstractInfo, BladeClassInfo, BladeEnumInfo, BladeEnumVariantInfo, BladeFieldInfo,
+    BladeMethodInfo, BladeModuleSymbols, BladeParamInfo, BladeSymbolManifest, BladeTypeAliasInfo,
+    BladeTypeInfo, load_symbol_manifest, load_symbol_manifest_from_bytes, save_symbol_manifest,
 };
 
 // ============================================================================
@@ -790,8 +790,8 @@ pub fn load_bundle_from_bytes(bytes: &[u8]) -> Result<RayzorBundle, BladeError> 
 /// hash — we never want to fail the build here, only to invalidate the cache
 /// when the import graph shifts.
 pub fn compute_import_set_hash(entry_source: &str, manifest_dirs: &[std::path::PathBuf]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
     use std::collections::HashSet;
+    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     const MAX_VISITS: usize = 4096; // pathological-input guard

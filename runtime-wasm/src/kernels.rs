@@ -225,7 +225,7 @@ pub extern "C" fn rayzor_flash_band_worker(work_ptr: i32) -> i64 {
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "rayzor")]
-extern "C" {
+unsafe extern "C" {
     fn rayzor_thread_spawn(fn_idx: i32, env_ptr: i32) -> i32;
     fn rayzor_thread_join_void(handle: i32);
 }

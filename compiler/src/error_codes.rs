@@ -556,9 +556,11 @@ mod tests {
         // Test symbol errors range
         let symbol_errors = registry.get_symbol_errors();
         assert!(!symbol_errors.is_empty());
-        assert!(symbol_errors
-            .iter()
-            .all(|e| e.code >= 2000 && e.code <= 2999));
+        assert!(
+            symbol_errors
+                .iter()
+                .all(|e| e.code >= 2000 && e.code <= 2999)
+        );
     }
 
     #[test]

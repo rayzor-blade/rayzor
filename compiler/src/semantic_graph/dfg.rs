@@ -9,7 +9,7 @@
 //! - Value numbering for optimization opportunities
 //! - Integration with CFG for complete program representation
 
-use crate::tast::collections::{new_id_map, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map};
 use crate::tast::node::{BinaryOperator, UnaryOperator};
 use crate::tast::{DataFlowNodeId, InternedString, ScopeId, SsaVariableId, TypeId};
 

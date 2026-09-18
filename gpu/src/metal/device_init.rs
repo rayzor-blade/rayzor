@@ -6,7 +6,7 @@ use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 
 // MTLCreateSystemDefaultDevice requires CoreGraphics to be linked
 #[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {}
+unsafe extern "C" {}
 
 /// Metal-specific GPU context wrapping device + command queue.
 pub struct MetalContext {

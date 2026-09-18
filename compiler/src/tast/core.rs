@@ -11,9 +11,9 @@
 use crate::tast::SourceLocation;
 
 use super::{
-    collections::{new_id_map, IdMap, IdSet},
-    type_cache::{TypeCache, TypeCacheKey},
     InternedString, LifetimeId, ScopeId, StringInterner, SymbolId, TypeId, TypedArena,
+    collections::{IdMap, IdSet, new_id_map},
+    type_cache::{TypeCache, TypeCacheKey},
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -578,7 +578,7 @@ impl TypeTable {
     /// # Safety
     /// The caller must ensure the ID is valid and within bounds.
     pub unsafe fn get_unchecked(&self, id: TypeId) -> &Type {
-        self.types.get_unchecked(id.as_raw() as usize)
+        unsafe { self.types.get_unchecked(id.as_raw() as usize) }
     }
 
     /// Create a new type with automatic ID assignment

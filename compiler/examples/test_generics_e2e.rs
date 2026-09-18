@@ -261,14 +261,13 @@ fn compile_and_check(source: &str, name: &str) -> Result<MonoStats, String> {
                     if let compiler::ir::IrInstruction::CallDirect {
                         func_id, type_args, ..
                     } = instr
+                        && !type_args.is_empty()
                     {
-                        if !type_args.is_empty() {
-                            println!(
-                                "  📞 Call with type_args in {}: func_id={:?}, type_args={:?}",
-                                func.name, func_id, type_args
-                            );
-                            stats.call_sites_rewritten += 1;
-                        }
+                        println!(
+                            "  📞 Call with type_args in {}: func_id={:?}, type_args={:?}",
+                            func.name, func_id, type_args
+                        );
+                        stats.call_sites_rewritten += 1;
                     }
                 }
             }

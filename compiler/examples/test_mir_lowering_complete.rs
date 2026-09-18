@@ -37,8 +37,8 @@ use compiler::ir::{
 };
 use compiler::tast::ScopeId;
 use compiler::tast::{
-    ast_lowering::AstLowering, scopes::ScopeTree, type_checking_pipeline::TypeCheckingPhase,
-    StringInterner, SymbolTable, TypeTable,
+    StringInterner, SymbolTable, TypeTable, ast_lowering::AstLowering, scopes::ScopeTree,
+    type_checking_pipeline::TypeCheckingPhase,
 };
 use diagnostics::{Diagnostics, ErrorFormatter};
 use parser::haxe_parser::parse_haxe_file;

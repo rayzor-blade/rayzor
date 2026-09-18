@@ -3,9 +3,9 @@
 //! This module provides a trait that allows optimization passes to work generically
 //! across different IR representations (HIR, MIR, LIR).
 
+use super::IrType;
 use super::optimization::{OptimizationPass, OptimizationResult};
 use super::validation::ValidationError;
-use super::IrType;
 use std::any::Any;
 use std::fmt::Debug;
 

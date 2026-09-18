@@ -36,7 +36,7 @@
 //!
 //! This test uses the pipeline directly to avoid stdlib compilation overhead
 
-use compiler::pipeline::{compile_haxe_file, CompilationResult};
+use compiler::pipeline::{CompilationResult, compile_haxe_file};
 
 fn main() {
     println!("=== Iterator/For-In Loop Lowering Tests ===\n");

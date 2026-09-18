@@ -782,11 +782,7 @@ impl CBackend {
                 let load_type = Self::type_to_c(ty);
                 let load_cast = if load_type == "void" || load_type == "void*" {
                     // Loading a pointer-sized value
-                    if dest_c == "void*" {
-                        "void*"
-                    } else {
-                        "i64"
-                    }
+                    if dest_c == "void*" { "void*" } else { "i64" }
                 } else {
                     &load_type
                 };

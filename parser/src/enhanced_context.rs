@@ -7,7 +7,7 @@
 //! - Integrate seamlessly with nom parsing
 
 use diagnostics::{Diagnostic, DiagnosticBuilder, FileId, SourcePosition, SourceSpan};
-use nom::{error::ParseError as NomParseError, Parser};
+use nom::{Parser, error::ParseError as NomParseError};
 
 /// Helper utilities for error suggestions
 pub struct ErrorHelpers;

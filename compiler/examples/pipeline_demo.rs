@@ -33,7 +33,7 @@
 //! This example demonstrates the complete Haxe -> AST -> TAST pipeline.
 
 use compiler::pipeline::{
-    compile_haxe_file, HaxeCompilationPipeline, PipelineConfig, TargetPlatform,
+    HaxeCompilationPipeline, PipelineConfig, TargetPlatform, compile_haxe_file,
 };
 
 fn main() {

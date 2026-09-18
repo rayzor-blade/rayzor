@@ -4,12 +4,12 @@
 //! Falls back to plain text when not a TTY.
 
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::Constraint,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table},
-    Terminal,
 };
 use std::io;
 

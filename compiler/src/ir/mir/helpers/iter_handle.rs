@@ -136,7 +136,7 @@ impl<'a> HirToMirContext<'a> {
                 TypeKind::Map { key_type, .. } => {
                     return Some(IterSource::MapValues {
                         values_fn: self.map_values_fn_for_key(*key_type)?,
-                    })
+                    });
                 }
                 TypeKind::Class { symbol_id, .. } => {
                     let class_sym = *symbol_id;
@@ -156,17 +156,17 @@ impl<'a> HirToMirContext<'a> {
                         Some("IntMap") => {
                             return Some(IterSource::MapValues {
                                 values_fn: "haxe_intmap_values_to_array",
-                            })
+                            });
                         }
                         Some("StringMap") => {
                             return Some(IterSource::MapValues {
                                 values_fn: "haxe_stringmap_values_to_array",
-                            })
+                            });
                         }
                         Some("ObjectMap") => {
                             return Some(IterSource::MapValues {
                                 values_fn: "haxe_objectmap_values_to_array",
-                            })
+                            });
                         }
                         _ => {}
                     }

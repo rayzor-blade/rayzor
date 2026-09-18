@@ -34,6 +34,7 @@
 //! for more precise variable state tracking, especially through phi nodes.
 
 use compiler::tast::{
+    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         BinaryOperator, ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue,
         TypedExpression, TypedExpressionKind, TypedFunction, TypedParameter, TypedStatement,
@@ -41,7 +42,6 @@ use compiler::tast::{
     },
     symbols::{Mutability, Visibility},
     type_flow_guard::TypeFlowGuard,
-    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -67,7 +67,9 @@ fn main() {
     println!("✅ Null safety with SSA precision: WORKING (correctly detects null dereference!)");
     println!("✅ Loop phi analysis: WORKING (verified with separate test)");
     println!("\n🎉 Mission Complete: Full DFG+SSA integration achieved!");
-    println!("📍 All key features working: DFG construction, SSA variable tracking, null safety, and loop analysis");
+    println!(
+        "📍 All key features working: DFG construction, SSA variable tracking, null safety, and loop analysis"
+    );
 }
 
 fn test_ssa_variable_tracking(
@@ -527,10 +529,14 @@ fn test_null_safety_with_ssa(
             println!("  → Correctly identifies x₂ as null after assignment");
             println!("  → Detects null dereference on x₂");
         } else {
-            println!("⚠️  Null safety with SSA: PARTIAL - DFG construction succeeds but null detection needs work");
+            println!(
+                "⚠️  Null safety with SSA: PARTIAL - DFG construction succeeds but null detection needs work"
+            );
         }
     } else {
-        println!("⚠️  Null safety with SSA: PARTIAL - DFG construction succeeds but null detection needs work");
+        println!(
+            "⚠️  Null safety with SSA: PARTIAL - DFG construction succeeds but null detection needs work"
+        );
         println!("  → Main achievement: No more DFG construction failures on complex control flow");
         println!("  → Next step: Enhance null safety analysis integration with SSA");
     }
@@ -765,7 +771,9 @@ fn test_loop_phi_analysis(
         println!("  → Variables maintain initialized state through loop");
         println!("  → No false positives from loop back-edges");
     } else {
-        println!("⚠️  Loop phi analysis: PARTIAL - DFG construction succeeds but loop analysis needs work");
+        println!(
+            "⚠️  Loop phi analysis: PARTIAL - DFG construction succeeds but loop analysis needs work"
+        );
         println!("  → Main achievement: No more DFG construction failures on loop structures");
     }
     println!("");

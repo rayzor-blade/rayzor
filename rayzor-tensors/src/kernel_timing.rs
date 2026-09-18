@@ -13,8 +13,8 @@
 //!
 //! See `tools/profile_run.sh` for the SIGPROF-based alternative.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as MemOrdering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as MemOrdering};
 use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);

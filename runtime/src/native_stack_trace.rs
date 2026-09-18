@@ -8,7 +8,7 @@
 use crate::exception::get_exception_stack_trace;
 use crate::haxe_array::HaxeArray;
 use crate::haxe_string::HaxeString;
-use std::alloc::{alloc, Layout};
+use std::alloc::{Layout, alloc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, RwLock};
 
@@ -71,16 +71,16 @@ fn fetch_source_content(path: &str) -> String {
     if path == "<unknown>" {
         return String::new();
     }
-    if let Ok(cache) = SOURCE_CONTENT_CACHE.read() {
-        if let Some(content) = cache.get(path) {
-            return content.clone();
-        }
+    if let Ok(cache) = SOURCE_CONTENT_CACHE.read()
+        && let Some(content) = cache.get(path)
+    {
+        return content.clone();
     }
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    if !content.is_empty() {
-        if let Ok(mut cache) = SOURCE_CONTENT_CACHE.write() {
-            cache.insert(path.to_string(), content.clone());
-        }
+    if !content.is_empty()
+        && let Ok(mut cache) = SOURCE_CONTENT_CACHE.write()
+    {
+        cache.insert(path.to_string(), content.clone());
     }
     content
 }
@@ -119,13 +119,13 @@ fn fetch_source_line(path: &str, line: u32) -> String {
     }
 
     // Fast path: file already cached
-    if let Ok(cache) = SOURCE_FILE_CACHE.read() {
-        if let Some(lines) = cache.get(path) {
-            return lines
-                .get((line as usize).saturating_sub(1))
-                .cloned()
-                .unwrap_or_default();
-        }
+    if let Ok(cache) = SOURCE_FILE_CACHE.read()
+        && let Some(lines) = cache.get(path)
+    {
+        return lines
+            .get((line as usize).saturating_sub(1))
+            .cloned()
+            .unwrap_or_default();
     }
 
     // Slow path: read and cache the file

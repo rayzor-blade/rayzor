@@ -27,8 +27,8 @@
 //! }
 //! ```
 
-use crate::ir::modules::IrModule;
 use crate::ir::IrType;
+use crate::ir::modules::IrModule;
 use std::collections::BTreeMap;
 
 /// Metadata for an exported class, collected from MIR.

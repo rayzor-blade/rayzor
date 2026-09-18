@@ -26,35 +26,25 @@ class Test {
             // Check that we have 3 catch blocks
             if let Some(parser::haxe_ast::TypeDeclaration::Class(class)) =
                 result.declarations.first()
+                && let Some(method) = class.fields.first()
+                && let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind
+                && let Some(body) = &func.body
+                && let parser::haxe_ast::ExprKind::Block(block) = &body.kind
+                && let Some(parser::haxe_ast::BlockElement::Expr(try_expr)) = block.first()
+                && let parser::haxe_ast::ExprKind::Try { catches, .. } = &try_expr.kind
             {
-                if let Some(method) = class.fields.first() {
-                    if let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind {
-                        if let Some(body) = &func.body {
-                            if let parser::haxe_ast::ExprKind::Block(block) = &body.kind {
-                                if let Some(parser::haxe_ast::BlockElement::Expr(try_expr)) =
-                                    block.first()
-                                {
-                                    if let parser::haxe_ast::ExprKind::Try { catches, .. } =
-                                        &try_expr.kind
-                                    {
-                                        println!("Found {} catch blocks", catches.len());
-                                        assert_eq!(catches.len(), 3, "Should have 3 catch blocks");
+                println!("Found {} catch blocks", catches.len());
+                assert_eq!(catches.len(), 3, "Should have 3 catch blocks");
 
-                                        // Check types
-                                        if let Some(type_hint) = &catches[0].type_hint {
-                                            println!("First catch type: {:?}", type_hint);
-                                        }
-                                        if let Some(type_hint) = &catches[1].type_hint {
-                                            println!("Second catch type: {:?}", type_hint);
-                                        }
-                                        if let Some(type_hint) = &catches[2].type_hint {
-                                            println!("Third catch type: {:?}", type_hint);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // Check types
+                if let Some(type_hint) = &catches[0].type_hint {
+                    println!("First catch type: {:?}", type_hint);
+                }
+                if let Some(type_hint) = &catches[1].type_hint {
+                    println!("Second catch type: {:?}", type_hint);
+                }
+                if let Some(type_hint) = &catches[2].type_hint {
+                    println!("Third catch type: {:?}", type_hint);
                 }
             }
         }

@@ -55,7 +55,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                                 key.kind
                             ),
                             location: span_to_location(key.span),
-                        })
+                        });
                     }
                 };
                 map.insert(key_str, expr_to_value(value)?);
@@ -568,7 +568,7 @@ fn compare_values(
                     right.type_name()
                 ),
                 location,
-            })
+            });
         }
     };
     Ok(MacroValue::Bool(pred(ordering)))

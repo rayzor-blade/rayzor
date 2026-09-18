@@ -38,92 +38,103 @@ pub fn register_code(start: usize, size: usize, name: &str) {
 
 #[cfg(unix)]
 unsafe fn write(bytes: &[u8]) {
-    libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len());
+    unsafe {
+        libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len());
+    }
 }
 #[cfg(unix)]
 unsafe fn hex(value: usize) {
-    let mut bytes = [b'0'; 2 + 2 * std::mem::size_of::<usize>()];
-    bytes[1] = b'x';
-    for i in 2..bytes.len() {
-        let shift = (bytes.len() - 1 - i) * 4;
-        bytes[i] = b"0123456789abcdef"[(value >> shift) & 15];
+    unsafe {
+        let mut bytes = [b'0'; 2 + 2 * std::mem::size_of::<usize>()];
+        bytes[1] = b'x';
+        for i in 2..bytes.len() {
+            let shift = (bytes.len() - 1 - i) * 4;
+            bytes[i] = b"0123456789abcdef"[(value >> shift) & 15];
+        }
+        write(&bytes);
     }
-    write(&bytes);
 }
 #[cfg(unix)]
 unsafe fn location(pc: usize) {
-    hex(pc);
-    let mut node = RANGES.load(Ordering::Acquire);
-    while !node.is_null() {
-        let entry = &*node;
-        if pc >= entry.start && pc < entry.end {
-            write(&entry.label);
-            write(b" +");
-            hex(pc - entry.start);
-            return;
+    unsafe {
+        hex(pc);
+        let mut node = RANGES.load(Ordering::Acquire);
+        while !node.is_null() {
+            let entry = &*node;
+            if pc >= entry.start && pc < entry.end {
+                write(&entry.label);
+                write(b" +");
+                hex(pc - entry.start);
+                return;
+            }
+            node = entry.next;
         }
-        node = entry.next;
+        write(b" [outside registered JIT code]");
     }
-    write(b" [outside registered JIT code]");
 }
 #[cfg(unix)]
 unsafe extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
-    write(b"rayzor: native crash signal=");
-    write(match sig {
-        libc::SIGSEGV => b"SIGSEGV",
-        libc::SIGBUS => b"SIGBUS",
-        libc::SIGILL => b"SIGILL",
-        libc::SIGABRT => b"SIGABRT",
-        libc::SIGTRAP => b"SIGTRAP",
-        _ => b"unknown",
-    });
-    if !info.is_null() {
-        write(b" fault=");
-        hex((*info).si_addr() as usize);
+    unsafe {
+        write(b"rayzor: native crash signal=");
+        write(match sig {
+            libc::SIGSEGV => b"SIGSEGV",
+            libc::SIGBUS => b"SIGBUS",
+            libc::SIGILL => b"SIGILL",
+            libc::SIGABRT => b"SIGABRT",
+            libc::SIGTRAP => b"SIGTRAP",
+            _ => b"unknown",
+        });
+        if !info.is_null() {
+            write(b" fault=");
+            hex((*info).si_addr() as usize);
+        }
+        let (pc, caller) = registers(ctx);
+        write(b" pc=");
+        location(pc);
+        if caller != 0 {
+            write(b" caller=");
+            location(caller.saturating_sub(1));
+        }
+        write(b"\n");
+        libc::_exit(128 + sig);
     }
-    let (pc, caller) = registers(ctx);
-    write(b" pc=");
-    location(pc);
-    if caller != 0 {
-        write(b" caller=");
-        location(caller.saturating_sub(1));
-    }
-    write(b"\n");
-    libc::_exit(128 + sig);
 }
 #[cfg(unix)]
 unsafe fn registers(ctx: *mut libc::c_void) -> (usize, usize) {
-    if ctx.is_null() {
-        return (0, 0);
-    }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
-        if !mc.is_null() {
-            return ((*mc).__ss.__pc as usize, (*mc).__ss.__lr as usize);
+    unsafe {
+        if ctx.is_null() {
+            return (0, 0);
         }
-    }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
-        if !mc.is_null() {
-            return ((*mc).__ss.__rip as usize, 0);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
+            if !mc.is_null() {
+                return ((*mc).__ss.__pc as usize, (*mc).__ss.__lr as usize);
+            }
         }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            let mc = (*(ctx as *const libc::ucontext_t)).uc_mcontext;
+            if !mc.is_null() {
+                return ((*mc).__ss.__rip as usize, 0);
+            }
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            return (
+                (*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize]
+                    as usize,
+                0,
+            );
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            let mc = &(*(ctx as *const libc::ucontext_t)).uc_mcontext;
+            return (mc.pc as usize, mc.regs[30] as usize);
+        }
+        #[allow(unreachable_code)]
+        (0, 0)
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        return (
-            (*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] as usize,
-            0,
-        );
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        let mc = &(*(ctx as *const libc::ucontext_t)).uc_mcontext;
-        return (mc.pc as usize, mc.regs[30] as usize);
-    }
-    #[allow(unreachable_code)]
-    (0, 0)
 }
 
 /// The CLI opts in; embedders retain their own signal handlers.

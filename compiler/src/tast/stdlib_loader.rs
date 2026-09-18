@@ -4,7 +4,7 @@
 //! rather than hardcoding them. This follows Haxe's actual implementation.
 
 use log::{info, warn};
-use parser::{parse_haxe_file_with_diagnostics, ErrorFormatter, HaxeFile};
+use parser::{ErrorFormatter, HaxeFile, parse_haxe_file_with_diagnostics};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

@@ -1408,11 +1408,17 @@ impl CraneliftBackend {
         match (res, res_pid) {
             (Ok(_), Ok(_)) => eprintln!(
                 "[jit-map] backend {} appended {} new finalised functions to {} + {} (total this backend: {})",
-                self.backend_id, n, path, path_pid, self.dumped_funcids.len()
+                self.backend_id,
+                n,
+                path,
+                path_pid,
+                self.dumped_funcids.len()
             ),
             (e1, e2) => eprintln!(
                 "[jit-map] backend {} failed to append: shared={:?} pid={:?}",
-                self.backend_id, e1.err(), e2.err()
+                self.backend_id,
+                e1.err(),
+                e2.err()
             ),
         }
     }
@@ -1908,7 +1914,7 @@ impl CraneliftBackend {
             "free" => {
                 // fn free(ptr: *void)
                 sig.params.push(AbiParam::new(self.pointer_type)); // ptr
-                                                                   // no return value
+                // no return value
             }
             _ => return Err(format!("Unknown libc function: {}", name)),
         }
@@ -2600,11 +2606,7 @@ impl CraneliftBackend {
                     .unwrap_or("<non-string panic>");
                 return Err(format!(
                     "Cranelift panicked while defining function '{}' (qualified={:?}, mir={:?}, cl={:?}): {}",
-                    function.name,
-                    function.qualified_name,
-                    mir_func_id,
-                    func_id,
-                    panic_msg
+                    function.name, function.qualified_name, mir_func_id, func_id, panic_msg
                 ));
             }
         }
@@ -3112,7 +3114,7 @@ impl CraneliftBackend {
                         sig.params.push(AbiParam::new(types::I64)); // var_name ptr
                         sig.params.push(AbiParam::new(types::I64)); // var_name len
                         sig.params.push(AbiParam::new(types::I64)); // line
-                                                                    // No return type — function is noreturn (`-> !` in Rust).
+                        // No return type — function is noreturn (`-> !` in Rust).
                         let fid = module
                             .declare_function("rayzor_panic_use_after_move", Linkage::Import, &sig)
                             .map_err(|e| {
@@ -5333,7 +5335,7 @@ impl CraneliftBackend {
                         Self::mir_vector_to_cranelift(element, *count)?
                     }
                     other => {
-                        return Err(format!("VectorShuffle: non-vector result type {:?}", other))
+                        return Err(format!("VectorShuffle: non-vector result type {:?}", other));
                     }
                 };
                 let r = if want != builder.func.dfg.value_type(r) {
@@ -5361,7 +5363,7 @@ impl CraneliftBackend {
                         Self::mir_vector_to_cranelift(element, *count)?
                     }
                     other => {
-                        return Err(format!("VectorConvert: non-vector result type {:?}", other))
+                        return Err(format!("VectorConvert: non-vector result type {:?}", other));
                     }
                 };
                 let r = match kind {
@@ -5391,7 +5393,7 @@ impl CraneliftBackend {
                         Self::mir_vector_to_cranelift(element, *count)?
                     }
                     other => {
-                        return Err(format!("VectorNarrow: non-vector result type {:?}", other))
+                        return Err(format!("VectorNarrow: non-vector result type {:?}", other));
                     }
                 };
                 let r = if want != builder.func.dfg.value_type(r) {
@@ -6074,7 +6076,7 @@ impl CraneliftBackend {
     /// This avoids generating __init__ code that calls runtime functions via FFI.
     pub fn register_enum_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::{register_enum_from_mir, ParamType};
+        use rayzor_runtime::type_system::{ParamType, register_enum_from_mir};
 
         for module in modules {
             for (_id, typedef) in &module.types {

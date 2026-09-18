@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
-use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
 use crate::semantic_graph::LifetimeId;
+use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
 use crate::tast::{SourceLocation, SymbolId};
 
 /// **Lifetime Constraint Solver**

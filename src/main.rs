@@ -1012,20 +1012,20 @@ fn main() {
             cache_dir,
             verbose,
         } => run_artifact_build_on_large_stack("rayzor-aot", move || {
-            if files.is_empty() {
-                if let Ok((entry, manifest)) = resolve_from_manifest() {
-                    files.push(entry);
-                    if output.is_none() {
-                        if let Some(project) = manifest {
-                            output = project.output_path().map(|p| {
-                                p.with_extension(if emit == "gcc" || emit == "exe" {
-                                    ""
-                                } else {
-                                    emit.as_str()
-                                })
-                            });
-                        }
-                    }
+            if files.is_empty()
+                && let Ok((entry, manifest)) = resolve_from_manifest()
+            {
+                files.push(entry);
+                if output.is_none()
+                    && let Some(project) = manifest
+                {
+                    output = project.output_path().map(|p| {
+                        p.with_extension(if emit == "gcc" || emit == "exe" {
+                            ""
+                        } else {
+                            emit.as_str()
+                        })
+                    });
                 }
             }
             if files.is_empty() {
@@ -1732,10 +1732,10 @@ fn run_file(
             }
             if let Ok(meta) = path.metadata() {
                 meta.len().hash(h);
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        dur.as_nanos().hash(h);
-                    }
+                if let Ok(modified) = meta.modified()
+                    && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+                {
+                    dur.as_nanos().hash(h);
                 }
             }
         }
@@ -1774,24 +1774,22 @@ fn run_file(
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("hx") {
-                        if let Ok(meta) = path.metadata() {
-                            if let Ok(modified) = meta.modified() {
-                                modified.hash(&mut h);
-                            }
-                        }
+                    if path.extension().and_then(|e| e.to_str()) == Some("hx")
+                        && let Ok(meta) = path.metadata()
+                        && let Ok(modified) = meta.modified()
+                    {
+                        modified.hash(&mut h);
                     }
                     // Also check subdirectories (packages)
-                    if path.is_dir() {
-                        if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                            for sub in sub_entries.flatten() {
-                                if sub.path().extension().and_then(|e| e.to_str()) == Some("hx") {
-                                    if let Ok(meta) = sub.path().metadata() {
-                                        if let Ok(modified) = meta.modified() {
-                                            modified.hash(&mut h);
-                                        }
-                                    }
-                                }
+                    if path.is_dir()
+                        && let Ok(sub_entries) = std::fs::read_dir(&path)
+                    {
+                        for sub in sub_entries.flatten() {
+                            if sub.path().extension().and_then(|e| e.to_str()) == Some("hx")
+                                && let Ok(meta) = sub.path().metadata()
+                                && let Ok(modified) = meta.modified()
+                            {
+                                modified.hash(&mut h);
                             }
                         }
                     }
@@ -1815,42 +1813,39 @@ fn run_file(
     let (mir_module, _cache_hit) = 'load_mir: {
         // Try loading from MIR cache (source hash must match)
         // Cache includes pre-rendered diagnostic strings for replay.
-        if cache_enabled {
-            if let Ok(data) = std::fs::read(&mir_cache_path) {
-                if data.len() >= 12 {
-                    let cached_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
-                    let diag_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
-                    if cached_hash == source_hash && data.len() >= 12 + diag_len {
-                        // Replay cached diagnostic strings — warnings and
-                        // advice only. Error-severity strings describe the
-                        // PREVIOUS compile and replaying them verbatim on a
-                        // warm run made every cached start look like it had
-                        // just failed (the "spurious cache errors" IMPORT
-                        // storm users reported). The stored errors
-                        // themselves are tracked by the blade-coherence
-                        // F4/F7/F8 work; the replay was wrong independently.
-                        // RAYZOR_REPLAY_CACHED_ERRORS=1 restores the old
-                        // behavior for debugging.
-                        if diag_len > 0 {
-                            if let Ok(diag_strings) =
-                                postcard::from_bytes::<Vec<String>>(&data[12..12 + diag_len])
-                            {
-                                let replay_errors =
-                                    std::env::var_os("RAYZOR_REPLAY_CACHED_ERRORS").is_some();
-                                for s in &diag_strings {
-                                    if replay_errors || !s.contains("Error:") {
-                                        eprint!("{}", s);
-                                    }
-                                }
-                            }
-                        }
-                        // Load MIR module
-                        if let Ok(module) =
-                            postcard::from_bytes::<compiler::ir::IrModule>(&data[12 + diag_len..])
-                        {
-                            break 'load_mir (module, true);
+        if cache_enabled
+            && let Ok(data) = std::fs::read(&mir_cache_path)
+            && data.len() >= 12
+        {
+            let cached_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
+            let diag_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+            if cached_hash == source_hash && data.len() >= 12 + diag_len {
+                // Replay cached diagnostic strings — warnings and
+                // advice only. Error-severity strings describe the
+                // PREVIOUS compile and replaying them verbatim on a
+                // warm run made every cached start look like it had
+                // just failed (the "spurious cache errors" IMPORT
+                // storm users reported). The stored errors
+                // themselves are tracked by the blade-coherence
+                // F4/F7/F8 work; the replay was wrong independently.
+                // RAYZOR_REPLAY_CACHED_ERRORS=1 restores the old
+                // behavior for debugging.
+                if diag_len > 0
+                    && let Ok(diag_strings) =
+                        postcard::from_bytes::<Vec<String>>(&data[12..12 + diag_len])
+                {
+                    let replay_errors = std::env::var_os("RAYZOR_REPLAY_CACHED_ERRORS").is_some();
+                    for s in &diag_strings {
+                        if replay_errors || !s.contains("Error:") {
+                            eprint!("{}", s);
                         }
                     }
+                }
+                // Load MIR module
+                if let Ok(module) =
+                    postcard::from_bytes::<compiler::ir::IrModule>(&data[12 + diag_len..])
+                {
+                    break 'load_mir (module, true);
                 }
             }
         }
@@ -1884,49 +1879,48 @@ fn run_file(
                 h.end_phase("stdlib", stdlib);
                 h.end_phase("parse", parse);
                 h.end_phase("typecheck", tast);
-                if std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some() {
-                    if let Some(detail) = compile_helpers::LAST_TYPECHECK_DETAIL
+                if std::env::var_os("RAYZOR_PROFILE_TYPECHECK").is_some()
+                    && let Some(detail) = compile_helpers::LAST_TYPECHECK_DETAIL
                         .lock()
                         .ok()
                         .and_then(|s| *s)
-                    {
-                        h.end_phase("tc.hdll", detail.hdll_ms);
-                        h.end_phase("tc.deps", detail.dependency_ms);
-                        h.end_phase("tc.import-scan", detail.import_scan_ms);
-                        h.end_phase("tc.imports", detail.import_load_ms + detail.import_hx_ms);
-                        h.end_phase("tc.imp-discover", detail.import_discover_ms);
-                        h.end_phase("tc.imp-toposort", detail.import_toposort_ms);
-                        h.end_phase("tc.imp-compile", detail.import_compile_ms);
-                        h.end_phase("tc.imp-cache-load", detail.import_cache_load_ms);
-                        h.end_phase("tc.imp-cache-save", detail.import_cache_save_ms);
-                        h.end_phase("tc.imp-compile-call", detail.import_compile_call_ms);
-                        h.end_phase("tc.user", detail.user_files_ms);
-                        h.end_phase("tc.file-parse", detail.file_parse_ms);
-                        h.end_phase("tc.macro", detail.macro_ms);
-                        h.end_phase("tc.ast", detail.ast_lower_ms);
-                        h.end_phase("tc.send-sync", detail.send_sync_ms);
-                        h.end_phase("tc.ownership", detail.ownership_ms);
-                        h.end_phase("tc.hir", detail.hir_ms);
-                        h.end_phase("tc.extern", detail.extern_check_ms);
-                        h.end_phase("tc.mir-prep", detail.mir_prep_ms);
-                        h.end_phase("tc.mir", detail.mir_ms);
-                        h.end_phase("tc.mir-core", detail.mir_lower_core_ms);
-                        h.end_phase("tc.merge", detail.stdlib_merge_ms);
-                        h.end_phase("tc.mono", detail.monomorphize_ms);
-                        eprintln!(
-                            "  typecheck-detail: files={} macro_skipped={} imports={} \
+                {
+                    h.end_phase("tc.hdll", detail.hdll_ms);
+                    h.end_phase("tc.deps", detail.dependency_ms);
+                    h.end_phase("tc.import-scan", detail.import_scan_ms);
+                    h.end_phase("tc.imports", detail.import_load_ms + detail.import_hx_ms);
+                    h.end_phase("tc.imp-discover", detail.import_discover_ms);
+                    h.end_phase("tc.imp-toposort", detail.import_toposort_ms);
+                    h.end_phase("tc.imp-compile", detail.import_compile_ms);
+                    h.end_phase("tc.imp-cache-load", detail.import_cache_load_ms);
+                    h.end_phase("tc.imp-cache-save", detail.import_cache_save_ms);
+                    h.end_phase("tc.imp-compile-call", detail.import_compile_call_ms);
+                    h.end_phase("tc.user", detail.user_files_ms);
+                    h.end_phase("tc.file-parse", detail.file_parse_ms);
+                    h.end_phase("tc.macro", detail.macro_ms);
+                    h.end_phase("tc.ast", detail.ast_lower_ms);
+                    h.end_phase("tc.send-sync", detail.send_sync_ms);
+                    h.end_phase("tc.ownership", detail.ownership_ms);
+                    h.end_phase("tc.hir", detail.hir_ms);
+                    h.end_phase("tc.extern", detail.extern_check_ms);
+                    h.end_phase("tc.mir-prep", detail.mir_prep_ms);
+                    h.end_phase("tc.mir", detail.mir_ms);
+                    h.end_phase("tc.mir-core", detail.mir_lower_core_ms);
+                    h.end_phase("tc.merge", detail.stdlib_merge_ms);
+                    h.end_phase("tc.mono", detail.monomorphize_ms);
+                    eprintln!(
+                        "  typecheck-detail: files={} macro_skipped={} imports={} \
                              cache_hit={} cache_miss={} fresh={} typedef_fresh={} \
                              already={}",
-                            detail.files_seen,
-                            detail.macro_skipped_files,
-                            detail.imports_collected,
-                            detail.import_cache_hits,
-                            detail.import_cache_misses,
-                            detail.import_fresh_compiles,
-                            detail.import_typedef_fresh,
-                            detail.import_already_compiled
-                        );
-                    }
+                        detail.files_seen,
+                        detail.macro_skipped_files,
+                        detail.imports_collected,
+                        detail.import_cache_hits,
+                        detail.import_cache_misses,
+                        detail.import_fresh_compiles,
+                        detail.import_typedef_fresh,
+                        detail.import_already_compiled
+                    );
                 }
                 h.end_phase("mir", mir);
             }
@@ -2015,10 +2009,10 @@ fn run_file(
             };
             let mut pass_manager = PassManager::for_level(level);
             let _ = pass_manager.run(&mut mir_module);
-            if let Some(ref h) = progress_handle {
-                if let Some(t_opt) = t_opt {
-                    h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
-                }
+            if let Some(ref h) = progress_handle
+                && let Some(t_opt) = t_opt
+            {
+                h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
             }
         } else {
             // Skipping optimization must not skip the passes correctness
@@ -2378,10 +2372,10 @@ fn build_hxml(
     dry_run: bool,
 ) -> Result<(), String> {
     // Auto-detect: if file is .hxml use HXML path, otherwise try rayzor.toml
-    if let Some(ref file) = file_arg {
-        if file.extension().map(|e| e == "hxml").unwrap_or(false) {
-            return build_from_hxml(file, verbose, output_override, dry_run);
-        }
+    if let Some(ref file) = file_arg
+        && file.extension().map(|e| e == "hxml").unwrap_or(false)
+    {
+        return build_from_hxml(file, verbose, output_override, dry_run);
     }
 
     // Try rayzor.toml
@@ -2860,12 +2854,12 @@ fn show_info(_features: bool, _tiers: bool) {
     }
 
     use ratatui::{
+        Terminal,
         backend::CrosstermBackend,
         layout::Constraint,
         style::{Color, Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Paragraph, Row, Table},
-        Terminal,
     };
 
     // Orange color (RGB)
@@ -3005,7 +2999,7 @@ fn show_info(_features: bool, _tiers: bool) {
 fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
     use ratatui::style::Color;
-    use tui::panel::{render_info_panel, InfoRow};
+    use tui::panel::{InfoRow, render_info_panel};
 
     let mut config = CompilationConfig::default();
     if let Some(dir) = cache_dir {
@@ -3049,42 +3043,40 @@ fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
     // Collect cache entries
     let mut entries: Vec<(String, u64, String)> = Vec::new();
-    if cache_path.exists() {
-        if let Ok(dir) = std::fs::read_dir(&cache_path) {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                let is_cache = path.extension().and_then(|e| e.to_str()) == Some("blade")
-                    || path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.ends_with(".mir.cache"))
-                        .unwrap_or(false);
-                if is_cache {
-                    if let Ok(meta) = path.metadata() {
-                        let name = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("?")
-                            .to_string();
-                        let age = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.elapsed().ok())
-                            .map(|d| {
-                                if d.as_secs() < 60 {
-                                    format!("{}s", d.as_secs())
-                                } else if d.as_secs() < 3600 {
-                                    format!("{}m", d.as_secs() / 60)
-                                } else if d.as_secs() < 86400 {
-                                    format!("{}h", d.as_secs() / 3600)
-                                } else {
-                                    format!("{}d", d.as_secs() / 86400)
-                                }
-                            })
-                            .unwrap_or_else(|| "?".to_string());
-                        entries.push((name, meta.len(), age));
-                    }
-                }
+    if cache_path.exists()
+        && let Ok(dir) = std::fs::read_dir(&cache_path)
+    {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            let is_cache = path.extension().and_then(|e| e.to_str()) == Some("blade")
+                || path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".mir.cache"))
+                    .unwrap_or(false);
+            if is_cache && let Ok(meta) = path.metadata() {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let age = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| {
+                        if d.as_secs() < 60 {
+                            format!("{}s", d.as_secs())
+                        } else if d.as_secs() < 3600 {
+                            format!("{}m", d.as_secs() / 60)
+                        } else if d.as_secs() < 86400 {
+                            format!("{}h", d.as_secs() / 3600)
+                        } else {
+                            format!("{}d", d.as_secs() / 86400)
+                        }
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                entries.push((name, meta.len(), age));
             }
         }
     }
@@ -3102,12 +3094,12 @@ fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
     // Render in ratatui inline panel
     use ratatui::{
+        Terminal,
         backend::CrosstermBackend,
         layout::Constraint,
         style::{Color, Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Row, Table},
-        Terminal,
     };
 
     let total_size: u64 = entries.iter().map(|(_, s, _)| s).sum();
@@ -3320,7 +3312,7 @@ fn cmd_bundle(
     verbose: bool,
 ) -> Result<(), String> {
     use compiler::ir::optimization::OptimizationLevel;
-    use compiler::tools::preblade::{create_bundle, BundleConfig};
+    use compiler::tools::preblade::{BundleConfig, create_bundle};
 
     // Resolve project config from the first file or current dir
     let mut manifest_project = None;
@@ -3357,10 +3349,10 @@ fn cmd_bundle(
         let rpkgs = compiler::workspace::resolve_dependencies(&project.manifest, &project.root)
             .unwrap_or_default();
         for rpkg_path in rpkgs {
-            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path) {
-                if let Some(plugin) = rpkg.compiler_plugin.take() {
-                    plugins.push(Box::new(plugin));
-                }
+            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path)
+                && let Some(plugin) = rpkg.compiler_plugin.take()
+            {
+                plugins.push(Box::new(plugin));
             }
         }
         for lib_path in project.resolved_native_libs() {
@@ -3442,14 +3434,14 @@ fn cmd_aot(
         if let Ok((entry, manifest)) = resolve_from_manifest() {
             files.push(entry);
             manifest_project = manifest;
-            if output.is_none() {
-                if let Some(p) = manifest_project.as_ref().and_then(|m| m.output_path()) {
-                    output = Some(p.with_extension(if emit == "gcc" || emit == "exe" {
-                        ""
-                    } else {
-                        emit.as_str()
-                    }));
-                }
+            if output.is_none()
+                && let Some(p) = manifest_project.as_ref().and_then(|m| m.output_path())
+            {
+                output = Some(p.with_extension(if emit == "gcc" || emit == "exe" {
+                    ""
+                } else {
+                    emit.as_str()
+                }));
             }
         }
     } else {
@@ -3485,10 +3477,10 @@ fn cmd_aot(
         let rpkgs = compiler::workspace::resolve_dependencies(&project.manifest, &project.root)
             .unwrap_or_default();
         for rpkg_path in rpkgs {
-            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path) {
-                if let Some(plugin) = rpkg.compiler_plugin.take() {
-                    plugins.push(Box::new(plugin));
-                }
+            if let Ok(mut rpkg) = compiler::rpkg::install::RpkgPlugin::load(&rpkg_path)
+                && let Some(plugin) = rpkg.compiler_plugin.take()
+            {
+                plugins.push(Box::new(plugin));
             }
         }
         for lib_path in &native_link_libs {
@@ -3596,7 +3588,7 @@ fn cmd_aot(
     {
         use compiler::codegen::aot_compiler::OutputFormat;
         use compiler::ir::optimization::OptimizationLevel;
-        use compiler::tools::aot_build::{run_aot, AotConfig};
+        use compiler::tools::aot_build::{AotConfig, run_aot};
 
         let output_format = match emit.as_str() {
             "exe" => OutputFormat::Executable,
@@ -3609,7 +3601,7 @@ fn cmd_aot(
                 return Err(format!(
                     "Unknown emit format: {}. Use: exe, obj, llvm-ir, llvm-bc, asm, c, gcc",
                     other
-                ))
+                ));
             }
         };
 
@@ -3654,7 +3646,7 @@ fn cmd_preblade(
     cache_dir: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), String> {
-    use compiler::tools::preblade::{extract_stdlib_symbols, PrebladeConfig};
+    use compiler::tools::preblade::{PrebladeConfig, extract_stdlib_symbols};
 
     let out_path = out.unwrap_or_else(|| PathBuf::from(".rayzor/blade/stdlib"));
 
@@ -3985,10 +3977,10 @@ fn cmd_dump(
             "digraph MIR {\n  rankdir=TB;\n  node [shape=box, fontname=\"monospace\"];\n\n",
         );
         for func in module.functions.values() {
-            if let Some(ref filter) = function_filter {
-                if !func.name.contains(filter) {
-                    continue;
-                }
+            if let Some(ref filter) = function_filter
+                && !func.name.contains(filter)
+            {
+                continue;
             }
             dot.push_str(&format!("  subgraph cluster_{} {{\n", func.id.0));
             dot.push_str(&format!("    label=\"{}\";\n", func.name));
@@ -4076,10 +4068,10 @@ fn cmd_dump(
         output_str.push_str(&format!("; Functions: {}\n\n", module.functions.len()));
 
         for func in module.functions.values() {
-            if let Some(ref filter) = function_filter {
-                if !func.name.contains(filter) {
-                    continue;
-                }
+            if let Some(ref filter) = function_filter
+                && !func.name.contains(filter)
+            {
+                continue;
             }
             output_str.push_str(&dump::dump_cfg(&func.cfg));
             output_str.push('\n');

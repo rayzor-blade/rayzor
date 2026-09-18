@@ -4,20 +4,20 @@
 
 use crate::haxe_ast::*;
 use crate::haxe_parser::{
-    access, function_name, identifier, keyword, metadata_list, modifiers, position, symbol, ws,
-    PResult,
+    PResult, access, function_name, identifier, keyword, metadata_list, modifiers, position,
+    symbol, ws,
 };
 use crate::haxe_parser_expr::expression;
 use crate::haxe_parser_expr2::block_expr;
 use crate::haxe_parser_types::{type_expr, type_params};
 use nom::{
+    Parser,
     branch::alt,
     bytes::complete::tag,
     combinator::{map, opt, peek, value},
     error::context,
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, preceded, tuple},
-    Parser,
 };
 
 /// Parse function body - handles both block and single expression bodies
@@ -26,9 +26,7 @@ fn function_body<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
     // Check if this is a block body (starts with '{')
     if input.starts_with('{') {
-        let result = block_expr(full, input);
-
-        result
+        block_expr(full, input)
     } else {
         // Single expression body
         expression(full, input)
@@ -382,12 +380,12 @@ pub fn parse_access_and_modifiers(input: &str) -> PResult<(Option<Access>, Vec<M
         current_input = input;
 
         // Try to parse access specifier
-        if access_spec.is_none() {
-            if let Ok((rest, access_val)) = access(current_input) {
-                access_spec = Some(access_val);
-                current_input = rest;
-                continue;
-            }
+        if access_spec.is_none()
+            && let Ok((rest, access_val)) = access(current_input)
+        {
+            access_spec = Some(access_val);
+            current_input = rest;
+            continue;
         }
 
         // Try to parse modifiers

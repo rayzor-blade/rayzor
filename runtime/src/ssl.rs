@@ -12,15 +12,17 @@ use std::sync::Arc;
 
 /// Convert HaxeString pointer to owned Rust String
 unsafe fn hs_to_rust(s_ptr: *const u8) -> Option<String> {
-    if s_ptr.is_null() {
-        return None;
+    unsafe {
+        if s_ptr.is_null() {
+            return None;
+        }
+        let hs = &*(s_ptr as *const HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            return Some(String::new());
+        }
+        let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
+        Some(String::from_utf8_lossy(bytes).into_owned())
     }
-    let hs = &*(s_ptr as *const HaxeString);
-    if hs.ptr.is_null() || hs.len == 0 {
-        return Some(String::new());
-    }
-    let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
-    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 // ============================================================================
@@ -240,15 +242,14 @@ pub extern "C" fn rayzor_ssl_socket_peer_certificate(handle: *mut u8) -> *mut u8
     }
     unsafe {
         let ssl = &*(handle as *const SslSocketHandle);
-        if let Some(ref tls_stream) = ssl.tls_stream {
-            if let Some(certs) = tls_stream.conn.peer_certificates() {
-                if !certs.is_empty() {
-                    let cert_handle = Box::new(CertificateHandle {
-                        certs: certs.to_vec(),
-                    });
-                    return Box::into_raw(cert_handle) as *mut u8;
-                }
-            }
+        if let Some(ref tls_stream) = ssl.tls_stream
+            && let Some(certs) = tls_stream.conn.peer_certificates()
+            && !certs.is_empty()
+        {
+            let cert_handle = Box::new(CertificateHandle {
+                certs: certs.to_vec(),
+            });
+            return Box::into_raw(cert_handle) as *mut u8;
         }
         std::ptr::null_mut()
     }
@@ -286,10 +287,10 @@ pub extern "C" fn rayzor_ssl_socket_write(handle: *mut u8, data: *const u8) {
     unsafe {
         let ssl = &mut *(handle as *mut SslSocketHandle);
         let data_str = hs_to_rust(data);
-        if let Some(ref mut tls_stream) = ssl.tls_stream {
-            if let Some(s) = data_str {
-                let _ = tls_stream.write_all(s.as_bytes());
-            }
+        if let Some(ref mut tls_stream) = ssl.tls_stream
+            && let Some(s) = data_str
+        {
+            let _ = tls_stream.write_all(s.as_bytes());
         }
     }
 }
@@ -461,10 +462,10 @@ pub extern "C" fn rayzor_ssl_socket_write_string(handle: *mut u8, s: *const u8) 
     unsafe {
         let ssl = &mut *(handle as *mut SslSocketHandle);
         let s_str = hs_to_rust(s);
-        if let Some(ref mut tls_stream) = ssl.tls_stream {
-            if let Some(s) = s_str {
-                let _ = tls_stream.write_all(s.as_bytes());
-            }
+        if let Some(ref mut tls_stream) = ssl.tls_stream
+            && let Some(s) = s_str
+        {
+            let _ = tls_stream.write_all(s.as_bytes());
         }
     }
 }
@@ -569,14 +570,13 @@ pub extern "C" fn rayzor_ssl_cert_load_path(path: *const u8) -> *mut u8 {
                 if p.extension()
                     .map(|e| e == "pem" || e == "crt")
                     .unwrap_or(false)
+                    && let Ok(file) = std::fs::File::open(&p)
                 {
-                    if let Ok(file) = std::fs::File::open(&p) {
-                        let mut reader = std::io::BufReader::new(file);
-                        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
-                            .filter_map(|r| r.ok())
-                            .collect();
-                        all_certs.extend(certs);
-                    }
+                    let mut reader = std::io::BufReader::new(file);
+                    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    all_certs.extend(certs);
                 }
             }
         }

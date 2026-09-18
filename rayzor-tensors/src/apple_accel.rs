@@ -165,8 +165,8 @@ struct BnnsNdArrayDescriptor {
 
 const BNNS_DTYPE_INT8: u32 = 0x20000 | 8; // IntBit | 8
 const BNNS_DTYPE_INT32: u32 = 0x20000 | 32; // IntBit | 32
-                                            // RowMajorMatrix: value(row,col) at col*stride[0]+row*stride[1];
-                                            // size[0]=cols, size[1]=rows. Contiguous row-major -> stride[0]=1, stride[1]=cols.
+// RowMajorMatrix: value(row,col) at col*stride[0]+row*stride[1];
+// size[0]=cols, size[1]=rows. Contiguous row-major -> stride[0]=1, stride[1]=cols.
 const BNNS_LAYOUT_ROW_MAJOR: u32 = 0x20000;
 
 unsafe extern "C" {

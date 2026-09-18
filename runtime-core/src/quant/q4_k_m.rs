@@ -23,7 +23,7 @@ use half::f16;
 use crate::floats::roundf;
 use crate::simd::tensor_f32::axpy_slice;
 
-use super::types::{Q4KBlock, Q4KMBlock, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE};
+use super::types::{Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE, Q4KBlock, Q4KMBlock, Q8KBlock};
 
 /// Decode the 12-byte (scales, mins) header of a Q4_K_M block.
 ///
@@ -55,35 +55,37 @@ pub fn q4_k_get_scale_min(j: usize, header: &[u8; 12]) -> (u8, u8) {
 /// `block_ptr` must reference a live 144-byte Q4_K_M super-block.
 #[inline]
 pub unsafe fn decode_q4_k_block(block_ptr: *const u8) -> Q4KBlock {
-    let d_bits = *(block_ptr as *const u16);
-    let dmin_bits = *(block_ptr.add(2) as *const u16);
-    let d = f16::from_bits(d_bits).to_f32();
-    let dmin = f16::from_bits(dmin_bits).to_f32();
+    unsafe {
+        let d_bits = *(block_ptr as *const u16);
+        let dmin_bits = *(block_ptr.add(2) as *const u16);
+        let d = f16::from_bits(d_bits).to_f32();
+        let dmin = f16::from_bits(dmin_bits).to_f32();
 
-    let mut header = [0u8; 12];
-    for (i, slot) in header.iter_mut().enumerate() {
-        *slot = *block_ptr.add(4 + i);
-    }
+        let mut header = [0u8; 12];
+        for (i, slot) in header.iter_mut().enumerate() {
+            *slot = *block_ptr.add(4 + i);
+        }
 
-    let mut scales = [0.0f32; 8];
-    let mut mins = [0.0f32; 8];
-    for j in 0..8 {
-        let (sc6, mn6) = q4_k_get_scale_min(j, &header);
-        scales[j] = d * (sc6 as f32);
-        mins[j] = dmin * (mn6 as f32);
-    }
+        let mut scales = [0.0f32; 8];
+        let mut mins = [0.0f32; 8];
+        for j in 0..8 {
+            let (sc6, mn6) = q4_k_get_scale_min(j, &header);
+            scales[j] = d * (sc6 as f32);
+            mins[j] = dmin * (mn6 as f32);
+        }
 
-    let mut quants = [0u8; 128];
-    for (i, slot) in quants.iter_mut().enumerate() {
-        *slot = *block_ptr.add(16 + i);
-    }
+        let mut quants = [0u8; 128];
+        for (i, slot) in quants.iter_mut().enumerate() {
+            *slot = *block_ptr.add(16 + i);
+        }
 
-    Q4KBlock {
-        d,
-        dmin,
-        scales,
-        mins,
-        quants,
+        Q4KBlock {
+            d,
+            dmin,
+            scales,
+            mins,
+            quants,
+        }
     }
 }
 
@@ -482,11 +484,7 @@ pub fn quantize_block_q4_k_m(x: &[f32; 256]) -> Q4KMBlock {
             .filter(|&&m| m > 0.0)
             .fold(0.0f32, |a, &b| a + b);
         let neg_mag: f32 = sub_mn.iter().filter(|&&m| m < 0.0).map(|&m| -m).sum();
-        if pos_mag >= neg_mag {
-            1.0
-        } else {
-            -1.0
-        }
+        if pos_mag >= neg_mag { 1.0 } else { -1.0 }
     };
     let dmin_f32 = if max_abs_mn == 0.0 {
         0.0
@@ -579,34 +577,36 @@ pub unsafe fn q4_k_m_matmul_f32(
     k: usize,
     n: usize,
 ) {
-    debug_assert!(
-        k.is_multiple_of(Q4_K_M_BLOCK_SIZE),
-        "Q4_K_M matmul: K must be a multiple of 256"
-    );
-    let blocks_per_row = k / Q4_K_M_BLOCK_SIZE;
-    let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+    unsafe {
+        debug_assert!(
+            k.is_multiple_of(Q4_K_M_BLOCK_SIZE),
+            "Q4_K_M matmul: K must be a multiple of 256"
+        );
+        let blocks_per_row = k / Q4_K_M_BLOCK_SIZE;
+        let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
 
-    for i in 0..m {
-        let c_row = c_data.add(i * n);
-        core::ptr::write_bytes(c_row, 0, n * core::mem::size_of::<f32>());
-        let row_ptr = a_data.add(i * blocks_per_row * Q4_K_M_BLOCK_BYTES);
-        for b_idx in 0..blocks_per_row {
-            let block_ptr = row_ptr.add(b_idx * Q4_K_M_BLOCK_BYTES);
-            let block = decode_q4_k_block(block_ptr);
-            dequant_q4_k_block(&block, &mut stage);
-            // Now stage[0..256] holds the dequantised f32 weights for this
-            // 256-element slice of A's row i. Update C's row i by axpy
-            // against the matching 256 rows of B.
-            let k_off = b_idx * Q4_K_M_BLOCK_SIZE;
-            for p in 0..Q4_K_M_BLOCK_SIZE {
-                let a_ik = stage[p];
-                if a_ik == 0.0 {
-                    continue;
+        for i in 0..m {
+            let c_row = c_data.add(i * n);
+            core::ptr::write_bytes(c_row, 0, n * core::mem::size_of::<f32>());
+            let row_ptr = a_data.add(i * blocks_per_row * Q4_K_M_BLOCK_BYTES);
+            for b_idx in 0..blocks_per_row {
+                let block_ptr = row_ptr.add(b_idx * Q4_K_M_BLOCK_BYTES);
+                let block = decode_q4_k_block(block_ptr);
+                dequant_q4_k_block(&block, &mut stage);
+                // Now stage[0..256] holds the dequantised f32 weights for this
+                // 256-element slice of A's row i. Update C's row i by axpy
+                // against the matching 256 rows of B.
+                let k_off = b_idx * Q4_K_M_BLOCK_SIZE;
+                for p in 0..Q4_K_M_BLOCK_SIZE {
+                    let a_ik = stage[p];
+                    if a_ik == 0.0 {
+                        continue;
+                    }
+                    let b_row = b_data.add((k_off + p) * n);
+                    let c_slice = core::slice::from_raw_parts_mut(c_row, n);
+                    let b_slice = core::slice::from_raw_parts(b_row, n);
+                    axpy_slice(c_slice, a_ik, b_slice);
                 }
-                let b_row = b_data.add((k_off + p) * n);
-                let c_slice = core::slice::from_raw_parts_mut(c_row, n);
-                let b_slice = core::slice::from_raw_parts(b_row, n);
-                axpy_slice(c_slice, a_ik, b_slice);
             }
         }
     }

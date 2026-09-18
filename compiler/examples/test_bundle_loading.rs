@@ -41,8 +41,8 @@
 use compiler::codegen::profiling::ProfileConfig;
 use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::blade::{load_bundle, RayzorBundle};
 use compiler::ir::IrFunctionId;
+use compiler::ir::blade::{RayzorBundle, load_bundle};
 use std::time::Instant;
 
 fn main() {

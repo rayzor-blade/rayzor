@@ -14,24 +14,24 @@ use log::{debug, error, info, warn};
 
 use crate::error_codes::error_registry;
 use crate::ir::{
+    IrModule,
     hir::HirModule,
     hir_to_mir::lower_hir_to_mir,
-    optimizable::{optimize, OptimizableModule},
+    optimizable::{OptimizableModule, optimize},
     optimization::{OptimizationResult, PassManager},
     tast_to_hir::lower_tast_to_hir,
-    validation::{validate_module, ValidationError},
-    IrModule,
+    validation::{ValidationError, validate_module},
 };
-use crate::semantic_graph::{builder::CfgBuilder, GraphConstructionOptions, SemanticGraphs};
+use crate::semantic_graph::{GraphConstructionOptions, SemanticGraphs, builder::CfgBuilder};
 use crate::tast::type_flow_guard::{FlowSafetyError, FlowSafetyResults, TypeFlowGuard};
 use crate::tast::{
+    SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{FileMetadata, SafetyMode, TypedFile},
     string_intern::{InternedString, StringInterner},
-    SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 
 // Use the parser's public interface
-use parser::{haxe_ast::HaxeFile, parse_haxe_file_with_diagnostics, ParseResult};
+use parser::{ParseResult, haxe_ast::HaxeFile, parse_haxe_file_with_diagnostics};
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -818,9 +818,15 @@ impl HaxeCompilationPipeline {
                                         } else if typed_file.uses_manual_memory() {
                                             // Non-strict mode: Display warnings but continue
                                             if !memory_safety_errors.is_empty() {
-                                                warn!("\n⚠️  Memory Safety Warnings (non-strict mode):");
-                                                warn!("   The following issues were found but compilation will continue.");
-                                                warn!("   Unannotated classes will use ARC (atomic reference counting).\n");
+                                                warn!(
+                                                    "\n⚠️  Memory Safety Warnings (non-strict mode):"
+                                                );
+                                                warn!(
+                                                    "   The following issues were found but compilation will continue."
+                                                );
+                                                warn!(
+                                                    "   Unannotated classes will use ARC (atomic reference counting).\n"
+                                                );
                                                 for err in &memory_safety_errors {
                                                     warn!(
                                                         "   {} at {}:{}",
@@ -1841,8 +1847,8 @@ impl HaxeCompilationPipeline {
         type_table: &Rc<RefCell<TypeTable>>,
         scope_tree: &crate::tast::ScopeTree,
     ) -> Result<SemanticGraphs, Vec<CompilationError>> {
-        use crate::semantic_graph::dfg_builder::DfgBuilder;
         use crate::semantic_graph::GraphConstructionError;
+        use crate::semantic_graph::dfg_builder::DfgBuilder;
         use crate::tast::type_checker::TypeChecker;
 
         info!(
@@ -2181,7 +2187,10 @@ impl HaxeCompilationPipeline {
 
                 // Each captured variable is moved into the closure environment
                 for captured_var in &capture_analysis.captures {
-                    debug!("OWNERSHIP DEBUG: Lambda captures variable {:?}, adding move to ownership graph", captured_var.symbol_id);
+                    debug!(
+                        "OWNERSHIP DEBUG: Lambda captures variable {:?}, adding move to ownership graph",
+                        captured_var.symbol_id
+                    );
                     ownership_graph.add_move(
                         captured_var.symbol_id,
                         None, // Moved into closure environment (no destination variable)
@@ -2305,7 +2314,10 @@ impl HaxeCompilationPipeline {
                         type_table,
                     );
                     if !violations.is_empty() {
-                        debug!("\n⛔ MEMORY SAFETY ENFORCEMENT: Blocking MIR lowering due to {} violation(s) in strict mode", violations.len());
+                        debug!(
+                            "\n⛔ MEMORY SAFETY ENFORCEMENT: Blocking MIR lowering due to {} violation(s) in strict mode",
+                            violations.len()
+                        );
                         return Err(violations);
                     } else {
                         debug!("✅ MEMORY SAFETY: All checks passed, proceeding to MIR lowering");
@@ -2551,8 +2563,12 @@ impl HaxeCompilationPipeline {
                 );
                 return name_str.to_string();
             } else {
-                debug!("DEBUG get_variable_name: Symbol {} found but couldn't resolve interned string {} in interner (interner has {} strings)",
-                    symbol_id.as_raw(), sym.name.as_raw(), interner.len());
+                debug!(
+                    "DEBUG get_variable_name: Symbol {} found but couldn't resolve interned string {} in interner (interner has {} strings)",
+                    symbol_id.as_raw(),
+                    sym.name.as_raw(),
+                    interner.len()
+                );
                 // Try to iterate through all strings to see what's there
                 debug!("DEBUG: Dumping first 100 strings in interner:");
                 for i in 0..100.min(interner.len()) {
@@ -2758,14 +2774,15 @@ impl HaxeCompilationPipeline {
                                 immutable_borrow_locations.len()
                             ),
                             // Use first mutable borrow location as the primary location
-                            mutable_borrow_locations.first()
+                            mutable_borrow_locations
+                                .first()
                                 .or(immutable_borrow_locations.first())
                                 .cloned()
                                 .unwrap_or_else(|| {
                                     // Fall back to a reasonable default location
                                     SourceLocation::new(1, 1, 1, 1)
                                 }),
-                            suggestion
+                            suggestion,
                         )
                     }
                     crate::semantic_graph::OwnershipViolation::DanglingPointer {

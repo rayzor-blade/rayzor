@@ -3,8 +3,8 @@
 #[cfg(test)]
 mod tests {
     use crate::tast::{
-        type_checking_pipeline::TypeCheckingPhase, AstLowering, ScopeId, ScopeTree, StringInterner,
-        SymbolTable, TypeTable,
+        AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable,
+        type_checking_pipeline::TypeCheckingPhase,
     };
     use diagnostics::{Diagnostics, ErrorFormatter, SourceMap};
     use parser::parse_haxe_file;

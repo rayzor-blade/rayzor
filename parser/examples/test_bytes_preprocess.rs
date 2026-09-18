@@ -1,5 +1,5 @@
 use parser::parse_haxe_file_with_diagnostics;
-use parser::preprocessor::{preprocess, PreprocessorConfig};
+use parser::preprocessor::{PreprocessorConfig, preprocess};
 
 fn main() {
     let source = std::fs::read_to_string("compiler/haxe-std/haxe/io/Bytes.hx")

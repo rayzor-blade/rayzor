@@ -114,7 +114,9 @@ pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
         KernelOp::Sigmoid => format!("({cuda_type})(1.0 / (1.0 + exp(-(double)a[id])))"),
         KernelOp::Tanh => format!("({cuda_type})tanh((double)a[id])"),
         KernelOp::Gelu => {
-            format!("({cuda_type})((double)a[id] * 0.5 * (1.0 + tanh(0.7978845608 * ((double)a[id] + 0.044715 * (double)a[id] * (double)a[id] * (double)a[id]))))")
+            format!(
+                "({cuda_type})((double)a[id] * 0.5 * (1.0 + tanh(0.7978845608 * ((double)a[id] + 0.044715 * (double)a[id] * (double)a[id] * (double)a[id]))))"
+            )
         }
         KernelOp::Silu => format!("({cuda_type})((double)a[id] / (1.0 + exp(-(double)a[id])))"),
         _ => unreachable!("not a unary op"),

@@ -794,8 +794,8 @@ static CLASS_NAME_ALIAS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 > = std::sync::OnceLock::new();
 
-fn class_field_layouts(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>> {
+fn class_field_layouts()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<(String, u32)>>> {
     CLASS_FIELD_LAYOUTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -846,9 +846,8 @@ static PARAM_OWNERSHIP: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>>,
 > = std::sync::OnceLock::new();
 
-fn param_ownership_registry(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>>
-{
+fn param_ownership_registry()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<crate::tast::ParamOwnership>>> {
     PARAM_OWNERSHIP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 

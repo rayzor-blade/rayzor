@@ -4,8 +4,8 @@
 //! and ensure that AST to TAST lowering preserves all critical information.
 
 use crate::{
-    pipeline::{compile_haxe_file, CompilationResult},
-    tast::{node::*, StringInterner},
+    pipeline::{CompilationResult, compile_haxe_file},
+    tast::{StringInterner, node::*},
 };
 
 use std::{cell::RefCell, rc::Rc};

@@ -10,9 +10,9 @@ use inkwell::targets::RelocMode;
 
 use crate::compilation::{CompilationConfig, CompilationUnit};
 use crate::compiler_plugin::CompilerPlugin;
-use crate::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
-use crate::ir::tree_shake;
 use crate::ir::IrModule;
+use crate::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
+use crate::ir::tree_shake;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

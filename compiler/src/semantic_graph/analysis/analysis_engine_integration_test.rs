@@ -164,7 +164,9 @@ mod integration_tests {
                 Err(analysis_error) => {
                     // For this specific case, constraint solver errors may be valid
                     // if the constraints are truly unsatisfiable
-                    println!("✅ Constraint solver detected unsatisfiable constraints (expected for invalid code)");
+                    println!(
+                        "✅ Constraint solver detected unsatisfiable constraints (expected for invalid code)"
+                    );
                     println!("   Error: {:?}", analysis_error);
                 }
             }
@@ -231,7 +233,9 @@ mod integration_tests {
                 }
                 Err(analysis_error) => {
                     // For use-after-move, constraint solver errors may be valid
-                    println!("✅ Constraint solver detected unsatisfiable constraints for use-after-move (expected)");
+                    println!(
+                        "✅ Constraint solver detected unsatisfiable constraints for use-after-move (expected)"
+                    );
                     println!("   Error: {:?}", analysis_error);
                 }
             }
@@ -300,7 +304,9 @@ mod integration_tests {
                 }
                 Err(analysis_error) => {
                     // For return local reference, constraint solver errors are expected
-                    println!("✅ Constraint solver detected unsatisfiable constraints for return-local-ref (expected)");
+                    println!(
+                        "✅ Constraint solver detected unsatisfiable constraints for return-local-ref (expected)"
+                    );
                     println!("   Error: {:?}", analysis_error);
                 }
             }

@@ -7,8 +7,8 @@
 //! - Expression rewriting chains (assert, logging, tracing macros)
 //! - Deep cross-class macro helper dispatch (tink architecture pattern)
 
-use compiler::macro_system::{expand_macros, expand_macros_with_class_registry, ClassRegistry};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use compiler::macro_system::{ClassRegistry, expand_macros, expand_macros_with_class_registry};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::fmt::Write;
 use std::time::Duration;
 

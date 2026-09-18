@@ -630,46 +630,52 @@ static CONSTRUCTOR_REGISTRY: RwLock<Option<HashMap<u32, i64>>> = RwLock::new(Non
 
 /// Helper: allocate a HaxeString from a &str, using the C API.
 unsafe fn alloc_haxe_string(s: &str) -> *mut u8 {
-    let hs_layout = std::alloc::Layout::new::<crate::haxe_string::HaxeString>();
-    let hs_ptr = std::alloc::alloc(hs_layout) as *mut crate::haxe_string::HaxeString;
-    if hs_ptr.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let hs_layout = std::alloc::Layout::new::<crate::haxe_string::HaxeString>();
+        let hs_ptr = std::alloc::alloc(hs_layout) as *mut crate::haxe_string::HaxeString;
+        if hs_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        crate::haxe_string::haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
+        hs_ptr as *mut u8
     }
-    crate::haxe_string::haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
-    hs_ptr as *mut u8
 }
 
 /// Helper: build a HaxeArray of HaxeStrings from a slice of &str.
 unsafe fn build_string_array(names: &[&str]) -> *mut u8 {
-    let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
-    let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
-    if arr_ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-    crate::haxe_array::haxe_array_new(
-        arr_ptr,
-        std::mem::size_of::<*mut crate::haxe_string::HaxeString>(),
-    );
-    for name in names {
-        let hs_ptr = alloc_haxe_string(name);
-        if !hs_ptr.is_null() {
-            crate::haxe_array::haxe_array_push(arr_ptr, &hs_ptr as *const *mut u8 as *const u8);
+    unsafe {
+        let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
+        let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
+        if arr_ptr.is_null() {
+            return std::ptr::null_mut();
         }
+        crate::haxe_array::haxe_array_new(
+            arr_ptr,
+            std::mem::size_of::<*mut crate::haxe_string::HaxeString>(),
+        );
+        for name in names {
+            let hs_ptr = alloc_haxe_string(name);
+            if !hs_ptr.is_null() {
+                crate::haxe_array::haxe_array_push(arr_ptr, &hs_ptr as *const *mut u8 as *const u8);
+            }
+        }
+        arr_ptr as *mut u8
     }
-    arr_ptr as *mut u8
 }
 
 unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
-    let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
-    let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
-    if arr_ptr.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
+        let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
+        if arr_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        crate::haxe_array::haxe_array_new(arr_ptr, 8);
+        for &value in values {
+            crate::haxe_array::haxe_array_push_i64(arr_ptr, value);
+        }
+        arr_ptr as *mut u8
     }
-    crate::haxe_array::haxe_array_new(arr_ptr, 8);
-    for &value in values {
-        crate::haxe_array::haxe_array_push_i64(arr_ptr, value);
-    }
-    arr_ptr as *mut u8
 }
 
 /// Type.getClassName(c) -> String
@@ -677,12 +683,11 @@ unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(class_info) = &type_info.class_info {
-                return unsafe { alloc_haxe_string(class_info.name) };
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(class_info) = &type_info.class_info
+    {
+        return unsafe { alloc_haxe_string(class_info.name) };
     }
     std::ptr::null_mut()
 }
@@ -691,14 +696,12 @@ pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(class_info) = &type_info.class_info {
-                if let Some(super_id) = class_info.super_type_id {
-                    return super_id as i64;
-                }
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(class_info) = &type_info.class_info
+        && let Some(super_id) = class_info.super_type_id
+    {
+        return super_id as i64;
     }
     -1
 }
@@ -708,27 +711,26 @@ pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(class_info) = &type_info.class_info {
-                let mut names = class_info.instance_fields.to_vec();
-                let mut current = Some(*class_info);
-                let mut visited = HashSet::new();
-                while let Some(info) = current {
-                    for name in info.instance_methods {
-                        if !names.contains(name) {
-                            names.push(name);
-                        }
-                    }
-                    current = info
-                        .super_type_id
-                        .filter(|id| visited.insert(*id))
-                        .and_then(|id| registry.get(&TypeId(id)))
-                        .and_then(|info| info.class_info);
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(class_info) = &type_info.class_info
+    {
+        let mut names = class_info.instance_fields.to_vec();
+        let mut current = Some(*class_info);
+        let mut visited = HashSet::new();
+        while let Some(info) = current {
+            for name in info.instance_methods {
+                if !names.contains(name) {
+                    names.push(name);
                 }
-                return unsafe { build_string_array(&names) };
             }
+            current = info
+                .super_type_id
+                .filter(|id| visited.insert(*id))
+                .and_then(|id| registry.get(&TypeId(id)))
+                .and_then(|info| info.class_info);
         }
+        return unsafe { build_string_array(&names) };
     }
     unsafe { build_string_array(&[]) }
 }
@@ -738,12 +740,11 @@ pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(class_info) = &type_info.class_info {
-                return unsafe { build_string_array(class_info.static_fields) };
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(class_info) = &type_info.class_info
+    {
+        return unsafe { build_string_array(class_info.static_fields) };
     }
     unsafe { build_string_array(&[]) }
 }
@@ -763,10 +764,10 @@ pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
         String::from_utf8_lossy(bytes).to_string()
     };
     let guard = CLASS_NAME_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(&type_id) = registry.get(&name) {
-            return type_id as i64;
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(&type_id) = registry.get(&name)
+    {
+        return type_id as i64;
     }
     -1
 }
@@ -786,10 +787,10 @@ pub extern "C" fn haxe_type_resolve_enum(name_ptr: *mut u8) -> i64 {
         String::from_utf8_lossy(bytes).to_string()
     };
     let guard = ENUM_NAME_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(&type_id) = registry.get(&name) {
-            return type_id as i64;
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(&type_id) = registry.get(&name)
+    {
+        return type_id as i64;
     }
     -1
 }
@@ -807,12 +808,11 @@ pub extern "C" fn haxe_type_get_enum(value: i64, type_id: i32) -> i64 {
         return -1;
     }
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id)) {
-            if type_info.enum_info.is_some() {
-                return type_id as i64;
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id))
+        && type_info.enum_info.is_some()
+    {
+        return type_id as i64;
     }
     -1
 }
@@ -926,13 +926,12 @@ pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(enum_info) = &type_info.enum_info {
-                let names: Vec<&str> = enum_info.variants.iter().map(|v| v.name).collect();
-                return unsafe { build_string_array(&names) };
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(enum_info) = &type_info.enum_info
+    {
+        let names: Vec<&str> = enum_info.variants.iter().map(|v| v.name).collect();
+        return unsafe { build_string_array(&names) };
     }
     unsafe { build_string_array(&[]) }
 }
@@ -941,12 +940,11 @@ pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(enum_info) = &type_info.enum_info {
-                return unsafe { alloc_haxe_string(enum_info.name) };
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(enum_info) = &type_info.enum_info
+    {
+        return unsafe { alloc_haxe_string(enum_info.name) };
     }
     std::ptr::null_mut()
 }
@@ -963,10 +961,10 @@ fn enum_variant_from_value(
     // Unboxed enum case: value is discriminant, only valid for zero-param variants.
     if value >= 0 {
         let idx = value as usize;
-        if let Some(variant) = enum_info.variants.get(idx) {
-            if variant.param_count == 0 {
-                return Some((value, false, variant));
-            }
+        if let Some(variant) = enum_info.variants.get(idx)
+            && variant.param_count == 0
+        {
+            return Some((value, false, variant));
         }
     }
 
@@ -982,23 +980,25 @@ fn enum_variant_from_value(
 }
 
 unsafe fn haxe_string_ptr_eq(a: i64, b: i64) -> bool {
-    if a == b {
-        return true;
+    unsafe {
+        if a == b {
+            return true;
+        }
+        if a == 0 || b == 0 {
+            return false;
+        }
+        let sa = &*(a as *const crate::haxe_string::HaxeString);
+        let sb = &*(b as *const crate::haxe_string::HaxeString);
+        if sa.len != sb.len {
+            return false;
+        }
+        if sa.ptr.is_null() || sb.ptr.is_null() {
+            return false;
+        }
+        let a_bytes = std::slice::from_raw_parts(sa.ptr, sa.len);
+        let b_bytes = std::slice::from_raw_parts(sb.ptr, sb.len);
+        a_bytes == b_bytes
     }
-    if a == 0 || b == 0 {
-        return false;
-    }
-    let sa = &*(a as *const crate::haxe_string::HaxeString);
-    let sb = &*(b as *const crate::haxe_string::HaxeString);
-    if sa.len != sb.len {
-        return false;
-    }
-    if sa.ptr.is_null() || sb.ptr.is_null() {
-        return false;
-    }
-    let a_bytes = std::slice::from_raw_parts(sa.ptr, sa.len);
-    let b_bytes = std::slice::from_raw_parts(sb.ptr, sb.len);
-    a_bytes == b_bytes
 }
 
 /// Type.allEnums(e) -> Array<T>
@@ -1006,18 +1006,17 @@ unsafe fn haxe_string_ptr_eq(a: i64, b: i64) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(enum_info) = &type_info.enum_info {
-                let mut values = Vec::new();
-                for (idx, variant) in enum_info.variants.iter().enumerate() {
-                    if variant.param_count == 0 {
-                        values.push(idx as i64);
-                    }
-                }
-                return unsafe { build_i64_array(&values) };
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(enum_info) = &type_info.enum_info
+    {
+        let mut values = Vec::new();
+        for (idx, variant) in enum_info.variants.iter().enumerate() {
+            if variant.param_count == 0 {
+                values.push(idx as i64);
             }
         }
+        return unsafe { build_i64_array(&values) };
     }
     unsafe { build_i64_array(&[]) }
 }
@@ -1102,14 +1101,13 @@ pub extern "C" fn haxe_type_create_enum(
     };
 
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(enum_info) = &type_info.enum_info {
-                for (idx, variant) in enum_info.variants.iter().enumerate() {
-                    if variant.name == constr_name {
-                        return create_enum_value(idx as i32, variant.param_count, params_ptr);
-                    }
-                }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(enum_info) = &type_info.enum_info
+    {
+        for (idx, variant) in enum_info.variants.iter().enumerate() {
+            if variant.name == constr_name {
+                return create_enum_value(idx as i32, variant.param_count, params_ptr);
             }
         }
     }
@@ -1125,14 +1123,12 @@ pub extern "C" fn haxe_type_create_enum_index(
     params_ptr: *mut u8,
 ) -> i64 {
     let guard = TYPE_REGISTRY.read().unwrap();
-    if let Some(registry) = guard.as_ref() {
-        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
-            if let Some(enum_info) = &type_info.enum_info {
-                if let Some(variant) = enum_info.variants.get(index as usize) {
-                    return create_enum_value(index as i32, variant.param_count, params_ptr);
-                }
-            }
-        }
+    if let Some(registry) = guard.as_ref()
+        && let Some(type_info) = registry.get(&TypeId(type_id as u32))
+        && let Some(enum_info) = &type_info.enum_info
+        && let Some(variant) = enum_info.variants.get(index as usize)
+    {
+        return create_enum_value(index as i32, variant.param_count, params_ptr);
     }
     0
 }
@@ -1258,10 +1254,10 @@ pub extern "C" fn haxe_register_enum_variant(
         };
 
         let mut builder = ENUM_BUILDER.write().unwrap();
-        if let Some(ref mut map) = *builder {
-            if let Some((_, variants, _)) = map.get_mut(&type_id) {
-                variants.push((name, param_count, param_types));
-            }
+        if let Some(ref mut map) = *builder
+            && let Some((_, variants, _)) = map.get_mut(&type_id)
+        {
+            variants.push((name, param_count, param_types));
         }
     }
 }
@@ -1271,65 +1267,67 @@ pub extern "C" fn haxe_register_enum_variant(
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_register_enum_finish(type_id: u32) {
     let mut builder = ENUM_BUILDER.write().unwrap();
-    if let Some(ref mut map) = *builder {
-        if let Some((enum_name, variants, _)) = map.remove(&type_id) {
-            // Convert to static storage
-            let enum_name_static: &'static str = Box::leak(enum_name.into_boxed_str());
+    if let Some(ref mut map) = *builder
+        && let Some((enum_name, variants, _)) = map.remove(&type_id)
+    {
+        // Convert to static storage
+        let enum_name_static: &'static str = Box::leak(enum_name.into_boxed_str());
 
-            // Build static variant info array
-            let variant_infos: Vec<EnumVariantInfo> = variants
-                .into_iter()
-                .map(|(name, param_count, param_types)| EnumVariantInfo {
-                    name: Box::leak(name.into_boxed_str()),
-                    param_count,
-                    param_types: Box::leak(param_types.into_boxed_slice()),
-                })
-                .collect();
+        // Build static variant info array
+        let variant_infos: Vec<EnumVariantInfo> = variants
+            .into_iter()
+            .map(|(name, param_count, param_types)| EnumVariantInfo {
+                name: Box::leak(name.into_boxed_str()),
+                param_count,
+                param_types: Box::leak(param_types.into_boxed_slice()),
+            })
+            .collect();
 
-            let variants_static: &'static [EnumVariantInfo] =
-                Box::leak(variant_infos.into_boxed_slice());
+        let variants_static: &'static [EnumVariantInfo] =
+            Box::leak(variant_infos.into_boxed_slice());
 
-            let enum_info = Box::leak(Box::new(EnumInfo {
-                name: enum_name_static,
-                variants: variants_static,
-            }));
+        let enum_info = Box::leak(Box::new(EnumInfo {
+            name: enum_name_static,
+            variants: variants_static,
+        }));
 
-            let type_info = TypeInfo {
-                name: enum_name_static,
-                size: std::mem::size_of::<i64>(),
-                align: std::mem::align_of::<i64>(),
-                to_string: enum_to_string,
-                enum_info: Some(enum_info),
-                class_info: None,
-            };
+        let type_info = TypeInfo {
+            name: enum_name_static,
+            size: std::mem::size_of::<i64>(),
+            align: std::mem::align_of::<i64>(),
+            to_string: enum_to_string,
+            enum_info: Some(enum_info),
+            class_info: None,
+        };
 
-            register_type(TypeId(type_id), type_info);
-            register_enum_name(enum_name_static, type_id);
+        register_type(TypeId(type_id), type_info);
+        register_enum_name(enum_name_static, type_id);
 
-            debug!(
-                "Registered enum '{}' with {} variants at type_id {}",
-                enum_name_static,
-                variants_static.len(),
-                type_id
-            );
-        }
+        debug!(
+            "Registered enum '{}' with {} variants at type_id {}",
+            enum_name_static,
+            variants_static.len(),
+            type_id
+        );
     }
 }
 
 /// toString implementation for enum types
 /// Takes a pointer to (type_id: u32, discriminant: i64) tuple
 unsafe extern "C" fn enum_to_string(value_ptr: *const u8) -> StringPtr {
-    // Enum values are stored as just the discriminant (i64)
-    // We need to look up the type from context - for now return the discriminant as string
-    let discriminant = *(value_ptr as *const i64);
+    unsafe {
+        // Enum values are stored as just the discriminant (i64)
+        // We need to look up the type from context - for now return the discriminant as string
+        let discriminant = *(value_ptr as *const i64);
 
-    // For now, just format the discriminant - proper lookup requires type_id context
-    // This will be improved when we have proper Dynamic boxing with type_id
-    let s = format!("{}", discriminant);
-    let leaked = Box::leak(s.into_boxed_str());
-    StringPtr {
-        ptr: leaked.as_ptr(),
-        len: leaked.len(),
+        // For now, just format the discriminant - proper lookup requires type_id context
+        // This will be improved when we have proper Dynamic boxing with type_id
+        let s = format!("{}", discriminant);
+        let leaked = Box::leak(s.into_boxed_str());
+        StringPtr {
+            ptr: leaked.as_ptr(),
+            len: leaked.len(),
+        }
     }
 }
 
@@ -1420,7 +1418,7 @@ pub extern "C" fn haxe_enum_get_parameters(
     is_boxed: i32,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     // Allocate a HaxeArray on the heap
     let arr = unsafe {
@@ -1977,40 +1975,48 @@ unsafe extern "C" fn null_to_string(_value_ptr: *const u8) -> StringPtr {
 }
 
 unsafe extern "C" fn bool_to_string(value_ptr: *const u8) -> StringPtr {
-    let value = *(value_ptr as *const bool);
-    let s = if value { "true" } else { "false" };
-    StringPtr {
-        ptr: s.as_ptr(),
-        len: s.len(),
+    unsafe {
+        let value = *(value_ptr as *const bool);
+        let s = if value { "true" } else { "false" };
+        StringPtr {
+            ptr: s.as_ptr(),
+            len: s.len(),
+        }
     }
 }
 
 unsafe extern "C" fn int_to_string(value_ptr: *const u8) -> StringPtr {
-    let value = *(value_ptr as *const i64);
-    let s = value.to_string();
-    // UNSAFE: Leaking memory! Need proper string management
-    // TODO: Use a string pool or return owned strings
-    let s_static = Box::leak(s.into_boxed_str());
-    StringPtr {
-        ptr: s_static.as_ptr(),
-        len: s_static.len(),
+    unsafe {
+        let value = *(value_ptr as *const i64);
+        let s = value.to_string();
+        // UNSAFE: Leaking memory! Need proper string management
+        // TODO: Use a string pool or return owned strings
+        let s_static = Box::leak(s.into_boxed_str());
+        StringPtr {
+            ptr: s_static.as_ptr(),
+            len: s_static.len(),
+        }
     }
 }
 
 unsafe extern "C" fn float_to_string(value_ptr: *const u8) -> StringPtr {
-    let value = *(value_ptr as *const f64);
-    let s = value.to_string();
-    // UNSAFE: Leaking memory! Need proper string management
-    let s_static = Box::leak(s.into_boxed_str());
-    StringPtr {
-        ptr: s_static.as_ptr(),
-        len: s_static.len(),
+    unsafe {
+        let value = *(value_ptr as *const f64);
+        let s = value.to_string();
+        // UNSAFE: Leaking memory! Need proper string management
+        let s_static = Box::leak(s.into_boxed_str());
+        StringPtr {
+            ptr: s_static.as_ptr(),
+            len: s_static.len(),
+        }
     }
 }
 
 unsafe extern "C" fn string_to_string(value_ptr: *const u8) -> StringPtr {
-    // String is already a StringPtr, just return it
-    *(value_ptr as *const StringPtr)
+    unsafe {
+        // String is already a StringPtr, just return it
+        *(value_ptr as *const StringPtr)
+    }
 }
 
 unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
@@ -2022,110 +2028,115 @@ unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
 }
 
 unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
-    // value_ptr is an anon object handle — stringify it
-    let mut buf = String::from("{object}");
-    // Try to list fields
-    let fields_arr = crate::anon_object::rayzor_anon_fields(value_ptr as *mut u8);
-    if !fields_arr.is_null() {
-        let arr = &*(fields_arr as *const crate::haxe_array::HaxeArray);
-        if arr.len > 0 {
-            buf.clear();
-            buf.push('{');
-            for i in 0..arr.len {
-                let name_hs_ptr = *(arr.ptr.add(i * 8) as *const *mut u8);
-                if !name_hs_ptr.is_null() {
-                    let name_hs = &*(name_hs_ptr as *const crate::haxe_string::HaxeString);
-                    if !name_hs.ptr.is_null() && name_hs.len > 0 {
-                        if i > 0 {
-                            buf.push_str(", ");
-                        }
-                        let name = std::str::from_utf8(std::slice::from_raw_parts(
-                            name_hs.ptr,
-                            name_hs.len,
-                        ))
-                        .unwrap_or("?");
-                        buf.push_str(name);
-                        buf.push_str(": ");
-                        // Get field value and stringify
-                        let val = crate::anon_object::rayzor_anon_get_field(
-                            value_ptr as *mut u8,
-                            name_hs.ptr,
-                            name_hs.len as u32,
-                        );
-                        if val.is_null() {
-                            buf.push_str("null");
-                        } else {
-                            let hs = haxe_std_string_ptr(val);
-                            if !hs.is_null() {
-                                let h = &*hs;
-                                if !h.ptr.is_null() && h.len > 0 {
-                                    let s = std::str::from_utf8(std::slice::from_raw_parts(
-                                        h.ptr, h.len,
-                                    ))
-                                    .unwrap_or("?");
-                                    buf.push_str(s);
+    unsafe {
+        // value_ptr is an anon object handle — stringify it
+        let mut buf = String::from("{object}");
+        // Try to list fields
+        let fields_arr = crate::anon_object::rayzor_anon_fields(value_ptr as *mut u8);
+        if !fields_arr.is_null() {
+            let arr = &*(fields_arr as *const crate::haxe_array::HaxeArray);
+            if arr.len > 0 {
+                buf.clear();
+                buf.push('{');
+                for i in 0..arr.len {
+                    let name_hs_ptr = *(arr.ptr.add(i * 8) as *const *mut u8);
+                    if !name_hs_ptr.is_null() {
+                        let name_hs = &*(name_hs_ptr as *const crate::haxe_string::HaxeString);
+                        if !name_hs.ptr.is_null() && name_hs.len > 0 {
+                            if i > 0 {
+                                buf.push_str(", ");
+                            }
+                            let name = std::str::from_utf8(std::slice::from_raw_parts(
+                                name_hs.ptr,
+                                name_hs.len,
+                            ))
+                            .unwrap_or("?");
+                            buf.push_str(name);
+                            buf.push_str(": ");
+                            // Get field value and stringify
+                            let val = crate::anon_object::rayzor_anon_get_field(
+                                value_ptr as *mut u8,
+                                name_hs.ptr,
+                                name_hs.len as u32,
+                            );
+                            if val.is_null() {
+                                buf.push_str("null");
+                            } else {
+                                let hs = haxe_std_string_ptr(val);
+                                if !hs.is_null() {
+                                    let h = &*hs;
+                                    if !h.ptr.is_null() && h.len > 0 {
+                                        let s = std::str::from_utf8(std::slice::from_raw_parts(
+                                            h.ptr, h.len,
+                                        ))
+                                        .unwrap_or("?");
+                                        buf.push_str(s);
+                                    } else {
+                                        buf.push_str("null");
+                                    }
                                 } else {
                                     buf.push_str("null");
                                 }
-                            } else {
-                                buf.push_str("null");
                             }
                         }
                     }
                 }
+                buf.push('}');
             }
-            buf.push('}');
         }
-    }
-    let s_static = Box::leak(buf.into_boxed_str());
-    StringPtr {
-        ptr: s_static.as_ptr(),
-        len: s_static.len(),
+        let s_static = Box::leak(buf.into_boxed_str());
+        StringPtr {
+            ptr: s_static.as_ptr(),
+            len: s_static.len(),
+        }
     }
 }
 
 unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
-    // value_ptr is a HaxeArray pointer — format as [e0, e1, ...]
-    if value_ptr.is_null() {
-        let s = "null";
-        return StringPtr {
-            ptr: s.as_ptr(),
-            len: s.len(),
-        };
-    }
-    let arr = &*(value_ptr as *const crate::haxe_array::HaxeArray);
-    let mut buf = String::from("[");
-    for i in 0..arr.len {
-        if i > 0 {
-            buf.push(',');
+    unsafe {
+        // value_ptr is a HaxeArray pointer — format as [e0, e1, ...]
+        if value_ptr.is_null() {
+            let s = "null";
+            return StringPtr {
+                ptr: s.as_ptr(),
+                len: s.len(),
+            };
         }
-        // Elements are DynamicValue* pointers stored as i64
-        let elem = *(arr.ptr.add(i * 8) as *const *mut u8);
-        if elem.is_null() {
-            buf.push_str("null");
-        } else {
-            let hs = haxe_std_string_ptr(elem);
-            if !hs.is_null() {
-                let h = &*hs;
-                if !h.ptr.is_null() && h.len > 0 {
-                    if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(h.ptr, h.len)) {
-                        buf.push_str(s);
+        let arr = &*(value_ptr as *const crate::haxe_array::HaxeArray);
+        let mut buf = String::from("[");
+        for i in 0..arr.len {
+            if i > 0 {
+                buf.push(',');
+            }
+            // Elements are DynamicValue* pointers stored as i64
+            let elem = *(arr.ptr.add(i * 8) as *const *mut u8);
+            if elem.is_null() {
+                buf.push_str("null");
+            } else {
+                let hs = haxe_std_string_ptr(elem);
+                if !hs.is_null() {
+                    let h = &*hs;
+                    if !h.ptr.is_null() && h.len > 0 {
+                        if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(h.ptr, h.len))
+                        {
+                            buf.push_str(s);
+                        } else {
+                            buf.push('?');
+                        }
                     } else {
-                        buf.push('?');
+                        buf.push_str("null");
                     }
                 } else {
                     buf.push_str("null");
                 }
-            } else {
-                buf.push_str("null");
             }
         }
-    }
-    buf.push(']');
-    let s_static = Box::leak(buf.into_boxed_str());
-    StringPtr {
-        ptr: s_static.as_ptr(),
-        len: s_static.len(),
+        buf.push(']');
+        let s_static = Box::leak(buf.into_boxed_str());
+        StringPtr {
+            ptr: s_static.as_ptr(),
+            len: s_static.len(),
+        }
     }
 }
 
@@ -3483,12 +3494,11 @@ pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i64) {
     let mut registry = VTABLE_REGISTRY.write().unwrap();
-    if let Some(map) = registry.as_mut() {
-        if let Some(vtable) = map.get_mut(&(type_id as u32)) {
-            if (slot_index as usize) < vtable.len() {
-                vtable[slot_index as usize] = closure_ptr;
-            }
-        }
+    if let Some(map) = registry.as_mut()
+        && let Some(vtable) = map.get_mut(&(type_id as u32))
+        && (slot_index as usize) < vtable.len()
+    {
+        vtable[slot_index as usize] = closure_ptr;
     }
 }
 
@@ -3809,15 +3819,15 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
                 // Outlier type_id (bigger than the dense cap): frozen at the
                 // same freeze as the flat table, read without a lock.
                 let sparse = &*VTABLE_SPARSE;
-                if let Some(entry) = sparse.get(&(type_id as u32)) {
-                    if slot < entry.len {
-                        let v = *entry.slots.add(slot);
-                        VT_NANOS.fetch_add(
-                            _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64),
-                            Ordering::Relaxed,
-                        );
-                        return v;
-                    }
+                if let Some(entry) = sparse.get(&(type_id as u32))
+                    && slot < entry.len
+                {
+                    let v = *entry.slots.add(slot);
+                    VT_NANOS.fetch_add(
+                        _t_in.map_or(0, |t| t.elapsed().as_nanos() as u64),
+                        Ordering::Relaxed,
+                    );
+                    return v;
                 }
             }
         }
@@ -3828,17 +3838,17 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
         VT_SLOW.fetch_add(1, Ordering::Relaxed);
     }
     let registry = VTABLE_REGISTRY.read().unwrap();
-    if let Some(map) = registry.as_ref() {
-        if let Some(vtable) = map.get(&(type_id as u32)) {
-            if slot < vtable.len() {
-                return vtable[slot];
-            }
-            crate::exception::throw_with_message(format!(
-                "interface dispatch: vtable slot {slot} out of range for type_id \
-                 {type_id} (vtable has {} slots)",
-                vtable.len()
-            ));
+    if let Some(map) = registry.as_ref()
+        && let Some(vtable) = map.get(&(type_id as u32))
+    {
+        if slot < vtable.len() {
+            return vtable[slot];
         }
+        crate::exception::throw_with_message(format!(
+            "interface dispatch: vtable slot {slot} out of range for type_id \
+                 {type_id} (vtable has {} slots)",
+            vtable.len()
+        ));
     }
     crate::exception::throw_with_message(format!(
         "interface dispatch: no vtable registered for type_id {type_id} \

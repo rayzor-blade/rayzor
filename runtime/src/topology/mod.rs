@@ -98,19 +98,15 @@ fn spin_iters_per_us() -> f64 {
     }
     std::hint::black_box(acc);
     let us = t.elapsed().as_nanos() as f64 / 1000.0;
-    if us > 0.0 {
-        n as f64 / us
-    } else {
-        100.0
-    }
+    if us > 0.0 { n as f64 / us } else { 100.0 }
 }
 
 /// Measure the park -> unpark -> resume round-trip latency (median of a few
 /// samples). This is the "cost of blocking" side of the spin-vs-block
 /// break-even.
 fn park_wake_latency_us() -> f64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
     let mut samples: Vec<f64> = Vec::new();
     for _ in 0..5 {

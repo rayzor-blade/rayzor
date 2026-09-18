@@ -35,15 +35,17 @@ struct HostHandle {
 // =============================================================================
 
 unsafe fn haxe_string_to_rust(s_ptr: *const u8) -> String {
-    if s_ptr.is_null() {
-        return String::new();
+    unsafe {
+        if s_ptr.is_null() {
+            return String::new();
+        }
+        let hs = &*(s_ptr as *const HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            return String::new();
+        }
+        let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
+        String::from_utf8_lossy(bytes).into_owned()
     }
-    let hs = &*(s_ptr as *const HaxeString);
-    if hs.ptr.is_null() || hs.len == 0 {
-        return String::new();
-    }
-    let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn rust_string_to_haxe(s: &str) -> *mut u8 {
@@ -321,12 +323,12 @@ pub extern "C" fn rayzor_socket_peer(handle: *mut u8, out_host: *mut i32, out_po
     }
     let sock = unsafe { &*(handle as *const SocketHandle) };
 
-    if let Some(ref stream) = sock.stream {
-        if let Ok(SocketAddr::V4(v4)) = stream.peer_addr() {
-            unsafe {
-                *out_host = ipv4_to_u32(*v4.ip()) as i32;
-                *out_port = v4.port() as i32;
-            }
+    if let Some(ref stream) = sock.stream
+        && let Ok(SocketAddr::V4(v4)) = stream.peer_addr()
+    {
+        unsafe {
+            *out_host = ipv4_to_u32(*v4.ip()) as i32;
+            *out_port = v4.port() as i32;
         }
     }
 }

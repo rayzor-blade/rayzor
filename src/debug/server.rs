@@ -11,7 +11,7 @@
 //! data to the same dashboard without coordination.
 
 use super::DebugCommands;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -106,10 +106,10 @@ fn route(path: &str) -> (&'static str, &'static str, Vec<u8>) {
 
 fn parse_limit(query: &str) -> usize {
     for kv in query.split('&') {
-        if let Some(v) = kv.strip_prefix("limit=") {
-            if let Ok(n) = v.parse::<usize>() {
-                return n;
-            }
+        if let Some(v) = kv.strip_prefix("limit=")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            return n;
         }
     }
     100
@@ -313,10 +313,10 @@ fn load_file_table_inner() -> HashMap<u32, String> {
                 }
             }
             let mut it = line.splitn(2, ',');
-            if let (Some(k), Some(v)) = (it.next(), it.next()) {
-                if let Ok(id) = k.parse::<u32>() {
-                    m.insert(id, v.trim_matches('"').to_string());
-                }
+            if let (Some(k), Some(v)) = (it.next(), it.next())
+                && let Ok(id) = k.parse::<u32>()
+            {
+                m.insert(id, v.trim_matches('"').to_string());
             }
         }
     }

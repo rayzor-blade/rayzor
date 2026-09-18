@@ -33,27 +33,29 @@ pub fn quantise_int8_row(src: &[f32], dst: &mut [i8]) -> f32 {
 #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
 #[inline]
 pub unsafe fn dot_i8_i8(a: *const i8, b: *const i8, k: usize) -> i32 {
-    use core::arch::aarch64::*;
-    // Two independent accumulators hide vdotq_s32's latency (~5 cycles on
-    // M1) across the unrolled pair, mirroring the Q4_K SDOT kernels.
-    let mut acc0 = vdupq_n_s32(0);
-    let mut acc1 = vdupq_n_s32(0);
-    let mut i = 0usize;
-    while i + 32 <= k {
-        acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
-        acc1 = vdotq_s32(acc1, vld1q_s8(a.add(i + 16)), vld1q_s8(b.add(i + 16)));
-        i += 32;
+    unsafe {
+        use core::arch::aarch64::*;
+        // Two independent accumulators hide vdotq_s32's latency (~5 cycles on
+        // M1) across the unrolled pair, mirroring the Q4_K SDOT kernels.
+        let mut acc0 = vdupq_n_s32(0);
+        let mut acc1 = vdupq_n_s32(0);
+        let mut i = 0usize;
+        while i + 32 <= k {
+            acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
+            acc1 = vdotq_s32(acc1, vld1q_s8(a.add(i + 16)), vld1q_s8(b.add(i + 16)));
+            i += 32;
+        }
+        if i + 16 <= k {
+            acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
+            i += 16;
+        }
+        let mut sum = vaddvq_s32(acc0) + vaddvq_s32(acc1);
+        while i < k {
+            sum += (*a.add(i) as i32) * (*b.add(i) as i32);
+            i += 1;
+        }
+        sum
     }
-    if i + 16 <= k {
-        acc0 = vdotq_s32(acc0, vld1q_s8(a.add(i)), vld1q_s8(b.add(i)));
-        i += 16;
-    }
-    let mut sum = vaddvq_s32(acc0) + vaddvq_s32(acc1);
-    while i < k {
-        sum += (*a.add(i) as i32) * (*b.add(i) as i32);
-        i += 1;
-    }
-    sum
 }
 
 /// Scalar fallback for targets without SDOT.
@@ -95,19 +97,21 @@ pub unsafe fn int8_matmul_f32(
     k: usize,
     n: usize,
 ) {
-    for i in 0..m {
-        let row_scale = *scales.add(i);
-        let a_row = a_data.add(i * k);
-        let c_row = c_data.add(i * n);
-        // Initialise the result row to zero.
-        core::ptr::write_bytes(c_row, 0, n * core::mem::size_of::<f32>());
-        for p in 0..k {
-            let a_ik = *a_row.add(p) as f32 * row_scale;
-            let b_row = b_data.add(p * n);
-            // Equivalent to axpy_slice(c_row, a_ik, b_row).
-            let c_slice = core::slice::from_raw_parts_mut(c_row, n);
-            let b_slice = core::slice::from_raw_parts(b_row, n);
-            axpy_slice(c_slice, a_ik, b_slice);
+    unsafe {
+        for i in 0..m {
+            let row_scale = *scales.add(i);
+            let a_row = a_data.add(i * k);
+            let c_row = c_data.add(i * n);
+            // Initialise the result row to zero.
+            core::ptr::write_bytes(c_row, 0, n * core::mem::size_of::<f32>());
+            for p in 0..k {
+                let a_ik = *a_row.add(p) as f32 * row_scale;
+                let b_row = b_data.add(p * n);
+                // Equivalent to axpy_slice(c_row, a_ik, b_row).
+                let c_slice = core::slice::from_raw_parts_mut(c_row, n);
+                let b_slice = core::slice::from_raw_parts(b_row, n);
+                axpy_slice(c_slice, a_ik, b_slice);
+            }
         }
     }
 }

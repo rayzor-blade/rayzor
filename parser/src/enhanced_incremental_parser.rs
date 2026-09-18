@@ -7,8 +7,8 @@ use diagnostics::{Diagnostics, FileId, SourceMap, SourcePosition, SourceSpan};
 
 use crate::enhanced_context::HaxeDiagnostics;
 use crate::haxe_ast::HaxeFile;
-use nom::character::complete::multispace0;
 use nom::IResult;
+use nom::character::complete::multispace0;
 
 /// Result of enhanced incremental parsing
 #[derive(Debug)]
@@ -48,7 +48,7 @@ impl EnhancedParseResult {
 pub fn parse_incrementally_enhanced(file_name: &str, input: &str) -> EnhancedParseResult {
     let mut result = EnhancedParseResult::new(file_name.to_string(), input);
     let file_id = FileId::new(0); // First file in source map
-                                  // let mut collector = ContextErrorCollector::new(file_id);
+    // let mut collector = ContextErrorCollector::new(file_id);
 
     // Always run style validation for enhanced diagnostics
     validate_source_style(input, &mut result, file_id);

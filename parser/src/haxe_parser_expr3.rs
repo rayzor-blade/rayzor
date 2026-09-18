@@ -3,18 +3,18 @@
 //! This module contains try/catch, function, and other remaining expression parsers
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::tag,
     character::complete::{alpha1, alphanumeric1, char},
     combinator::{map, opt, recognize, value},
     multi::{many0, many1, separated_list0},
     sequence::{delimited, pair, preceded},
-    IResult, Parser,
 };
 
 use crate::custom_error::ContextualError;
 use crate::haxe_ast::*;
-use crate::haxe_parser::{identifier, keyword, position, symbol, ws, PResult};
+use crate::haxe_parser::{PResult, identifier, keyword, position, symbol, ws};
 use crate::haxe_parser_decls::function_param;
 use crate::haxe_parser_expr::expression;
 use crate::haxe_parser_expr2::block_expr;

@@ -3,10 +3,10 @@
 //! Uses NVRTC (NVIDIA Runtime Compilation) to compile CUDA C source at runtime,
 //! then loads the resulting PTX into a CUmodule via the CUDA Driver API.
 
-use std::ffi::{c_int, CStr, CString};
+use std::ffi::{CStr, CString, c_int};
 use std::ptr;
 
-use super::device_init::{CUresult, CudaContext, CUDA_SUCCESS};
+use super::device_init::{CUDA_SUCCESS, CUresult, CudaContext};
 
 // CUDA Driver API types for modules/functions
 pub type CUmodule = *mut std::ffi::c_void;
@@ -19,7 +19,7 @@ pub type NvrtcResult = c_int;
 pub const NVRTC_SUCCESS: NvrtcResult = 0;
 
 // NVRTC FFI bindings
-extern "C" {
+unsafe extern "C" {
     fn nvrtcCreateProgram(
         prog: *mut NvrtcProgram,
         src: *const u8,
@@ -47,7 +47,7 @@ extern "C" {
 }
 
 // CUDA Driver API — module/function loading
-extern "C" {
+unsafe extern "C" {
     fn cuModuleLoadDataEx(
         module: *mut CUmodule,
         image: *const u8,

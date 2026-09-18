@@ -10,13 +10,13 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
 
+use crate::graphics::GraphicsContext;
 use crate::graphics::bind_group::{GraphicsBindGroup, GraphicsBindGroupLayout};
 use crate::graphics::command::CommandRecorder;
 use crate::graphics::pipeline::{GraphicsPipeline, PipelineBuilder};
 use crate::graphics::surface::GraphicsSurface;
 use crate::graphics::texture::{GraphicsSampler, GraphicsTexture};
 use crate::graphics::types;
-use crate::graphics::GraphicsContext;
 use crate::wgpu_backend::buffer_ops::WgpuBuffer;
 
 // ============================================================================
@@ -1366,11 +1366,7 @@ pub fn compute_mean(dev_h: i32, buf_h: i32) -> f64 {
     };
     drop(ht);
     let sum = compute_sum(dev_h, buf_h);
-    if numel > 0.0 {
-        sum / numel
-    } else {
-        0.0
-    }
+    if numel > 0.0 { sum / numel } else { 0.0 }
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_compute_max")]

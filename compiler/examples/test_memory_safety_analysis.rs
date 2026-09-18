@@ -397,7 +397,9 @@ class Test {
                     println!(
                         "   OwnershipAnalyzer is integrated but mutable aliasing is legal in Haxe"
                     );
-                    println!("   Rust-style borrow checking would require explicit @:unique annotations\n");
+                    println!(
+                        "   Rust-style borrow checking would require explicit @:unique annotations\n"
+                    );
                     true // Expected
                 }
                 Err(errors) => {
@@ -468,7 +470,9 @@ class Test {
             }
             Err(_errors) => {
                 println!("⚠️  SKIP: Got parse/lowering error (reference syntax not supported yet)");
-                println!("   Lifetime analyzer is integrated and working - references would enable detection\n");
+                println!(
+                    "   Lifetime analyzer is integrated and working - references would enable detection\n"
+                );
                 true
             }
         },

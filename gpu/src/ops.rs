@@ -31,71 +31,75 @@ fn buf_to_lazy_op(buf: &GpuBuffer) -> Rc<LazyOp> {
 
 /// Create a lazy binary elementwise GpuBuffer.
 unsafe fn binary_lazy(a: i64, b: i64, op: KernelOp) -> i64 {
-    if a == 0 || b == 0 {
-        return 0;
+    unsafe {
+        if a == 0 || b == 0 {
+            return 0;
+        }
+
+        let a_buf = &*(a as *const GpuBuffer);
+        let b_buf = &*(b as *const GpuBuffer);
+
+        if a_buf.dtype != b_buf.dtype || a_buf.numel != b_buf.numel {
+            return 0;
+        }
+
+        let lhs = buf_to_lazy_op(a_buf);
+        let rhs = buf_to_lazy_op(b_buf);
+
+        let node = LazyNode {
+            op: Rc::new(LazyOp::Binary { op, lhs, rhs }),
+            dtype: a_buf.dtype,
+            numel: a_buf.numel,
+        };
+
+        let result = GpuBuffer::lazy(node, a_buf.numel, a_buf.dtype);
+        Box::into_raw(Box::new(result)) as i64
     }
-
-    let a_buf = &*(a as *const GpuBuffer);
-    let b_buf = &*(b as *const GpuBuffer);
-
-    if a_buf.dtype != b_buf.dtype || a_buf.numel != b_buf.numel {
-        return 0;
-    }
-
-    let lhs = buf_to_lazy_op(a_buf);
-    let rhs = buf_to_lazy_op(b_buf);
-
-    let node = LazyNode {
-        op: Rc::new(LazyOp::Binary { op, lhs, rhs }),
-        dtype: a_buf.dtype,
-        numel: a_buf.numel,
-    };
-
-    let result = GpuBuffer::lazy(node, a_buf.numel, a_buf.dtype);
-    Box::into_raw(Box::new(result)) as i64
 }
 
 /// Create a lazy unary elementwise GpuBuffer.
 unsafe fn unary_lazy(a: i64, op: KernelOp) -> i64 {
-    if a == 0 {
-        return 0;
+    unsafe {
+        if a == 0 {
+            return 0;
+        }
+
+        let a_buf = &*(a as *const GpuBuffer);
+        let input = buf_to_lazy_op(a_buf);
+
+        let node = LazyNode {
+            op: Rc::new(LazyOp::Unary { op, input }),
+            dtype: a_buf.dtype,
+            numel: a_buf.numel,
+        };
+
+        let result = GpuBuffer::lazy(node, a_buf.numel, a_buf.dtype);
+        Box::into_raw(Box::new(result)) as i64
     }
-
-    let a_buf = &*(a as *const GpuBuffer);
-    let input = buf_to_lazy_op(a_buf);
-
-    let node = LazyNode {
-        op: Rc::new(LazyOp::Unary { op, input }),
-        dtype: a_buf.dtype,
-        numel: a_buf.numel,
-    };
-
-    let result = GpuBuffer::lazy(node, a_buf.numel, a_buf.dtype);
-    Box::into_raw(Box::new(result)) as i64
 }
 
 // ---------------------------------------------------------------------------
 // Extern C API — Binary ops: (ctx, a, b) -> result (lazy)
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_add(_ctx: i64, a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Add)
+    unsafe { binary_lazy(a, b, KernelOp::Add) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_sub(_ctx: i64, a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Sub)
+    unsafe { binary_lazy(a, b, KernelOp::Sub) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_mul(_ctx: i64, a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Mul)
+    unsafe { binary_lazy(a, b, KernelOp::Mul) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_div(_ctx: i64, a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Div)
+    unsafe { binary_lazy(a, b, KernelOp::Div) }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,78 +110,78 @@ pub unsafe extern "C" fn rayzor_gpu_compute_div(_ctx: i64, a: i64, b: i64) -> i6
 // uses the GpuContext owned by GPUCompute).
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_buffer_add(a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Add)
+    unsafe { binary_lazy(a, b, KernelOp::Add) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_buffer_sub(a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Sub)
+    unsafe { binary_lazy(a, b, KernelOp::Sub) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_buffer_mul(a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Mul)
+    unsafe { binary_lazy(a, b, KernelOp::Mul) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_buffer_div(a: i64, b: i64) -> i64 {
-    binary_lazy(a, b, KernelOp::Div)
+    unsafe { binary_lazy(a, b, KernelOp::Div) }
 }
 
 // ---------------------------------------------------------------------------
 // Extern C API — Unary ops: (ctx, a) -> result (lazy)
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_neg(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Neg)
+    unsafe { unary_lazy(a, KernelOp::Neg) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_abs(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Abs)
+    unsafe { unary_lazy(a, KernelOp::Abs) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_sqrt(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Sqrt)
+    unsafe { unary_lazy(a, KernelOp::Sqrt) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_exp(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Exp)
+    unsafe { unary_lazy(a, KernelOp::Exp) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_log(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Log)
+    unsafe { unary_lazy(a, KernelOp::Log) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_relu(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Relu)
+    unsafe { unary_lazy(a, KernelOp::Relu) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_sigmoid(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Sigmoid)
+    unsafe { unary_lazy(a, KernelOp::Sigmoid) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_tanh(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Tanh)
+    unsafe { unary_lazy(a, KernelOp::Tanh) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_gelu(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Gelu)
+    unsafe { unary_lazy(a, KernelOp::Gelu) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_silu(_ctx: i64, a: i64) -> i64 {
-    unary_lazy(a, KernelOp::Silu)
+    unsafe { unary_lazy(a, KernelOp::Silu) }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,53 +206,55 @@ fn next_power_of_2(n: usize) -> usize {
 /// Backend dispatch for two-pass reduction: each backend handles its own
 /// buffer allocation, kernel dispatch, and readback.
 unsafe fn reduce_impl(ctx: i64, buf: i64, op: KernelOp) -> f64 {
-    if ctx == 0 || buf == 0 {
-        return 0.0;
+    unsafe {
+        if ctx == 0 || buf == 0 {
+            return 0.0;
+        }
+
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let a_buf = &mut *(buf as *mut GpuBuffer);
+
+        if a_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0.0;
+        }
+
+        let dtype = a_buf.dtype;
+        let numel = a_buf.numel;
+        let elem_size = buffer::dtype_byte_size(dtype);
+
+        if numel == 0 {
+            return 0.0;
+        }
+
+        // Compile reduction kernel
+        let cached = match gpu_ctx
+            .kernel_cache
+            .get_or_compile(&gpu_ctx.inner, op, dtype)
+        {
+            Ok(k) => k,
+            Err(_) => return 0.0,
+        };
+
+        // Two-pass reduction via backend dispatch
+        let tg_size = REDUCE_WG_SIZE.min(next_power_of_2(numel));
+        let num_tgs = if numel <= tg_size {
+            1
+        } else {
+            numel.div_ceil(tg_size).min(256)
+        };
+
+        reduce_dispatch(
+            &gpu_ctx.inner,
+            &cached.compiled,
+            a_buf.native_buffer(),
+            numel,
+            num_tgs,
+            tg_size,
+            elem_size,
+            dtype,
+        )
+        .unwrap_or(0.0)
     }
-
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let a_buf = &mut *(buf as *mut GpuBuffer);
-
-    if a_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0.0;
-    }
-
-    let dtype = a_buf.dtype;
-    let numel = a_buf.numel;
-    let elem_size = buffer::dtype_byte_size(dtype);
-
-    if numel == 0 {
-        return 0.0;
-    }
-
-    // Compile reduction kernel
-    let cached = match gpu_ctx
-        .kernel_cache
-        .get_or_compile(&gpu_ctx.inner, op, dtype)
-    {
-        Ok(k) => k,
-        Err(_) => return 0.0,
-    };
-
-    // Two-pass reduction via backend dispatch
-    let tg_size = REDUCE_WG_SIZE.min(next_power_of_2(numel));
-    let num_tgs = if numel <= tg_size {
-        1
-    } else {
-        numel.div_ceil(tg_size).min(256)
-    };
-
-    reduce_dispatch(
-        &gpu_ctx.inner,
-        &cached.compiled,
-        a_buf.native_buffer(),
-        numel,
-        num_tgs,
-        tg_size,
-        elem_size,
-        dtype,
-    )
-    .unwrap_or(0.0)
 }
 
 /// Backend-dispatch for two-pass reduction.
@@ -446,47 +452,50 @@ fn reduce_dispatch(
 
 /// Perform GPU matrix multiplication: C(M×N) = A(M×K) × B(K×N).
 unsafe fn matmul_impl(ctx: i64, a: i64, b: i64, m: usize, k: usize, n: usize) -> i64 {
-    if ctx == 0 || a == 0 || b == 0 || m == 0 || k == 0 || n == 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let a_buf = &mut *(a as *mut GpuBuffer);
-    let b_buf = &mut *(b as *mut GpuBuffer);
-    if a_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if b_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-
-    let dtype = a_buf.dtype;
-    let cached = match gpu_ctx
-        .kernel_cache
-        .get_or_compile(&gpu_ctx.inner, KernelOp::Matmul, dtype)
-    {
-        Ok(k) => k,
-        Err(_) => return 0,
-    };
-
-    let elem_size = buffer::dtype_byte_size(dtype);
-
-    match matmul_dispatch(
-        &gpu_ctx.inner,
-        &cached.compiled,
-        a_buf.native_buffer(),
-        b_buf.native_buffer(),
-        m,
-        k,
-        n,
-        elem_size,
-        dtype,
-    ) {
-        Ok(result_native) => {
-            let result = GpuBuffer::materialized(result_native, m * n, dtype);
-            Box::into_raw(Box::new(result)) as i64
+    unsafe {
+        if ctx == 0 || a == 0 || b == 0 || m == 0 || k == 0 || n == 0 {
+            return 0;
         }
-        Err(_) => 0,
+
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let a_buf = &mut *(a as *mut GpuBuffer);
+        let b_buf = &mut *(b as *mut GpuBuffer);
+        if a_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if b_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+
+        let dtype = a_buf.dtype;
+        let cached =
+            match gpu_ctx
+                .kernel_cache
+                .get_or_compile(&gpu_ctx.inner, KernelOp::Matmul, dtype)
+            {
+                Ok(k) => k,
+                Err(_) => return 0,
+            };
+
+        let elem_size = buffer::dtype_byte_size(dtype);
+
+        match matmul_dispatch(
+            &gpu_ctx.inner,
+            &cached.compiled,
+            a_buf.native_buffer(),
+            b_buf.native_buffer(),
+            m,
+            k,
+            n,
+            elem_size,
+            dtype,
+        ) {
+            Ok(result_native) => {
+                let result = GpuBuffer::materialized(result_native, m * n, dtype);
+                Box::into_raw(Box::new(result)) as i64
+            }
+            Err(_) => 0,
+        }
     }
 }
 
@@ -502,34 +511,36 @@ unsafe fn matmul_impl(ctx: i64, a: i64, b: i64, m: usize, k: usize, n: usize) ->
 ///
 /// # Safety
 /// `addr` must point to `byte_size` readable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
     ctx: i64,
     addr: i64,
     byte_size: i64,
 ) -> i64 {
-    gpu_thread_check("buffer_from_bytes");
-    if ctx == 0 || addr == 0 || byte_size <= 0 {
-        return 0;
-    }
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let native = match &gpu_ctx.inner {
-        #[cfg(feature = "webgpu-backend")]
-        NativeContext::Wgpu(wc) => {
-            match crate::wgpu_backend::buffer_ops::WgpuBuffer::from_data(
-                wc,
-                addr as *const u8,
-                byte_size as usize,
-            ) {
-                Some(b) => NativeBuffer::Wgpu(b),
-                None => return 0,
-            }
+    unsafe {
+        gpu_thread_check("buffer_from_bytes");
+        if ctx == 0 || addr == 0 || byte_size <= 0 {
+            return 0;
         }
-        _ => return 0,
-    };
-    // u8 elements: the shader reinterprets them as u32 blocks.
-    let buf = GpuBuffer::materialized(native, byte_size as usize, buffer::DTYPE_U8);
-    Box::into_raw(Box::new(buf)) as i64
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let native = match &gpu_ctx.inner {
+            #[cfg(feature = "webgpu-backend")]
+            NativeContext::Wgpu(wc) => {
+                match crate::wgpu_backend::buffer_ops::WgpuBuffer::from_data(
+                    wc,
+                    addr as *const u8,
+                    byte_size as usize,
+                ) {
+                    Some(b) => NativeBuffer::Wgpu(b),
+                    None => return 0,
+                }
+            }
+            _ => return 0,
+        };
+        // u8 elements: the shader reinterprets them as u32 blocks.
+        let buf = GpuBuffer::materialized(native, byte_size as usize, buffer::DTYPE_U8);
+        Box::into_raw(Box::new(buf)) as i64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,25 +554,27 @@ pub unsafe extern "C" fn rayzor_gpu_compute_buffer_from_bytes(
 // native backtrace to stderr from inside the faulting process.
 #[cfg(all(feature = "native", unix))]
 mod crash_trace {
-    extern "C" {
+    unsafe extern "C" {
         fn backtrace(buf: *mut *mut libc::c_void, size: libc::c_int) -> libc::c_int;
         fn backtrace_symbols_fd(buf: *const *mut libc::c_void, size: libc::c_int, fd: libc::c_int);
     }
 
     unsafe extern "C" fn on_fault(sig: libc::c_int) {
-        // async-signal-safe: write(2) + backtrace_symbols_fd only.
-        let msg = match sig {
-            libc::SIGSEGV => &b"\n[rzg] *** SIGSEGV ***\n"[..],
-            libc::SIGBUS => &b"\n[rzg] *** SIGBUS ***\n"[..],
-            _ => &b"\n[rzg] *** SIGILL ***\n"[..],
-        };
-        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
-        let mut frames: [*mut libc::c_void; 64] = [std::ptr::null_mut(); 64];
-        let n = backtrace(frames.as_mut_ptr(), 64);
-        backtrace_symbols_fd(frames.as_ptr(), n, 2);
-        // Restore default and re-raise so the exit status is still the signal.
-        libc::signal(sig, libc::SIG_DFL);
-        libc::raise(sig);
+        unsafe {
+            // async-signal-safe: write(2) + backtrace_symbols_fd only.
+            let msg = match sig {
+                libc::SIGSEGV => &b"\n[rzg] *** SIGSEGV ***\n"[..],
+                libc::SIGBUS => &b"\n[rzg] *** SIGBUS ***\n"[..],
+                _ => &b"\n[rzg] *** SIGILL ***\n"[..],
+            };
+            libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+            let mut frames: [*mut libc::c_void; 64] = [std::ptr::null_mut(); 64];
+            let n = backtrace(frames.as_mut_ptr(), 64);
+            backtrace_symbols_fd(frames.as_ptr(), n, 2);
+            // Restore default and re-raise so the exit status is still the signal.
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
     }
 
     pub fn install() {
@@ -635,49 +648,51 @@ pub fn gpu_thread_check(site: &str) {
 /// # Safety
 /// `addr` must point to `byte_size` readable bytes, and `byte_size` must not
 /// exceed the buffer's size.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_write_bytes(
     ctx: i64,
     buffer_ptr: i64,
     addr: i64,
     byte_size: i64,
 ) -> bool {
-    gpu_thread_check("write_bytes");
-    if ctx == 0 || buffer_ptr == 0 || addr == 0 || byte_size <= 0 {
-        return false;
-    }
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let buf = &mut *(buffer_ptr as *mut GpuBuffer);
-    if buf.ensure_materialized(gpu_ctx).is_err() {
-        return false;
-    }
-    #[cfg(feature = "webgpu-backend")]
-    {
-        let (NativeContext::Wgpu(wc), NativeBuffer::Wgpu(wb)) =
-            (&gpu_ctx.inner, buf.native_buffer().as_ref())
-        else {
-            return false;
-        };
-        let n = byte_size as usize;
-        if n > wb.byte_size {
+    unsafe {
+        gpu_thread_check("write_bytes");
+        if ctx == 0 || buffer_ptr == 0 || addr == 0 || byte_size <= 0 {
             return false;
         }
-        // Pending compute may still reference this buffer; submit first so the
-        // overwrite cannot race work that has been encoded but not run.
-        wc.flush();
-        let src = std::slice::from_raw_parts(addr as *const u8, n);
-        wc.queue.write_buffer(&wb.buffer, 0, src);
-        return true;
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let buf = &mut *(buffer_ptr as *mut GpuBuffer);
+        if buf.ensure_materialized(gpu_ctx).is_err() {
+            return false;
+        }
+        #[cfg(feature = "webgpu-backend")]
+        {
+            let (NativeContext::Wgpu(wc), NativeBuffer::Wgpu(wb)) =
+                (&gpu_ctx.inner, buf.native_buffer().as_ref())
+            else {
+                return false;
+            };
+            let n = byte_size as usize;
+            if n > wb.byte_size {
+                return false;
+            }
+            // Pending compute may still reference this buffer; submit first so the
+            // overwrite cannot race work that has been encoded but not run.
+            wc.flush();
+            let src = std::slice::from_raw_parts(addr as *const u8, n);
+            wc.queue.write_buffer(&wb.buffer, 0, src);
+            return true;
+        }
+        #[allow(unreachable_code)]
+        false
     }
-    #[allow(unreachable_code)]
-    false
 }
 
 /// `rayzor_gpu_compute_matmul_q4k(ctx, a, bq4, m, k, n) -> GpuBuffer`
 ///
 /// `C[m,n] = A[m,k] * dequant(Bq4)[n,k]^T` with B as raw Q4_K_M blocks.
 /// `k` must be a multiple of 256 (the Q4_K super-block size).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_matmul_q4k(
     ctx: i64,
     a: i64,
@@ -686,68 +701,72 @@ pub unsafe extern "C" fn rayzor_gpu_compute_matmul_q4k(
     k: i64,
     n: i64,
 ) -> i64 {
-    gpu_thread_check("matmul_q4k");
-    if ctx == 0 || a == 0 || b == 0 || m <= 0 || k <= 0 || n <= 0 || k % 256 != 0 {
-        return 0;
-    }
-    let (m, k, n) = (m as usize, k as usize, n as usize);
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let a_buf = &mut *(a as *mut GpuBuffer);
-    let b_buf = &mut *(b as *mut GpuBuffer);
-    if a_buf.ensure_materialized(gpu_ctx).is_err() || b_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-
-    let cached = match gpu_ctx.kernel_cache.get_or_compile(
-        &gpu_ctx.inner,
-        KernelOp::MatmulQ4K,
-        buffer::DTYPE_F32,
-    ) {
-        Ok(kk) => kk,
-        Err(_) => return 0,
-    };
-
-    #[cfg(feature = "webgpu-backend")]
-    {
-        use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
-        let (NativeContext::Wgpu(wc), NativeCompiledKernel::Wgpu(kernel)) =
-            (&gpu_ctx.inner, &cached.compiled)
-        else {
+    unsafe {
+        gpu_thread_check("matmul_q4k");
+        if ctx == 0 || a == 0 || b == 0 || m <= 0 || k <= 0 || n <= 0 || k % 256 != 0 {
             return 0;
-        };
-        let (NativeBuffer::Wgpu(aw), NativeBuffer::Wgpu(bw)) = (
-            a_buf.native_buffer().as_ref(),
-            b_buf.native_buffer().as_ref(),
-        ) else {
-            return 0;
-        };
-        let out = match WgpuBuffer::allocate(wc, m * n * 4) {
-            Some(o) => o,
-            None => return 0,
-        };
-        // dims.w carries blocks-per-row so the shader can index blocks.
-        let dims: [u32; 4] = [m as u32, k as u32, n as u32, (k / 256) as u32];
-        let dims_buf = match WgpuBuffer::from_data(wc, dims.as_ptr() as *const u8, 16) {
-            Some(d) => d,
-            None => return 0,
-        };
-        let bm = crate::codegen::wgsl_matmul::Q4K_BM as usize;
-        let bn = crate::codegen::wgsl_matmul::Q4K_BN as usize;
-        if dispatch::dispatch_workgroups(
-            wc,
-            kernel,
-            &[aw, bw, &out, &dims_buf],
-            (n.div_ceil(bn), m.div_ceil(bm), 1),
-        )
-        .is_err()
+        }
+        let (m, k, n) = (m as usize, k as usize, n as usize);
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let a_buf = &mut *(a as *mut GpuBuffer);
+        let b_buf = &mut *(b as *mut GpuBuffer);
+        if a_buf.ensure_materialized(gpu_ctx).is_err()
+            || b_buf.ensure_materialized(gpu_ctx).is_err()
         {
             return 0;
         }
-        let buf = GpuBuffer::materialized(NativeBuffer::Wgpu(out), m * n, buffer::DTYPE_F32);
-        return Box::into_raw(Box::new(buf)) as i64;
+
+        let cached = match gpu_ctx.kernel_cache.get_or_compile(
+            &gpu_ctx.inner,
+            KernelOp::MatmulQ4K,
+            buffer::DTYPE_F32,
+        ) {
+            Ok(kk) => kk,
+            Err(_) => return 0,
+        };
+
+        #[cfg(feature = "webgpu-backend")]
+        {
+            use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
+            let (NativeContext::Wgpu(wc), NativeCompiledKernel::Wgpu(kernel)) =
+                (&gpu_ctx.inner, &cached.compiled)
+            else {
+                return 0;
+            };
+            let (NativeBuffer::Wgpu(aw), NativeBuffer::Wgpu(bw)) = (
+                a_buf.native_buffer().as_ref(),
+                b_buf.native_buffer().as_ref(),
+            ) else {
+                return 0;
+            };
+            let out = match WgpuBuffer::allocate(wc, m * n * 4) {
+                Some(o) => o,
+                None => return 0,
+            };
+            // dims.w carries blocks-per-row so the shader can index blocks.
+            let dims: [u32; 4] = [m as u32, k as u32, n as u32, (k / 256) as u32];
+            let dims_buf = match WgpuBuffer::from_data(wc, dims.as_ptr() as *const u8, 16) {
+                Some(d) => d,
+                None => return 0,
+            };
+            let bm = crate::codegen::wgsl_matmul::Q4K_BM as usize;
+            let bn = crate::codegen::wgsl_matmul::Q4K_BN as usize;
+            if dispatch::dispatch_workgroups(
+                wc,
+                kernel,
+                &[aw, bw, &out, &dims_buf],
+                (n.div_ceil(bn), m.div_ceil(bm), 1),
+            )
+            .is_err()
+            {
+                return 0;
+            }
+            let buf = GpuBuffer::materialized(NativeBuffer::Wgpu(out), m * n, buffer::DTYPE_F32);
+            return Box::into_raw(Box::new(buf)) as i64;
+        }
+        #[allow(unreachable_code)]
+        0
     }
-    #[allow(unreachable_code)]
-    0
 }
 
 /// Backend-dispatch for matmul.
@@ -884,54 +903,58 @@ fn matmul_dispatch(
 // Extern C API — Reductions: (ctx, buf) -> f64
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_sum(ctx: i64, buf: i64) -> f64 {
-    reduce_impl(ctx, buf, KernelOp::ReduceSum)
+    unsafe { reduce_impl(ctx, buf, KernelOp::ReduceSum) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_mean(ctx: i64, buf: i64) -> f64 {
-    if buf == 0 {
-        return 0.0;
+    unsafe {
+        if buf == 0 {
+            return 0.0;
+        }
+        let a_buf = &*(buf as *const GpuBuffer);
+        let numel = a_buf.numel;
+        if numel == 0 {
+            return 0.0;
+        }
+        reduce_impl(ctx, buf, KernelOp::ReduceSum) / numel as f64
     }
-    let a_buf = &*(buf as *const GpuBuffer);
-    let numel = a_buf.numel;
-    if numel == 0 {
-        return 0.0;
-    }
-    reduce_impl(ctx, buf, KernelOp::ReduceSum) / numel as f64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_max(ctx: i64, buf: i64) -> f64 {
-    reduce_impl(ctx, buf, KernelOp::ReduceMax)
+    unsafe { reduce_impl(ctx, buf, KernelOp::ReduceMax) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_min(ctx: i64, buf: i64) -> f64 {
-    reduce_impl(ctx, buf, KernelOp::ReduceMin)
+    unsafe { reduce_impl(ctx, buf, KernelOp::ReduceMin) }
 }
 
 // ---------------------------------------------------------------------------
 // Extern C API — Dot product: (ctx, a, b) -> f64
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_dot(ctx: i64, a: i64, b: i64) -> f64 {
-    let product = rayzor_gpu_compute_mul(ctx, a, b);
-    if product == 0 {
-        return 0.0;
+    unsafe {
+        let product = rayzor_gpu_compute_mul(ctx, a, b);
+        if product == 0 {
+            return 0.0;
+        }
+        let result = reduce_impl(ctx, product, KernelOp::ReduceSum);
+        let _ = Box::from_raw(product as *mut GpuBuffer);
+        result
     }
-    let result = reduce_impl(ctx, product, KernelOp::ReduceSum);
-    let _ = Box::from_raw(product as *mut GpuBuffer);
-    result
 }
 
 // ---------------------------------------------------------------------------
 // Extern C API — Matmul: (ctx, a, b, m, k, n) -> GpuBuffer handle
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_matmul(
     ctx: i64,
     a: i64,
@@ -940,14 +963,14 @@ pub unsafe extern "C" fn rayzor_gpu_compute_matmul(
     k: i64,
     n: i64,
 ) -> i64 {
-    matmul_impl(ctx, a, b, m as usize, k as usize, n as usize)
+    unsafe { matmul_impl(ctx, a, b, m as usize, k as usize, n as usize) }
 }
 
 // ---------------------------------------------------------------------------
 // Extern C API — Batch Matmul: (ctx, a, b, batch, m, k, n) -> GpuBuffer handle
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_batch_matmul(
     ctx: i64,
     a: i64,
@@ -957,15 +980,17 @@ pub unsafe extern "C" fn rayzor_gpu_compute_batch_matmul(
     k: i64,
     n: i64,
 ) -> i64 {
-    batch_matmul_impl(
-        ctx,
-        a,
-        b,
-        batch as usize,
-        m as usize,
-        k as usize,
-        n as usize,
-    )
+    unsafe {
+        batch_matmul_impl(
+            ctx,
+            a,
+            b,
+            batch as usize,
+            m as usize,
+            k as usize,
+            n as usize,
+        )
+    }
 }
 
 unsafe fn batch_matmul_impl(
@@ -977,48 +1002,50 @@ unsafe fn batch_matmul_impl(
     k: usize,
     n: usize,
 ) -> i64 {
-    if ctx == 0 || a == 0 || b == 0 || batch == 0 || m == 0 || k == 0 || n == 0 {
-        return 0;
-    }
-
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let a_buf = &mut *(a as *mut GpuBuffer);
-    let b_buf = &mut *(b as *mut GpuBuffer);
-    if a_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if b_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-
-    let dtype = a_buf.dtype;
-    let cached =
-        match gpu_ctx
-            .kernel_cache
-            .get_or_compile(&gpu_ctx.inner, KernelOp::BatchMatmul, dtype)
-        {
-            Ok(k) => k,
-            Err(_) => return 0,
-        };
-
-    let elem_size = buffer::dtype_byte_size(dtype);
-
-    match batch_matmul_dispatch(
-        &gpu_ctx.inner,
-        &cached.compiled,
-        a_buf.native_buffer(),
-        b_buf.native_buffer(),
-        batch,
-        m,
-        k,
-        n,
-        elem_size,
-    ) {
-        Ok(result_native) => {
-            let result = GpuBuffer::materialized(result_native, batch * m * n, dtype);
-            Box::into_raw(Box::new(result)) as i64
+    unsafe {
+        if ctx == 0 || a == 0 || b == 0 || batch == 0 || m == 0 || k == 0 || n == 0 {
+            return 0;
         }
-        Err(_) => 0,
+
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let a_buf = &mut *(a as *mut GpuBuffer);
+        let b_buf = &mut *(b as *mut GpuBuffer);
+        if a_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if b_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+
+        let dtype = a_buf.dtype;
+        let cached =
+            match gpu_ctx
+                .kernel_cache
+                .get_or_compile(&gpu_ctx.inner, KernelOp::BatchMatmul, dtype)
+            {
+                Ok(k) => k,
+                Err(_) => return 0,
+            };
+
+        let elem_size = buffer::dtype_byte_size(dtype);
+
+        match batch_matmul_dispatch(
+            &gpu_ctx.inner,
+            &cached.compiled,
+            a_buf.native_buffer(),
+            b_buf.native_buffer(),
+            batch,
+            m,
+            k,
+            n,
+            elem_size,
+        ) {
+            Ok(result_native) => {
+                let result = GpuBuffer::materialized(result_native, batch * m * n, dtype);
+                Box::into_raw(Box::new(result)) as i64
+            }
+            Err(_) => 0,
+        }
     }
 }
 
@@ -1157,48 +1184,51 @@ fn batch_matmul_dispatch(
 /// is the trailing-dim length (hidden_size); the input is treated as a
 /// flat `[groups, row_len]` matrix with `groups = numel / row_len`.
 unsafe fn rms_norm_impl(ctx: i64, x: i64, weight: i64, row_len: usize, eps: f32) -> i64 {
-    if ctx == 0 || x == 0 || weight == 0 || row_len == 0 {
-        return 0;
-    }
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let x_buf = &mut *(x as *mut GpuBuffer);
-    let w_buf = &mut *(weight as *mut GpuBuffer);
-    if x_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if w_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if x_buf.numel == 0 || !x_buf.numel.is_multiple_of(row_len) {
-        return 0;
-    }
-    let groups = x_buf.numel / row_len;
-    let dtype = x_buf.dtype;
-    let cached = match gpu_ctx
-        .kernel_cache
-        .get_or_compile(&gpu_ctx.inner, KernelOp::RmsNorm, dtype)
-    {
-        Ok(k) => k,
-        Err(_) => return 0,
-    };
-    let elem_size = buffer::dtype_byte_size(dtype);
-
-    match rms_norm_dispatch(
-        &gpu_ctx.inner,
-        &cached.compiled,
-        x_buf.native_buffer(),
-        w_buf.native_buffer(),
-        x_buf.numel,
-        row_len,
-        groups,
-        eps,
-        elem_size,
-    ) {
-        Ok(result_native) => {
-            let result = GpuBuffer::materialized(result_native, x_buf.numel, dtype);
-            Box::into_raw(Box::new(result)) as i64
+    unsafe {
+        if ctx == 0 || x == 0 || weight == 0 || row_len == 0 {
+            return 0;
         }
-        Err(_) => 0,
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let x_buf = &mut *(x as *mut GpuBuffer);
+        let w_buf = &mut *(weight as *mut GpuBuffer);
+        if x_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if w_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if x_buf.numel == 0 || !x_buf.numel.is_multiple_of(row_len) {
+            return 0;
+        }
+        let groups = x_buf.numel / row_len;
+        let dtype = x_buf.dtype;
+        let cached =
+            match gpu_ctx
+                .kernel_cache
+                .get_or_compile(&gpu_ctx.inner, KernelOp::RmsNorm, dtype)
+            {
+                Ok(k) => k,
+                Err(_) => return 0,
+            };
+        let elem_size = buffer::dtype_byte_size(dtype);
+
+        match rms_norm_dispatch(
+            &gpu_ctx.inner,
+            &cached.compiled,
+            x_buf.native_buffer(),
+            w_buf.native_buffer(),
+            x_buf.numel,
+            row_len,
+            groups,
+            eps,
+            elem_size,
+        ) {
+            Ok(result_native) => {
+                let result = GpuBuffer::materialized(result_native, x_buf.numel, dtype);
+                Box::into_raw(Box::new(result)) as i64
+            }
+            Err(_) => 0,
+        }
     }
 }
 
@@ -1346,54 +1376,57 @@ unsafe fn rope_impl(
     position_offset: u32,
     cos_max_seq: usize,
 ) -> i64 {
-    if ctx == 0 || x == 0 || cos == 0 || sin == 0 {
-        return 0;
-    }
-    if seq_len == 0 || num_heads == 0 || head_dim == 0 || !head_dim.is_multiple_of(2) {
-        return 0;
-    }
-    let gpu_ctx = &mut *(ctx as *mut GpuContext);
-    let x_buf = &mut *(x as *mut GpuBuffer);
-    let cos_buf = &mut *(cos as *mut GpuBuffer);
-    let sin_buf = &mut *(sin as *mut GpuBuffer);
-    if x_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if cos_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    if sin_buf.ensure_materialized(gpu_ctx).is_err() {
-        return 0;
-    }
-    let dtype = x_buf.dtype;
-    let cached = match gpu_ctx
-        .kernel_cache
-        .get_or_compile(&gpu_ctx.inner, KernelOp::Rope, dtype)
-    {
-        Ok(k) => k,
-        Err(_) => return 0,
-    };
-    let elem_size = buffer::dtype_byte_size(dtype);
-    let numel = seq_len * num_heads * head_dim;
-
-    match rope_dispatch(
-        &gpu_ctx.inner,
-        &cached.compiled,
-        x_buf.native_buffer(),
-        cos_buf.native_buffer(),
-        sin_buf.native_buffer(),
-        seq_len,
-        num_heads,
-        head_dim,
-        position_offset,
-        cos_max_seq,
-        elem_size,
-    ) {
-        Ok(result_native) => {
-            let result = GpuBuffer::materialized(result_native, numel, dtype);
-            Box::into_raw(Box::new(result)) as i64
+    unsafe {
+        if ctx == 0 || x == 0 || cos == 0 || sin == 0 {
+            return 0;
         }
-        Err(_) => 0,
+        if seq_len == 0 || num_heads == 0 || head_dim == 0 || !head_dim.is_multiple_of(2) {
+            return 0;
+        }
+        let gpu_ctx = &mut *(ctx as *mut GpuContext);
+        let x_buf = &mut *(x as *mut GpuBuffer);
+        let cos_buf = &mut *(cos as *mut GpuBuffer);
+        let sin_buf = &mut *(sin as *mut GpuBuffer);
+        if x_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if cos_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        if sin_buf.ensure_materialized(gpu_ctx).is_err() {
+            return 0;
+        }
+        let dtype = x_buf.dtype;
+        let cached =
+            match gpu_ctx
+                .kernel_cache
+                .get_or_compile(&gpu_ctx.inner, KernelOp::Rope, dtype)
+            {
+                Ok(k) => k,
+                Err(_) => return 0,
+            };
+        let elem_size = buffer::dtype_byte_size(dtype);
+        let numel = seq_len * num_heads * head_dim;
+
+        match rope_dispatch(
+            &gpu_ctx.inner,
+            &cached.compiled,
+            x_buf.native_buffer(),
+            cos_buf.native_buffer(),
+            sin_buf.native_buffer(),
+            seq_len,
+            num_heads,
+            head_dim,
+            position_offset,
+            cos_max_seq,
+            elem_size,
+        ) {
+            Ok(result_native) => {
+                let result = GpuBuffer::materialized(result_native, numel, dtype);
+                Box::into_raw(Box::new(result)) as i64
+            }
+            Err(_) => 0,
+        }
     }
 }
 
@@ -1558,7 +1591,7 @@ fn rope_dispatch(
 // Transformer primitives — FFI entry points
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_rms_norm(
     ctx: i64,
     x: i64,
@@ -1566,10 +1599,10 @@ pub unsafe extern "C" fn rayzor_gpu_compute_rms_norm(
     row_len: i64,
     eps: f64,
 ) -> i64 {
-    rms_norm_impl(ctx, x, weight, row_len as usize, eps as f32)
+    unsafe { rms_norm_impl(ctx, x, weight, row_len as usize, eps as f32) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn rayzor_gpu_compute_rope(
     ctx: i64,
@@ -1582,17 +1615,19 @@ pub unsafe extern "C" fn rayzor_gpu_compute_rope(
     position_offset: i64,
     cos_max_seq: i64,
 ) -> i64 {
-    rope_impl(
-        ctx,
-        x,
-        cos,
-        sin,
-        seq_len as usize,
-        num_heads as usize,
-        head_dim as usize,
-        position_offset.max(0) as u32,
-        cos_max_seq as usize,
-    )
+    unsafe {
+        rope_impl(
+            ctx,
+            x,
+            cos,
+            sin,
+            seq_len as usize,
+            num_heads as usize,
+            head_dim as usize,
+            position_offset.max(0) as u32,
+            cos_max_seq as usize,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,14 +1654,16 @@ mod tests {
     }
 
     unsafe fn create_test_buffer(ctx: i64, data: &[f32]) -> i64 {
-        let gpu_ctx = &*(ctx as *const GpuContext);
-        let byte_size = std::mem::size_of_val(data);
-        let inner = gpu_ctx
-            .inner
-            .buffer_from_data(data.as_ptr() as *const u8, byte_size)
-            .expect("failed to create test buffer");
-        let buf = GpuBuffer::materialized(inner, data.len(), buffer::DTYPE_F32);
-        Box::into_raw(Box::new(buf)) as i64
+        unsafe {
+            let gpu_ctx = &*(ctx as *const GpuContext);
+            let byte_size = std::mem::size_of_val(data);
+            let inner = gpu_ctx
+                .inner
+                .buffer_from_data(data.as_ptr() as *const u8, byte_size)
+                .expect("failed to create test buffer");
+            let buf = GpuBuffer::materialized(inner, data.len(), buffer::DTYPE_F32);
+            Box::into_raw(Box::new(buf)) as i64
+        }
     }
 
     #[test]

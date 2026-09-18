@@ -2,12 +2,12 @@
 
 use super::buffer_ops::CudaBuffer;
 use super::compile::CudaCompiledKernel;
-use super::device_init::{CUresult, CudaContext, CUDA_SUCCESS};
+use super::device_init::{CUDA_SUCCESS, CUresult, CudaContext};
 
 type CUstream = *mut std::ffi::c_void;
 
 // CUDA Driver API — kernel launch
-extern "C" {
+unsafe extern "C" {
     fn cuLaunchKernel(
         f: super::compile::CUfunction,
         grid_dim_x: u32,

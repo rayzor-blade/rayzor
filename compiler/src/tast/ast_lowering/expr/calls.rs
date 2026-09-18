@@ -900,7 +900,7 @@ impl<'a> AstLowering<'a> {
                 match tt.get(resolved).map(|ti| &ti.kind) {
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
                     Some(TypeKind::Abstract { symbol_id, .. }) => {
-                        break *symbol_id == abstract_symbol
+                        break *symbol_id == abstract_symbol;
                     }
                     _ => break false,
                 }

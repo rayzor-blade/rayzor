@@ -139,7 +139,8 @@ impl CompilationUnit {
                 // diagnostic's "Main.hx fallback" rendering can be cross-referenced
                 // against the real source location.
                 if std::env::var("RAYZOR_DEBUG_E0382").is_ok() {
-                    eprintln!("[E0382-DEBUG] var={} sym={} typed_file={} severity={} move_file_id={} move_line={} move_col={} use_file_id={} use_line={} use_col={}",
+                    eprintln!(
+                        "[E0382-DEBUG] var={} sym={} typed_file={} severity={} move_file_id={} move_line={} move_col={} use_file_id={} use_line={} use_col={}",
                         var_name,
                         variable.as_raw(),
                         typed_file.metadata.file_path,

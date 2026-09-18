@@ -3,17 +3,17 @@
 //! This module handles all expression parsing with proper precedence and associativity
 
 use nom::{
+    Parser,
     branch::alt,
     bytes::complete::{escaped, tag},
     character::complete::{char, digit1, hex_digit1, none_of, oct_digit1, one_of},
     combinator::{map, opt, recognize, value},
     multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded},
-    Parser,
 };
 
 use crate::haxe_ast::*;
-use crate::haxe_parser::{identifier, keyword, position, symbol, ws, PResult};
+use crate::haxe_parser::{PResult, identifier, keyword, position, symbol, ws};
 use crate::haxe_parser_expr2::{
     array_expr, block_expr, cast_expr, compiler_specific_expr, do_while_expr, for_expr,
     identifier_expr, if_expr, inline_expr, inline_preprocessor_expr, macro_expr, new_expr,
@@ -709,10 +709,10 @@ pub(crate) fn unescape_string(s: &str) -> String {
                 Some('u') => {
                     // Unicode escape: \uXXXX
                     let hex: String = chars.by_ref().take(4).collect();
-                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                        if let Some(ch) = char::from_u32(code) {
-                            result.push(ch);
-                        }
+                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                        && let Some(ch) = char::from_u32(code)
+                    {
+                        result.push(ch);
                     }
                 }
                 Some(c) => {

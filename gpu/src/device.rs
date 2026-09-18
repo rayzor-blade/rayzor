@@ -22,7 +22,7 @@ pub struct GpuContext {
 
 /// Create a new GPU compute context.
 /// Returns an opaque i64 handle (pointer), or 0 on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_gpu_compute_create() -> i64 {
     match NativeContext::new() {
         Some(ctx) => {
@@ -39,21 +39,19 @@ pub extern "C" fn rayzor_gpu_compute_create() -> i64 {
 }
 
 /// Destroy a GPU compute context and free its resources.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_gpu_compute_destroy(ctx: i64) {
-    if ctx == 0 {
-        return;
+    unsafe {
+        if ctx == 0 {
+            return;
+        }
+        let _ = Box::from_raw(ctx as *mut GpuContext);
     }
-    let _ = Box::from_raw(ctx as *mut GpuContext);
 }
 
 /// Check if GPU compute is available on this system.
 /// Returns 1 if available, 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rayzor_gpu_compute_is_available() -> i8 {
-    if NativeContext::is_available() {
-        1
-    } else {
-        0
-    }
+    if NativeContext::is_available() { 1 } else { 0 }
 }

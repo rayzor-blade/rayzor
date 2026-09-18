@@ -1,8 +1,8 @@
 //! Test for FieldConstraint processing in lifetime solver
 
+use crate::semantic_graph::LifetimeId;
 use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
 use crate::semantic_graph::analysis::lifetime_solver::LifetimeConstraintSolver;
-use crate::semantic_graph::LifetimeId;
 use crate::tast::SourceLocation;
 
 #[cfg(test)]

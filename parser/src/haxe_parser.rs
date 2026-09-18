@@ -4,6 +4,7 @@
 //! and tracks spans for every AST node.
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, take_until, take_while},
     character::complete::{alpha1, alphanumeric1, char, multispace1},
@@ -11,7 +12,6 @@ use nom::{
     error::context,
     multi::{many0, many1, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
-    IResult, Parser,
 };
 
 use crate::custom_error::ContextualError;
@@ -823,10 +823,10 @@ pub fn ws(input: &str) -> PResult<()> {
     // Fast path: if first char isn't whitespace or comment start, return immediately.
     // This avoids entering the many0(alt(...)) machinery for the ~90% of calls
     // where there's no whitespace to skip (called ~16,500 times per 551-line file).
-    if let Some(first) = input.as_bytes().first() {
-        if !matches!(first, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'#') {
-            return Ok((input, ()));
-        }
+    if let Some(first) = input.as_bytes().first()
+        && !matches!(first, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'#')
+    {
+        return Ok((input, ()));
     }
     value(
         (),
@@ -871,14 +871,14 @@ fn preprocessor_directive(input: &str) -> PResult<&str> {
     if input.starts_with("#if") {
         // Quick check: if we find #end before finding a newline, it's an inline preprocessor
         if let Some(newline_pos) = input.find('\n') {
-            if let Some(end_pos) = input.find("#end") {
-                if end_pos < newline_pos {
-                    // This is an inline preprocessor directive - don't handle it here
-                    return Err(nom::Err::Error(ContextualError::new(
-                        input,
-                        nom::error::ErrorKind::Tag,
-                    )));
-                }
+            if let Some(end_pos) = input.find("#end")
+                && end_pos < newline_pos
+            {
+                // This is an inline preprocessor directive - don't handle it here
+                return Err(nom::Err::Error(ContextualError::new(
+                    input,
+                    nom::error::ErrorKind::Tag,
+                )));
             }
         } else if input.contains("#end") {
             // No newline found but #end exists - entire thing is on one line

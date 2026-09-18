@@ -11,8 +11,8 @@
 use crate::tast::type_checker::{ClassHierarchyInfo, ClassHierarchyRegistry};
 
 use super::{
-    symbol_cache::SymbolResolutionCache, InternedString, LifetimeId, ScopeId, StringInterner,
-    SymbolId, TypeId, TypedArena,
+    InternedString, LifetimeId, ScopeId, StringInterner, SymbolId, TypeId, TypedArena,
+    symbol_cache::SymbolResolutionCache,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

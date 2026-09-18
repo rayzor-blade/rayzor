@@ -13,11 +13,11 @@
 //! - `rayzor_future_is_ready(handle) -> bool` — check if resolved
 
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 
-use crate::concurrency::{arm64_jit_barrier, ACTIVE_THREAD_COUNT};
+use crate::concurrency::{ACTIVE_THREAD_COUNT, arm64_jit_barrier};
 
 unsafe extern "C" {
     fn _setjmp(buf: *mut u8) -> i32;

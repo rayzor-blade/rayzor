@@ -36,7 +36,7 @@ use crate::tensor::{Tensor, DTYPE_F32};
 // handled, 0 to fall back to the sequential guest path.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "rayzor")]
-extern "C" {
+unsafe extern "C" {
     fn rayzor_host_qmatmul_par(
         x_data_off: i32,
         x_stride0: i32,
@@ -586,7 +586,7 @@ pub extern "C" fn rayzor_qmatmul_band_worker(work_ptr: i32) -> i64 {
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "rayzor")]
-extern "C" {
+unsafe extern "C" {
     fn rayzor_thread_spawn(fn_idx: i32, env_ptr: i32) -> i32;
     // Void join: blocks on the worker, discards its (always-0) result without
     // boxing. The boxing `rayzor_thread_join` is the Thread<T>.join() contract;

@@ -165,34 +165,36 @@ pub unsafe extern "C" fn nue_prefill_graph_load(
     kv_heads: i64,
     head_dim: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
-    {
-        if dir_ptr == 0 || dir_len <= 0 || stem_ptr == 0 || stem_len <= 0 {
-            return 0;
+    unsafe {
+        #[cfg(target_os = "macos")]
+        {
+            if dir_ptr == 0 || dir_len <= 0 || stem_ptr == 0 || stem_len <= 0 {
+                return 0;
+            }
+            if hidden <= 0 || layers <= 0 || kv_heads <= 0 || head_dim <= 0 {
+                return 0;
+            }
+            let d = std::slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize);
+            let s = std::slice::from_raw_parts(stem_ptr as *const u8, stem_len as usize);
+            let (Ok(dir), Ok(stem)) = (std::str::from_utf8(d), std::str::from_utf8(s)) else {
+                return 0;
+            };
+            imp::load(
+                dir,
+                stem,
+                hidden as usize,
+                layers as usize,
+                kv_heads as usize,
+                head_dim as usize,
+            )
         }
-        if hidden <= 0 || layers <= 0 || kv_heads <= 0 || head_dim <= 0 {
-            return 0;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (
+                dir_ptr, dir_len, stem_ptr, stem_len, hidden, layers, kv_heads, head_dim,
+            );
+            -1
         }
-        let d = std::slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize);
-        let s = std::slice::from_raw_parts(stem_ptr as *const u8, stem_len as usize);
-        let (Ok(dir), Ok(stem)) = (std::str::from_utf8(d), std::str::from_utf8(s)) else {
-            return 0;
-        };
-        imp::load(
-            dir,
-            stem,
-            hidden as usize,
-            layers as usize,
-            kv_heads as usize,
-            head_dim as usize,
-        )
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (
-            dir_ptr, dir_len, stem_ptr, stem_len, hidden, layers, kv_heads, head_dim,
-        );
-        -1
     }
 }
 
@@ -213,27 +215,29 @@ pub unsafe extern "C" fn nue_prefill_graph_kv_copy(
     head_dim: i64,
     dst_ptr: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
-    {
-        if kv_ptr == 0
-            || dst_ptr == 0
-            || s_real <= 0
-            || bucket < s_real
-            || kv_heads <= 0
-            || head_dim <= 0
+    unsafe {
+        #[cfg(target_os = "macos")]
         {
-            return -1;
+            if kv_ptr == 0
+                || dst_ptr == 0
+                || s_real <= 0
+                || bucket < s_real
+                || kv_heads <= 0
+                || head_dim <= 0
+            {
+                return -1;
+            }
+            let row = (kv_heads * head_dim) as usize;
+            let n = s_real as usize * row;
+            let src = (kv_ptr as *const f32).add(slot as usize * bucket as usize * row);
+            std::ptr::copy_nonoverlapping(src, dst_ptr as *mut f32, n);
+            0
         }
-        let row = (kv_heads * head_dim) as usize;
-        let n = s_real as usize * row;
-        let src = (kv_ptr as *const f32).add(slot as usize * bucket as usize * row);
-        std::ptr::copy_nonoverlapping(src, dst_ptr as *mut f32, n);
-        0
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (kv_ptr, slot, s_real, bucket, kv_heads, head_dim, dst_ptr);
-        -1
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (kv_ptr, slot, s_real, bucket, kv_heads, head_dim, dst_ptr);
+            -1
+        }
     }
 }
 

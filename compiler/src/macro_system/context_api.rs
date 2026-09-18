@@ -85,11 +85,14 @@ impl TyperRef {
     /// The lifetime is erased here for storage; the install/clear pairing in
     /// `expand_deferred_call` is what makes that sound.
     pub unsafe fn new(typer: &mut (dyn MacroTyper + '_)) -> Self {
-        let ptr: *mut (dyn MacroTyper + '_) = typer;
-        Self {
-            ptr: std::mem::transmute::<*mut (dyn MacroTyper + '_), *mut (dyn MacroTyper + 'static)>(
-                ptr,
-            ),
+        unsafe {
+            let ptr: *mut (dyn MacroTyper + '_) = typer;
+            Self {
+                ptr: std::mem::transmute::<
+                    *mut (dyn MacroTyper + '_),
+                    *mut (dyn MacroTyper + 'static),
+                >(ptr),
+            }
         }
     }
 
@@ -299,21 +302,23 @@ impl MacroContext {
         symbol_table: &SymbolTable,
         type_table: Rc<RefCell<TypeTable>>,
     ) -> Self {
-        Self {
-            symbol_table: Some(SymbolTableRef::new(symbol_table)),
-            type_table: Some(type_table),
-            call_position: SourceLocation::unknown(),
-            build_class: None,
-            current_module: None,
-            current_method: None,
-            current_class: None,
-            defines: BTreeMap::new(),
-            typer: None,
-            monomorphs: std::collections::BTreeSet::new(),
-            mono_bindings: BTreeMap::new(),
-            diagnostics: Vec::new(),
-            defined_types: Vec::new(),
-            build_fields: None,
+        unsafe {
+            Self {
+                symbol_table: Some(SymbolTableRef::new(symbol_table)),
+                type_table: Some(type_table),
+                call_position: SourceLocation::unknown(),
+                build_class: None,
+                current_module: None,
+                current_method: None,
+                current_class: None,
+                defines: BTreeMap::new(),
+                typer: None,
+                monomorphs: std::collections::BTreeSet::new(),
+                mono_bindings: BTreeMap::new(),
+                diagnostics: Vec::new(),
+                defined_types: Vec::new(),
+                build_fields: None,
+            }
         }
     }
 
@@ -328,7 +333,9 @@ impl MacroContext {
     /// The typer must outlive every dispatch until `clear_typer` runs. The
     /// caller pairs the two around a single `expand_macro_call`.
     pub unsafe fn set_typer(&mut self, typer: &mut dyn MacroTyper) {
-        self.typer = Some(TyperRef::new(typer));
+        unsafe {
+            self.typer = Some(TyperRef::new(typer));
+        }
     }
 
     /// Remove the installed typer and the call-scoped monomorph state.

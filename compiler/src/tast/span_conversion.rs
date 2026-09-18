@@ -6,8 +6,8 @@
 use crate::tast::symbols::SourceLocation;
 use parser::Span;
 use source_map::{
-    parser_integration::{ParserSpan, SpanConversion as SourceMapSpanConversion},
     FileId, SourceMap,
+    parser_integration::{ParserSpan, SpanConversion as SourceMapSpanConversion},
 };
 
 /// Bridge between source_map types and TAST types

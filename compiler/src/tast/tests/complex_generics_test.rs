@@ -1,7 +1,7 @@
 //! Test complex generic type constraints parsing and lowering
 
 use crate::tast::{
-    node::TypedFile, AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable,
+    AstLowering, ScopeId, ScopeTree, StringInterner, SymbolTable, TypeTable, node::TypedFile,
 };
 use parser::parse_haxe_file;
 use std::cell::RefCell;

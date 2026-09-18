@@ -38,6 +38,7 @@
 //! This tests the TypeFlowGuard's null safety analysis to validate our null dereference detection.
 
 use compiler::tast::{
+    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     control_flow_analysis::ControlFlowAnalyzer,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
@@ -45,7 +46,6 @@ use compiler::tast::{
     },
     symbols::{Mutability, Visibility},
     type_flow_guard::TypeFlowGuard,
-    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

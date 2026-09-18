@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use crate::tast::collections::{new_id_map, IdMap};
+use crate::tast::collections::{IdMap, new_id_map};
 use crate::tast::{BlockId, LifetimeId, SourceLocation, SymbolId};
 
 // Re-export all graph types for convenience

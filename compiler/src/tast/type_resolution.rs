@@ -14,8 +14,8 @@
 //! - Ensures no Dynamic types remain where concrete types are needed
 
 use crate::tast::{
-    core::*, node::*, scopes::NameResolver, InternedString, ScopeId, ScopeTree, SourceLocation,
-    StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
+    InternedString, ScopeId, ScopeTree, SourceLocation, StringInterner, SymbolId, SymbolTable,
+    TypeId, TypeTable, core::*, node::*, scopes::NameResolver,
 };
 use parser::{HaxeFile, Type as ParserType, TypeDeclaration};
 use std::cell::RefCell;

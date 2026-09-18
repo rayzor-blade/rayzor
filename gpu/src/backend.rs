@@ -111,20 +111,22 @@ impl NativeContext {
         data: *const u8,
         byte_size: usize,
     ) -> Option<NativeBuffer> {
-        match self {
-            #[cfg(feature = "metal-backend")]
-            NativeContext::Metal(ctx) => {
-                MetalBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Metal)
+        unsafe {
+            match self {
+                #[cfg(feature = "metal-backend")]
+                NativeContext::Metal(ctx) => {
+                    MetalBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Metal)
+                }
+                #[cfg(feature = "webgpu-backend")]
+                NativeContext::Wgpu(ctx) => {
+                    WgpuBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Wgpu)
+                }
+                #[cfg(feature = "cuda-backend")]
+                NativeContext::Cuda(ctx) => {
+                    CudaBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Cuda)
+                }
+                NativeContext::Unavailable => None,
             }
-            #[cfg(feature = "webgpu-backend")]
-            NativeContext::Wgpu(ctx) => {
-                WgpuBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Wgpu)
-            }
-            #[cfg(feature = "cuda-backend")]
-            NativeContext::Cuda(ctx) => {
-                CudaBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Cuda)
-            }
-            NativeContext::Unavailable => None,
         }
     }
 

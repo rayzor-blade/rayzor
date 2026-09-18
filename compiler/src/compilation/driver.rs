@@ -1087,8 +1087,10 @@ impl CompilationUnit {
 
             let offset = std::cmp::max(max_user_func_id, max_user_extern_id) + 1;
 
-            debug!("DEBUG: Renumbering stdlib functions with offset {} (max_user_func={}, max_user_extern={})",
-                  offset, max_user_func_id, max_user_extern_id);
+            debug!(
+                "DEBUG: Renumbering stdlib functions with offset {} (max_user_func={}, max_user_extern={})",
+                offset, max_user_func_id, max_user_extern_id
+            );
 
             // Build map of function names to ALL IDs in the user module (before merging).
             // Multiple import modules can have duplicate extern declarations of the same function.
@@ -1256,9 +1258,9 @@ impl CompilationUnit {
                                 } => {
                                     if let Some(&new_id) = id_replacements.get(ref_func_id) {
                                         debug!(
-                                        "DEBUG: Updated FunctionRef in {} from func_id {} -> {}",
-                                        caller_func.name, ref_func_id.0, new_id.0
-                                    );
+                                            "DEBUG: Updated FunctionRef in {} from func_id {} -> {}",
+                                            caller_func.name, ref_func_id.0, new_id.0
+                                        );
                                         *ref_func_id = new_id;
                                     }
                                 }
@@ -1268,9 +1270,9 @@ impl CompilationUnit {
                                 } => {
                                     if let Some(&new_id) = id_replacements.get(closure_func_id) {
                                         debug!(
-                                        "DEBUG: Updated MakeClosure in {} from func_id {} -> {}",
-                                        caller_func.name, closure_func_id.0, new_id.0
-                                    );
+                                            "DEBUG: Updated MakeClosure in {} from func_id {} -> {}",
+                                            caller_func.name, closure_func_id.0, new_id.0
+                                        );
                                         *closure_func_id = new_id;
                                     }
                                 }

@@ -16,7 +16,7 @@
 //! `hidden_size` like 4096).
 
 use crate::buffer;
-use crate::codegen::wgsl::{wgsl_prelude, WORKGROUP_SIZE};
+use crate::codegen::wgsl::{WORKGROUP_SIZE, wgsl_prelude};
 use crate::kernel_ir::KernelOp;
 
 /// RMS normalization shader. Each workgroup handles one row.

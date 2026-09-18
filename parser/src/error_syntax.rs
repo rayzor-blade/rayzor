@@ -30,11 +30,11 @@ impl ParsedError {
         let mut note = None;
 
         // Check if context starts with error code [EXXX]
-        if context.starts_with('[') {
-            if let Some(end) = context.find(']') {
-                code = Some(context[1..end].to_string());
-                message = context[end + 1..].trim().to_string();
-            }
+        if context.starts_with('[')
+            && let Some(end) = context.find(']')
+        {
+            code = Some(context[1..end].to_string());
+            message = context[end + 1..].trim().to_string();
         }
 
         // Split by pipe to find additional fields

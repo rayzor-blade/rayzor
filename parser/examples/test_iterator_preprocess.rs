@@ -1,4 +1,4 @@
-use parser::preprocessor::{preprocess, PreprocessorConfig};
+use parser::preprocessor::{PreprocessorConfig, preprocess};
 
 fn main() {
     let source =

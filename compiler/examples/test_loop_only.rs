@@ -30,6 +30,7 @@
 )]
 //! Test just the loop analysis
 use compiler::tast::{
+    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         BinaryOperator, ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue,
         TypedExpression, TypedExpressionKind, TypedFunction, TypedParameter, TypedStatement,
@@ -37,7 +38,6 @@ use compiler::tast::{
     },
     symbols::{Mutability, Visibility},
     type_flow_guard::TypeFlowGuard,
-    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -282,7 +282,9 @@ fn main() {
         println!("  → Variables maintain initialized state through loop");
         println!("  → No false positives from loop back-edges");
     } else {
-        println!("⚠️  Loop phi analysis: PARTIAL - DFG construction succeeds but loop analysis needs work");
+        println!(
+            "⚠️  Loop phi analysis: PARTIAL - DFG construction succeeds but loop analysis needs work"
+        );
         println!("  → Main achievement: No more DFG construction failures on loop structures");
     }
 }

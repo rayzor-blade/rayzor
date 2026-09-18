@@ -172,10 +172,12 @@ rayzor_plugin::declare_native_methods! {
 pub unsafe extern "C" fn plugin_describe(
     out_count: *mut usize,
 ) -> *const rayzor_plugin::NativeMethodDesc {
-    if !out_count.is_null() {
-        *out_count = TENSOR_METHODS.len();
+    unsafe {
+        if !out_count.is_null() {
+            *out_count = TENSOR_METHODS.len();
+        }
+        TENSOR_METHODS.as_ptr()
     }
-    TENSOR_METHODS.as_ptr()
 }
 
 #[repr(C)]
@@ -199,376 +201,378 @@ macro_rules! entry {
 /// table. The host reads `count` entries of `(name_ptr, name_len, fn_ptr)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_init(out_count: *mut usize) -> *const SymbolEntry {
-    let entries = Box::new([
-        entry!(
-            b"rayzor_plugin_tensor_data",
-            crate::tensor::rayzor_plugin_tensor_data
-        ),
-        entry!(
-            b"rayzor_plugin_tensor_dtype",
-            crate::tensor::rayzor_plugin_tensor_dtype
-        ),
-        entry!(
-            b"rayzor_plugin_tensor_ndim",
-            crate::tensor::rayzor_plugin_tensor_ndim
-        ),
-        entry!(
-            b"rayzor_plugin_tensor_shape",
-            crate::tensor::rayzor_plugin_tensor_shape
-        ),
-        entry!(
-            b"rayzor_plugin_tensor_is_contiguous",
-            crate::tensor::rayzor_plugin_tensor_is_contiguous
-        ),
-        entry!(
-            b"rayzor_plugin_tensor_alloc_zeros",
-            crate::tensor::rayzor_plugin_tensor_alloc_zeros
-        ),
-        entry!(b"rayzor_tensor_zeros", crate::tensor::rayzor_tensor_zeros),
-        entry!(b"rayzor_tensor_uninit", crate::tensor::rayzor_tensor_uninit),
-        entry!(b"rayzor_tensor_ones", crate::tensor::rayzor_tensor_ones),
-        entry!(b"rayzor_tensor_full", crate::tensor::rayzor_tensor_full),
-        // Haxe-ABI adapters (haxe_abi.rs): take Array/handle args directly —
-        // the direct binding targets for @:native in rayzor/ds/Tensor.hx.
-        entry!(
-            b"rayzor_tensor_zeros_arr",
-            crate::haxe_abi::rayzor_tensor_zeros_arr
-        ),
-        entry!(
-            b"rayzor_tensor_uninit_arr",
-            crate::haxe_abi::rayzor_tensor_uninit_arr
-        ),
-        entry!(
-            b"rayzor_tensor_ones_arr",
-            crate::haxe_abi::rayzor_tensor_ones_arr
-        ),
-        entry!(
-            b"rayzor_tensor_full_arr",
-            crate::haxe_abi::rayzor_tensor_full_arr
-        ),
-        entry!(
-            b"rayzor_tensor_rand_arr",
-            crate::haxe_abi::rayzor_tensor_rand_arr
-        ),
-        entry!(
-            b"rayzor_tensor_from_array_arr",
-            crate::haxe_abi::rayzor_tensor_from_array_arr
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_f32_arr",
-            crate::haxe_abi::rayzor_tensor_from_bytes_f32_arr
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_f16_arr",
-            crate::haxe_abi::rayzor_tensor_from_bytes_f16_arr
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_q8_0_arr",
-            crate::haxe_abi::rayzor_tensor_from_bytes_q8_0_arr
-        ),
-        entry!(
-            b"rayzor_tensor_reshape_arr",
-            crate::haxe_abi::rayzor_tensor_reshape_arr
-        ),
-        entry!(
-            b"rayzor_tensor_permute_arr",
-            crate::haxe_abi::rayzor_tensor_permute_arr
-        ),
-        entry!(
-            b"rayzor_tensor_get_arr",
-            crate::haxe_abi::rayzor_tensor_get_arr
-        ),
-        entry!(
-            b"rayzor_tensor_set_arr",
-            crate::haxe_abi::rayzor_tensor_set_arr
-        ),
-        entry!(
-            b"rayzor_tensor_gather_rows_arr",
-            crate::haxe_abi::rayzor_tensor_gather_rows_arr
-        ),
-        entry!(
-            b"rayzor_tensor_gather_rows_q6_k_arr",
-            crate::haxe_abi::rayzor_tensor_gather_rows_q6_k_arr
-        ),
-        entry!(
-            b"rayzor_tensor_topk_scan_arr",
-            crate::haxe_abi::rayzor_tensor_topk_scan_arr
-        ),
-        entry!(
-            b"rayzor_qtensor_from_f32_int8_t",
-            crate::haxe_abi::rayzor_qtensor_from_f32_int8_t
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_qkv_fused_arr",
-            crate::haxe_abi::rayzor_tensor_matmul_qkv_fused_arr
-        ),
-        entry!(
-            b"rayzor_tensor_from_array",
-            crate::tensor::rayzor_tensor_from_array
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_f16",
-            crate::tensor::rayzor_tensor_from_bytes_f16
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_f32",
-            crate::tensor::rayzor_tensor_from_bytes_f32
-        ),
-        entry!(
-            b"rayzor_tensor_from_bytes_q8_0",
-            crate::tensor::rayzor_tensor_from_bytes_q8_0
-        ),
-        entry!(b"rayzor_tensor_rand", crate::tensor::rayzor_tensor_rand),
-        entry!(b"rayzor_tensor_shape", crate::tensor::rayzor_tensor_shape),
-        entry!(b"rayzor_tensor_ndim", crate::tensor::rayzor_tensor_ndim),
-        entry!(b"rayzor_tensor_numel", crate::tensor::rayzor_tensor_numel),
-        entry!(b"rayzor_tensor_dtype", crate::tensor::rayzor_tensor_dtype),
-        entry!(b"rayzor_tensor_device", crate::tensor::rayzor_tensor_device),
-        entry!(
-            b"rayzor_tensor_numa_node",
-            crate::tensor::rayzor_tensor_numa_node
-        ),
-        entry!(
-            b"rayzor_tensor_shape_ptr",
-            crate::tensor::rayzor_tensor_shape_ptr
-        ),
-        entry!(
-            b"rayzor_tensor_shape_ndim",
-            crate::tensor::rayzor_tensor_shape_ndim
-        ),
-        entry!(b"rayzor_tensor_get", crate::tensor::rayzor_tensor_get),
-        entry!(
-            b"rayzor_tensor_get_flat",
-            crate::tensor::rayzor_tensor_get_flat
-        ),
-        entry!(
-            b"rayzor_tensor_set_flat",
-            crate::tensor::rayzor_tensor_set_flat
-        ),
-        entry!(
-            b"rayzor_tensor_topk_scan",
-            crate::tensor::rayzor_tensor_topk_scan
-        ),
-        entry!(
-            b"rayzor_tensor_flash_attn_decode",
-            crate::tensor::rayzor_tensor_flash_attn_decode
-        ),
-        entry!(b"rayzor_tensor_set", crate::tensor::rayzor_tensor_set),
-        entry!(
-            b"rayzor_tensor_append_along_0_f32",
-            crate::tensor::rayzor_tensor_append_along_0_f32
-        ),
-        entry!(
-            b"rayzor_tensor_broadcast_repeat_0_f32",
-            crate::tensor::rayzor_tensor_broadcast_repeat_0_f32
-        ),
-        entry!(
-            b"rayzor_tensor_reshape",
-            crate::tensor::rayzor_tensor_reshape
-        ),
-        entry!(
-            b"rayzor_tensor_transpose",
-            crate::tensor::rayzor_tensor_transpose
-        ),
-        entry!(
-            b"rayzor_tensor_permute",
-            crate::tensor::rayzor_tensor_permute
-        ),
-        entry!(b"rayzor_tensor_slice", crate::tensor::rayzor_tensor_slice),
-        entry!(b"rayzor_tensor_add", crate::tensor::rayzor_tensor_add),
-        entry!(
-            b"rayzor_tensor_add_into",
-            crate::tensor::rayzor_tensor_add_into
-        ),
-        entry!(b"rayzor_tensor_sub", crate::tensor::rayzor_tensor_sub),
-        entry!(b"rayzor_tensor_mul", crate::tensor::rayzor_tensor_mul),
-        entry!(
-            b"rayzor_tensor_silu_mul",
-            crate::tensor::rayzor_tensor_silu_mul
-        ),
-        entry!(b"rayzor_tensor_div", crate::tensor::rayzor_tensor_div),
-        entry!(b"rayzor_tensor_sqrt", crate::tensor::rayzor_tensor_sqrt),
-        entry!(b"rayzor_tensor_exp", crate::tensor::rayzor_tensor_exp),
-        entry!(b"rayzor_tensor_log", crate::tensor::rayzor_tensor_log),
-        entry!(b"rayzor_tensor_relu", crate::tensor::rayzor_tensor_relu),
-        entry!(b"rayzor_tensor_gelu", crate::tensor::rayzor_tensor_gelu),
-        entry!(b"rayzor_tensor_silu", crate::tensor::rayzor_tensor_silu),
-        entry!(
-            b"rayzor_tensor_softmax",
-            crate::tensor::rayzor_tensor_softmax
-        ),
-        entry!(
-            b"rayzor_tensor_layer_norm",
-            crate::tensor::rayzor_tensor_layer_norm
-        ),
-        entry!(
-            b"rayzor_tensor_rms_norm",
-            crate::tensor::rayzor_tensor_rms_norm
-        ),
-        entry!(
-            b"rayzor_tensor_rms_norm_weight",
-            crate::tensor::rayzor_tensor_rms_norm_weight
-        ),
-        entry!(b"rayzor_tensor_sum", crate::tensor::rayzor_tensor_sum),
-        entry!(b"rayzor_tensor_mean", crate::tensor::rayzor_tensor_mean),
-        entry!(b"rayzor_tensor_max", crate::tensor::rayzor_tensor_max),
-        entry!(b"rayzor_tensor_min", crate::tensor::rayzor_tensor_min),
-        entry!(b"rayzor_tensor_dot", crate::tensor::rayzor_tensor_dot),
-        entry!(b"rayzor_tensor_matmul", crate::tensor::rayzor_tensor_matmul),
-        entry!(
-            b"rayzor_tensor_matmul_t",
-            crate::tensor::rayzor_tensor_matmul_t
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_t_threaded",
-            crate::tensor::rayzor_tensor_matmul_t_threaded
-        ),
-        entry!(b"rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope),
-        entry!(
-            b"rayzor_tensor_rope_neox",
-            crate::tensor::rayzor_tensor_rope_neox
-        ),
-        entry!(
-            b"rayzor_tensor_rope_cos_table",
-            crate::tensor::rayzor_tensor_rope_cos_table
-        ),
-        entry!(
-            b"rayzor_tensor_rope_sin_table",
-            crate::tensor::rayzor_tensor_rope_sin_table
-        ),
-        entry!(
-            b"rayzor_tensor_rope_cos_table_f16",
-            crate::tensor::rayzor_tensor_rope_cos_table_f16
-        ),
-        entry!(
-            b"rayzor_tensor_rope_sin_table_f16",
-            crate::tensor::rayzor_tensor_rope_sin_table_f16
-        ),
-        entry!(
-            b"rayzor_tensor_gather_rows",
-            crate::tensor::rayzor_tensor_gather_rows
-        ),
-        entry!(b"rayzor_tensor_bmm", crate::tensor::rayzor_tensor_bmm),
-        entry!(
-            b"rayzor_tensor_bmm_threaded",
-            crate::tensor::rayzor_tensor_bmm_threaded
-        ),
-        entry!(
-            b"rayzor_tensor_expand_kv_heads_axis1_f32",
-            crate::tensor::rayzor_tensor_expand_kv_heads_axis1_f32
-        ),
-        entry!(
-            b"rayzor_tensor_causal_mask_",
-            crate::tensor::rayzor_tensor_causal_mask_
-        ),
-        entry!(b"rayzor_tensor_scale", crate::tensor::rayzor_tensor_scale),
-        entry!(
-            b"rayzor_tensor_transpose_last2",
-            crate::tensor::rayzor_tensor_transpose_last2
-        ),
-        entry!(b"rayzor_tensor_data", crate::tensor::rayzor_tensor_data),
-        entry!(b"rayzor_tensor_free", crate::tensor::rayzor_tensor_free),
-        entry!(b"rayzor_tensor_clone", crate::tensor::rayzor_tensor_clone),
-        entry!(
-            b"rayzor_tensor_arc_clone",
-            crate::tensor::rayzor_tensor_arc_clone
-        ),
-        entry!(
-            b"rayzor_tensor_deep_clone",
-            crate::tensor::rayzor_tensor_deep_clone
-        ),
-        entry!(
-            b"rayzor_qtensor_from_f32_int8",
-            crate::quant::rayzor_qtensor_from_f32_int8
-        ),
-        entry!(
-            b"rayzor_qtensor_wrap_q4_k_m",
-            crate::quant::rayzor_qtensor_wrap_q4_k_m
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q4_k_m",
-            crate::quant::rayzor_qtensor_from_bytes_q4_k_m
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q6_k",
-            crate::quant::rayzor_qtensor_from_bytes_q6_k
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q5_0_int8",
-            crate::quant::rayzor_qtensor_from_bytes_q5_0_int8
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q5_1_int8",
-            crate::quant::rayzor_qtensor_from_bytes_q5_1_int8
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q5_k_q4km",
-            crate::quant::rayzor_qtensor_from_bytes_q5_k_q4km
-        ),
-        entry!(
-            b"rayzor_qtensor_from_bytes_q8_0",
-            crate::quant::rayzor_qtensor_from_bytes_q8_0
-        ),
-        entry!(
-            b"rayzor_qtensor_requant_q6k_to_q4km",
-            crate::quant::rayzor_qtensor_requant_q6k_to_q4km
-        ),
-        entry!(b"rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows),
-        entry!(b"rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols),
-        entry!(
-            b"rayzor_qtensor_data_ptr",
-            crate::quant::rayzor_qtensor_data_ptr
-        ),
-        entry!(
-            b"rayzor_qtensor_scales_ptr",
-            crate::quant::rayzor_qtensor_scales_ptr
-        ),
-        entry!(b"rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel),
-        entry!(
-            b"rayzor_qtensor_scheme",
-            crate::quant::rayzor_qtensor_scheme
-        ),
-        entry!(
-            b"rayzor_qtensor_dequant",
-            crate::quant::rayzor_qtensor_dequant
-        ),
-        entry!(
-            b"rayzor_qtensor_matmul_f32",
-            crate::quant::rayzor_qtensor_matmul_f32
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_qt_t_f32",
-            crate::quant::rayzor_tensor_matmul_qt_t_f32
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_qt_t_f32_chunk",
-            crate::quant::rayzor_tensor_matmul_qt_t_f32_chunk
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_qt_t_f32_threaded",
-            crate::quant::rayzor_tensor_matmul_qt_t_f32_threaded
-        ),
-        entry!(
-            b"rayzor_tensor_matmul_qkv_qt_t_f32_threaded",
-            crate::quant::rayzor_tensor_matmul_qkv_qt_t_f32_threaded
-        ),
-        entry!(
-            b"rayzor_tensor_gather_rows_q6_k",
-            crate::quant::rayzor_tensor_gather_rows_q6_k
-        ),
-        entry!(b"rayzor_qtensor_free", crate::quant::rayzor_qtensor_free),
-        entry!(b"rayzor_qtensor_clone", crate::quant::rayzor_qtensor_clone),
-        entry!(
-            b"rayzor_qtensor_arc_clone",
-            crate::quant::rayzor_qtensor_arc_clone
-        ),
-        entry!(
-            b"rayzor_qtensor_deep_clone",
-            crate::quant::rayzor_qtensor_deep_clone
-        ),
-    ]);
-    if !out_count.is_null() {
-        *out_count = entries.len();
+    unsafe {
+        let entries = Box::new([
+            entry!(
+                b"rayzor_plugin_tensor_data",
+                crate::tensor::rayzor_plugin_tensor_data
+            ),
+            entry!(
+                b"rayzor_plugin_tensor_dtype",
+                crate::tensor::rayzor_plugin_tensor_dtype
+            ),
+            entry!(
+                b"rayzor_plugin_tensor_ndim",
+                crate::tensor::rayzor_plugin_tensor_ndim
+            ),
+            entry!(
+                b"rayzor_plugin_tensor_shape",
+                crate::tensor::rayzor_plugin_tensor_shape
+            ),
+            entry!(
+                b"rayzor_plugin_tensor_is_contiguous",
+                crate::tensor::rayzor_plugin_tensor_is_contiguous
+            ),
+            entry!(
+                b"rayzor_plugin_tensor_alloc_zeros",
+                crate::tensor::rayzor_plugin_tensor_alloc_zeros
+            ),
+            entry!(b"rayzor_tensor_zeros", crate::tensor::rayzor_tensor_zeros),
+            entry!(b"rayzor_tensor_uninit", crate::tensor::rayzor_tensor_uninit),
+            entry!(b"rayzor_tensor_ones", crate::tensor::rayzor_tensor_ones),
+            entry!(b"rayzor_tensor_full", crate::tensor::rayzor_tensor_full),
+            // Haxe-ABI adapters (haxe_abi.rs): take Array/handle args directly —
+            // the direct binding targets for @:native in rayzor/ds/Tensor.hx.
+            entry!(
+                b"rayzor_tensor_zeros_arr",
+                crate::haxe_abi::rayzor_tensor_zeros_arr
+            ),
+            entry!(
+                b"rayzor_tensor_uninit_arr",
+                crate::haxe_abi::rayzor_tensor_uninit_arr
+            ),
+            entry!(
+                b"rayzor_tensor_ones_arr",
+                crate::haxe_abi::rayzor_tensor_ones_arr
+            ),
+            entry!(
+                b"rayzor_tensor_full_arr",
+                crate::haxe_abi::rayzor_tensor_full_arr
+            ),
+            entry!(
+                b"rayzor_tensor_rand_arr",
+                crate::haxe_abi::rayzor_tensor_rand_arr
+            ),
+            entry!(
+                b"rayzor_tensor_from_array_arr",
+                crate::haxe_abi::rayzor_tensor_from_array_arr
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_f32_arr",
+                crate::haxe_abi::rayzor_tensor_from_bytes_f32_arr
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_f16_arr",
+                crate::haxe_abi::rayzor_tensor_from_bytes_f16_arr
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_q8_0_arr",
+                crate::haxe_abi::rayzor_tensor_from_bytes_q8_0_arr
+            ),
+            entry!(
+                b"rayzor_tensor_reshape_arr",
+                crate::haxe_abi::rayzor_tensor_reshape_arr
+            ),
+            entry!(
+                b"rayzor_tensor_permute_arr",
+                crate::haxe_abi::rayzor_tensor_permute_arr
+            ),
+            entry!(
+                b"rayzor_tensor_get_arr",
+                crate::haxe_abi::rayzor_tensor_get_arr
+            ),
+            entry!(
+                b"rayzor_tensor_set_arr",
+                crate::haxe_abi::rayzor_tensor_set_arr
+            ),
+            entry!(
+                b"rayzor_tensor_gather_rows_arr",
+                crate::haxe_abi::rayzor_tensor_gather_rows_arr
+            ),
+            entry!(
+                b"rayzor_tensor_gather_rows_q6_k_arr",
+                crate::haxe_abi::rayzor_tensor_gather_rows_q6_k_arr
+            ),
+            entry!(
+                b"rayzor_tensor_topk_scan_arr",
+                crate::haxe_abi::rayzor_tensor_topk_scan_arr
+            ),
+            entry!(
+                b"rayzor_qtensor_from_f32_int8_t",
+                crate::haxe_abi::rayzor_qtensor_from_f32_int8_t
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_qkv_fused_arr",
+                crate::haxe_abi::rayzor_tensor_matmul_qkv_fused_arr
+            ),
+            entry!(
+                b"rayzor_tensor_from_array",
+                crate::tensor::rayzor_tensor_from_array
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_f16",
+                crate::tensor::rayzor_tensor_from_bytes_f16
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_f32",
+                crate::tensor::rayzor_tensor_from_bytes_f32
+            ),
+            entry!(
+                b"rayzor_tensor_from_bytes_q8_0",
+                crate::tensor::rayzor_tensor_from_bytes_q8_0
+            ),
+            entry!(b"rayzor_tensor_rand", crate::tensor::rayzor_tensor_rand),
+            entry!(b"rayzor_tensor_shape", crate::tensor::rayzor_tensor_shape),
+            entry!(b"rayzor_tensor_ndim", crate::tensor::rayzor_tensor_ndim),
+            entry!(b"rayzor_tensor_numel", crate::tensor::rayzor_tensor_numel),
+            entry!(b"rayzor_tensor_dtype", crate::tensor::rayzor_tensor_dtype),
+            entry!(b"rayzor_tensor_device", crate::tensor::rayzor_tensor_device),
+            entry!(
+                b"rayzor_tensor_numa_node",
+                crate::tensor::rayzor_tensor_numa_node
+            ),
+            entry!(
+                b"rayzor_tensor_shape_ptr",
+                crate::tensor::rayzor_tensor_shape_ptr
+            ),
+            entry!(
+                b"rayzor_tensor_shape_ndim",
+                crate::tensor::rayzor_tensor_shape_ndim
+            ),
+            entry!(b"rayzor_tensor_get", crate::tensor::rayzor_tensor_get),
+            entry!(
+                b"rayzor_tensor_get_flat",
+                crate::tensor::rayzor_tensor_get_flat
+            ),
+            entry!(
+                b"rayzor_tensor_set_flat",
+                crate::tensor::rayzor_tensor_set_flat
+            ),
+            entry!(
+                b"rayzor_tensor_topk_scan",
+                crate::tensor::rayzor_tensor_topk_scan
+            ),
+            entry!(
+                b"rayzor_tensor_flash_attn_decode",
+                crate::tensor::rayzor_tensor_flash_attn_decode
+            ),
+            entry!(b"rayzor_tensor_set", crate::tensor::rayzor_tensor_set),
+            entry!(
+                b"rayzor_tensor_append_along_0_f32",
+                crate::tensor::rayzor_tensor_append_along_0_f32
+            ),
+            entry!(
+                b"rayzor_tensor_broadcast_repeat_0_f32",
+                crate::tensor::rayzor_tensor_broadcast_repeat_0_f32
+            ),
+            entry!(
+                b"rayzor_tensor_reshape",
+                crate::tensor::rayzor_tensor_reshape
+            ),
+            entry!(
+                b"rayzor_tensor_transpose",
+                crate::tensor::rayzor_tensor_transpose
+            ),
+            entry!(
+                b"rayzor_tensor_permute",
+                crate::tensor::rayzor_tensor_permute
+            ),
+            entry!(b"rayzor_tensor_slice", crate::tensor::rayzor_tensor_slice),
+            entry!(b"rayzor_tensor_add", crate::tensor::rayzor_tensor_add),
+            entry!(
+                b"rayzor_tensor_add_into",
+                crate::tensor::rayzor_tensor_add_into
+            ),
+            entry!(b"rayzor_tensor_sub", crate::tensor::rayzor_tensor_sub),
+            entry!(b"rayzor_tensor_mul", crate::tensor::rayzor_tensor_mul),
+            entry!(
+                b"rayzor_tensor_silu_mul",
+                crate::tensor::rayzor_tensor_silu_mul
+            ),
+            entry!(b"rayzor_tensor_div", crate::tensor::rayzor_tensor_div),
+            entry!(b"rayzor_tensor_sqrt", crate::tensor::rayzor_tensor_sqrt),
+            entry!(b"rayzor_tensor_exp", crate::tensor::rayzor_tensor_exp),
+            entry!(b"rayzor_tensor_log", crate::tensor::rayzor_tensor_log),
+            entry!(b"rayzor_tensor_relu", crate::tensor::rayzor_tensor_relu),
+            entry!(b"rayzor_tensor_gelu", crate::tensor::rayzor_tensor_gelu),
+            entry!(b"rayzor_tensor_silu", crate::tensor::rayzor_tensor_silu),
+            entry!(
+                b"rayzor_tensor_softmax",
+                crate::tensor::rayzor_tensor_softmax
+            ),
+            entry!(
+                b"rayzor_tensor_layer_norm",
+                crate::tensor::rayzor_tensor_layer_norm
+            ),
+            entry!(
+                b"rayzor_tensor_rms_norm",
+                crate::tensor::rayzor_tensor_rms_norm
+            ),
+            entry!(
+                b"rayzor_tensor_rms_norm_weight",
+                crate::tensor::rayzor_tensor_rms_norm_weight
+            ),
+            entry!(b"rayzor_tensor_sum", crate::tensor::rayzor_tensor_sum),
+            entry!(b"rayzor_tensor_mean", crate::tensor::rayzor_tensor_mean),
+            entry!(b"rayzor_tensor_max", crate::tensor::rayzor_tensor_max),
+            entry!(b"rayzor_tensor_min", crate::tensor::rayzor_tensor_min),
+            entry!(b"rayzor_tensor_dot", crate::tensor::rayzor_tensor_dot),
+            entry!(b"rayzor_tensor_matmul", crate::tensor::rayzor_tensor_matmul),
+            entry!(
+                b"rayzor_tensor_matmul_t",
+                crate::tensor::rayzor_tensor_matmul_t
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_t_threaded",
+                crate::tensor::rayzor_tensor_matmul_t_threaded
+            ),
+            entry!(b"rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope),
+            entry!(
+                b"rayzor_tensor_rope_neox",
+                crate::tensor::rayzor_tensor_rope_neox
+            ),
+            entry!(
+                b"rayzor_tensor_rope_cos_table",
+                crate::tensor::rayzor_tensor_rope_cos_table
+            ),
+            entry!(
+                b"rayzor_tensor_rope_sin_table",
+                crate::tensor::rayzor_tensor_rope_sin_table
+            ),
+            entry!(
+                b"rayzor_tensor_rope_cos_table_f16",
+                crate::tensor::rayzor_tensor_rope_cos_table_f16
+            ),
+            entry!(
+                b"rayzor_tensor_rope_sin_table_f16",
+                crate::tensor::rayzor_tensor_rope_sin_table_f16
+            ),
+            entry!(
+                b"rayzor_tensor_gather_rows",
+                crate::tensor::rayzor_tensor_gather_rows
+            ),
+            entry!(b"rayzor_tensor_bmm", crate::tensor::rayzor_tensor_bmm),
+            entry!(
+                b"rayzor_tensor_bmm_threaded",
+                crate::tensor::rayzor_tensor_bmm_threaded
+            ),
+            entry!(
+                b"rayzor_tensor_expand_kv_heads_axis1_f32",
+                crate::tensor::rayzor_tensor_expand_kv_heads_axis1_f32
+            ),
+            entry!(
+                b"rayzor_tensor_causal_mask_",
+                crate::tensor::rayzor_tensor_causal_mask_
+            ),
+            entry!(b"rayzor_tensor_scale", crate::tensor::rayzor_tensor_scale),
+            entry!(
+                b"rayzor_tensor_transpose_last2",
+                crate::tensor::rayzor_tensor_transpose_last2
+            ),
+            entry!(b"rayzor_tensor_data", crate::tensor::rayzor_tensor_data),
+            entry!(b"rayzor_tensor_free", crate::tensor::rayzor_tensor_free),
+            entry!(b"rayzor_tensor_clone", crate::tensor::rayzor_tensor_clone),
+            entry!(
+                b"rayzor_tensor_arc_clone",
+                crate::tensor::rayzor_tensor_arc_clone
+            ),
+            entry!(
+                b"rayzor_tensor_deep_clone",
+                crate::tensor::rayzor_tensor_deep_clone
+            ),
+            entry!(
+                b"rayzor_qtensor_from_f32_int8",
+                crate::quant::rayzor_qtensor_from_f32_int8
+            ),
+            entry!(
+                b"rayzor_qtensor_wrap_q4_k_m",
+                crate::quant::rayzor_qtensor_wrap_q4_k_m
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q4_k_m",
+                crate::quant::rayzor_qtensor_from_bytes_q4_k_m
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q6_k",
+                crate::quant::rayzor_qtensor_from_bytes_q6_k
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q5_0_int8",
+                crate::quant::rayzor_qtensor_from_bytes_q5_0_int8
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q5_1_int8",
+                crate::quant::rayzor_qtensor_from_bytes_q5_1_int8
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q5_k_q4km",
+                crate::quant::rayzor_qtensor_from_bytes_q5_k_q4km
+            ),
+            entry!(
+                b"rayzor_qtensor_from_bytes_q8_0",
+                crate::quant::rayzor_qtensor_from_bytes_q8_0
+            ),
+            entry!(
+                b"rayzor_qtensor_requant_q6k_to_q4km",
+                crate::quant::rayzor_qtensor_requant_q6k_to_q4km
+            ),
+            entry!(b"rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows),
+            entry!(b"rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols),
+            entry!(
+                b"rayzor_qtensor_data_ptr",
+                crate::quant::rayzor_qtensor_data_ptr
+            ),
+            entry!(
+                b"rayzor_qtensor_scales_ptr",
+                crate::quant::rayzor_qtensor_scales_ptr
+            ),
+            entry!(b"rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel),
+            entry!(
+                b"rayzor_qtensor_scheme",
+                crate::quant::rayzor_qtensor_scheme
+            ),
+            entry!(
+                b"rayzor_qtensor_dequant",
+                crate::quant::rayzor_qtensor_dequant
+            ),
+            entry!(
+                b"rayzor_qtensor_matmul_f32",
+                crate::quant::rayzor_qtensor_matmul_f32
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_qt_t_f32",
+                crate::quant::rayzor_tensor_matmul_qt_t_f32
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_qt_t_f32_chunk",
+                crate::quant::rayzor_tensor_matmul_qt_t_f32_chunk
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_qt_t_f32_threaded",
+                crate::quant::rayzor_tensor_matmul_qt_t_f32_threaded
+            ),
+            entry!(
+                b"rayzor_tensor_matmul_qkv_qt_t_f32_threaded",
+                crate::quant::rayzor_tensor_matmul_qkv_qt_t_f32_threaded
+            ),
+            entry!(
+                b"rayzor_tensor_gather_rows_q6_k",
+                crate::quant::rayzor_tensor_gather_rows_q6_k
+            ),
+            entry!(b"rayzor_qtensor_free", crate::quant::rayzor_qtensor_free),
+            entry!(b"rayzor_qtensor_clone", crate::quant::rayzor_qtensor_clone),
+            entry!(
+                b"rayzor_qtensor_arc_clone",
+                crate::quant::rayzor_qtensor_arc_clone
+            ),
+            entry!(
+                b"rayzor_qtensor_deep_clone",
+                crate::quant::rayzor_qtensor_deep_clone
+            ),
+        ]);
+        if !out_count.is_null() {
+            *out_count = entries.len();
+        }
+        Box::leak(entries).as_ptr()
     }
-    Box::leak(entries).as_ptr()
 }

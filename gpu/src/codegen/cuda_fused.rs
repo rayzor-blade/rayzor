@@ -87,11 +87,19 @@ fn emit_op(
                 KernelOp::Sqrt => format!("({cuda_type})sqrt((double){input_expr})"),
                 KernelOp::Exp => format!("({cuda_type})exp((double){input_expr})"),
                 KernelOp::Log => format!("({cuda_type})log((double){input_expr})"),
-                KernelOp::Relu => format!("{input_expr} > ({cuda_type})0 ? {input_expr} : ({cuda_type})0"),
-                KernelOp::Sigmoid => format!("({cuda_type})(1.0 / (1.0 + exp(-(double){input_expr})))"),
+                KernelOp::Relu => {
+                    format!("{input_expr} > ({cuda_type})0 ? {input_expr} : ({cuda_type})0")
+                }
+                KernelOp::Sigmoid => {
+                    format!("({cuda_type})(1.0 / (1.0 + exp(-(double){input_expr})))")
+                }
                 KernelOp::Tanh => format!("({cuda_type})tanh((double){input_expr})"),
-                KernelOp::Gelu => format!("({cuda_type})((double){input_expr} * 0.5 * (1.0 + tanh(0.7978845608 * ((double){input_expr} + 0.044715 * (double){input_expr} * (double){input_expr} * (double){input_expr}))))"),
-                KernelOp::Silu => format!("({cuda_type})((double){input_expr} / (1.0 + exp(-(double){input_expr})))"),
+                KernelOp::Gelu => format!(
+                    "({cuda_type})((double){input_expr} * 0.5 * (1.0 + tanh(0.7978845608 * ((double){input_expr} + 0.044715 * (double){input_expr} * (double){input_expr} * (double){input_expr}))))"
+                ),
+                KernelOp::Silu => format!(
+                    "({cuda_type})((double){input_expr} / (1.0 + exp(-(double){input_expr})))"
+                ),
                 _ => unreachable!("not a unary op: {:?}", kernel_op),
             };
 

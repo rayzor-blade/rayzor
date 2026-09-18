@@ -52,7 +52,9 @@ impl<'a> AstLowering<'a> {
                     eprintln!("  - Field '{}' is not Clone", field_name);
                 }
                 eprintln!("  All fields must derive Clone or be primitive Copy types");
-                eprintln!("  Consider adding @:derive(Clone) to field types or removing Clone from this class");
+                eprintln!(
+                    "  Consider adding @:derive(Clone) to field types or removing Clone from this class"
+                );
 
                 // Remove Clone trait to prevent incorrect codegen
                 derived_traits.retain(|t| *t != DerivedTrait::Clone);

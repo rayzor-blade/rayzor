@@ -8,10 +8,10 @@
 //! - Integration with Symbol and Scope systems
 
 use super::{
-    collections::{new_id_map, new_id_set, IdMap, IdSet},
-    core::{Type, TypeKind, TypeTable, TypeUsageStats},
     InternedString, Scope, ScopeId, ScopeKind, ScopeTree, SourceLocation, StringInterner, Symbol,
     SymbolId, SymbolKind, SymbolTable, TypeId,
+    collections::{IdMap, IdSet, new_id_map, new_id_set},
+    core::{Type, TypeKind, TypeTable, TypeUsageStats},
 };
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -1164,7 +1164,7 @@ impl<'a> TypeChecker<'a> {
             (_, TypeKind::Optional { inner_type }) => {
                 // T is assignable to T?
                 let inner_type_id = *inner_type; // Copy the TypeId
-                                                 // Now we can make the mutable call without holding references
+                // Now we can make the mutable call without holding references
                 let inner_compat = self.check_compatibility(source_id, inner_type_id);
                 match inner_compat {
                     TypeCompatibility::Identical | TypeCompatibility::Assignable => {

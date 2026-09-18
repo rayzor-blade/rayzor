@@ -25,9 +25,9 @@
 
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 /// Maximum workers we statically pre-allocate slot arrays for.
@@ -522,8 +522,10 @@ unsafe fn trampoline_for<F: Fn(usize, usize) + Send + Sync>(
     lo: usize,
     hi: usize,
 ) {
-    let f = &*(closure_ptr as *const F);
-    f(lo, hi);
+    unsafe {
+        let f = &*(closure_ptr as *const F);
+        f(lo, hi);
+    }
 }
 
 type TrampolineFn = unsafe fn(*const (), usize, usize);
@@ -706,11 +708,7 @@ fn bias_to_performance_core() {
 /// compute width is `workers + 1` — RZT_WORKERS=7 → 8 compute threads.
 pub fn auto_kernel_threads() -> usize {
     let w = global().workers();
-    if caller_band_enabled() {
-        w + 1
-    } else {
-        w
-    }
+    if caller_band_enabled() { w + 1 } else { w }
 }
 
 /// Whether `parallel_rows` runs band 0 on the calling thread.

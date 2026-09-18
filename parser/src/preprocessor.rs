@@ -236,40 +236,40 @@ fn process_inline_conditionals(line: &str, config: &PreprocessorConfig) -> Strin
             if let Some(end_idx) = end_pos {
                 let condition = line[cond_start..cond_end].trim();
 
-                if let Some(else_idx) = else_pos {
-                    if else_idx < end_idx {
-                        // We have both if and else branches
-                        let if_branch = &line[cond_end..else_idx].trim();
-                        let else_start = else_idx + 5; // Skip "#else"
-                        let else_branch = &line[else_start..end_idx].trim();
+                if let Some(else_idx) = else_pos
+                    && else_idx < end_idx
+                {
+                    // We have both if and else branches
+                    let if_branch = &line[cond_end..else_idx].trim();
+                    let else_start = else_idx + 5; // Skip "#else"
+                    let else_branch = &line[else_start..end_idx].trim();
 
-                        // Check if branches have trailing semicolons before trimming
-                        let if_has_semicolon = if_branch.trim_end().ends_with(';');
-                        let else_has_semicolon = else_branch.trim_end().ends_with(';');
+                    // Check if branches have trailing semicolons before trimming
+                    let if_has_semicolon = if_branch.trim_end().ends_with(';');
+                    let else_has_semicolon = else_branch.trim_end().ends_with(';');
 
-                        // Remove leading/trailing semicolons and whitespace
-                        let if_content =
-                            if_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
-                        let else_content =
-                            else_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
+                    // Remove leading/trailing semicolons and whitespace
+                    let if_content =
+                        if_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
+                    let else_content =
+                        else_branch.trim_matches(|c: char| c == ';' || c.is_whitespace());
 
-                        // Evaluate condition and add semicolon back if needed
-                        if evaluate_condition(condition, config) {
-                            result.push_str(if_content);
-                            if if_has_semicolon {
-                                result.push(';');
-                            }
-                        } else {
-                            result.push_str(else_content);
-                            if else_has_semicolon {
-                                result.push(';');
-                            }
+                    // Evaluate condition and add semicolon back if needed
+                    if evaluate_condition(condition, config) {
+                        result.push_str(if_content);
+                        if if_has_semicolon {
+                            result.push(';');
                         }
-
-                        // Move past #end
-                        pos = end_idx + 4; // Skip "#end"
-                        continue;
+                    } else {
+                        result.push_str(else_content);
+                        if else_has_semicolon {
+                            result.push(';');
+                        }
                     }
+
+                    // Move past #end
+                    pos = end_idx + 4; // Skip "#end"
+                    continue;
                 }
 
                 // No else branch, just if

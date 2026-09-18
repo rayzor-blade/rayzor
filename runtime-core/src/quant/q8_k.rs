@@ -6,7 +6,7 @@
 
 use crate::floats::roundf;
 
-use super::types::{Q8Block, Q8KBlock, Q4_K_M_BLOCK_SIZE};
+use super::types::{Q4_K_M_BLOCK_SIZE, Q8Block, Q8KBlock};
 
 /// Quantise a 256-element span of `x` to INT8 with one F32 scale + the 8
 /// per-sub-block sums.
@@ -15,96 +15,98 @@ use super::types::{Q8Block, Q8KBlock, Q4_K_M_BLOCK_SIZE};
 /// `x` must reference 256 live f32 elements.
 #[inline]
 pub unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
-    // Pass 1: find the absolute max over 256 elements (NEON 4×4-lane
-    // unrolled). Used to pick a symmetric scale so quants land in
-    // [-127, 127].
-    #[allow(unused_assignments)] // overwritten in aarch64 path, read in fallback
-    let mut max_abs = 0.0f32;
-    #[cfg(target_arch = "aarch64")]
-    {
-        use core::arch::aarch64::*;
-        let pa = x;
-        let mut m0 = vdupq_n_f32(0.0);
-        let mut m1 = vdupq_n_f32(0.0);
-        let mut m2 = vdupq_n_f32(0.0);
-        let mut m3 = vdupq_n_f32(0.0);
-        let abs_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFF_FFFF));
-        let mut i = 0;
-        while i < 256 {
-            let v0 = vandq_u32(
-                vreinterpretq_u32_f32(vld1q_f32(pa.add(i))),
-                vreinterpretq_u32_f32(abs_mask),
-            );
-            let v1 = vandq_u32(
-                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))),
-                vreinterpretq_u32_f32(abs_mask),
-            );
-            let v2 = vandq_u32(
-                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))),
-                vreinterpretq_u32_f32(abs_mask),
-            );
-            let v3 = vandq_u32(
-                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))),
-                vreinterpretq_u32_f32(abs_mask),
-            );
-            m0 = vmaxq_f32(m0, vreinterpretq_f32_u32(v0));
-            m1 = vmaxq_f32(m1, vreinterpretq_f32_u32(v1));
-            m2 = vmaxq_f32(m2, vreinterpretq_f32_u32(v2));
-            m3 = vmaxq_f32(m3, vreinterpretq_f32_u32(v3));
-            i += 16;
+    unsafe {
+        // Pass 1: find the absolute max over 256 elements (NEON 4×4-lane
+        // unrolled). Used to pick a symmetric scale so quants land in
+        // [-127, 127].
+        #[allow(unused_assignments)] // overwritten in aarch64 path, read in fallback
+        let mut max_abs = 0.0f32;
+        #[cfg(target_arch = "aarch64")]
+        {
+            use core::arch::aarch64::*;
+            let pa = x;
+            let mut m0 = vdupq_n_f32(0.0);
+            let mut m1 = vdupq_n_f32(0.0);
+            let mut m2 = vdupq_n_f32(0.0);
+            let mut m3 = vdupq_n_f32(0.0);
+            let abs_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFF_FFFF));
+            let mut i = 0;
+            while i < 256 {
+                let v0 = vandq_u32(
+                    vreinterpretq_u32_f32(vld1q_f32(pa.add(i))),
+                    vreinterpretq_u32_f32(abs_mask),
+                );
+                let v1 = vandq_u32(
+                    vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))),
+                    vreinterpretq_u32_f32(abs_mask),
+                );
+                let v2 = vandq_u32(
+                    vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))),
+                    vreinterpretq_u32_f32(abs_mask),
+                );
+                let v3 = vandq_u32(
+                    vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))),
+                    vreinterpretq_u32_f32(abs_mask),
+                );
+                m0 = vmaxq_f32(m0, vreinterpretq_f32_u32(v0));
+                m1 = vmaxq_f32(m1, vreinterpretq_f32_u32(v1));
+                m2 = vmaxq_f32(m2, vreinterpretq_f32_u32(v2));
+                m3 = vmaxq_f32(m3, vreinterpretq_f32_u32(v3));
+                i += 16;
+            }
+            let m = vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3));
+            max_abs = vmaxvq_f32(m);
         }
-        let m = vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3));
-        max_abs = vmaxvq_f32(m);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        for i in 0..256 {
-            let v = (*x.add(i)).abs();
-            if v > max_abs {
-                max_abs = v;
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for i in 0..256 {
+                let v = (*x.add(i)).abs();
+                if v > max_abs {
+                    max_abs = v;
+                }
             }
         }
-    }
 
-    let mut block = Q8Block {
-        quants: [0i8; 256],
-        scale: 0.0,
-        bsums: [0i32; 8],
-        bsums_16: [0i32; 16],
-    };
+        let mut block = Q8Block {
+            quants: [0i8; 256],
+            scale: 0.0,
+            bsums: [0i32; 8],
+            bsums_16: [0i32; 16],
+        };
 
-    if max_abs == 0.0 {
-        block.scale = 1.0;
-        return block;
-    }
-    block.scale = max_abs / 127.0;
-    let inv_scale = 127.0 / max_abs;
-
-    // Pass 2: quantise + accumulate per-16 sums; pair them up for the
-    // Q4_K_M per-32 sums.
-    for s16 in 0..16 {
-        let mut sum: i32 = 0;
-        for j in 0..16 {
-            let v = *x.add(s16 * 16 + j) * inv_scale;
-            // NO explicit clamp: the absmax scale already bounds
-            // roundf(v) to [-127,127], and Rust's `as i8` is itself
-            // saturating (NaN→0, out-of-range→clamp). A defensive
-            // `.clamp(-128,127)` here is what BROKE wasm at opt>=2: it let
-            // LLVM's vectorizer prove the range and downgrade the saturating
-            // `fptosi.sat` to a plain `fptosi`, which is UB on the NaN lane
-            // (vectorization evaluates all lanes, so a masked-out NaN still
-            // traps via the planted `unreachable`). Bare `as i8` keeps the
-            // total saturating lowering. Bit-identical for in-range inputs.
-            let q = roundf(v) as i8;
-            block.quants[s16 * 16 + j] = q;
-            sum += q as i32;
+        if max_abs == 0.0 {
+            block.scale = 1.0;
+            return block;
         }
-        block.bsums_16[s16] = sum;
+        block.scale = max_abs / 127.0;
+        let inv_scale = 127.0 / max_abs;
+
+        // Pass 2: quantise + accumulate per-16 sums; pair them up for the
+        // Q4_K_M per-32 sums.
+        for s16 in 0..16 {
+            let mut sum: i32 = 0;
+            for j in 0..16 {
+                let v = *x.add(s16 * 16 + j) * inv_scale;
+                // NO explicit clamp: the absmax scale already bounds
+                // roundf(v) to [-127,127], and Rust's `as i8` is itself
+                // saturating (NaN→0, out-of-range→clamp). A defensive
+                // `.clamp(-128,127)` here is what BROKE wasm at opt>=2: it let
+                // LLVM's vectorizer prove the range and downgrade the saturating
+                // `fptosi.sat` to a plain `fptosi`, which is UB on the NaN lane
+                // (vectorization evaluates all lanes, so a masked-out NaN still
+                // traps via the planted `unreachable`). Bare `as i8` keeps the
+                // total saturating lowering. Bit-identical for in-range inputs.
+                let q = roundf(v) as i8;
+                block.quants[s16 * 16 + j] = q;
+                sum += q as i32;
+            }
+            block.bsums_16[s16] = sum;
+        }
+        for s in 0..8 {
+            block.bsums[s] = block.bsums_16[2 * s] + block.bsums_16[2 * s + 1];
+        }
+        block
     }
-    for s in 0..8 {
-        block.bsums[s] = block.bsums_16[2 * s] + block.bsums_16[2 * s + 1];
-    }
-    block
 }
 
 /// Lazy populator for the X→Q8 cache. Returns a borrowed reference to the
@@ -122,11 +124,13 @@ pub unsafe fn x_q8_cache_get<'a>(
     b_idx: usize,
     x_ptr: *const f32,
 ) -> &'a Q8Block {
-    if !init[b_idx] {
-        cache[b_idx] = quantize_x_block_q8(x_ptr);
-        init[b_idx] = true;
+    unsafe {
+        if !init[b_idx] {
+            cache[b_idx] = quantize_x_block_q8(x_ptr);
+            init[b_idx] = true;
+        }
+        &cache[b_idx]
     }
-    &cache[b_idx]
 }
 
 /// `quantize_row_q8_K` — convert a row of `x.len() / 256` super-blocks of

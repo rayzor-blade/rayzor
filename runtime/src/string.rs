@@ -2,7 +2,7 @@
 //!
 //! Haxe strings are UTF-8 encoded and backed by a Vec<u8>
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::ptr;
 
 /// Haxe String representation: { ptr: *mut u8, len: usize, cap: usize }

@@ -14,7 +14,7 @@
 
 use super::{SourceLocation, SourceLocationTracker, SourceLocationTracking, SymbolId};
 use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
-use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map, new_id_set};
 use crate::tast::{BlockId, BorrowEdgeId, DataFlowNodeId, LifetimeId, MoveEdgeId, ScopeId, TypeId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

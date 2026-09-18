@@ -33,13 +33,13 @@
 //! Tests the basic DFG integration capabilities with simpler TAST structures.
 
 use compiler::tast::{
+    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         BinaryOperator, ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue,
         TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
     type_flow_guard::TypeFlowGuard,
-    SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

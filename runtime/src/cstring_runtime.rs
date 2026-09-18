@@ -4,7 +4,7 @@
 //! Used by `rayzor.CString` extern abstract and `@:cstruct` fields.
 
 use crate::haxe_string::HaxeString;
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::ptr;
 
 /// Convert a HaxeString to a null-terminated C string (char*).

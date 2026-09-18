@@ -5,8 +5,8 @@
 use log::debug;
 use std::cell::RefCell;
 use std::io::Write;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // Use the canonical HaxeString definition from haxe_string module
 use crate::haxe_string::HaxeString;
@@ -105,11 +105,11 @@ fn print_with_prefix(msg: &str) {
     }
 
     // Invoke callback if set
-    if let Ok(cb) = TRACE_CALLBACK.lock() {
-        if let Some(ref callback) = *cb {
-            callback(msg);
-            return;
-        }
+    if let Ok(cb) = TRACE_CALLBACK.lock()
+        && let Some(ref callback) = *cb
+    {
+        callback(msg);
+        return;
     }
 
     TRACE_PREFIX.with(|p| {
@@ -1250,7 +1250,7 @@ static PROGRAM_ARGS: std::sync::OnceLock<ArgsStorage> = std::sync::OnceLock::new
 /// Returns a heap-allocated HaxeArray pointer.
 fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     let count = args.len();
     let elem_size = 8; // size of pointer (i64)
@@ -1602,15 +1602,17 @@ pub extern "C" fn haxe_sys_get_char(echo: bool) -> i32 {
 
 /// Helper to convert HaxeString pointer to Rust String
 unsafe fn haxe_string_to_rust(s: *const HaxeString) -> Option<String> {
-    if s.is_null() {
-        return None;
+    unsafe {
+        if s.is_null() {
+            return None;
+        }
+        let s_ref = &*s;
+        if s_ref.ptr.is_null() || s_ref.len == 0 {
+            return Some(String::new());
+        }
+        let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
+        std::str::from_utf8(slice).ok().map(|s| s.to_string())
     }
-    let s_ref = &*s;
-    if s_ref.ptr.is_null() || s_ref.len == 0 {
-        return Some(String::new());
-    }
-    let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
-    std::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
 /// Helper to create HaxeString from Rust String
@@ -1779,10 +1781,10 @@ pub extern "C" fn haxe_filesystem_is_directory(path: *const HaxeString) -> bool 
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_create_directory(path: *const HaxeString) {
     unsafe {
-        if let Some(path_str) = haxe_string_to_rust(path) {
-            if let Err(e) = std::fs::create_dir_all(&path_str) {
-                debug!("FileSystem.createDirectory error: {} - {}", path_str, e);
-            }
+        if let Some(path_str) = haxe_string_to_rust(path)
+            && let Err(e) = std::fs::create_dir_all(&path_str)
+        {
+            debug!("FileSystem.createDirectory error: {} - {}", path_str, e);
         }
     }
 }
@@ -1792,10 +1794,10 @@ pub extern "C" fn haxe_filesystem_create_directory(path: *const HaxeString) {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_delete_file(path: *const HaxeString) {
     unsafe {
-        if let Some(path_str) = haxe_string_to_rust(path) {
-            if let Err(e) = std::fs::remove_file(&path_str) {
-                debug!("FileSystem.deleteFile error: {} - {}", path_str, e);
-            }
+        if let Some(path_str) = haxe_string_to_rust(path)
+            && let Err(e) = std::fs::remove_file(&path_str)
+        {
+            debug!("FileSystem.deleteFile error: {} - {}", path_str, e);
         }
     }
 }
@@ -1805,10 +1807,10 @@ pub extern "C" fn haxe_filesystem_delete_file(path: *const HaxeString) {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_filesystem_delete_directory(path: *const HaxeString) {
     unsafe {
-        if let Some(path_str) = haxe_string_to_rust(path) {
-            if let Err(e) = std::fs::remove_dir(&path_str) {
-                debug!("FileSystem.deleteDirectory error: {} - {}", path_str, e);
-            }
+        if let Some(path_str) = haxe_string_to_rust(path)
+            && let Err(e) = std::fs::remove_dir(&path_str)
+        {
+            debug!("FileSystem.deleteDirectory error: {} - {}", path_str, e);
         }
     }
 }
@@ -1997,7 +1999,7 @@ pub extern "C" fn haxe_filesystem_is_file(path: *const HaxeString) -> bool {
 pub extern "C" fn haxe_filesystem_read_directory(
     path: *const HaxeString,
 ) -> *mut crate::haxe_array::HaxeArray {
-    use crate::haxe_array::{haxe_array_new, haxe_array_push, HaxeArray};
+    use crate::haxe_array::{HaxeArray, haxe_array_new, haxe_array_push};
 
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -2987,20 +2989,18 @@ fn mem_facts() -> Option<MemFacts> {
 #[cfg(all(unix, target_os = "macos"))]
 fn mem_facts() -> Option<MemFacts> {
     unsafe fn sysctl_u64(name: &str) -> Option<u64> {
-        let cname = std::ffi::CString::new(name).ok()?;
-        let mut val: u64 = 0;
-        let mut len = std::mem::size_of::<u64>();
-        let rc = libc::sysctlbyname(
-            cname.as_ptr(),
-            &mut val as *mut _ as *mut libc::c_void,
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        );
-        if rc == 0 {
-            Some(val)
-        } else {
-            None
+        unsafe {
+            let cname = std::ffi::CString::new(name).ok()?;
+            let mut val: u64 = 0;
+            let mut len = std::mem::size_of::<u64>();
+            let rc = libc::sysctlbyname(
+                cname.as_ptr(),
+                &mut val as *mut _ as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            );
+            if rc == 0 { Some(val) } else { None }
         }
     }
     unsafe {
@@ -4312,7 +4312,7 @@ pub extern "C" fn haxe_stringmap_keys_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4338,7 +4338,7 @@ pub extern "C" fn haxe_intmap_keys_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4362,7 +4362,7 @@ pub extern "C" fn haxe_stringmap_values_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4386,7 +4386,7 @@ pub extern "C" fn haxe_intmap_values_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4504,7 +4504,7 @@ pub extern "C" fn haxe_objectmap_keys_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4527,7 +4527,7 @@ pub extern "C" fn haxe_objectmap_values_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -4580,7 +4580,7 @@ pub extern "C" fn haxe_objectmap_copy(map_ptr: *mut HaxeObjectMap) -> *mut HaxeO
 
 #[cfg(all(test, unix))]
 mod mlock_policy_tests {
-    use super::{decide_mlock, linux_mem_facts_from, MemFacts};
+    use super::{MemFacts, decide_mlock, linux_mem_facts_from};
 
     const GB: u64 = 1024 * 1024 * 1024;
     const MODEL: u64 = 770 * 1024 * 1024; // Llama-1B Q4_K_M

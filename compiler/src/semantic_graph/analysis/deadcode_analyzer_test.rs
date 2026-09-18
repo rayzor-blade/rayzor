@@ -8,14 +8,14 @@
 mod deadcode_analysis_tests {
     use super::super::{deadcode_analyzer::*, ownership_analyzer::FunctionAnalysisContext};
     use crate::semantic_graph::{
-        cfg::{BasicBlock, Terminator},
-        dfg::{ConstantValue, LivenessInfo, NodeMetadata, SsaVariable},
         CallGraph, CallSite, CallTarget, CallType, ControlFlowGraph, DataFlowGraph, DataFlowNode,
         DataFlowNodeKind, OwnershipGraph,
+        cfg::{BasicBlock, Terminator},
+        dfg::{ConstantValue, LivenessInfo, NodeMetadata, SsaVariable},
     };
     use crate::tast::{
-        collections::new_id_set, BlockId, CallSiteId, DataFlowNodeId, SourceLocation,
-        SsaVariableId, SymbolId, TypeId,
+        BlockId, CallSiteId, DataFlowNodeId, SourceLocation, SsaVariableId, SymbolId, TypeId,
+        collections::new_id_set,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
@@ -441,8 +441,8 @@ mod deadcode_analysis_tests {
 #[cfg(test)]
 mod deadcode_analysis_integration_tests {
     use super::*;
-    use crate::semantic_graph::analysis::analysis_engine::AnalysisEngine;
     use crate::semantic_graph::SemanticGraphs;
+    use crate::semantic_graph::analysis::analysis_engine::AnalysisEngine;
 
     #[test]
     fn test_integration_with_analysis_engine() {

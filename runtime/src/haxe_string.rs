@@ -4,7 +4,7 @@
 //! All strings are UTF-8 encoded and null-terminated for C interop
 
 use log::debug;
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::io::Write;
 use std::ptr;
 use std::slice;
@@ -95,10 +95,8 @@ fn write_stdout_parts(head: &[u8], tail: &[u8], force: bool) {
 
     let now = Instant::now();
     let mut should_flush = force || interval.is_zero() || buffer.len() >= 4096;
-    if !should_flush {
-        if let Ok(last) = LAST_FLUSH.get_or_init(|| Mutex::new(now)).lock() {
-            should_flush = now.duration_since(*last) >= interval;
-        }
+    if !should_flush && let Ok(last) = LAST_FLUSH.get_or_init(|| Mutex::new(now)).lock() {
+        should_flush = now.duration_since(*last) >= interval;
     }
     if !should_flush {
         return;
@@ -655,8 +653,8 @@ fn strfree_keep_headers() -> bool {
 const FREED_MARK: usize = 0xF4EE_D0F4_EED0;
 
 fn strfree_dbg_count() {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
     static ON: OnceLock<bool> = OnceLock::new();
     static N: AtomicU64 = AtomicU64::new(0);
     if !*ON.get_or_init(|| std::env::var_os("RZT_DBG_STRFREE").is_some()) {
@@ -755,21 +753,23 @@ unsafe fn dynamic_box_to_string(s: *const HaxeString) -> Option<*mut HaxeString>
 /// `s` must be null or a valid `HaxeString` whose `ptr`/`len` describe live
 /// memory for the duration of the borrow.
 unsafe fn printable_bytes<'a>(s: *const HaxeString) -> Option<&'a [u8]> {
-    if s.is_null() {
-        return None;
-    }
-    if let Some(boxed) = dynamic_box_to_string(s) {
-        return printable_bytes(boxed);
-    }
-    let s_ref = &*s;
-    if s_ref.len == 0 {
-        return None;
-    }
-    let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
-    if str::from_utf8(slice).is_ok() {
-        Some(slice)
-    } else {
-        None
+    unsafe {
+        if s.is_null() {
+            return None;
+        }
+        if let Some(boxed) = dynamic_box_to_string(s) {
+            return printable_bytes(boxed);
+        }
+        let s_ref = &*s;
+        if s_ref.len == 0 {
+            return None;
+        }
+        let slice = slice::from_raw_parts(s_ref.ptr, s_ref.len);
+        if str::from_utf8(slice).is_ok() {
+            Some(slice)
+        } else {
+            None
+        }
     }
 }
 

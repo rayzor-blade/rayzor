@@ -120,16 +120,17 @@ fn analyze_class_error(input: &str) -> String {
             // Look for switch expressions that might be missing semicolons
             if let Some(switch_start) = body.find("switch") {
                 let after_switch = &body[switch_start..];
-                if let Some(brace_start) = after_switch.find('{') {
-                    if let Some(brace_end) = find_matching_brace(&after_switch[brace_start..]) {
-                        let _switch_block = &after_switch[..brace_start + brace_end + 1];
-                        let after_switch_block =
-                            &after_switch[brace_start + brace_end + 1..].trim_start();
+                if let Some(brace_start) = after_switch.find('{')
+                    && let Some(brace_end) = find_matching_brace(&after_switch[brace_start..])
+                {
+                    let _switch_block = &after_switch[..brace_start + brace_end + 1];
+                    let after_switch_block =
+                        &after_switch[brace_start + brace_end + 1..].trim_start();
 
-                        // If the next character after switch is not a semicolon and we have more content
-                        if !after_switch_block.starts_with(';') && !after_switch_block.is_empty() {
-                            return "Missing semicolon after switch expression in variable assignment".to_string();
-                        }
+                    // If the next character after switch is not a semicolon and we have more content
+                    if !after_switch_block.starts_with(';') && !after_switch_block.is_empty() {
+                        return "Missing semicolon after switch expression in variable assignment"
+                            .to_string();
                     }
                 }
             }
@@ -308,13 +309,13 @@ pub fn parse_incrementally(_file_name: &str, input: &str) -> IncrementalParseRes
         }
 
         // Handle conditional compilation blocks
-        if current_input.starts_with("#if") {
-            if let Some(end_pos) = current_input.find("#end") {
-                let block = &current_input[..end_pos + 4];
-                parsed_elements.push(ParsedElement::ConditionalBlock(block.to_string()));
-                current_input = &current_input[end_pos + 4..];
-                continue;
-            }
+        if current_input.starts_with("#if")
+            && let Some(end_pos) = current_input.find("#end")
+        {
+            let block = &current_input[..end_pos + 4];
+            parsed_elements.push(ParsedElement::ConditionalBlock(block.to_string()));
+            current_input = &current_input[end_pos + 4..];
+            continue;
         }
 
         // Enhanced error analysis and recovery
@@ -344,11 +345,11 @@ pub fn parse_incrementally(_file_name: &str, input: &str) -> IncrementalParseRes
                 let mut _closest_keyword = None;
 
                 for search_keyword in &keywords {
-                    if let Some(pos) = current_input[1..].find(search_keyword) {
-                        if next_pos.is_none() || pos < next_pos.unwrap() {
-                            next_pos = Some(pos + 1); // +1 because we searched from index 1
-                            _closest_keyword = Some(search_keyword);
-                        }
+                    if let Some(pos) = current_input[1..].find(search_keyword)
+                        && (next_pos.is_none() || pos < next_pos.unwrap())
+                    {
+                        next_pos = Some(pos + 1); // +1 because we searched from index 1
+                        _closest_keyword = Some(search_keyword);
                     }
                 }
 

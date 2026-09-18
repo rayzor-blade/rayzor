@@ -29,6 +29,7 @@
     clippy::clone_on_copy
 )]
 use compiler::codegen::cranelift_backend::CraneliftBackend;
+use compiler::ir::IrModule;
 /// End-to-End JIT Test for Vec<u8>
 ///
 /// This test verifies the complete pipeline:
@@ -43,14 +44,13 @@ use compiler::codegen::cranelift_backend::CraneliftBackend;
 /// - Vec<u8> operations execute correctly
 /// - Memory management is functional
 use compiler::ir::optimizable::OptimizableModule;
-use compiler::ir::IrModule;
 use compiler::stdlib::build_stdlib;
 
 // Import runtime to ensure symbols are linked
 extern crate rayzor_runtime;
 
 // External declarations for runtime functions
-extern "C" {
+unsafe extern "C" {
     fn rayzor_malloc(size: u64) -> *mut u8;
     fn rayzor_realloc(ptr: *mut u8, old_size: u64, new_size: u64) -> *mut u8;
     fn rayzor_free(ptr: *mut u8, size: u64);

@@ -2,13 +2,13 @@
 //!
 //! Uses CUDA Driver API: `cuMemAlloc`, `cuMemcpyHtoD`, `cuMemcpyDtoH`, `cuMemFree`.
 
-use super::device_init::{CUresult, CudaContext, CUDA_SUCCESS};
+use super::device_init::{CUDA_SUCCESS, CUresult, CudaContext};
 
 /// CUDA device pointer (opaque GPU address).
 pub type CUdeviceptr = u64;
 
 // CUDA Driver API — memory management
-extern "C" {
+unsafe extern "C" {
     fn cuMemAlloc_v2(dptr: *mut CUdeviceptr, bytesize: usize) -> CUresult;
     fn cuMemFree_v2(dptr: CUdeviceptr) -> CUresult;
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const u8, bytecount: usize) -> CUresult;

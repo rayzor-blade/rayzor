@@ -116,7 +116,7 @@ fn main() {
     // cache the F32). "cached" = sgemm alone (the steady-state prefill cost);
     // "per-call" = dequant+sgemm every forward (the no-cache lower bound).
     use rayzor_runtime_core::quant::q4_k_m::dequant_q4_k_block;
-    use rayzor_runtime_core::quant::types::{Q4KBlock, Q4_K_M_BLOCK_SIZE};
+    use rayzor_runtime_core::quant::types::{Q4_K_M_BLOCK_SIZE, Q4KBlock};
     let blk = Q4KBlock {
         d: 0.02,
         dmin: 0.01,
@@ -311,7 +311,9 @@ fn main() {
     }
 
     if !i8_ok {
-        println!("\n-- int8 throughput SKIPPED: BNNSMatMul rejects int8 (public matmul is float-only) --");
+        println!(
+            "\n-- int8 throughput SKIPPED: BNNSMatMul rejects int8 (public matmul is float-only) --"
+        );
         return;
     }
     println!("\n-- int8-AMX (BNNS) vs NEON sdot, model shapes --");

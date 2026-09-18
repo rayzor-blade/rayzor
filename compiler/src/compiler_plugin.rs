@@ -45,10 +45,10 @@
 //! ```
 
 use crate::ir::mir_builder::MirBuilder;
+use crate::stdlib::{MethodSignature, RuntimeFunctionCall, StdlibMapping};
 use crate::stdlib::{
     array, channel, map_iter, memory, stdtypes, string, sync, thread, vec, vec_u8,
 };
-use crate::stdlib::{MethodSignature, RuntimeFunctionCall, StdlibMapping};
 
 /// Trait for compiler plugins that provide stdlib method mappings.
 ///
@@ -315,42 +315,44 @@ impl NativePlugin {
         descs: *const rayzor_plugin::NativeMethodDesc,
         count: usize,
     ) -> Self {
-        let mut methods = Vec::with_capacity(count);
-        let slice = std::slice::from_raw_parts(descs, count);
+        unsafe {
+            let mut methods = Vec::with_capacity(count);
+            let slice = std::slice::from_raw_parts(descs, count);
 
-        for desc in slice {
-            let symbol_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                desc.symbol_name,
-                desc.symbol_name_len,
-            ))
-            .to_string();
+            for desc in slice {
+                let symbol_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                    desc.symbol_name,
+                    desc.symbol_name_len,
+                ))
+                .to_string();
 
-            let class_name = normalize_class_name(std::str::from_utf8_unchecked(
-                std::slice::from_raw_parts(desc.class_name, desc.class_name_len),
-            ));
+                let class_name = normalize_class_name(std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(desc.class_name, desc.class_name_len),
+                ));
 
-            let method_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                desc.method_name,
-                desc.method_name_len,
-            ))
-            .to_string();
+                let method_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                    desc.method_name,
+                    desc.method_name_len,
+                ))
+                .to_string();
 
-            let param_types = desc.param_types[..desc.param_count as usize].to_vec();
+                let param_types = desc.param_types[..desc.param_count as usize].to_vec();
 
-            methods.push(NativeMethodInfo {
-                symbol_name,
-                class_name,
-                method_name,
-                is_static: desc.is_static != 0,
-                param_count: desc.param_count,
-                return_type: desc.return_type,
-                param_types,
-            });
-        }
+                methods.push(NativeMethodInfo {
+                    symbol_name,
+                    class_name,
+                    method_name,
+                    is_static: desc.is_static != 0,
+                    param_count: desc.param_count,
+                    return_type: desc.return_type,
+                    param_types,
+                });
+            }
 
-        NativePlugin {
-            plugin_name: name.to_string(),
-            methods,
+            NativePlugin {
+                plugin_name: name.to_string(),
+                methods,
+            }
         }
     }
 

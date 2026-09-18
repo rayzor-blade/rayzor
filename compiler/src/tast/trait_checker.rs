@@ -5,10 +5,10 @@
 //! extern call lowering to validate thread safety and other constraints.
 
 use crate::tast::{
+    StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     core::{Mutability, TypeKind},
     core_types::CoreTypeChecker,
     node::{DerivedTrait, TypedClass},
-    StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 

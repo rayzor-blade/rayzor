@@ -4,7 +4,7 @@
 //! dylib), or mixed (extern classes, library classes that wrap them, and a
 //! dylib). The builder accepts any combination of entries.
 
-use super::{EntryKind, EntryMeta, MethodDescEntry, RpkgEntry, RpkgToc, RPKG_MAGIC, RPKG_VERSION};
+use super::{EntryKind, EntryMeta, MethodDescEntry, RPKG_MAGIC, RPKG_VERSION, RpkgEntry, RpkgToc};
 use std::path::Path;
 
 /// Accumulates entries and writes the final `.rpkg` archive.

@@ -187,7 +187,9 @@ fn main() {
             );
 
             if stdlib_symbols.len() > 0 && good_user == user_symbols.len() {
-                println!("\n🎉 SUCCESS: All stdlib symbols prefixed with 'haxe.*', user symbols with 'test.*'!");
+                println!(
+                    "\n🎉 SUCCESS: All stdlib symbols prefixed with 'haxe.*', user symbols with 'test.*'!"
+                );
             } else {
                 println!("\n⚠️  Symbols may need verification");
             }

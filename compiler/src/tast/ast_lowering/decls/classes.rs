@@ -992,7 +992,7 @@ impl<'a> AstLowering<'a> {
                     };
                     match tt.get(formal).map(|t| &t.kind) {
                         None | Some(TypeKind::Dynamic) | Some(TypeKind::TypeParameter { .. }) => {
-                            continue
+                            continue;
                         }
                         _ => formal,
                     }

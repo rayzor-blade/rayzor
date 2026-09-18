@@ -41,12 +41,12 @@
 
 use compiler::tast::type_flow_guard::{FlowSafetyError, FlowSafetyResults, TypeFlowGuard};
 use compiler::tast::{
+    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
         TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

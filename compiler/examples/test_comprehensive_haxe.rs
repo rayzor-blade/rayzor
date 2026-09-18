@@ -41,7 +41,7 @@
 use compiler::codegen::CraneliftBackend;
 use compiler::ir::{hir_to_mir::lower_hir_to_mir, tast_to_hir::lower_tast_to_hir};
 use compiler::tast::{
-    ast_lowering::AstLowering, scopes::ScopeTree, StringInterner, SymbolTable, TypeTable,
+    StringInterner, SymbolTable, TypeTable, ast_lowering::AstLowering, scopes::ScopeTree,
 };
 use parser::haxe_parser::parse_haxe_file;
 use std::cell::RefCell;

@@ -1643,7 +1643,10 @@ impl CompilationUnit {
                                                 if let Some(placeholder_name) =
                                                     self.string_interner.get(*name)
                                                 {
-                                                    trace!("    Found typedef with Placeholder target (after deps): {}", placeholder_name);
+                                                    trace!(
+                                                        "    Found typedef with Placeholder target (after deps): {}",
+                                                        placeholder_name
+                                                    );
                                                     placeholder_targets
                                                         .push(placeholder_name.to_string());
                                                 }
@@ -1669,7 +1672,10 @@ impl CompilationUnit {
 
                                     if any_loaded {
                                         // Retry compilation after loading typedef targets
-                                        debug!("  Retrying compilation of {} after loading typedef targets...", qualified_path);
+                                        debug!(
+                                            "  Retrying compilation of {} after loading typedef targets...",
+                                            qualified_path
+                                        );
                                         match self
                                             .compile_file_with_shared_state(&filename, &source)
                                         {
@@ -1719,7 +1725,10 @@ impl CompilationUnit {
 
                                     if loaded_any {
                                         // Try one more time
-                                        debug!("  Retrying compilation of {} after loading additional dependencies...", qualified_path);
+                                        debug!(
+                                            "  Retrying compilation of {} after loading additional dependencies...",
+                                            qualified_path
+                                        );
                                         match self
                                             .compile_file_with_shared_state(&filename, &source)
                                         {
@@ -1732,7 +1741,11 @@ impl CompilationUnit {
                                                     .iter()
                                                     .map(|e| e.message.clone())
                                                     .collect();
-                                                return Err(format!("Errors compiling {} (after loading additional dependencies): {}", filename, error_msgs.join(", ")));
+                                                return Err(format!(
+                                                    "Errors compiling {} (after loading additional dependencies): {}",
+                                                    filename,
+                                                    error_msgs.join(", ")
+                                                ));
                                             }
                                         }
                                     }

@@ -301,7 +301,7 @@ impl<I> ContextualError<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::{bytes::complete::tag, error::context, IResult, Parser};
+    use nom::{IResult, Parser, bytes::complete::tag, error::context};
 
     type TestResult<'a, T> = IResult<&'a str, T, ContextualError<&'a str>>;
 

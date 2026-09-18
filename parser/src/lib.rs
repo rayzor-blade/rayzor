@@ -44,11 +44,11 @@ pub use diagnostics::haxe::HaxeDiagnostics;
 // Export new Haxe parser
 pub use haxe_ast::*;
 pub use haxe_parser::{
-    parse_haxe_file, parse_haxe_file_with_debug, parse_haxe_file_with_diagnostics, ParseResult,
-    HAXE_KEYWORDS,
+    HAXE_KEYWORDS, ParseResult, parse_haxe_file, parse_haxe_file_with_debug,
+    parse_haxe_file_with_diagnostics,
 };
 pub use incremental_parser_enhanced::{
-    parse_incrementally_enhanced, IncrementalParseResult as EnhancedParseResult,
+    IncrementalParseResult as EnhancedParseResult, parse_incrementally_enhanced,
 };
 
 // #[cfg(test)]

@@ -460,7 +460,10 @@ impl<'a> HirToMirContext<'a> {
                                     return local.ty.clone();
                                 }
                                 if let Some(ty) = function.register_types.get(left) {
-                                    debug!("Inferred type from BinOp left operand register_types: {:?}", ty);
+                                    debug!(
+                                        "Inferred type from BinOp left operand register_types: {:?}",
+                                        ty
+                                    );
                                     return ty.clone();
                                 }
                                 // BinOp on params is likely I64 (Haxe Int)

@@ -32,7 +32,7 @@
 
 use compiler::ir::tast_to_hir::lower_tast_to_hir;
 use compiler::tast::{
-    ast_lowering::AstLowering, scopes::ScopeTree, StringInterner, SymbolTable, TypeTable,
+    StringInterner, SymbolTable, TypeTable, ast_lowering::AstLowering, scopes::ScopeTree,
 };
 use parser::parse_haxe_file_with_diagnostics;
 use std::cell::RefCell;

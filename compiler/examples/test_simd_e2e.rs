@@ -38,8 +38,8 @@
 //! - Lane access: extract, insert
 //! - Reductions: sum, dot
 
-use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
+use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
 
 /// Test result

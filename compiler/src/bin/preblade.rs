@@ -119,11 +119,9 @@ fn main() {
     // Standard symbol extraction mode
     let out_path = out_path.unwrap_or_else(|| PathBuf::from(".rayzor/blade/stdlib"));
 
-    if !list_only {
-        if let Err(e) = std::fs::create_dir_all(&out_path) {
-            eprintln!("Error creating output directory: {}", e);
-            std::process::exit(1);
-        }
+    if !list_only && let Err(e) = std::fs::create_dir_all(&out_path) {
+        eprintln!("Error creating output directory: {}", e);
+        std::process::exit(1);
     }
 
     println!("Pre-BLADE: Extracting stdlib symbols");

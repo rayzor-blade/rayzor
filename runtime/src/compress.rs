@@ -4,7 +4,7 @@
 //! one-shot (run) APIs matching the Haxe stdlib interface.
 
 use crate::anon_object::{rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape};
-use crate::haxe_sys::{haxe_bytes_alloc, HaxeBytes};
+use crate::haxe_sys::{HaxeBytes, haxe_bytes_alloc};
 use std::sync::Once;
 
 // Shape ID for {done:Bool, read:Int, write:Int} anonymous return.

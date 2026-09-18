@@ -54,44 +54,46 @@ pub unsafe fn flash_attn_decode_one_qhead<F: Fn(f32) -> f32>(
     scores: &mut [f32],
     exp_fn: F,
 ) {
-    let kv_head = q_head / group;
-    let q_row = core::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
+    unsafe {
+        let kv_head = q_head / group;
+        let q_row = core::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
 
-    // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
-    let mut max_score = f32::NEG_INFINITY;
-    for l in 0..cache_len {
-        let k_row = core::slice::from_raw_parts(
-            k_data.add(l * kv_row_stride + kv_head * head_dim),
-            head_dim,
-        );
-        let s = dot_slice_f32(q_row, k_row) * scale_f32;
-        scores[l] = s;
-        if s > max_score {
-            max_score = s;
+        // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
+        let mut max_score = f32::NEG_INFINITY;
+        for l in 0..cache_len {
+            let k_row = core::slice::from_raw_parts(
+                k_data.add(l * kv_row_stride + kv_head * head_dim),
+                head_dim,
+            );
+            let s = dot_slice_f32(q_row, k_row) * scale_f32;
+            scores[l] = s;
+            if s > max_score {
+                max_score = s;
+            }
         }
-    }
 
-    // Second pass: softmax denominator, in the standard max-shifted form
-    // (matches `Tensor.softmax`'s reduction order). `exp_fn` is monomorphised
-    // per call site so the inner is byte-equal to the prior inline kernel
-    // when the caller passes `|x| x.exp()`.
-    let mut denom = 0.0f32;
-    for l in 0..cache_len {
-        let e = exp_fn(scores[l] - max_score);
-        scores[l] = e;
-        denom += e;
-    }
-    let inv_denom = 1.0 / denom;
+        // Second pass: softmax denominator, in the standard max-shifted form
+        // (matches `Tensor.softmax`'s reduction order). `exp_fn` is monomorphised
+        // per call site so the inner is byte-equal to the prior inline kernel
+        // when the caller passes `|x| x.exp()`.
+        let mut denom = 0.0f32;
+        for l in 0..cache_len {
+            let e = exp_fn(scores[l] - max_score);
+            scores[l] = e;
+            denom += e;
+        }
+        let inv_denom = 1.0 / denom;
 
-    // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
-    let out_row = core::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
-    out_row.fill(0.0);
-    for l in 0..cache_len {
-        let w = scores[l] * inv_denom;
-        let v_row = core::slice::from_raw_parts(
-            v_data.add(l * kv_row_stride + kv_head * head_dim),
-            head_dim,
-        );
-        axpy_slice(out_row, w, v_row);
+        // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
+        let out_row = core::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
+        out_row.fill(0.0);
+        for l in 0..cache_len {
+            let w = scores[l] * inv_denom;
+            let v_row = core::slice::from_raw_parts(
+                v_data.add(l * kv_row_stride + kv_head * head_dim),
+                head_dim,
+            );
+            axpy_slice(out_row, w, v_row);
+        }
     }
 }

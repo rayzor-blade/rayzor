@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
+use crate::tast::collections::{IdMap, IdSet, new_id_map, new_id_set};
 use crate::tast::node::{MacroExpansionInfo, TypedExpression, TypedPattern};
 use crate::tast::{BlockId, SourceLocation, StatementId, SymbolId, TypeId};
 

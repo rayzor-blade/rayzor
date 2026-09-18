@@ -309,8 +309,14 @@ impl Monomorphizer {
                         .collect();
                     eprintln!(
                         "[mono] call->{:?} {} NO explicit type_args; type_params={:?} param_tys={:?}",
-                        func_id, callee.name,
-                        callee.signature.type_params.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                        func_id,
+                        callee.name,
+                        callee
+                            .signature
+                            .type_params
+                            .iter()
+                            .map(|t| t.name.clone())
+                            .collect::<Vec<_>>(),
                         ptys
                     );
                 }

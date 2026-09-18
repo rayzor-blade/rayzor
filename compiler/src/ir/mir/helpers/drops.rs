@@ -94,8 +94,7 @@ impl<'a> HirToMirContext<'a> {
                 if skip_symbol == Some(*symbol) {
                     trace!(
                         "Drop: Skipping {:?} ({:?}) in cleanup (returned value)",
-                        symbol,
-                        ir_id
+                        symbol, ir_id
                     );
                     continue;
                 }
@@ -128,8 +127,7 @@ impl<'a> HirToMirContext<'a> {
                 self.emit_tracked_free(ir_id, true);
                 trace!(
                     "Drop: Freed {:?} ({:?}) in cleanup_all_scopes (Drop class)",
-                    symbol,
-                    ir_id
+                    symbol, ir_id
                 );
             }
         }

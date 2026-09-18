@@ -10,9 +10,9 @@
 //! surface tiny and the binary smaller — drop in libnuma later if explicit
 //! page-level placement becomes necessary.
 
-use libc::{cpu_set_t, pthread_self, pthread_setaffinity_np, CPU_SET, CPU_ZERO};
+use libc::{CPU_SET, CPU_ZERO, cpu_set_t, pthread_self, pthread_setaffinity_np};
 use std::fs;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 use std::sync::OnceLock;
 
 /// Topology snapshot — populated once on first use.
@@ -232,11 +232,7 @@ pub(super) fn bind_current_thread(node: i32) -> i32 {
         }
     }
     let rc = unsafe { pthread_setaffinity_np(pthread_self(), size_of::<cpu_set_t>(), &set) };
-    if rc == 0 {
-        0
-    } else {
-        -1
-    }
+    if rc == 0 { 0 } else { -1 }
 }
 
 pub(super) fn bind_current_thread_to_performance() -> i32 {
@@ -252,11 +248,7 @@ pub(super) fn bind_current_thread_to_performance() -> i32 {
         }
     }
     let rc = unsafe { pthread_setaffinity_np(pthread_self(), size_of::<cpu_set_t>(), &set) };
-    if rc == 0 {
-        0
-    } else {
-        -1
-    }
+    if rc == 0 { 0 } else { -1 }
 }
 
 pub(super) fn unbind_current_thread() -> i32 {
@@ -270,9 +262,5 @@ pub(super) fn unbind_current_thread() -> i32 {
         unsafe { CPU_SET(c as usize, &mut set) };
     }
     let rc = unsafe { pthread_setaffinity_np(pthread_self(), size_of::<cpu_set_t>(), &set) };
-    if rc == 0 {
-        0
-    } else {
-        -1
-    }
+    if rc == 0 { 0 } else { -1 }
 }

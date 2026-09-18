@@ -28,14 +28,14 @@ class MacroTools {
         Ok(file) => {
             println!("✓ Basic macro function parsed successfully");
             // Verify the macro modifier is present
-            if let TypeDeclaration::Class(class) = &file.declarations[0] {
-                if let ClassFieldKind::Function(_func) = &class.fields[0].kind {
-                    let has_macro = class.fields[0]
-                        .modifiers
-                        .iter()
-                        .any(|m| matches!(m, Modifier::Macro));
-                    assert!(has_macro, "Function should have macro modifier");
-                }
+            if let TypeDeclaration::Class(class) = &file.declarations[0]
+                && let ClassFieldKind::Function(_func) = &class.fields[0].kind
+            {
+                let has_macro = class.fields[0]
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, Modifier::Macro));
+                assert!(has_macro, "Function should have macro modifier");
             }
         }
         Err(e) => panic!("Failed to parse basic macro function: {}", e),

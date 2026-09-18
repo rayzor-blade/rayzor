@@ -43,8 +43,8 @@
 use compiler::codegen::CraneliftBackend;
 use compiler::compilation::{CompilationConfig, CompilationUnit};
 use compiler::compiler_plugin::CompilerPlugin;
-use compiler::stdlib::hdll_plugin::HdllPlugin;
 use compiler::stdlib::IrTypeDescriptor;
+use compiler::stdlib::hdll_plugin::HdllPlugin;
 use std::path::Path;
 
 fn main() {

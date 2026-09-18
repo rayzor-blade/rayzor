@@ -7,9 +7,9 @@
 //! - Resource tracking for proper cleanup
 
 use crate::tast::{
+    ScopeId, SourceLocation, SymbolId, TypeId,
     node::{TypedExpression, TypedExpressionKind, TypedFile, TypedFunction, TypedStatement},
     symbols::Mutability,
-    ScopeId, SourceLocation, SymbolId, TypeId,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

@@ -807,7 +807,7 @@ impl BytecodeCompiler {
                     self.compile_expr(base)?;
                     self.compile_expr(index)?;
                     self.emitter.emit_op(Op::Dup); // TODO: need to dup both base and index
-                                                   // This is simplified; full implementation in Phase 5
+                    // This is simplified; full implementation in Phase 5
                     self.compile_expr(right)?;
                     self.emit_compound_op(op, span)?;
                     self.emitter.emit_op(Op::SetIndex);

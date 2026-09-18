@@ -8,27 +8,27 @@ include!(concat!(env!("OUT_DIR"), "/stdlib_defines.rs"));
 use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
+    IrFunctionId, IrInstruction, IrModule, IrValue, Monomorphizer,
     blade::{
-        load_blade, load_symbol_manifest, load_symbol_manifest_from_bytes, save_blade_with_state,
         BladeAbstractInfo, BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo,
         BladeFieldEntry, BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
-        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
+        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo, load_blade, load_symbol_manifest,
+        load_symbol_manifest_from_bytes, save_blade_with_state,
     },
-    IrFunctionId, IrInstruction, IrModule, IrValue, Monomorphizer,
 };
 use crate::pipeline::{
     CompilationError, CompilationResult, ErrorCategory, HaxeCompilationPipeline, PipelineConfig,
 };
 use crate::stdlib::hdll_plugin::HdllPlugin;
 use crate::tast::{
+    AstLowering, InternedString, ScopeId, ScopeTree, SourceLocation, StringInterner, SymbolId,
+    SymbolTable, TypeId, TypeKind, TypeTable, TypedFile,
     namespace::{ImportResolver, NamespaceResolver},
     stdlib_loader::{StdLibConfig, StdLibLoader},
     symbols::SymbolFlags,
-    AstLowering, InternedString, ScopeId, ScopeTree, SourceLocation, StringInterner, SymbolId,
-    SymbolTable, TypeId, TypeKind, TypeTable, TypedFile,
 };
 use log::{debug, info, trace, warn};
-use parser::{parse_haxe_file, parse_haxe_file_with_debug, HaxeFile};
+use parser::{HaxeFile, parse_haxe_file, parse_haxe_file_with_debug};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

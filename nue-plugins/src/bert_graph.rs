@@ -296,27 +296,29 @@ pub unsafe extern "C" fn nue_bert_graph_load(
     hidden: i64,
     kind: i64,
 ) -> i64 {
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var_os("RZT_DBG_GRAPH").is_some() {
-            eprintln!(
-                "[bert-graph] load args: dir_ptr={dir_ptr:#x} dir_len={dir_len} stem_ptr={stem_ptr:#x} stem_len={stem_len} hidden={hidden} kind={kind}"
-            );
+    unsafe {
+        #[cfg(target_os = "macos")]
+        {
+            if std::env::var_os("RZT_DBG_GRAPH").is_some() {
+                eprintln!(
+                    "[bert-graph] load args: dir_ptr={dir_ptr:#x} dir_len={dir_len} stem_ptr={stem_ptr:#x} stem_len={stem_len} hidden={hidden} kind={kind}"
+                );
+            }
+            if dir_ptr == 0 || dir_len <= 0 || stem_ptr == 0 || stem_len <= 0 || hidden <= 0 {
+                return 0;
+            }
+            let d = std::slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize);
+            let s = std::slice::from_raw_parts(stem_ptr as *const u8, stem_len as usize);
+            let (Ok(dir), Ok(stem)) = (std::str::from_utf8(d), std::str::from_utf8(s)) else {
+                return 0;
+            };
+            imp::load(dir, stem, hidden as usize, kind)
         }
-        if dir_ptr == 0 || dir_len <= 0 || stem_ptr == 0 || stem_len <= 0 || hidden <= 0 {
-            return 0;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (dir_ptr, dir_len, stem_ptr, stem_len, hidden, kind);
+            -1
         }
-        let d = std::slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize);
-        let s = std::slice::from_raw_parts(stem_ptr as *const u8, stem_len as usize);
-        let (Ok(dir), Ok(stem)) = (std::str::from_utf8(d), std::str::from_utf8(s)) else {
-            return 0;
-        };
-        imp::load(dir, stem, hidden as usize, kind)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (dir_ptr, dir_len, stem_ptr, stem_len, hidden, kind);
-        -1
     }
 }
 

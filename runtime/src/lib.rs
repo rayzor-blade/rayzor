@@ -30,7 +30,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::missing_safety_doc)]
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
 // Export Vec module (old API - keeping for backward compat)
@@ -50,8 +50,8 @@ pub mod exception;
 pub mod future; // Future<T> — lazy async futures
 pub mod socket; // Networking (Socket, Host — TCP/DNS)
 pub mod ssl; // SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)
-             // Note: ArrayIterator/ArrayKeyValueIterator are compiled as regular Haxe classes.
-             // The array_iterator module is kept for potential future use but not registered.
+// Note: ArrayIterator/ArrayKeyValueIterator are compiled as regular Haxe classes.
+// The array_iterator module is kept for potential future use but not registered.
 pub mod crash_diagnostics;
 pub mod haxe_array; // Dynamic Array API
 pub mod haxe_math; // Math functions
@@ -120,24 +120,26 @@ pub const DEBUG_MODE: bool = false;
 /// Pointer to allocated memory, or null on failure
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_malloc(size: u64) -> *mut u8 {
-    if size == 0 {
-        return ptr::null_mut();
+    unsafe {
+        if size == 0 {
+            return ptr::null_mut();
+        }
+
+        // Create layout for allocation
+        let layout = match Layout::from_size_align(size as usize, 1) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        // Allocate memory
+        let ptr = alloc(layout);
+
+        if ptr.is_null() {
+            return ptr::null_mut();
+        }
+
+        ptr
     }
-
-    // Create layout for allocation
-    let layout = match Layout::from_size_align(size as usize, 1) {
-        Ok(layout) => layout,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    // Allocate memory
-    let ptr = alloc(layout);
-
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-
-    ptr
 }
 
 /// Reallocate memory to a new size
@@ -155,29 +157,31 @@ pub unsafe extern "C" fn rayzor_malloc(size: u64) -> *mut u8 {
 /// Pointer to reallocated memory, or null on failure
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_realloc(ptr: *mut u8, old_size: u64, new_size: u64) -> *mut u8 {
-    if ptr.is_null() {
-        return rayzor_malloc(new_size);
+    unsafe {
+        if ptr.is_null() {
+            return rayzor_malloc(new_size);
+        }
+
+        if new_size == 0 {
+            rayzor_free(ptr, old_size);
+            return ptr::null_mut();
+        }
+
+        // Create layouts
+        let old_layout = match Layout::from_size_align(old_size as usize, 1) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        // Reallocate
+        let new_ptr = realloc(ptr, old_layout, new_size as usize);
+
+        if new_ptr.is_null() {
+            return ptr::null_mut();
+        }
+
+        new_ptr
     }
-
-    if new_size == 0 {
-        rayzor_free(ptr, old_size);
-        return ptr::null_mut();
-    }
-
-    // Create layouts
-    let old_layout = match Layout::from_size_align(old_size as usize, 1) {
-        Ok(layout) => layout,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    // Reallocate
-    let new_ptr = realloc(ptr, old_layout, new_size as usize);
-
-    if new_ptr.is_null() {
-        return ptr::null_mut();
-    }
-
-    new_ptr
 }
 
 /// Free allocated memory
@@ -192,18 +196,20 @@ pub unsafe extern "C" fn rayzor_realloc(ptr: *mut u8, old_size: u64, new_size: u
 /// * `size` - Size of the allocation in bytes
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_free(ptr: *mut u8, size: u64) {
-    if ptr.is_null() || size == 0 {
-        return;
+    unsafe {
+        if ptr.is_null() || size == 0 {
+            return;
+        }
+
+        // Create layout
+        let layout = match Layout::from_size_align(size as usize, 1) {
+            Ok(layout) => layout,
+            Err(_) => return, // Invalid layout, can't free
+        };
+
+        // Deallocate
+        dealloc(ptr, layout);
     }
-
-    // Create layout
-    let layout = match Layout::from_size_align(size as usize, 1) {
-        Ok(layout) => layout,
-        Err(_) => return, // Invalid layout, can't free
-    };
-
-    // Deallocate
-    dealloc(ptr, layout);
 }
 
 // ============================================================================
@@ -225,17 +231,19 @@ pub unsafe extern "C" fn rayzor_panic_use_after_move(
     var_len: i64,
     line: i64,
 ) -> ! {
-    let name = if var_name.is_null() || var_len <= 0 {
-        "<unknown>"
-    } else {
-        let bytes = std::slice::from_raw_parts(var_name, var_len as usize);
-        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
-    };
-    eprintln!(
-        "[RAYZOR] use-after-move trap: {} was already moved (line {})",
-        name, line
-    );
-    std::process::abort();
+    unsafe {
+        let name = if var_name.is_null() || var_len <= 0 {
+            "<unknown>"
+        } else {
+            let bytes = std::slice::from_raw_parts(var_name, var_len as usize);
+            std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
+        };
+        eprintln!(
+            "[RAYZOR] use-after-move trap: {} was already moved (line {})",
+            name, line
+        );
+        std::process::abort();
+    }
 }
 
 // ============================================================================
@@ -266,7 +274,7 @@ const TRACKED_MAX_SIZE: usize = 1 << 40;
 #[cfg(feature = "profile")]
 pub mod profile;
 #[cfg(feature = "profile")]
-pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
+pub use profile::{TrackingAllocator, ensure_alloc_dump_hooks};
 
 /// Allocate tracked heap memory using Rust's global allocator.
 ///
@@ -275,27 +283,29 @@ pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
 /// Returns 16-byte aligned pointer for SIMD compatibility.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_alloc(size: u64) -> *mut u8 {
-    if size == 0 {
-        return ptr::null_mut();
+    unsafe {
+        if size == 0 {
+            return ptr::null_mut();
+        }
+
+        // Round up to 16-byte alignment
+        let aligned_size = ((size as usize) + (TRACKED_ALIGNMENT - 1)) & !(TRACKED_ALIGNMENT - 1);
+        let total = aligned_size + TRACKED_HEADER_SIZE;
+        let layout = match Layout::from_size_align(total, TRACKED_ALIGNMENT) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+
+        let base = alloc(layout);
+        if base.is_null() {
+            return ptr::null_mut();
+        }
+
+        // Write size header at base (first 8 bytes of the 16-byte header)
+        *(base as *mut u64) = aligned_size as u64;
+
+        base.add(TRACKED_HEADER_SIZE)
     }
-
-    // Round up to 16-byte alignment
-    let aligned_size = ((size as usize) + (TRACKED_ALIGNMENT - 1)) & !(TRACKED_ALIGNMENT - 1);
-    let total = aligned_size + TRACKED_HEADER_SIZE;
-    let layout = match Layout::from_size_align(total, TRACKED_ALIGNMENT) {
-        Ok(layout) => layout,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let base = alloc(layout);
-    if base.is_null() {
-        return ptr::null_mut();
-    }
-
-    // Write size header at base (first 8 bytes of the 16-byte header)
-    *(base as *mut u64) = aligned_size as u64;
-
-    base.add(TRACKED_HEADER_SIZE)
 }
 
 /// Free tracked heap memory using Rust's global allocator.
@@ -305,28 +315,30 @@ pub unsafe extern "C" fn rayzor_tracked_alloc(size: u64) -> *mut u8 {
 /// Rejects obviously invalid sizes as a safety net against double-free.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_free(ptr: *mut u8) {
-    if ptr.is_null() {
-        return;
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+
+        // Read the size header (first 8 bytes of 16-byte header before the user pointer)
+        let base = ptr.sub(TRACKED_HEADER_SIZE);
+        let aligned_size = *(base as *const u64) as usize;
+
+        // Sanity check: reject zero or impossibly large sizes
+        // Zero size indicates this was already freed or never a valid tracked allocation.
+        // Sizes > 1TB are clearly corrupt metadata.
+        if aligned_size == 0 || aligned_size > TRACKED_MAX_SIZE {
+            return;
+        }
+
+        // Clear the size header to help catch double-frees
+        // (subsequent free of this address will see size=0 and return early)
+        *(base as *mut u64) = 0;
+
+        let total = aligned_size + TRACKED_HEADER_SIZE;
+        let layout = Layout::from_size_align_unchecked(total, TRACKED_ALIGNMENT);
+        dealloc(base, layout);
     }
-
-    // Read the size header (first 8 bytes of 16-byte header before the user pointer)
-    let base = ptr.sub(TRACKED_HEADER_SIZE);
-    let aligned_size = *(base as *const u64) as usize;
-
-    // Sanity check: reject zero or impossibly large sizes
-    // Zero size indicates this was already freed or never a valid tracked allocation.
-    // Sizes > 1TB are clearly corrupt metadata.
-    if aligned_size == 0 || aligned_size > TRACKED_MAX_SIZE {
-        return;
-    }
-
-    // Clear the size header to help catch double-frees
-    // (subsequent free of this address will see size=0 and return early)
-    *(base as *mut u64) = 0;
-
-    let total = aligned_size + TRACKED_HEADER_SIZE;
-    let layout = Layout::from_size_align_unchecked(total, TRACKED_ALIGNMENT);
-    dealloc(base, layout);
 }
 
 /// Reallocate tracked heap memory using Rust's global allocator.
@@ -336,46 +348,48 @@ pub unsafe extern "C" fn rayzor_tracked_free(ptr: *mut u8) {
 /// copying data, and freeing the old block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_tracked_realloc(ptr: *mut u8, new_size: u64) -> *mut u8 {
-    if ptr.is_null() {
-        return rayzor_tracked_alloc(new_size);
-    }
-    if new_size == 0 {
+    unsafe {
+        if ptr.is_null() {
+            return rayzor_tracked_alloc(new_size);
+        }
+        if new_size == 0 {
+            rayzor_tracked_free(ptr);
+            return ptr::null_mut();
+        }
+
+        // Read old size from header
+        let old_base = ptr.sub(TRACKED_HEADER_SIZE);
+        let old_aligned_size = *(old_base as *const u64) as usize;
+
+        // Sanity check old size
+        if old_aligned_size == 0 || old_aligned_size > TRACKED_MAX_SIZE {
+            // Corrupt or already freed — just do a fresh alloc
+            return rayzor_tracked_alloc(new_size);
+        }
+
+        let new_aligned_size =
+            ((new_size as usize) + (TRACKED_ALIGNMENT - 1)) & !(TRACKED_ALIGNMENT - 1);
+
+        // If same size, nothing to do
+        if new_aligned_size == old_aligned_size {
+            return ptr;
+        }
+
+        // Allocate new block with header
+        let new_ptr = rayzor_tracked_alloc(new_size);
+        if new_ptr.is_null() {
+            return ptr::null_mut();
+        }
+
+        // Copy old data (up to the smaller of old and new sizes)
+        let copy_size = old_aligned_size.min(new_aligned_size);
+        ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
+
+        // Free old block
         rayzor_tracked_free(ptr);
-        return ptr::null_mut();
+
+        new_ptr
     }
-
-    // Read old size from header
-    let old_base = ptr.sub(TRACKED_HEADER_SIZE);
-    let old_aligned_size = *(old_base as *const u64) as usize;
-
-    // Sanity check old size
-    if old_aligned_size == 0 || old_aligned_size > TRACKED_MAX_SIZE {
-        // Corrupt or already freed — just do a fresh alloc
-        return rayzor_tracked_alloc(new_size);
-    }
-
-    let new_aligned_size =
-        ((new_size as usize) + (TRACKED_ALIGNMENT - 1)) & !(TRACKED_ALIGNMENT - 1);
-
-    // If same size, nothing to do
-    if new_aligned_size == old_aligned_size {
-        return ptr;
-    }
-
-    // Allocate new block with header
-    let new_ptr = rayzor_tracked_alloc(new_size);
-    if new_ptr.is_null() {
-        return ptr::null_mut();
-    }
-
-    // Copy old data (up to the smaller of old and new sizes)
-    let copy_size = old_aligned_size.min(new_aligned_size);
-    ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-
-    // Free old block
-    rayzor_tracked_free(ptr);
-
-    new_ptr
 }
 
 /// Initialize RTTI (Runtime Type Information) for user-defined types.
@@ -476,15 +490,17 @@ pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
 /// `name` must point to `len` bytes of UTF-8 for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rayzor_uncompiled_function(name: *const u8, len: usize) -> ! {
-    let what = if name.is_null() {
-        "<unnamed>".to_string()
-    } else {
-        String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned()
-    };
-    eprintln!("rayzor: `{what}` was never compiled, and something called it.");
-    eprintln!("        The compiler could not build this function and installed a stub in its");
-    eprintln!("        place. Whatever it uses is unsupported, or failed to compile earlier.");
-    std::process::abort()
+    unsafe {
+        let what = if name.is_null() {
+            "<unnamed>".to_string()
+        } else {
+            String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned()
+        };
+        eprintln!("rayzor: `{what}` was never compiled, and something called it.");
+        eprintln!("        The compiler could not build this function and installed a stub in its");
+        eprintln!("        place. Whatever it uses is unsupported, or failed to compile earlier.");
+        std::process::abort()
+    }
 }
 
 /// The address of a global's storage.

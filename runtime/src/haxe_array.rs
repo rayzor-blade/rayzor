@@ -5,7 +5,7 @@
 
 use crate::haxe_string::HaxeString;
 use log::debug;
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
 /// Haxe Array representation (generic via element size)
@@ -772,8 +772,8 @@ pub extern "C" fn haxe_array_slice(
 /// historically never emitted, so a nonzero count proves the InsertFree
 /// array-release path actually fires at runtime.
 fn arrfree_dbg_count() {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
     static ON: OnceLock<bool> = OnceLock::new();
     static N: AtomicU64 = AtomicU64::new(0);
     if !*ON.get_or_init(|| std::env::var_os("RZT_DBG_ARRFREE").is_some()) {
@@ -1561,29 +1561,31 @@ unsafe fn array_to_string_typed(
     arr: *const HaxeArray,
     render: impl Fn(i64) -> String,
 ) -> *mut HaxeString {
-    let result_layout = Layout::new::<HaxeString>();
-    let result_ptr = alloc(result_layout) as *mut HaxeString;
-    if result_ptr.is_null() {
-        panic!("Failed to allocate HaxeString for toString");
-    }
-    if arr.is_null() || (*arr).len == 0 {
-        crate::haxe_string::haxe_string_from_bytes(result_ptr, b"[]".as_ptr(), 2);
-        return result_ptr;
-    }
-    let arr_ref = &*arr;
-    let mut s = String::with_capacity(arr_ref.len * 4 + 2);
-    s.push('[');
-    let data = arr_ref.ptr as *const i64;
-    for i in 0..arr_ref.len {
-        if i > 0 {
-            s.push_str(", ");
+    unsafe {
+        let result_layout = Layout::new::<HaxeString>();
+        let result_ptr = alloc(result_layout) as *mut HaxeString;
+        if result_ptr.is_null() {
+            panic!("Failed to allocate HaxeString for toString");
         }
-        s.push_str(&render(*data.add(i)));
+        if arr.is_null() || (*arr).len == 0 {
+            crate::haxe_string::haxe_string_from_bytes(result_ptr, b"[]".as_ptr(), 2);
+            return result_ptr;
+        }
+        let arr_ref = &*arr;
+        let mut s = String::with_capacity(arr_ref.len * 4 + 2);
+        s.push('[');
+        let data = arr_ref.ptr as *const i64;
+        for i in 0..arr_ref.len {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&render(*data.add(i)));
+        }
+        s.push(']');
+        let bytes = s.as_bytes();
+        crate::haxe_string::haxe_string_from_bytes(result_ptr, bytes.as_ptr(), bytes.len());
+        result_ptr
     }
-    s.push(']');
-    let bytes = s.as_bytes();
-    crate::haxe_string::haxe_string_from_bytes(result_ptr, bytes.as_ptr(), bytes.len());
-    result_ptr
 }
 
 #[unsafe(no_mangle)]
@@ -1713,25 +1715,27 @@ pub unsafe extern "C" fn haxe_array_string_index_of(
     from: i64,
     reverse: i32,
 ) -> i64 {
-    if arr.is_null() || (*arr).len == 0 {
-        return -1;
-    }
-    let array = &*arr;
-    let len = array.len as i64;
-    let start = if from < 0 { (len + from).max(0) } else { from };
-    let mut i = if reverse != 0 {
-        start.min(len - 1)
-    } else {
-        start
-    };
-    while i >= 0 && i < len {
-        let element = *(array.ptr as *const *const HaxeString).add(i as usize);
-        if crate::haxe_string::haxe_string_compare(element, value) == 0 {
-            return i;
+    unsafe {
+        if arr.is_null() || (*arr).len == 0 {
+            return -1;
         }
-        i += if reverse != 0 { -1 } else { 1 };
+        let array = &*arr;
+        let len = array.len as i64;
+        let start = if from < 0 { (len + from).max(0) } else { from };
+        let mut i = if reverse != 0 {
+            start.min(len - 1)
+        } else {
+            start
+        };
+        while i >= 0 && i < len {
+            let element = *(array.ptr as *const *const HaxeString).add(i as usize);
+            if crate::haxe_string::haxe_string_compare(element, value) == 0 {
+                return i;
+            }
+            i += if reverse != 0 { -1 } else { 1 };
+        }
+        -1
     }
-    -1
 }
 
 /// Index an erased array. JSON/runtime metadata boxes both the array and its

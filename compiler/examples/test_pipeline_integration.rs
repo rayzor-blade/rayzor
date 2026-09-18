@@ -31,13 +31,13 @@
 //! Test TypeFlowGuard integration with type checking pipeline
 
 use compiler::tast::{
+    ScopeTree, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
     node::{
         ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue, TypedExpression,
         TypedExpressionKind, TypedFile, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
     type_checking_pipeline::TypeCheckingPhase,
-    ScopeTree, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use diagnostics::{Diagnostics, SourceMap};
 use std::cell::RefCell;

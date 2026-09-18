@@ -11,12 +11,12 @@
 //! and other affinity tools do for portability and is the right call for
 //! ML inference workloads where all node-pinned threads end up adjacent.
 
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 use std::ptr;
 use std::sync::OnceLock;
 
 use windows_sys::Win32::System::SystemInformation::{
-    GetLogicalProcessorInformationEx, RelationNumaNode, GROUP_AFFINITY,
+    GROUP_AFFINITY, GetLogicalProcessorInformationEx, RelationNumaNode,
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffinity};
@@ -198,11 +198,7 @@ pub(super) fn bind_current_thread(node: i32) -> i32 {
     };
     let mut prev: MaybeUninit<GROUP_AFFINITY> = MaybeUninit::zeroed();
     let ok = unsafe { SetThreadGroupAffinity(GetCurrentThread(), &mut new_aff, prev.as_mut_ptr()) };
-    if ok != 0 {
-        0
-    } else {
-        -1
-    }
+    if ok != 0 { 0 } else { -1 }
 }
 
 pub(super) fn bind_current_thread_to_performance() -> i32 {
@@ -225,11 +221,7 @@ pub(super) fn unbind_current_thread() -> i32 {
     };
     let mut prev: MaybeUninit<GROUP_AFFINITY> = MaybeUninit::zeroed();
     let ok = unsafe { SetThreadGroupAffinity(GetCurrentThread(), &mut new_aff, prev.as_mut_ptr()) };
-    if ok != 0 {
-        0
-    } else {
-        -1
-    }
+    if ok != 0 { 0 } else { -1 }
 }
 
 #[allow(dead_code)]

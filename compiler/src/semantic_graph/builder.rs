@@ -5,7 +5,7 @@
 //! suitable for advanced static analysis. Handles Haxe-specific constructs including
 //! pattern matching, exception handling, and macro expansion.
 
-use crate::tast::collections::{new_id_map, IdMap};
+use crate::tast::collections::{IdMap, new_id_map};
 use crate::tast::node::{
     MacroExpansionInfo, TypedCatchClause, TypedExpression, TypedFile, TypedFunction,
     TypedPatternCase, TypedStatement, TypedSwitchCase,

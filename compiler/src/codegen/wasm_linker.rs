@@ -2303,7 +2303,7 @@ fn parse_const_expr(expr: &wasmparser::ConstExpr) -> GlobalInit {
             wasmparser::Operator::F32Const { value } => return GlobalInit::F32(value.bits()),
             wasmparser::Operator::F64Const { value } => return GlobalInit::F64(value.bits()),
             wasmparser::Operator::GlobalGet { global_index } => {
-                return GlobalInit::GlobalGet(global_index)
+                return GlobalInit::GlobalGet(global_index);
             }
             wasmparser::Operator::End => break,
             _ => {}

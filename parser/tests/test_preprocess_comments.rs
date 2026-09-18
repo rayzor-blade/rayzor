@@ -1,4 +1,4 @@
-use parser::preprocessor::{preprocess, PreprocessorConfig};
+use parser::preprocessor::{PreprocessorConfig, preprocess};
 
 #[test]
 fn test_preprocess_with_leading_comment() {

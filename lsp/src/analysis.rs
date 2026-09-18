@@ -4,8 +4,8 @@
 //! semantic tokens, document outline, signature help, and inlay hints.
 //! Covers ALL Haxe language features from the rayzor parser and TAST.
 
-use compiler::tast::symbols::{Symbol, SymbolFlags, SymbolKind, Visibility};
 use compiler::tast::TypeKind;
+use compiler::tast::symbols::{Symbol, SymbolFlags, SymbolKind, Visibility};
 use compiler::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -107,10 +107,10 @@ pub fn format_hover(
     parts.push(format!("```haxe\n{}\n```", sig));
 
     // Qualified context
-    if let Some(qn) = sym.qualified_name.and_then(|qn| interner.get(qn)) {
-        if qn != name {
-            parts.push(format!("*{}*", qn));
-        }
+    if let Some(qn) = sym.qualified_name.and_then(|qn| interner.get(qn))
+        && qn != name
+    {
+        parts.push(format!("*{}*", qn));
     }
 
     // Flags / annotations
@@ -286,20 +286,19 @@ fn format_function_type(
     type_table: &TypeTable,
     interner: &StringInterner,
 ) -> String {
-    if let Some(ti) = type_table.get(type_id) {
-        if let TypeKind::Function {
+    if let Some(ti) = type_table.get(type_id)
+        && let TypeKind::Function {
             params,
             return_type,
             ..
         } = &ti.kind
-        {
-            let param_strs: Vec<String> = params
-                .iter()
-                .map(|p| format_type_name(*p, type_table, interner))
-                .collect();
-            let ret = format_type_name(*return_type, type_table, interner);
-            return format!("({}):{}", param_strs.join(", "), ret);
-        }
+    {
+        let param_strs: Vec<String> = params
+            .iter()
+            .map(|p| format_type_name(*p, type_table, interner))
+            .collect();
+        let ret = format_type_name(*return_type, type_table, interner);
+        return format!("({}):{}", param_strs.join(", "), ret);
     }
     format_type_name(type_id, type_table, interner)
 }

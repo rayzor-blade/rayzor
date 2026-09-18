@@ -33,13 +33,13 @@
 //! This directly calls the control flow analyzer to validate our fixes.
 
 use compiler::tast::{
+    SourceLocation, StringInterner, SymbolId, TypeId,
     control_flow_analysis::ControlFlowAnalyzer,
     node::{
         BinaryOperator, ExpressionMetadata, FunctionEffects, FunctionMetadata, LiteralValue,
         TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement, VariableUsage,
     },
     symbols::{Mutability, Visibility},
-    SourceLocation, StringInterner, SymbolId, TypeId,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

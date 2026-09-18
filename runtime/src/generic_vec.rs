@@ -21,7 +21,7 @@
 //! 3. **Geometric growth**: Amortized O(1) push
 //! 4. **Type-specific code**: No runtime type dispatch
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::mem;
 use std::ptr;
 

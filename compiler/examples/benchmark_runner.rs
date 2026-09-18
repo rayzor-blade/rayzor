@@ -43,21 +43,21 @@
 //!   cargo run --release --package compiler --example benchmark_runner -- --json
 //!   cargo run --release --package compiler --example benchmark_runner -- fibonacci --disable-trace
 
-use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
+use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
+use compiler::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
 use compiler::ir::tree_shake;
-use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
+use compiler::ir::{IrFunctionId, IrModule, RayzorBundle, load_bundle};
 
 use clap::Parser;
+#[cfg(feature = "llvm-backend")]
+use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::reset_llvm_global_state;
-#[cfg(feature = "llvm-backend")]
-use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
 use serde::{Deserialize, Serialize};
@@ -297,10 +297,10 @@ fn has_precompiled_bundle(name: &str) -> bool {
         .join(format!("{}.hx", name));
     let mut newer_than_bundle: Vec<String> = Vec::new();
     for dep in [source, std::env::current_exe().unwrap_or_default()] {
-        if let Ok(t) = dep.metadata().and_then(|m| m.modified()) {
-            if t > bundle_time {
-                newer_than_bundle.push(dep.display().to_string());
-            }
+        if let Ok(t) = dep.metadata().and_then(|m| m.modified())
+            && t > bundle_time
+        {
+            newer_than_bundle.push(dep.display().to_string());
         }
     }
 
@@ -443,10 +443,10 @@ fn list_benchmarks() -> Vec<String> {
 
     if let Ok(entries) = fs::read_dir(&base_path) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.path().file_stem() {
-                if entry.path().extension().map_or(false, |e| e == "hx") {
-                    benchmarks.push(name.to_string_lossy().to_string());
-                }
+            if let Some(name) = entry.path().file_stem()
+                && entry.path().extension().map_or(false, |e| e == "hx")
+            {
+                benchmarks.push(name.to_string_lossy().to_string());
             }
         }
     }
@@ -472,10 +472,12 @@ fn find_benchmark_entry(modules: &[IrModule]) -> Option<(String, String)> {
 fn prepare_benchmark_modules(
     mir_modules: &[std::sync::Arc<IrModule>],
 ) -> Result<Vec<IrModule>, String> {
-    let mut modules = vec![mir_modules
-        .last()
-        .map(|module| (**module).clone())
-        .ok_or("No MIR modules")?];
+    let mut modules = vec![
+        mir_modules
+            .last()
+            .map(|module| (**module).clone())
+            .ok_or("No MIR modules")?,
+    ];
     if let Some(entry) = find_benchmark_entry(&modules) {
         tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
     }

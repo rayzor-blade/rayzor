@@ -170,9 +170,9 @@ impl<'a> HirToMirContext<'a> {
                                     if !type_args.is_empty() {
                                         let concrete_type = self.convert_type(type_args[0]);
                                         debug!(
-                                        "[GENERIC RESOLVE] Resolved return type from {:?} to {:?}",
-                                        result_type, concrete_type
-                                    );
+                                            "[GENERIC RESOLVE] Resolved return type from {:?} to {:?}",
+                                            result_type, concrete_type
+                                        );
                                         concrete_type
                                     } else {
                                         result_type.clone()
@@ -210,15 +210,15 @@ impl<'a> HirToMirContext<'a> {
                                 || matches!(resolved_result_type, IrType::Ptr(ref inner) if **inner == IrType::Void)
                             {
                                 debug!(
-                                "[STDLIB MIR] resolved_result_type is Any/Ptr(Void), using function signature {:?}",
-                                func.signature.return_type
-                            );
+                                    "[STDLIB MIR] resolved_result_type is Any/Ptr(Void), using function signature {:?}",
+                                    func.signature.return_type
+                                );
                                 func.signature.return_type.clone()
                             } else {
                                 debug!(
-                                "[STDLIB MIR] Using resolved_result_type {:?} (handles generics)",
-                                resolved_result_type
-                            );
+                                    "[STDLIB MIR] Using resolved_result_type {:?} (handles generics)",
+                                    resolved_result_type
+                                );
                                 resolved_result_type.clone()
                             }
                         } else {
@@ -226,9 +226,9 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         debug!(
-                        "[STDLIB MIR] Registered forward ref (instance) to {} with ID {:?}, final return type: {:?}",
-                        mir_func_name, mir_func_id, final_return_type
-                    );
+                            "[STDLIB MIR] Registered forward ref (instance) to {} with ID {:?}, final return type: {:?}",
+                            mir_func_name, mir_func_id, final_return_type
+                        );
 
                         // Call with the wrapper's own return type, which may be Ptr(U8) for
                         // generic methods returning T.
@@ -732,9 +732,9 @@ impl<'a> HirToMirContext<'a> {
                                         );
 
                                         debug!(
-                                        "[QUALIFIED NAME PATH] Registered forward ref to {} with ID {:?}",
-                                        runtime_func, mir_func_id
-                                    );
+                                            "[QUALIFIED NAME PATH] Registered forward ref to {} with ID {:?}",
+                                            runtime_func, mir_func_id
+                                        );
 
                                         let result = self.builder.build_call_direct(
                                             mir_func_id,
@@ -909,9 +909,9 @@ impl<'a> HirToMirContext<'a> {
                                             let class_name =
                                                 self.canonical_stdlib_class_name(class_sym);
                                             debug!(
-                                            "[INFER CLASS] Inferred class from return type: {:?}",
-                                            class_name
-                                        );
+                                                "[INFER CLASS] Inferred class from return type: {:?}",
+                                                class_name
+                                            );
                                             class_name
                                         } else {
                                             debug!("[INFER CLASS] Class symbol not found");
@@ -1000,9 +1000,9 @@ impl<'a> HirToMirContext<'a> {
                                     )
                                 {
                                     debug!(
-                                    "[INFERRED CLASS PATH] Got runtime_func='{}' for class={}, method={}",
-                                    runtime_func, class_name, method_name
-                                );
+                                        "[INFERRED CLASS PATH] Got runtime_func='{}' for class={}, method={}",
+                                        runtime_func, class_name, method_name
+                                    );
 
                                     let arg_regs: Vec<_> = static_args
                                         .iter()
@@ -1100,9 +1100,9 @@ impl<'a> HirToMirContext<'a> {
                             // disambiguate overloads (Array.join(sep) vs Thread.join()).
                             let actual_arg_count = args.len().saturating_sub(1); // receiver
                             debug!(
-                            "[LAST RESORT] Could not infer class for method '{}' with {} args, trying all stdlib classes",
-                            method_name, actual_arg_count
-                        );
+                                "[LAST RESORT] Could not infer class for method '{}' with {} args, trying all stdlib classes",
+                                method_name, actual_arg_count
+                            );
                             // No MIR-wrapper-class detection here: this loop tries every
                             // class and would match the wrong one.
                             let stdlib_classes = self.stdlib_mapping.all_class_keys();
@@ -1153,9 +1153,9 @@ impl<'a> HirToMirContext<'a> {
                                         );
 
                                         debug!(
-                                        "[FALLBACK PATH] Registered forward ref to {} with ID {:?}",
-                                        runtime_func, mir_func_id
-                                    );
+                                            "[FALLBACK PATH] Registered forward ref to {} with ID {:?}",
+                                            runtime_func, mir_func_id
+                                        );
 
                                         let result = self.builder.build_call_direct(
                                             mir_func_id,
@@ -1341,9 +1341,9 @@ impl<'a> HirToMirContext<'a> {
                                 );
 
                                 debug!(
-                                "[MIR WRAPPER INSTANCE] Registered forward ref to {} with ID {:?}",
-                                mir_func_name, mir_func_id
-                            );
+                                    "[MIR WRAPPER INSTANCE] Registered forward ref to {} with ID {:?}",
+                                    mir_func_name, mir_func_id
+                                );
 
                                 let call_result = self.builder.build_call_direct(
                                     mir_func_id,
@@ -1354,9 +1354,9 @@ impl<'a> HirToMirContext<'a> {
                                 // Unbox when the wrapper returns Ptr(U8) but HIR expects a
                                 // primitive.
                                 debug!(
-                                "[MIR WRAPPER INSTANCE] call_result={:?}, mir_return_type={:?}, result_type={:?}",
-                                call_result, mir_return_type, result_type
-                            );
+                                    "[MIR WRAPPER INSTANCE] call_result={:?}, mir_return_type={:?}, result_type={:?}",
+                                    call_result, mir_return_type, result_type
+                                );
                                 if mir_func_name == "Channel_receive"
                                     || mir_func_name == "Channel_tryReceive"
                                 {
@@ -1373,9 +1373,9 @@ impl<'a> HirToMirContext<'a> {
                                 );
                             } else {
                                 debug!(
-                                "[MIR WRAPPER INSTANCE] No signature found for {}, falling through",
-                                mir_func_name
-                            );
+                                    "[MIR WRAPPER INSTANCE] No signature found for {}, falling through",
+                                    mir_func_name
+                                );
                             }
                         }
                     }

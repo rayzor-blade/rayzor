@@ -28,11 +28,11 @@
     clippy::useless_format,
     clippy::clone_on_copy
 )]
-use compiler::ir::optimizable::OptimizableModule;
 /// Test Vec<u8> operations in stdlib
 ///
 /// This test verifies that Vec<u8> functions are correctly built and validated.
 use compiler::ir::IrModule;
+use compiler::ir::optimizable::OptimizableModule;
 use compiler::stdlib::build_stdlib;
 
 fn main() {

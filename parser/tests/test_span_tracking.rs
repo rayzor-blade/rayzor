@@ -122,23 +122,21 @@ fn test_expression_spans() {
 
     match parse_haxe_file("test.hx", input, false) {
         Ok(haxe_file) => {
-            if let TypeDeclaration::Class(class) = &haxe_file.declarations[0] {
-                if let Some(method) = class.fields.iter().find(|f| {
+            if let TypeDeclaration::Class(class) = &haxe_file.declarations[0]
+                && let Some(method) = class.fields.iter().find(|f| {
                     if let parser::haxe_ast::ClassFieldKind::Function(func) = &f.kind {
                         func.name == "test"
                     } else {
                         false
                     }
-                }) {
-                    if let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind {
-                        if let Some(body) = &func.body {
-                            assert!(body.span.start < body.span.end);
+                })
+                && let parser::haxe_ast::ClassFieldKind::Function(func) = &method.kind
+                && let Some(body) = &func.body
+            {
+                assert!(body.span.start < body.span.end);
 
-                            // The body span should be within the input
-                            assert!(body.span.end <= input.len());
-                        }
-                    }
-                }
+                // The body span should be within the input
+                assert!(body.span.end <= input.len());
             }
         }
         Err(e) => panic!("Expression parsing should succeed, got: {}", e),

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::type_system::{
-    DynamicValue, TypeId, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING,
+    DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING, TypeId,
 };
 
 /// Type ID for anonymous objects in the DynamicValue type system
@@ -135,10 +135,10 @@ pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
     // Fast path: check if already registered (read lock only)
     {
         let table = SHAPE_TABLE.read().unwrap();
-        if let Some(ref t) = *table {
-            if t.get(&shape_id).is_some_and(|s| !s.field_names.is_empty()) {
-                return;
-            }
+        if let Some(ref t) = *table
+            && t.get(&shape_id).is_some_and(|s| !s.field_names.is_empty())
+        {
+            return;
         }
     }
 
@@ -195,7 +195,7 @@ fn get_shape(shape_id: u32) -> Option<ShapeDescriptor> {
 /// # Safety
 /// ptr must be a valid handle returned by rayzor_anon_new or rayzor_anon_clone
 unsafe fn borrow_arc(ptr: *mut u8) -> &'static Arc<AnonObject> {
-    &*(ptr as *const Arc<AnonObject>)
+    unsafe { &*(ptr as *const Arc<AnonObject>) }
 }
 
 /// Borrow the Arc mutably from a handle pointer (does NOT take ownership)
@@ -203,7 +203,7 @@ unsafe fn borrow_arc(ptr: *mut u8) -> &'static Arc<AnonObject> {
 /// # Safety
 /// ptr must be a valid handle, and no other references must exist
 unsafe fn borrow_arc_mut(ptr: *mut u8) -> &'static mut Arc<AnonObject> {
-    &mut *(ptr as *mut Arc<AnonObject>)
+    unsafe { &mut *(ptr as *mut Arc<AnonObject>) }
 }
 
 // ============================================================================
@@ -275,10 +275,10 @@ pub extern "C" fn rayzor_anon_set_field_by_index(ptr: *mut u8, index: u32, value
     unsafe {
         let arc = borrow_arc_mut(ptr);
         let obj = Arc::make_mut(arc);
-        if let AnonData::Inline(fields) = &mut obj.data {
-            if (index as usize) < fields.len() {
-                fields[index as usize] = value;
-            }
+        if let AnonData::Inline(fields) = &mut obj.data
+            && (index as usize) < fields.len()
+        {
+            fields[index as usize] = value;
         }
     }
 }
@@ -391,11 +391,11 @@ pub extern "C" fn rayzor_anon_set_field(
         match &mut obj.data {
             AnonData::Inline(fields) => {
                 // Check if field exists in shape
-                if let Some(shape) = get_shape(obj.shape_id) {
-                    if let Some(idx) = shape.field_names.iter().position(|n| n == &name) {
-                        fields[idx] = raw_value;
-                        return;
-                    }
+                if let Some(shape) = get_shape(obj.shape_id)
+                    && let Some(idx) = shape.field_names.iter().position(|n| n == &name)
+                {
+                    fields[idx] = raw_value;
+                    return;
                 }
                 // Field not in shape → promote to Map
                 let mut map = HashMap::new();

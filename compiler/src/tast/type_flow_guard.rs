@@ -18,8 +18,8 @@ use crate::semantic_graph::analysis::{
 };
 
 use crate::tast::{
-    node::{TypedFile, TypedFunction},
     SourceLocation, SymbolId, SymbolTable, TypeTable,
+    node::{TypedFile, TypedFunction},
 };
 use std::cell::RefCell;
 

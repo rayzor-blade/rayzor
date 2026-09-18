@@ -824,11 +824,11 @@ impl CompileCtx {
 
         for &(mod_idx, func_id, func) in &all_funcs {
             let func_id = &func_id; // match old code's reference pattern
-                                    // Skip functions already registered as imports (by ID or name).
-                                    // Always register return type for CallDirect type inference
-                                    // If this function maps to an import, use the import's signature for param types
-                                    // (the import type is authoritative — it may have f64 for Float params while
-                                    // the IrFunction might have Ptr/i32 from an older compilation context).
+            // Skip functions already registered as imports (by ID or name).
+            // Always register return type for CallDirect type inference
+            // If this function maps to an import, use the import's signature for param types
+            // (the import type is authoritative — it may have f64 for Float params while
+            // the IrFunction might have Ptr/i32 from an older compilation context).
             let (param_vts, ret_vt) = if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
                 if (idx as usize) < self.imports.len() {
                     let imp = &self.imports[idx as usize];

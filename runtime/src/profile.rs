@@ -508,7 +508,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
         if std::env::var_os("RAYZOR_DUMP_ALLOC_AT_EXIT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
         {
-            extern "C" {
+            unsafe extern "C" {
                 fn atexit(cb: extern "C" fn()) -> i32;
                 #[allow(dead_code)] // legacy fallback path retained for non-SA_SIGINFO targets
                 fn signal(sig: i32, h: extern "C" fn(i32)) -> *mut std::ffi::c_void;
@@ -556,7 +556,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                     dli_sname: *const std::ffi::c_char,
                     dli_saddr: *mut std::ffi::c_void,
                 }
-                extern "C" {
+                unsafe extern "C" {
                     fn dladdr(addr: *const std::ffi::c_void, info: *mut DlInfo) -> i32;
                 }
                 unsafe {
@@ -583,7 +583,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                             eprintln!("  0x{:x}  (in JIT / unresolved)", pc);
                         }
                     }
-                    extern "C" {
+                    unsafe extern "C" {
                         fn _exit(s: i32) -> !;
                     }
                     _exit(128 + sig);
@@ -606,7 +606,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                     rayzor_dump_alloc_stats();
                     rayzor_dump_alloc_graph();
                     unsafe {
-                        extern "C" {
+                        unsafe extern "C" {
                             fn _exit(s: i32) -> !;
                         }
                         _exit(128 + sig);

@@ -5,13 +5,13 @@
 
 #[cfg(feature = "llvm-backend")]
 use inkwell::{
+    OptimizationLevel,
     module::Module,
     passes::PassBuilderOptions,
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
     values::AsValueRef,
-    OptimizationLevel,
 };
 
 #[cfg(feature = "llvm-backend")]
