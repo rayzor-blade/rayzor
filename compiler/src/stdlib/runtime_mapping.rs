@@ -4781,82 +4781,78 @@ mod tests {
     /// The pre-index implementation of every class-keyed query: a whole-table
     /// scan filtered by `class_matches`. These are the oracle the indexed
     /// queries are checked against, and they are the definition of "unchanged".
+    /// The scan is done once per class by `entries`; each query then reads
+    /// that slice in table order.
     mod oracle {
         use super::*;
 
-        pub fn entries<'m>(
-            m: &'m StdlibMapping,
-            class: &str,
-        ) -> impl Iterator<Item = (&'m MethodSignature, &'m RuntimeFunctionCall)> + 'm {
-            let class = class.to_string();
+        pub type Entry<'m> = (&'m MethodSignature, &'m RuntimeFunctionCall);
+
+        pub fn entries<'m>(m: &'m StdlibMapping, class: &str) -> Vec<Entry<'m>> {
             m.mappings
                 .iter()
-                .filter(move |(sig, _)| m.class_matches(&class, sig.class))
+                .filter(|(sig, _)| m.class_matches(class, sig.class))
+                .collect()
         }
 
-        pub fn find_by_name(m: &StdlibMapping, class: &str, method: &str) -> Option<&'static str> {
-            entries(m, class)
+        pub fn find_by_name(e: &[Entry], method: &str) -> Option<&'static str> {
+            e.iter()
                 .find(|(sig, _)| sig.method == method)
                 .map(|(_, call)| call.runtime_name)
         }
 
         pub fn find_by_name_and_params(
-            m: &StdlibMapping,
-            class: &str,
+            e: &[Entry],
             method: &str,
             param_count: usize,
         ) -> Option<&'static str> {
-            entries(m, class)
+            e.iter()
                 .find(|(sig, call)| sig.method == method && call.param_count == param_count)
                 .map(|(_, call)| call.runtime_name)
         }
 
-        pub fn find_static_method(
-            m: &StdlibMapping,
-            class: &str,
-            method: &str,
-        ) -> Option<&'static str> {
-            entries(m, class)
+        pub fn find_static_method(e: &[Entry], method: &str) -> Option<&'static str> {
+            e.iter()
                 .find(|(sig, _)| sig.method == method && sig.is_static)
                 .map(|(_, call)| call.runtime_name)
         }
 
-        pub fn find_constructor(m: &StdlibMapping, class: &str) -> Option<&'static str> {
-            entries(m, class)
+        pub fn find_constructor(e: &[Entry]) -> Option<&'static str> {
+            e.iter()
                 .find(|(sig, _)| sig.method == "new" && sig.is_constructor)
                 .map(|(_, call)| call.runtime_name)
         }
 
         pub fn find_constructor_with_params(
-            m: &StdlibMapping,
-            class: &str,
+            e: &[Entry],
             param_count: usize,
         ) -> Option<&'static str> {
-            entries(m, class)
+            e.iter()
                 .find(|(sig, call)| {
                     sig.method == "new" && sig.is_constructor && call.param_count == param_count
                 })
                 .map(|(_, call)| call.runtime_name)
         }
 
-        pub fn has_mapping(m: &StdlibMapping, class: &str, method: &str, is_static: bool) -> bool {
-            entries(m, class).any(|(sig, _)| sig.method == method && sig.is_static == is_static)
+        pub fn has_mapping(e: &[Entry], method: &str, is_static: bool) -> bool {
+            e.iter()
+                .any(|(sig, _)| sig.method == method && sig.is_static == is_static)
         }
 
-        pub fn is_stdlib_class(m: &StdlibMapping, class: &str) -> bool {
-            entries(m, class).next().is_some()
+        pub fn is_stdlib_class(e: &[Entry]) -> bool {
+            !e.is_empty()
         }
 
-        pub fn class_has_static_methods(m: &StdlibMapping, class: &str) -> bool {
-            entries(m, class).any(|(sig, _)| sig.is_static)
+        pub fn class_has_static_methods(e: &[Entry]) -> bool {
+            e.iter().any(|(sig, _)| sig.is_static)
         }
 
-        pub fn get_class_static_str(m: &StdlibMapping, class: &str) -> Option<&'static str> {
-            entries(m, class).map(|(sig, _)| sig.class).next()
+        pub fn get_class_static_str(e: &[Entry]) -> Option<&'static str> {
+            e.first().map(|(sig, _)| sig.class)
         }
 
-        pub fn is_mir_wrapper_class(m: &StdlibMapping, class: &str) -> bool {
-            entries(m, class).any(|(_, call)| call.is_mir_wrapper)
+        pub fn is_mir_wrapper_class(e: &[Entry]) -> bool {
+            e.iter().any(|(_, call)| call.is_mir_wrapper)
         }
     }
 
@@ -4914,9 +4910,10 @@ mod tests {
                 "alias closure for {spelling:?}"
             );
 
+            let entries = oracle::entries(&mapping, spelling);
             assert_eq!(
                 mapping.get_class_static_str(spelling),
-                oracle::get_class_static_str(&mapping, spelling),
+                oracle::get_class_static_str(&entries),
                 "get_class_static_str({spelling:?})"
             );
 
@@ -4931,27 +4928,27 @@ mod tests {
 
             assert_eq!(
                 mapping.is_stdlib_class(spelling),
-                oracle::is_stdlib_class(&mapping, spelling),
+                oracle::is_stdlib_class(&entries),
                 "is_stdlib_class({spelling:?})"
             );
             assert_eq!(
                 mapping.class_has_any_method(spelling),
-                oracle::is_stdlib_class(&mapping, spelling),
+                oracle::is_stdlib_class(&entries),
                 "class_has_any_method({spelling:?})"
             );
             assert_eq!(
                 mapping.class_has_static_methods(key),
-                oracle::class_has_static_methods(&mapping, spelling),
+                oracle::class_has_static_methods(&entries),
                 "class_has_static_methods({spelling:?})"
             );
             assert_eq!(
                 mapping.is_mir_wrapper_class(key),
-                oracle::is_mir_wrapper_class(&mapping, spelling),
+                oracle::is_mir_wrapper_class(&entries),
                 "is_mir_wrapper_class({spelling:?})"
             );
             assert_eq!(
                 mapping.find_constructor(key).map(|(_, c)| c.runtime_name),
-                oracle::find_constructor(&mapping, spelling),
+                oracle::find_constructor(&entries),
                 "find_constructor({spelling:?})"
             );
             for &arity in &arities {
@@ -4959,7 +4956,7 @@ mod tests {
                     mapping
                         .find_constructor_with_params(key, arity)
                         .map(|(_, c)| c.runtime_name),
-                    oracle::find_constructor_with_params(&mapping, spelling, arity),
+                    oracle::find_constructor_with_params(&entries, arity),
                     "find_constructor_with_params({spelling:?}, {arity})"
                 );
             }
@@ -4969,20 +4966,20 @@ mod tests {
                     mapping
                         .find_by_name(key, method)
                         .map(|(_, c)| c.runtime_name),
-                    oracle::find_by_name(&mapping, spelling, method),
+                    oracle::find_by_name(&entries, method),
                     "find_by_name({spelling:?}, {method:?})"
                 );
                 assert_eq!(
                     mapping
                         .find_static_method(key, method)
                         .map(|(_, c)| c.runtime_name),
-                    oracle::find_static_method(&mapping, spelling, method),
+                    oracle::find_static_method(&entries, method),
                     "find_static_method({spelling:?}, {method:?})"
                 );
                 for is_static in [true, false] {
                     assert_eq!(
                         mapping.has_mapping(key, method, is_static),
-                        oracle::has_mapping(&mapping, spelling, method, is_static),
+                        oracle::has_mapping(&entries, method, is_static),
                         "has_mapping({spelling:?}, {method:?}, {is_static})"
                     );
                 }
@@ -4991,7 +4988,7 @@ mod tests {
                         mapping
                             .find_by_name_and_params(key, method, arity)
                             .map(|(_, c)| c.runtime_name),
-                        oracle::find_by_name_and_params(&mapping, spelling, method, arity),
+                        oracle::find_by_name_and_params(&entries, method, arity),
                         "find_by_name_and_params({spelling:?}, {method:?}, {arity})"
                     );
                 }
