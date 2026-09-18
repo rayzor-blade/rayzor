@@ -129,7 +129,7 @@ pub mod dtype {
 pub mod host_abi {
     use super::TensorHandle;
 
-    extern "C" {
+    unsafe extern "C" {
         // -- Tensor lifecycle ---------------------------------------------
 
         /// Allocate a zero-initialised tensor with the given shape

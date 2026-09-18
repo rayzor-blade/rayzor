@@ -82,7 +82,7 @@ extern class PhpClass {
         assert_eq!(ast.declarations.len(), 6);
 
         // Check ArrayList
-        if let TypeDeclaration::Class(ref c) = &ast.declarations[0] {
+        if let TypeDeclaration::Class(c) = &ast.declarations[0] {
             assert_eq!(c.name, "ArrayList");
             let native_meta = c
                 .meta
@@ -97,7 +97,7 @@ extern class PhpClass {
         }
 
         // Check Dictionary with C# namespace
-        if let TypeDeclaration::Class(ref c) = &ast.declarations[1] {
+        if let TypeDeclaration::Class(c) = &ast.declarations[1] {
             assert_eq!(c.name, "Dictionary");
             let native_meta = c
                 .meta
@@ -112,7 +112,7 @@ extern class PhpClass {
         }
 
         // Check Console with window.console.log
-        if let TypeDeclaration::Class(ref c) = &ast.declarations[2] {
+        if let TypeDeclaration::Class(c) = &ast.declarations[2] {
             assert_eq!(c.name, "Console");
             let native_meta = c
                 .meta
@@ -127,7 +127,7 @@ extern class PhpClass {
         }
 
         // Check ComponentFactory with very long path
-        if let TypeDeclaration::Class(ref c) = &ast.declarations[3] {
+        if let TypeDeclaration::Class(c) = &ast.declarations[3] {
             assert_eq!(c.name, "ComponentFactory");
             let native_meta = c
                 .meta
@@ -169,7 +169,7 @@ extern class PhpClass {
         }
 
         // Check PHP class with backslashes
-        if let TypeDeclaration::Class(ref c) = &ast.declarations[5] {
+        if let TypeDeclaration::Class(c) = &ast.declarations[5] {
             assert_eq!(c.name, "PhpClass");
             let native_meta = c
                 .meta
@@ -216,7 +216,7 @@ extern class PhpClass {
         for (input, expected_native) in edge_cases {
             let ast = parse_haxe_file("edge_case.hx", input, false)
                 .unwrap_or_else(|_| panic!("Failed to parse: {}", input));
-            if let Some(TypeDeclaration::Class(ref c)) = ast.declarations.first() {
+            if let Some(TypeDeclaration::Class(c)) = ast.declarations.first() {
                 let native_meta = c
                     .meta
                     .iter()

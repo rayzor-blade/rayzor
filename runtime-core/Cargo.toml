@@ -1,7 +1,7 @@
 [package]
 name = "rayzor-runtime-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Architecture-portable compute kernels shared by rayzor-runtime (native) and rayzor-runtime-wasm. no_std + alloc."
 
 [lib]
