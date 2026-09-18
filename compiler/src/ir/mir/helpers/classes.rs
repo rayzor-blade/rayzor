@@ -154,6 +154,7 @@ impl<'a> HirToMirContext<'a> {
                             name: field_name,
                             ty: field_ir_type,
                             offset: None,
+                            shape: Default::default(),
                         });
 
                         *field_index += 1;
@@ -254,6 +255,7 @@ impl<'a> HirToMirContext<'a> {
                     .to_string(),
                 ty: self.convert_type(parent_field.ty),
                 offset: None,
+                shape: Default::default(),
             });
 
             *field_index += 1;

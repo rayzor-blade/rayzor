@@ -6132,6 +6132,9 @@ fn gep_pointee_size(ty: &IrType) -> i32 {
         }
     }
     match ty {
+        // `*u8` is a boxed `Null<T>` slot's type, not a byte pointer; the
+        // byte-buffer emitters spell theirs `*i8`.
+        IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 8,
         IrType::Ptr(inner) => size_of(inner),
         other => size_of(other),
     }

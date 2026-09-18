@@ -4443,12 +4443,13 @@ impl CraneliftBackend {
                     .get(&index_id)
                     .ok_or_else(|| format!("GEP index {:?} not found in value_map", index_id))?;
                 // Determine element size from the GEP type:
-                // - Byte-pointer types (*u8, *i8): elem_size=1, index is already a byte offset
-                // - Struct field types (*void, f64, i32, etc.): elem_size=8, all Rayzor
-                //   object field slots are uniformly 8 bytes (class_alloc_sizes = field_index * 8)
+                // - Byte-pointer type (*i8): elem_size=1, index is already a byte offset
+                // - Everything else, *u8 (a boxed `Null<T>` slot) included: elem_size=8,
+                //   all Rayzor object field slots are uniformly 8 bytes
+                //   (class_alloc_sizes = field_index * 8)
                 let elem_size: usize = match ty {
                     IrType::Ptr(inner) => match inner.as_ref() {
-                        IrType::U8 | IrType::I8 => 1,
+                        IrType::I8 => 1,
                         _ => 8,
                     },
                     _ => 8,
@@ -6020,7 +6021,7 @@ impl CraneliftBackend {
                     let instance_field_types: Vec<rayzor_runtime::type_system::ParamType> = fields
                         .iter()
                         .filter(|f| f.name != "__type_id")
-                        .map(|f| Self::ir_type_to_param_type(&f.ty))
+                        .map(Self::field_param_type)
                         .collect();
                     let static_fields = &typedef.static_fields;
                     // Map the super's raw TypeId to its deterministic registry id.
@@ -6084,11 +6085,8 @@ impl CraneliftBackend {
                     let variant_data: Vec<(String, usize, Vec<ParamType>)> = variants
                         .iter()
                         .map(|v| {
-                            let param_types: Vec<ParamType> = v
-                                .fields
-                                .iter()
-                                .map(|f| Self::ir_type_to_param_type(&f.ty))
-                                .collect();
+                            let param_types: Vec<ParamType> =
+                                v.fields.iter().map(Self::field_param_type).collect();
                             (v.name.clone(), v.fields.len(), param_types)
                         })
                         .collect();
@@ -6114,13 +6112,17 @@ impl CraneliftBackend {
     }
 
     /// Map MIR IrType to runtime ParamType for RTTI registration.
-    pub fn ir_type_to_param_type(ty: &IrType) -> rayzor_runtime::type_system::ParamType {
+    pub fn field_param_type(field: &crate::ir::IrField) -> rayzor_runtime::type_system::ParamType {
+        use crate::ir::IrFieldShape;
         use rayzor_runtime::type_system::ParamType;
-        match ty {
-            IrType::I32 | IrType::I64 => ParamType::Int,
-            IrType::F32 | IrType::F64 => ParamType::Float,
-            IrType::Bool => ParamType::Bool,
-            IrType::String => ParamType::String,
+        match (&field.ty, field.shape) {
+            (IrType::I32 | IrType::I64, _) => ParamType::Int,
+            (IrType::F32 | IrType::F64, _) => ParamType::Float,
+            (IrType::Bool, _) => ParamType::Bool,
+            (IrType::String, _) => ParamType::String,
+            (_, IrFieldShape::Class) => ParamType::Object,
+            (_, IrFieldShape::Array) => ParamType::Array,
+            (_, IrFieldShape::Anonymous) => ParamType::Anon,
             _ => ParamType::Dynamic,
         }
     }

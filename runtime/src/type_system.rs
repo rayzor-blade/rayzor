@@ -165,6 +165,8 @@ pub enum ParamType {
     String = 3,  // HaxeString pointer
     Object = 4,  // Generic pointer
     Dynamic = 5, // Unknown/generic type parameter — print as i64
+    Array = 6,   // HaxeArray pointer
+    Anon = 7,    // anonymous object handle
 }
 
 /// Enum variant metadata
@@ -1067,9 +1069,12 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
                 .copied()
                 .unwrap_or(ParamType::Dynamic);
             let equal = match param_type {
-                ParamType::Int | ParamType::Bool | ParamType::Object | ParamType::Dynamic => {
-                    va == vb
-                }
+                ParamType::Int
+                | ParamType::Bool
+                | ParamType::Object
+                | ParamType::Dynamic
+                | ParamType::Array
+                | ParamType::Anon => va == vb,
                 ParamType::Float => f64::from_bits(va as u64) == f64::from_bits(vb as u64),
                 ParamType::String => haxe_string_ptr_eq(va, vb),
             };
@@ -1459,9 +1464,11 @@ pub extern "C" fn haxe_enum_get_parameters(
                     ParamType::Float => haxe_box_float_ptr(f64::from_bits(raw_val as u64)),
                     ParamType::Bool => haxe_box_bool_ptr(raw_val != 0),
                     // String and Object fields are already pointers, pass through
-                    ParamType::String | ParamType::Object | ParamType::Dynamic => {
-                        haxe_box_int_ptr(raw_val)
-                    }
+                    ParamType::String
+                    | ParamType::Object
+                    | ParamType::Dynamic
+                    | ParamType::Array
+                    | ParamType::Anon => haxe_box_int_ptr(raw_val),
                 };
                 crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
             }
@@ -1848,7 +1855,7 @@ pub extern "C" fn haxe_trace_enum_boxed(type_id: u32, ptr: *const u8) {
                             }
                         }
                     }
-                    ParamType::Object => {
+                    ParamType::Object | ParamType::Array | ParamType::Anon => {
                         let val = *(field_ptr as *const i64);
                         print!("<object@0x{:x}>", val);
                     }
@@ -1943,7 +1950,7 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
                             }
                         }
                     }
-                    ParamType::Object | ParamType::Dynamic => {
+                    ParamType::Object | ParamType::Dynamic | ParamType::Array | ParamType::Anon => {
                         let val = *(field_ptr as *const i64);
                         print!("{}", val);
                     }
@@ -3350,6 +3357,10 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
             haxe_box_reference_ptr(p, tag)
         }
         ParamType::Dynamic => haxe_box_int_ptr(value as i64),
+        ParamType::Array => haxe_box_reference_ptr(value as *mut u8, crate::json::TYPE_ARRAY.0),
+        ParamType::Anon => {
+            haxe_box_reference_ptr(value as *mut u8, crate::anon_object::TYPE_ANON_OBJECT.0)
+        }
     }
 }
 

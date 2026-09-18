@@ -44,6 +44,7 @@ impl<'a> HirToMirContext<'a> {
             name: "__type_id".to_string(),
             ty: IrType::I64,
             offset: None,
+            shape: Default::default(),
         });
         let mut field_index = 1u32; // User fields start at index 1
         let mut own_instance_fields = Vec::new();
@@ -181,6 +182,7 @@ impl<'a> HirToMirContext<'a> {
                     .to_string(),
                 ty: self.convert_type(field.ty),
                 offset: None,
+                shape: self.field_shape(field.ty),
             });
 
             field_index += 1;
@@ -714,6 +716,7 @@ impl<'a> HirToMirContext<'a> {
                     varargs: false,
                 })),
                 offset: None,
+                shape: Default::default(),
             })
             .collect();
 
@@ -852,6 +855,7 @@ impl<'a> HirToMirContext<'a> {
                             name: field_name,
                             ty: self.convert_type(f.type_id),
                             offset: Some((idx * 8) as u32), // 8 bytes per field
+                            shape: Default::default(),
                         }
                     })
                     .collect();

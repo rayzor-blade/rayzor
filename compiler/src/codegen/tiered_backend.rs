@@ -2836,7 +2836,7 @@ impl TieredBackend {
                         let param_types: Vec<ParamType> = v
                             .fields
                             .iter()
-                            .map(|f| CraneliftBackend::ir_type_to_param_type(&f.ty))
+                            .map(CraneliftBackend::field_param_type)
                             .collect();
                         (v.name.clone(), v.fields.len(), param_types)
                     })
@@ -2888,7 +2888,7 @@ impl TieredBackend {
                 let instance_field_types: Vec<rayzor_runtime::type_system::ParamType> = fields
                     .iter()
                     .filter(|f| f.name != "__type_id")
-                    .map(|f| CraneliftBackend::ir_type_to_param_type(&f.ty))
+                    .map(CraneliftBackend::field_param_type)
                     .collect();
                 let static_fields = &typedef.static_fields;
 

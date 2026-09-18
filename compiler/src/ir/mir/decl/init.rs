@@ -570,6 +570,7 @@ impl<'a> HirToMirContext<'a> {
                         name: field_name,
                         ty: self.convert_type(field.ty),
                         offset: None,
+                        shape: Default::default(),
                     }
                 })
                 .collect();

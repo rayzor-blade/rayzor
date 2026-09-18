@@ -349,7 +349,11 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
             // different ABI but rayzor is 64-bit-only today.
             value as u64
         }
-        ParamType::String | ParamType::Object | ParamType::Dynamic => value as u64,
+        ParamType::String
+        | ParamType::Object
+        | ParamType::Dynamic
+        | ParamType::Array
+        | ParamType::Anon => value as u64,
     }
 }
 

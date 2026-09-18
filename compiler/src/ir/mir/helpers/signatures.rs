@@ -515,19 +515,27 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Dynamic -> scalar is the inverse, with the rule a Let
-                    // applies: the callee reads its formal raw. Reference
-                    // formals are left alone -- a Dynamic-typed expression
-                    // can still hold a raw object pointer (an inlined call's
-                    // result does), and unboxing one reads its header.
-                    let param_is_scalar = {
+                    // Dynamic -> concrete is the inverse, with the rule a Let
+                    // applies: the callee reads its formal raw. A scalar formal
+                    // always unboxes; a String, Array or anonymous formal
+                    // unboxes by tag, which leaves a raw one alone (none begins
+                    // with its tag). Class formals are left as they are -- a
+                    // Dynamic-typed expression can hold a raw object pointer
+                    // (an inlined call's result does), and a class box is not
+                    // distinguishable from one.
+                    let param_unboxes = {
                         let type_table = self.type_table;
                         matches!(
                             type_table.get(resolved_param).map(|t| &t.kind),
-                            Some(TypeKind::Int) | Some(TypeKind::Float) | Some(TypeKind::Bool)
+                            Some(TypeKind::Int)
+                                | Some(TypeKind::Float)
+                                | Some(TypeKind::Bool)
+                                | Some(TypeKind::String)
+                                | Some(TypeKind::Array { .. })
+                                | Some(TypeKind::Anonymous { .. })
                         )
                     };
-                    if param_is_scalar {
+                    if param_unboxes {
                         if let Some(unboxed) =
                             self.maybe_unbox_value(arg_reg, resolved_arg, resolved_param)
                         {

@@ -922,7 +922,7 @@ impl CBackend {
                     // Fallback: generic pointer arithmetic
                     let elem_size = match ty {
                         IrType::Ptr(inner) => match inner.as_ref() {
-                            IrType::U8 | IrType::I8 => 1,
+                            IrType::I8 => 1,
                             _ => 8,
                         },
                         _ => 8,

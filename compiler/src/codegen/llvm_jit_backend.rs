@@ -4055,17 +4055,15 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 };
 
                 // Match Cranelift/interpreter GEP semantics EXACTLY:
-                // - Ptr(U8|I8) uses 1-byte addressing
-                // - everything else — including Ref(U8|I8) — is addressed in
-                //   8-byte slots (all Rayzor object field slots are uniformly
-                //   8 bytes; class_alloc_sizes = field_index * 8)
-                // Including Ref in the byte case diverged from the other two
-                // tiers: a Ref(U8)-typed GEP with slot indices compiled to
-                // byte offsets 1/2/3 instead of 8/16/24, leaving object
-                // headers uninitialized on the LLVM tier only.
+                // - Ptr(I8) uses 1-byte addressing (the byte-buffer emitters
+                //   all spell it that way)
+                // - everything else — Ptr(U8), a boxed `Null<T>` slot's type,
+                //   included — is addressed in 8-byte slots (all Rayzor object
+                //   field slots are uniformly 8 bytes; class_alloc_sizes =
+                //   field_index * 8)
                 let elem_size: u64 = match ty {
                     crate::ir::IrType::Ptr(inner) => match inner.as_ref() {
-                        crate::ir::IrType::U8 | crate::ir::IrType::I8 => 1,
+                        crate::ir::IrType::I8 => 1,
                         _ => 8,
                     },
                     _ => 8,

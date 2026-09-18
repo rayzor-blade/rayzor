@@ -109,6 +109,25 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The reference kind of a field slot, for reflection; the IrType of
+    /// every reference type is `*void`. Aliases and `Null<T>` see through.
+    pub(crate) fn field_shape(&self, type_id: TypeId) -> crate::ir::IrFieldShape {
+        use crate::ir::IrFieldShape;
+        use crate::tast::TypeKind;
+        let mut cur = type_id;
+        for _ in 0..4 {
+            match self.type_table.get(cur).map(|t| &t.kind) {
+                Some(TypeKind::Class { .. }) => return IrFieldShape::Class,
+                Some(TypeKind::Array { .. }) => return IrFieldShape::Array,
+                Some(TypeKind::Anonymous { .. }) => return IrFieldShape::Anonymous,
+                Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
+                Some(TypeKind::Optional { inner_type }) => cur = *inner_type,
+                _ => return IrFieldShape::Unknown,
+            }
+        }
+        IrFieldShape::Unknown
+    }
+
     pub(crate) fn convert_type(&self, type_id: TypeId) -> IrType {
         use crate::tast::TypeKind;
 

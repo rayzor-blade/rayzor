@@ -1061,11 +1061,18 @@ impl<'a> HirToMirContext<'a> {
             else {
                 continue;
             };
-            let field_ty = self
+            let field_type_id = self
                 .symbol_table
                 .get_symbol(field_init.field)
-                .map(|s| self.convert_type(s.type_id))
+                .map(|s| s.type_id);
+            let field_ty = field_type_id
+                .map(|t| self.convert_type(t))
                 .unwrap_or(IrType::I32);
+            // The slot takes what an assignment would store: a `Null<Int>`
+            // field holds a box, not the raw scalar.
+            let value_reg = field_type_id
+                .and_then(|t| self.maybe_box_value(value_reg, field_init.value.ty, t))
+                .unwrap_or(value_reg);
             if let Some(field_ptr) = self
                 .builder
                 .build_gep(this_reg, vec![index_const], field_ty)

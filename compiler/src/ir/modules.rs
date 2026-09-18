@@ -166,6 +166,17 @@ pub enum IrTypeDefinition {
     Opaque,
 }
 
+/// What a reflective read of a slot hands back, where the IrType cannot
+/// say: every reference type lowers to `*void`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrFieldShape {
+    #[default]
+    Unknown,
+    Class,
+    Array,
+    Anonymous,
+}
+
 /// Struct field
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrField {
@@ -177,6 +188,9 @@ pub struct IrField {
 
     /// Field offset (computed during layout)
     pub offset: Option<u32>,
+
+    #[serde(default)]
+    pub shape: IrFieldShape,
 }
 
 /// Enum variant
