@@ -1172,6 +1172,63 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Register each class's own `toString` for `Std.string` of an
+        // instance held as Dynamic. Locally compiled methods only, as above,
+        // and not in the standard library: a reference from here keeps the
+        // method's callees live, and the selective import merge does not
+        // carry every stdlib callee's body (Int64's `copy`).
+        let in_stdlib = self.builder.module.source_file.contains("haxe-std");
+        let register_to_string_fn = self.get_or_register_extern_function(
+            "haxe_type_register_to_string",
+            vec![IrType::I64, IrType::I64],
+            IrType::Void,
+        );
+        let classes: Vec<(TypeId, SymbolId)> = self
+            .class_type_to_symbol
+            .iter()
+            .map(|(t, s)| (*t, *s))
+            .collect();
+        for (_class_ty, class_sym) in classes {
+            if in_stdlib {
+                break;
+            }
+            let Some(class_qn) = self.symbol_table.get_symbol(class_sym).and_then(|sym| {
+                sym.qualified_name
+                    .or(Some(sym.name))
+                    .and_then(|n| self.string_interner.get(n))
+                    .map(str::to_owned)
+            }) else {
+                continue;
+            };
+            let wanted = format!("{class_qn}.toString");
+            let func_id = self
+                .builder
+                .module
+                .functions
+                .values()
+                .find(|f| {
+                    f.qualified_name.as_deref() == Some(wanted.as_str())
+                        && !f.cfg.blocks.is_empty()
+                        && f.signature.parameters.len() == 1
+                })
+                .map(|f| f.id);
+            let Some(func_id) = func_id else {
+                continue;
+            };
+            let Some(stable_id) = self.deterministic_class_type_id(class_sym) else {
+                continue;
+            };
+            let type_id_reg = self.builder.build_const(IrValue::I64(stable_id as i64));
+            let fn_ptr = self.builder.build_function_ref(func_id);
+            if let (Some(tid), Some(fptr)) = (type_id_reg, fn_ptr) {
+                self.builder.build_call_direct(
+                    register_to_string_fn,
+                    vec![tid, fptr],
+                    IrType::Void,
+                );
+            }
+        }
+
         // Register constructor closure pointers for Type.createInstance.
         let ctor_wrappers = self.constructor_reflect_wrappers.clone();
         for (class_type_id, wrapper_func_id) in ctor_wrappers {

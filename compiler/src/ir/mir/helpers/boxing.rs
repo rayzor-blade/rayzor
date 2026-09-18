@@ -646,6 +646,14 @@ impl<'a> HirToMirContext<'a> {
         let (value_is_dynamic, target_kind_cloned) = {
             let type_table = self.type_table;
             let value_kind = type_table.get(value_ty).map(|t| &t.kind);
+            // A typedef of a structure unboxes as the structure.
+            let mut target_ty = target_ty;
+            for _ in 0..4 {
+                match type_table.get(target_ty).map(|t| &t.kind) {
+                    Some(TypeKind::TypeAlias { target_type, .. }) => target_ty = *target_type,
+                    _ => break,
+                }
+            }
             let target_kind = type_table.get(target_ty).map(|t| t.kind.clone());
 
             let value_is_optional_scalar = match value_kind {

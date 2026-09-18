@@ -353,7 +353,8 @@ unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
         | ParamType::Object
         | ParamType::Dynamic
         | ParamType::Array
-        | ParamType::Anon => value as u64,
+        | ParamType::Anon
+        | ParamType::Boxed => value as u64,
     }
 }
 
@@ -825,8 +826,8 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
         if dv.type_id == anon_object::TYPE_ANON_OBJECT {
             return TVALUETYPE_TOBJECT;
         }
-        if dv.type_id == TYPE_STRING {
-            // Haxe treats String as a class
+        if dv.type_id == TYPE_STRING || dv.type_id == TYPE_ARRAY {
+            // Haxe treats String and Array as classes
             return TVALUETYPE_TCLASS;
         }
 

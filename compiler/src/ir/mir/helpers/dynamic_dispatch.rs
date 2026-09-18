@@ -74,6 +74,49 @@ impl<'a> HirToMirContext<'a> {
         out.unwrap_or(reg)
     }
 
+    /// A runtime-backed stdlib method declared to return `Dynamic` returns a
+    /// box (`Reflect.field`, `Reflect.getProperty`): the register is marked
+    /// so a binding does not take it for a raw anonymous handle.
+    pub(crate) fn note_dynamic_stdlib_result(&mut self, expr: &HirExpr, reg: IrId) {
+        let HirExprKind::Call { target, .. } = &expr.kind else {
+            return;
+        };
+        let (class, method) = match target {
+            crate::ir::hir::CallTarget::Static { class, method } => (*class, *method),
+            _ => return,
+        };
+        if !matches!(
+            self.builder.get_register_type(reg),
+            Some(IrType::Ptr(ref inner)) if matches!(**inner, IrType::U8)
+        ) {
+            return;
+        }
+        let Some(class_name) = self
+            .symbol_table
+            .get_symbol(class)
+            .and_then(|s| self.string_interner.get(s.name))
+        else {
+            return;
+        };
+        if !self.stdlib_mapping.is_stdlib_class(class_name) {
+            return;
+        }
+        let declared_dynamic = self
+            .symbol_table
+            .get_symbol(method)
+            .and_then(|s| self.type_table.get(s.type_id))
+            .is_some_and(|t| match &t.kind {
+                TypeKind::Function { return_type, .. } => matches!(
+                    self.type_table.get(*return_type).map(|r| &r.kind),
+                    Some(TypeKind::Dynamic)
+                ),
+                _ => false,
+            });
+        if declared_dynamic {
+            self.boxed_value_regs.insert(reg);
+        }
+    }
+
     /// The closure inside a function box held in a Dynamic, for an indirect
     /// call; any other register is returned as it is.
     pub(crate) fn unbox_dynamic_function(&mut self, reg: IrId, callee: &HirExpr) -> IrId {

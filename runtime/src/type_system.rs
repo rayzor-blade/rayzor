@@ -167,6 +167,7 @@ pub enum ParamType {
     Dynamic = 5, // Unknown/generic type parameter — print as i64
     Array = 6,   // HaxeArray pointer
     Anon = 7,    // anonymous object handle
+    Boxed = 8,   // DynamicValue pointer or null (a `Null<scalar>` slot)
 }
 
 /// Enum variant metadata
@@ -881,6 +882,44 @@ pub extern "C" fn haxe_type_register_constructor(type_id: i64, ctor_closure_ptr:
     map.insert(type_id as u32, ctor_closure_ptr);
 }
 
+/// The class's own `toString()`, `fn(this) -> HaxeString*`, keyed by the
+/// class id the object header carries; `Std.string` of a class instance
+/// calls it. A class without one prints its name.
+static TO_STRING_REGISTRY: RwLock<Option<HashMap<u32, usize>>> = RwLock::new(None);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_type_register_to_string(type_id: i64, fn_ptr: i64) {
+    if type_id <= 0 || fn_ptr == 0 {
+        return;
+    }
+    let mut registry = TO_STRING_REGISTRY.write().unwrap();
+    let map = registry.get_or_insert_with(HashMap::new);
+    map.insert(type_id as u32, fn_ptr as usize);
+}
+
+/// `Std.string` of a class instance: its `toString()` if it declares one,
+/// else the class name.
+fn class_instance_to_string(type_id: u32, obj: *mut u8) -> *mut crate::haxe_string::HaxeString {
+    let to_string = {
+        let registry = TO_STRING_REGISTRY.read().unwrap();
+        registry.as_ref().and_then(|m| m.get(&type_id).copied())
+    };
+    // A `fn_ref` is a closure record `[fn_ptr, env]`; a class method takes
+    // no env, so only the code address is used.
+    if let Some(closure) = to_string.filter(|c| *c >= 0x1000 && c & 7 == 0) {
+        let code = unsafe { *(closure as *const usize) };
+        if code != 0 {
+            let f: extern "C" fn(*mut u8) -> *mut crate::haxe_string::HaxeString =
+                unsafe { std::mem::transmute(code) };
+            return f(obj);
+        }
+    }
+    let name = get_type_info(TypeId(type_id))
+        .map(|ti| ti.name)
+        .unwrap_or("<object>");
+    unsafe { alloc_haxe_string(name) as *mut crate::haxe_string::HaxeString }
+}
+
 /// Type.createInstance(c, args) -> T
 /// Allocates an object, then invokes its registered constructor wrapper.
 #[unsafe(no_mangle)]
@@ -1074,7 +1113,8 @@ pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
                 | ParamType::Object
                 | ParamType::Dynamic
                 | ParamType::Array
-                | ParamType::Anon => va == vb,
+                | ParamType::Anon
+                | ParamType::Boxed => va == vb,
                 ParamType::Float => f64::from_bits(va as u64) == f64::from_bits(vb as u64),
                 ParamType::String => haxe_string_ptr_eq(va, vb),
             };
@@ -1468,7 +1508,8 @@ pub extern "C" fn haxe_enum_get_parameters(
                     | ParamType::Object
                     | ParamType::Dynamic
                     | ParamType::Array
-                    | ParamType::Anon => haxe_box_int_ptr(raw_val),
+                    | ParamType::Anon
+                    | ParamType::Boxed => haxe_box_int_ptr(raw_val),
                 };
                 crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
             }
@@ -1785,90 +1826,85 @@ pub extern "C" fn haxe_trace_enum(type_id: i64, discriminant: i64) {
     }
 }
 
+/// `VariantName` or `VariantName(p1, p2)` for a heap enum value with the
+/// layout `[tag:i32][pad:i32][field0:i64][field1:i64]...`.
+fn format_enum_boxed(type_id: u32, ptr: *const u8) -> String {
+    if ptr.is_null() {
+        return "null".to_string();
+    }
+    unsafe {
+        let tag = *(ptr as *const i32);
+        let Some(variant_info) = get_enum_variant_info(TypeId(type_id), tag as i64) else {
+            return format!("<enum {}::{}>", type_id, tag);
+        };
+        let mut out = String::from(variant_info.name);
+        if variant_info.param_count == 0 {
+            return out;
+        }
+        out.push('(');
+        for i in 0..variant_info.param_count {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let field_ptr = ptr.add(8 + i * 8);
+            let param_type = variant_info
+                .param_types
+                .get(i)
+                .copied()
+                .unwrap_or(ParamType::Int);
+            match param_type {
+                ParamType::Int | ParamType::Dynamic => {
+                    out.push_str(&(*(field_ptr as *const i64)).to_string())
+                }
+                ParamType::Float => out.push_str(&(*(field_ptr as *const f64)).to_string()),
+                ParamType::Bool => out.push_str(&(*(field_ptr as *const i64) != 0).to_string()),
+                ParamType::String => {
+                    let str_ptr = *(field_ptr as *const *const crate::haxe_string::HaxeString);
+                    if str_ptr.is_null() {
+                        out.push_str("null");
+                    } else {
+                        let haxe_str = &*str_ptr;
+                        let bytes =
+                            std::slice::from_raw_parts(haxe_str.ptr as *const u8, haxe_str.len);
+                        match std::str::from_utf8(bytes) {
+                            Ok(s) => out.push_str(s),
+                            Err(_) => out.push_str("<invalid utf8>"),
+                        }
+                    }
+                }
+                ParamType::Object | ParamType::Array | ParamType::Anon | ParamType::Boxed => {
+                    let val = *(field_ptr as *const i64);
+                    out.push_str(&format!("<object@0x{:x}>", val));
+                }
+            }
+        }
+        out.push(')');
+        out
+    }
+}
+
 /// Trace a boxed enum value (heap-allocated with parameters)
 /// Memory layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
 /// Prints "VariantName(param1, param2, ...)" format
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_trace_enum_boxed(type_id: u32, ptr: *const u8) {
-    if ptr.is_null() {
-        println!("null");
-        return;
-    }
+    println!("{}", format_enum_boxed(type_id, ptr));
+}
 
-    unsafe {
-        // Read tag (discriminant) from offset 0
-        let tag = *(ptr as *const i32);
+/// `Std.string` of a heap enum value, as a HaxeString.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_to_string_boxed(type_id: u32, ptr: *const u8) -> *mut u8 {
+    unsafe { alloc_haxe_string(&format_enum_boxed(type_id, ptr)) }
+}
 
-        // Look up variant info from RTTI
-        let variant_info = match get_enum_variant_info(TypeId(type_id), tag as i64) {
-            Some(info) => info,
-            None => {
-                // Fallback if enum not registered
-                println!("<enum {}::{}>", type_id, tag);
-                return;
-            }
-        };
-
-        let variant_name = variant_info.name;
-        let param_count = variant_info.param_count;
-        let param_types = variant_info.param_types;
-
-        if param_count == 0 {
-            println!("{}", variant_name);
-        } else {
-            print!("{}(", variant_name);
-            for i in 0..param_count {
-                if i > 0 {
-                    print!(", ");
-                }
-                // Read field at offset 8 + i * 8
-                let field_ptr = ptr.add(8 + i * 8);
-
-                // Get param type (default to Int if not available)
-                let param_type = param_types.get(i).copied().unwrap_or(ParamType::Int);
-
-                match param_type {
-                    ParamType::Int => {
-                        let val = *(field_ptr as *const i64);
-                        print!("{}", val);
-                    }
-                    ParamType::Float => {
-                        let val = *(field_ptr as *const f64);
-                        print!("{}", val);
-                    }
-                    ParamType::Bool => {
-                        let val = *(field_ptr as *const i64) != 0;
-                        print!("{}", val);
-                    }
-                    ParamType::String => {
-                        // Field is a pointer to HaxeString
-                        let str_ptr = *(field_ptr as *const *const crate::haxe_string::HaxeString);
-                        if str_ptr.is_null() {
-                            print!("null");
-                        } else {
-                            let haxe_str = &*str_ptr;
-                            let bytes =
-                                std::slice::from_raw_parts(haxe_str.ptr as *const u8, haxe_str.len);
-                            match std::str::from_utf8(bytes) {
-                                Ok(s) => print!("\"{}\"", s),
-                                Err(_) => print!("<invalid utf8>"),
-                            }
-                        }
-                    }
-                    ParamType::Object | ParamType::Array | ParamType::Anon => {
-                        let val = *(field_ptr as *const i64);
-                        print!("<object@0x{:x}>", val);
-                    }
-                    ParamType::Dynamic => {
-                        // Generic type parameter — print raw i64 value
-                        let val = *(field_ptr as *const i64);
-                        print!("{}", val);
-                    }
-                }
-            }
-            println!(")");
-        }
-    }
+/// `Std.string` of a plain enum value (a discriminant), as a HaxeString.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_to_string(type_id: i64, discriminant: i64) -> *mut u8 {
+    let text = match get_enum_variant_name(TypeId(type_id as u32), discriminant) {
+        Some(name) => name.to_string(),
+        None => discriminant.to_string(),
+    };
+    unsafe { alloc_haxe_string(&text) }
 }
 
 /// Trace a boxed enum value with explicit param types from type inference.
@@ -1950,7 +1986,11 @@ pub extern "C" fn haxe_trace_enum_boxed_typed(
                             }
                         }
                     }
-                    ParamType::Object | ParamType::Dynamic | ParamType::Array | ParamType::Anon => {
+                    ParamType::Object
+                    | ParamType::Dynamic
+                    | ParamType::Array
+                    | ParamType::Anon
+                    | ParamType::Boxed => {
                         let val = *(field_ptr as *const i64);
                         print!("{}", val);
                     }
@@ -2346,6 +2386,9 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
 
         // Look up type info and call toString, then convert to HaxeString
         if let Some(type_info) = get_type_info(dynamic.type_id) {
+            if type_info.class_info.is_some() {
+                return class_instance_to_string(dynamic.type_id.0, dynamic.value_ptr);
+            }
             let str_ptr = (type_info.to_string)(dynamic.value_ptr);
             // Convert StringPtr to HaxeString (adding cap=0)
             Box::into_raw(Box::new(HaxeString {
@@ -3361,6 +3404,7 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
         ParamType::Anon => {
             haxe_box_reference_ptr(value as *mut u8, crate::anon_object::TYPE_ANON_OBJECT.0)
         }
+        ParamType::Boxed => value as *mut u8,
     }
 }
 

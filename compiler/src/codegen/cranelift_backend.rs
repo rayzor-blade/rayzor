@@ -6123,6 +6123,7 @@ impl CraneliftBackend {
             (_, IrFieldShape::Class) => ParamType::Object,
             (_, IrFieldShape::Array) => ParamType::Array,
             (_, IrFieldShape::Anonymous) => ParamType::Anon,
+            (_, IrFieldShape::Boxed) => ParamType::Boxed,
             _ => ParamType::Dynamic,
         }
     }

@@ -855,7 +855,13 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Variable { .. } => self.lower_variable_expr(expr),
             HirExprKind::Field { .. } => self.lower_field_expr(expr),
             HirExprKind::Index { .. } => self.lower_index_expr(expr),
-            HirExprKind::Call { .. } => self.lower_call(expr),
+            HirExprKind::Call { .. } => {
+                let reg = self.lower_call(expr);
+                if let Some(reg) = reg {
+                    self.note_dynamic_stdlib_result(expr, reg);
+                }
+                reg
+            }
             HirExprKind::New { .. } => self.lower_new(expr),
             HirExprKind::Unary { .. } => self.lower_unary(expr),
             HirExprKind::Binary { .. } => self.lower_binary(expr),

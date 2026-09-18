@@ -604,6 +604,40 @@ impl<'a> HirToMirContext<'a> {
                 let arg_ty = self.resolve_expr_type_id(&args[0]);
                 Some(self.convert_to_string_with_hint(reg, &reg_ty, Some(arg_ty)))
             }
+            // `Sys.print(v)` / `Sys.println(v)` take a Dynamic and print
+            // `Std.string(v)`; the runtime functions take a String.
+            "haxe_string_print" | "haxe_string_println" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                let arg_ty = self.resolve_expr_type_id(&args[0]);
+                if matches!(
+                    self.type_table.get(arg_ty).map(|t| &t.kind),
+                    Some(TypeKind::String)
+                ) {
+                    return None;
+                }
+                let reg = self.lower_expression(&args[0])?;
+                let text = if self.expr_is_value_type_expr(&args[0]) {
+                    self.convert_value_type_to_string(reg)?
+                } else {
+                    let reg_ty = self
+                        .builder
+                        .get_register_type(reg)
+                        .unwrap_or(IrType::Ptr(Box::new(IrType::Void)));
+                    self.convert_to_string_with_hint(reg, &reg_ty, Some(arg_ty))?
+                };
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let text = self.builder.build_bitcast(text, ptr_void.clone())?;
+                let func_id = self.get_or_register_extern_function(
+                    runtime_func,
+                    vec![ptr_void],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(func_id, vec![text], IrType::Void);
+                Some(None)
+            }
             // These inspect the DynamicValue type_id tag, which raw function/class
             // pointers lack, so the argument is boxed. Register type Ptr(U8) is not a
             // usable shortcut — raw closure and class pointers share it without being

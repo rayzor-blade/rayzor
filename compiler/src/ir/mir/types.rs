@@ -121,7 +121,15 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::Array { .. }) => return IrFieldShape::Array,
                 Some(TypeKind::Anonymous { .. }) => return IrFieldShape::Anonymous,
                 Some(TypeKind::TypeAlias { target_type, .. }) => cur = *target_type,
-                Some(TypeKind::Optional { inner_type }) => cur = *inner_type,
+                Some(TypeKind::Optional { inner_type }) => {
+                    if matches!(
+                        self.type_table.get(*inner_type).map(|t| &t.kind),
+                        Some(TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                    ) {
+                        return IrFieldShape::Boxed;
+                    }
+                    cur = *inner_type;
+                }
                 _ => return IrFieldShape::Unknown,
             }
         }
@@ -595,6 +603,43 @@ impl<'a> HirToMirContext<'a> {
         // Check HIR type for Array (maps to Ptr(Void) in MIR, indistinguishable from Dynamic)
         if let Some(type_id) = hir_type_id {
             let type_kind = self.type_table.get(type_id).map(|ti| ti.kind.clone());
+            // An enum is an i64 in MIR: a heap pointer when a variant carries
+            // parameters, else the discriminant. Its name comes from the RTTI.
+            if let Some(TypeKind::Enum { symbol_id, .. }) = type_kind.as_ref() {
+                if self.symbol_table.get_symbol(*symbol_id).is_some() {
+                    let string_ptr = IrType::Ptr(Box::new(IrType::String));
+                    let enum_type_id = self.enum_runtime_id(*symbol_id);
+                    let as_i64 = if matches!(from_type, IrType::I64) {
+                        value
+                    } else {
+                        self.builder.build_bitcast(value, IrType::I64)?
+                    };
+                    return if self.enum_is_boxed(*symbol_id) {
+                        let tid = self.builder.build_const(IrValue::U32(enum_type_id))?;
+                        let ptr = self
+                            .builder
+                            .build_bitcast(as_i64, IrType::Ptr(Box::new(IrType::I8)))?;
+                        let f = self.get_or_register_extern_function(
+                            "haxe_enum_to_string_boxed",
+                            vec![IrType::U32, IrType::Ptr(Box::new(IrType::I8))],
+                            string_ptr.clone(),
+                        );
+                        self.builder
+                            .build_call_direct(f, vec![tid, ptr], string_ptr)
+                    } else {
+                        let tid = self
+                            .builder
+                            .build_const(IrValue::I64(enum_type_id as i64))?;
+                        let f = self.get_or_register_extern_function(
+                            "haxe_enum_to_string",
+                            vec![IrType::I64, IrType::I64],
+                            string_ptr.clone(),
+                        );
+                        self.builder
+                            .build_call_direct(f, vec![tid, as_i64], string_ptr)
+                    };
+                }
+            }
             if let Some(TypeKind::Array { element_type }) = type_kind.as_ref() {
                 // The untyped formatter guesses what a raw slot holds and
                 // reads 0 as `null`, so `[0, 2, 4]` printed `[null, 2, 4]`.

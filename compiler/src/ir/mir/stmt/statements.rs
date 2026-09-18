@@ -291,10 +291,30 @@ impl<'a> HirToMirContext<'a> {
                                     self.builder.get_register_type(value_reg),
                                     Some(IrType::Ptr(ref inner)) if matches!(**inner, IrType::U8)
                                 );
-                                // A register known to hold a box is not a raw handle.
+                                // A register known to hold a box is not a raw handle --
+                                // unless the binding is typed as a structure, in which
+                                // case the unbox below yields one whose shape nothing
+                                // here knows (a parsed JSON object), so it reads by name.
+                                let target_is_structure = {
+                                    let tt = self.type_table;
+                                    let mut t = target_ty;
+                                    for _ in 0..4 {
+                                        match tt.get(t).map(|ti| &ti.kind) {
+                                            Some(TypeKind::TypeAlias { target_type, .. }) => {
+                                                t = *target_type
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    matches!(
+                                        tt.get(t).map(|ti| &ti.kind),
+                                        Some(TypeKind::Anonymous { .. })
+                                    )
+                                };
                                 if is_dynamic_init
                                     && is_ptr_u8
-                                    && !self.boxed_value_regs.contains(&value_reg)
+                                    && (!self.boxed_value_regs.contains(&value_reg)
+                                        || target_is_structure)
                                 {
                                     self.raw_anon_symbols.insert(*symbol);
                                 }
