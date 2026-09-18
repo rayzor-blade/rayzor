@@ -639,11 +639,11 @@ mod tests {
 
         // Multiple threads generating IDs concurrently
         for _ in 0..4 {
-            let gen = Arc::clone(&generator);
+            let r#gen = Arc::clone(&generator);
             let handle = thread::spawn(move || {
                 let mut ids = Vec::new();
                 for _ in 0..100 {
-                    ids.push(gen.next());
+                    ids.push(r#gen.next());
                 }
                 ids
             });
