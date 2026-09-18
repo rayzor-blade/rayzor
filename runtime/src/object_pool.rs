@@ -473,6 +473,8 @@ mod tests {
         rayzor_object_free(b);
     }
 
+    // Without a pool the free goes to libc, which may hand the address back.
+    #[cfg(unix)]
     #[test]
     fn frees_a_foreign_pointer_without_touching_the_pool() {
         let _g = pooled();
