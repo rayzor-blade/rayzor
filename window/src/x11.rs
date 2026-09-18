@@ -213,94 +213,96 @@ fn x11() -> Option<&'static X11Lib> {
 }
 
 unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
-    macro_rules! load_sym {
-        ($name:ident, $ty:ty) => {{
-            let sym = libc::dlsym(
-                lib,
-                concat!(stringify!($name), "\0").as_ptr() as *const c_char,
-            );
-            if sym.is_null() {
-                eprintln!(
-                    "[rayzor-window] Failed to load X11 symbol: {}",
-                    stringify!($name)
+    unsafe {
+        macro_rules! load_sym {
+            ($name:ident, $ty:ty) => {{
+                let sym = libc::dlsym(
+                    lib,
+                    concat!(stringify!($name), "\0").as_ptr() as *const c_char,
                 );
-                return None;
-            }
-            std::mem::transmute::<*mut c_void, $ty>(sym)
-        }};
+                if sym.is_null() {
+                    eprintln!(
+                        "[rayzor-window] Failed to load X11 symbol: {}",
+                        stringify!($name)
+                    );
+                    return None;
+                }
+                std::mem::transmute::<*mut c_void, $ty>(sym)
+            }};
+        }
+
+        let x11lib = X11Lib {
+            _lib: lib,
+            XOpenDisplay: load_sym!(XOpenDisplay, unsafe extern "C" fn(*const c_char) -> Display),
+            XCloseDisplay: load_sym!(XCloseDisplay, unsafe extern "C" fn(Display) -> i32),
+            XCreateSimpleWindow: load_sym!(
+                XCreateSimpleWindow,
+                unsafe extern "C" fn(Display, Window, i32, i32, u32, u32, u32, u64, u64) -> Window
+            ),
+            XMapWindow: load_sym!(XMapWindow, unsafe extern "C" fn(Display, Window) -> i32),
+            XUnmapWindow: load_sym!(XUnmapWindow, unsafe extern "C" fn(Display, Window) -> i32),
+            XDestroyWindow: load_sym!(XDestroyWindow, unsafe extern "C" fn(Display, Window) -> i32),
+            XStoreName: load_sym!(
+                XStoreName,
+                unsafe extern "C" fn(Display, Window, *const c_char) -> i32
+            ),
+            _XMoveResizeWindow: load_sym!(
+                XMoveResizeWindow,
+                unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32
+            ),
+            XMoveWindow: load_sym!(
+                XMoveWindow,
+                unsafe extern "C" fn(Display, Window, i32, i32) -> i32
+            ),
+            XResizeWindow: load_sym!(
+                XResizeWindow,
+                unsafe extern "C" fn(Display, Window, u32, u32) -> i32
+            ),
+            XNextEvent: load_sym!(
+                XNextEvent,
+                unsafe extern "C" fn(Display, *mut XEvent) -> i32
+            ),
+            XPending: load_sym!(XPending, unsafe extern "C" fn(Display) -> i32),
+            XSelectInput: load_sym!(
+                XSelectInput,
+                unsafe extern "C" fn(Display, Window, i64) -> i32
+            ),
+            XDefaultScreen: load_sym!(XDefaultScreen, unsafe extern "C" fn(Display) -> i32),
+            XRootWindow: load_sym!(XRootWindow, unsafe extern "C" fn(Display, i32) -> Window),
+            _XDefaultGC: load_sym!(
+                XDefaultGC,
+                unsafe extern "C" fn(Display, i32) -> *mut c_void
+            ),
+            XBlackPixel: load_sym!(XBlackPixel, unsafe extern "C" fn(Display, i32) -> u64),
+            XWhitePixel: load_sym!(XWhitePixel, unsafe extern "C" fn(Display, i32) -> u64),
+            XDisplayWidth: load_sym!(XDisplayWidth, unsafe extern "C" fn(Display, i32) -> i32),
+            XDisplayHeight: load_sym!(XDisplayHeight, unsafe extern "C" fn(Display, i32) -> i32),
+            XInternAtom: load_sym!(
+                XInternAtom,
+                unsafe extern "C" fn(Display, *const c_char, Bool) -> Atom
+            ),
+            XSetWMProtocols: load_sym!(
+                XSetWMProtocols,
+                unsafe extern "C" fn(Display, Window, *mut Atom, i32) -> i32
+            ),
+            XFlush: load_sym!(XFlush, unsafe extern "C" fn(Display) -> i32),
+            XLookupKeysym: load_sym!(
+                XLookupKeysym,
+                unsafe extern "C" fn(*mut XEvent, i32) -> KeySym
+            ),
+            XGetWindowAttributes: load_sym!(
+                XGetWindowAttributes,
+                unsafe extern "C" fn(Display, Window, *mut XWindowAttributes) -> i32
+            ),
+            _XDefaultColormap: load_sym!(
+                XDefaultColormap,
+                unsafe extern "C" fn(Display, i32) -> Colormap
+            ),
+        };
+
+        let _ = X11.set(x11lib);
+        X11.get()
     }
-
-    let x11lib = X11Lib {
-        _lib: lib,
-        XOpenDisplay: load_sym!(XOpenDisplay, unsafe extern "C" fn(*const c_char) -> Display),
-        XCloseDisplay: load_sym!(XCloseDisplay, unsafe extern "C" fn(Display) -> i32),
-        XCreateSimpleWindow: load_sym!(
-            XCreateSimpleWindow,
-            unsafe extern "C" fn(Display, Window, i32, i32, u32, u32, u32, u64, u64) -> Window
-        ),
-        XMapWindow: load_sym!(XMapWindow, unsafe extern "C" fn(Display, Window) -> i32),
-        XUnmapWindow: load_sym!(XUnmapWindow, unsafe extern "C" fn(Display, Window) -> i32),
-        XDestroyWindow: load_sym!(XDestroyWindow, unsafe extern "C" fn(Display, Window) -> i32),
-        XStoreName: load_sym!(
-            XStoreName,
-            unsafe extern "C" fn(Display, Window, *const c_char) -> i32
-        ),
-        _XMoveResizeWindow: load_sym!(
-            XMoveResizeWindow,
-            unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32
-        ),
-        XMoveWindow: load_sym!(
-            XMoveWindow,
-            unsafe extern "C" fn(Display, Window, i32, i32) -> i32
-        ),
-        XResizeWindow: load_sym!(
-            XResizeWindow,
-            unsafe extern "C" fn(Display, Window, u32, u32) -> i32
-        ),
-        XNextEvent: load_sym!(
-            XNextEvent,
-            unsafe extern "C" fn(Display, *mut XEvent) -> i32
-        ),
-        XPending: load_sym!(XPending, unsafe extern "C" fn(Display) -> i32),
-        XSelectInput: load_sym!(
-            XSelectInput,
-            unsafe extern "C" fn(Display, Window, i64) -> i32
-        ),
-        XDefaultScreen: load_sym!(XDefaultScreen, unsafe extern "C" fn(Display) -> i32),
-        XRootWindow: load_sym!(XRootWindow, unsafe extern "C" fn(Display, i32) -> Window),
-        _XDefaultGC: load_sym!(
-            XDefaultGC,
-            unsafe extern "C" fn(Display, i32) -> *mut c_void
-        ),
-        XBlackPixel: load_sym!(XBlackPixel, unsafe extern "C" fn(Display, i32) -> u64),
-        XWhitePixel: load_sym!(XWhitePixel, unsafe extern "C" fn(Display, i32) -> u64),
-        XDisplayWidth: load_sym!(XDisplayWidth, unsafe extern "C" fn(Display, i32) -> i32),
-        XDisplayHeight: load_sym!(XDisplayHeight, unsafe extern "C" fn(Display, i32) -> i32),
-        XInternAtom: load_sym!(
-            XInternAtom,
-            unsafe extern "C" fn(Display, *const c_char, Bool) -> Atom
-        ),
-        XSetWMProtocols: load_sym!(
-            XSetWMProtocols,
-            unsafe extern "C" fn(Display, Window, *mut Atom, i32) -> i32
-        ),
-        XFlush: load_sym!(XFlush, unsafe extern "C" fn(Display) -> i32),
-        XLookupKeysym: load_sym!(
-            XLookupKeysym,
-            unsafe extern "C" fn(*mut XEvent, i32) -> KeySym
-        ),
-        XGetWindowAttributes: load_sym!(
-            XGetWindowAttributes,
-            unsafe extern "C" fn(Display, Window, *mut XWindowAttributes) -> i32
-        ),
-        _XDefaultColormap: load_sym!(
-            XDefaultColormap,
-            unsafe extern "C" fn(Display, i32) -> Colormap
-        ),
-    };
-
-    let _ = X11.set(x11lib);
-    X11.get()
 }
 
 // ============================================================================
@@ -331,174 +333,180 @@ impl X11Window {
     /// Create a window at the given position with the given size.
     /// `style` is a bitmask: 1=titled, 2=closable, 4=resizable, 8=miniaturizable, 32=frameless.
     pub unsafe fn create(title: &str, x: i32, y: i32, w: i32, h: i32, _style: i32) -> Option<Self> {
-        let x11 = x11()?;
+        unsafe {
+            let x11 = x11()?;
 
-        let display = (x11.XOpenDisplay)(std::ptr::null());
-        if display.is_null() {
-            eprintln!("[rayzor-window] Cannot open X11 display. Is DISPLAY set?");
-            return None;
+            let display = (x11.XOpenDisplay)(std::ptr::null());
+            if display.is_null() {
+                eprintln!("[rayzor-window] Cannot open X11 display. Is DISPLAY set?");
+                return None;
+            }
+
+            let screen = (x11.XDefaultScreen)(display);
+            let root = (x11.XRootWindow)(display, screen);
+            let black = (x11.XBlackPixel)(display, screen);
+            let white = (x11.XWhitePixel)(display, screen);
+
+            let window = (x11.XCreateSimpleWindow)(
+                display, root, x, y, w as u32, h as u32, 0,     // border_width
+                black, // border color
+                white, // background color
+            );
+            if window == 0 {
+                (x11.XCloseDisplay)(display);
+                return None;
+            }
+
+            // Set window title
+            if let Ok(title_c) = CString::new(title) {
+                (x11.XStoreName)(display, window, title_c.as_ptr());
+            }
+
+            // Select events
+            (x11.XSelectInput)(display, window, EVENT_MASK);
+
+            // Register WM_DELETE_WINDOW so the window manager sends ClientMessage on close
+            let wm_protocols = (x11.XInternAtom)(
+                display,
+                c"WM_PROTOCOLS".as_ptr(),
+                0, // False — create if needed
+            );
+            let mut wm_delete_window = (x11.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
+            (x11.XSetWMProtocols)(display, window, &mut wm_delete_window, 1);
+
+            // Map (show) the window
+            (x11.XMapWindow)(display, window);
+            (x11.XFlush)(display);
+
+            Some(X11Window {
+                display,
+                window,
+                _screen: screen,
+                width: w as u32,
+                height: h as u32,
+                resized: false,
+                should_close: false,
+                key_states: [false; 256],
+                mouse_x: 0.0,
+                mouse_y: 0.0,
+                mouse_buttons: [false; 5],
+                wm_delete_window,
+                _wm_protocols: wm_protocols,
+                visible: true,
+                pos_x: x,
+                pos_y: y,
+                events: crate::event::EventQueue::new(),
+            })
         }
-
-        let screen = (x11.XDefaultScreen)(display);
-        let root = (x11.XRootWindow)(display, screen);
-        let black = (x11.XBlackPixel)(display, screen);
-        let white = (x11.XWhitePixel)(display, screen);
-
-        let window = (x11.XCreateSimpleWindow)(
-            display, root, x, y, w as u32, h as u32, 0,     // border_width
-            black, // border color
-            white, // background color
-        );
-        if window == 0 {
-            (x11.XCloseDisplay)(display);
-            return None;
-        }
-
-        // Set window title
-        if let Ok(title_c) = CString::new(title) {
-            (x11.XStoreName)(display, window, title_c.as_ptr());
-        }
-
-        // Select events
-        (x11.XSelectInput)(display, window, EVENT_MASK);
-
-        // Register WM_DELETE_WINDOW so the window manager sends ClientMessage on close
-        let wm_protocols = (x11.XInternAtom)(
-            display,
-            c"WM_PROTOCOLS".as_ptr(),
-            0, // False — create if needed
-        );
-        let mut wm_delete_window = (x11.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
-        (x11.XSetWMProtocols)(display, window, &mut wm_delete_window, 1);
-
-        // Map (show) the window
-        (x11.XMapWindow)(display, window);
-        (x11.XFlush)(display);
-
-        Some(X11Window {
-            display,
-            window,
-            _screen: screen,
-            width: w as u32,
-            height: h as u32,
-            resized: false,
-            should_close: false,
-            key_states: [false; 256],
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            mouse_buttons: [false; 5],
-            wm_delete_window,
-            _wm_protocols: wm_protocols,
-            visible: true,
-            pos_x: x,
-            pos_y: y,
-            events: crate::event::EventQueue::new(),
-        })
     }
 
     /// Create a window centered on the screen.
     pub unsafe fn create_centered(title: &str, w: i32, h: i32) -> Option<Self> {
-        let x11 = x11()?;
+        unsafe {
+            let x11 = x11()?;
 
-        // We need a temporary display connection to query screen dimensions
-        let display = (x11.XOpenDisplay)(std::ptr::null());
-        if display.is_null() {
-            return None;
+            // We need a temporary display connection to query screen dimensions
+            let display = (x11.XOpenDisplay)(std::ptr::null());
+            if display.is_null() {
+                return None;
+            }
+            let screen = (x11.XDefaultScreen)(display);
+            let screen_w = (x11.XDisplayWidth)(display, screen);
+            let screen_h = (x11.XDisplayHeight)(display, screen);
+            (x11.XCloseDisplay)(display);
+
+            let x = (screen_w - w) / 2;
+            let y = (screen_h - h) / 2;
+
+            // Default style: titled + closable + resizable + miniaturizable
+            Self::create(title, x, y, w, h, 1 | 2 | 4 | 8)
         }
-        let screen = (x11.XDefaultScreen)(display);
-        let screen_w = (x11.XDisplayWidth)(display, screen);
-        let screen_h = (x11.XDisplayHeight)(display, screen);
-        (x11.XCloseDisplay)(display);
-
-        let x = (screen_w - w) / 2;
-        let y = (screen_h - h) / 2;
-
-        // Default style: titled + closable + resizable + miniaturizable
-        Self::create(title, x, y, w, h, 1 | 2 | 4 | 8)
     }
 
     /// Drain all pending X11 events. Returns true if the window should remain open.
     pub unsafe fn poll_events(&mut self) -> bool {
-        self.resized = false;
-        self.events.clear();
+        unsafe {
+            self.resized = false;
+            self.events.clear();
 
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return false,
-        };
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return false,
+            };
 
-        let mut event = XEvent::new();
+            let mut event = XEvent::new();
 
-        while (x11.XPending)(self.display) > 0 {
-            (x11.XNextEvent)(self.display, &mut event);
+            while (x11.XPending)(self.display) > 0 {
+                (x11.XNextEvent)(self.display, &mut event);
 
-            match event.event_type() {
-                KEY_PRESS => {
-                    let keysym = (x11.XLookupKeysym)(&mut event, 0);
-                    let vk = x11_keysym_to_key(keysym);
-                    if vk < 256 {
-                        self.key_states[vk] = true;
+                match event.event_type() {
+                    KEY_PRESS => {
+                        let keysym = (x11.XLookupKeysym)(&mut event, 0);
+                        let vk = x11_keysym_to_key(keysym);
+                        if vk < 256 {
+                            self.key_states[vk] = true;
+                        }
                     }
-                }
-                KEY_RELEASE => {
-                    let keysym = (x11.XLookupKeysym)(&mut event, 0);
-                    let vk = x11_keysym_to_key(keysym);
-                    if vk < 256 {
-                        self.key_states[vk] = false;
+                    KEY_RELEASE => {
+                        let keysym = (x11.XLookupKeysym)(&mut event, 0);
+                        let vk = x11_keysym_to_key(keysym);
+                        if vk < 256 {
+                            self.key_states[vk] = false;
+                        }
                     }
-                }
-                BUTTON_PRESS => {
-                    let btn = event.button();
-                    match btn {
-                        1 => self.mouse_buttons[0] = true, // left
-                        2 => self.mouse_buttons[1] = true, // middle
-                        3 => self.mouse_buttons[2] = true, // right
-                        4 => self.mouse_buttons[3] = true, // scroll up
-                        5 => self.mouse_buttons[4] = true, // scroll down
-                        _ => {}
+                    BUTTON_PRESS => {
+                        let btn = event.button();
+                        match btn {
+                            1 => self.mouse_buttons[0] = true, // left
+                            2 => self.mouse_buttons[1] = true, // middle
+                            3 => self.mouse_buttons[2] = true, // right
+                            4 => self.mouse_buttons[3] = true, // scroll up
+                            5 => self.mouse_buttons[4] = true, // scroll down
+                            _ => {}
+                        }
                     }
-                }
-                BUTTON_RELEASE => {
-                    let btn = event.button();
-                    match btn {
-                        1 => self.mouse_buttons[0] = false,
-                        2 => self.mouse_buttons[1] = false,
-                        3 => self.mouse_buttons[2] = false,
-                        4 => self.mouse_buttons[3] = false,
-                        5 => self.mouse_buttons[4] = false,
-                        _ => {}
+                    BUTTON_RELEASE => {
+                        let btn = event.button();
+                        match btn {
+                            1 => self.mouse_buttons[0] = false,
+                            2 => self.mouse_buttons[1] = false,
+                            3 => self.mouse_buttons[2] = false,
+                            4 => self.mouse_buttons[3] = false,
+                            5 => self.mouse_buttons[4] = false,
+                            _ => {}
+                        }
                     }
-                }
-                MOTION_NOTIFY => {
-                    self.mouse_x = event.motion_x() as f64;
-                    self.mouse_y = event.motion_y() as f64;
-                }
-                CONFIGURE_NOTIFY => {
-                    let new_w = event.configure_width() as u32;
-                    let new_h = event.configure_height() as u32;
-                    let new_x = event.configure_x();
-                    let new_y = event.configure_y();
+                    MOTION_NOTIFY => {
+                        self.mouse_x = event.motion_x() as f64;
+                        self.mouse_y = event.motion_y() as f64;
+                    }
+                    CONFIGURE_NOTIFY => {
+                        let new_w = event.configure_width() as u32;
+                        let new_h = event.configure_height() as u32;
+                        let new_x = event.configure_x();
+                        let new_y = event.configure_y();
 
-                    if new_w != self.width || new_h != self.height {
-                        self.width = new_w;
-                        self.height = new_h;
-                        self.resized = true;
+                        if new_w != self.width || new_h != self.height {
+                            self.width = new_w;
+                            self.height = new_h;
+                            self.resized = true;
+                        }
+                        self.pos_x = new_x;
+                        self.pos_y = new_y;
                     }
-                    self.pos_x = new_x;
-                    self.pos_y = new_y;
+                    EXPOSE => {
+                        // Redraw needed — for now just flush
+                        (x11.XFlush)(self.display);
+                    }
+                    CLIENT_MESSAGE if event.client_data_l0() == self.wm_delete_window => {
+                        self.should_close = true;
+                    }
+                    _ => {}
                 }
-                EXPOSE => {
-                    // Redraw needed — for now just flush
-                    (x11.XFlush)(self.display);
-                }
-                CLIENT_MESSAGE if event.client_data_l0() == self.wm_delete_window => {
-                    self.should_close = true;
-                }
-                _ => {}
             }
-        }
 
-        !self.should_close
+            !self.should_close
+        }
     }
 
     /// Check if a key is currently pressed. `key` uses cross-platform virtual key codes
@@ -509,67 +517,77 @@ impl X11Window {
 
     /// Set the window title.
     pub unsafe fn set_title(&self, title: &str) {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return,
-        };
-        if let Ok(title_c) = CString::new(title) {
-            (x11.XStoreName)(self.display, self.window, title_c.as_ptr());
-            (x11.XFlush)(self.display);
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return,
+            };
+            if let Ok(title_c) = CString::new(title) {
+                (x11.XStoreName)(self.display, self.window, title_c.as_ptr());
+                (x11.XFlush)(self.display);
+            }
         }
     }
 
     /// Move the window to (x, y).
     pub unsafe fn set_position(&mut self, x: i32, y: i32) {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return,
-        };
-        (x11.XMoveWindow)(self.display, self.window, x, y);
-        (x11.XFlush)(self.display);
-        self.pos_x = x;
-        self.pos_y = y;
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return,
+            };
+            (x11.XMoveWindow)(self.display, self.window, x, y);
+            (x11.XFlush)(self.display);
+            self.pos_x = x;
+            self.pos_y = y;
+        }
     }
 
     /// Resize the window to (w, h).
     pub unsafe fn set_size(&mut self, w: i32, h: i32) {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return,
-        };
-        let uw = w as u32;
-        let uh = h as u32;
-        (x11.XResizeWindow)(self.display, self.window, uw, uh);
-        (x11.XFlush)(self.display);
-        self.width = uw;
-        self.height = uh;
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return,
+            };
+            let uw = w as u32;
+            let uh = h as u32;
+            (x11.XResizeWindow)(self.display, self.window, uw, uh);
+            (x11.XFlush)(self.display);
+            self.width = uw;
+            self.height = uh;
+        }
     }
 
     /// Show or hide the window.
     pub unsafe fn set_visible(&mut self, visible: bool) {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return,
-        };
-        if visible {
-            (x11.XMapWindow)(self.display, self.window);
-        } else {
-            (x11.XUnmapWindow)(self.display, self.window);
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return,
+            };
+            if visible {
+                (x11.XMapWindow)(self.display, self.window);
+            } else {
+                (x11.XUnmapWindow)(self.display, self.window);
+            }
+            (x11.XFlush)(self.display);
+            self.visible = visible;
         }
-        (x11.XFlush)(self.display);
-        self.visible = visible;
     }
 
     /// Check if the window is currently visible (mapped).
     pub unsafe fn is_visible(&self) -> bool {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return false,
-        };
-        let mut attrs = XWindowAttributes::zeroed();
-        (x11.XGetWindowAttributes)(self.display, self.window, &mut attrs);
-        // map_state: 0=Unmapped, 1=Unviewable, 2=IsViewable
-        attrs.map_state == 2
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return false,
+            };
+            let mut attrs = XWindowAttributes::zeroed();
+            (x11.XGetWindowAttributes)(self.display, self.window, &mut attrs);
+            // map_state: 0=Unmapped, 1=Unviewable, 2=IsViewable
+            attrs.map_state == 2
+        }
     }
 
     /// Get the current window position.
@@ -630,17 +648,19 @@ impl X11Window {
 
     /// Destroy the window and close the display connection.
     pub unsafe fn destroy(&mut self) {
-        let x11 = match x11() {
-            Some(x) => x,
-            None => return,
-        };
-        if self.window != 0 {
-            (x11.XDestroyWindow)(self.display, self.window);
-            self.window = 0;
-        }
-        if !self.display.is_null() {
-            (x11.XCloseDisplay)(self.display);
-            self.display = std::ptr::null_mut();
+        unsafe {
+            let x11 = match x11() {
+                Some(x) => x,
+                None => return,
+            };
+            if self.window != 0 {
+                (x11.XDestroyWindow)(self.display, self.window);
+                self.window = 0;
+            }
+            if !self.display.is_null() {
+                (x11.XCloseDisplay)(self.display);
+                self.display = std::ptr::null_mut();
+            }
         }
     }
 }

@@ -1909,6 +1909,8 @@ pub unsafe extern "C" fn rayzor_amx_gemm_f16(
     b16: i64,
     cf32: i64,
 ) -> bool {
+    // The body is unsafe only on some targets.
+    #[allow(unused_unsafe)]
     unsafe {
         if m <= 0 || k <= 0 || n <= 0 || a16 == 0 || b16 == 0 || cf32 == 0 {
             return false;

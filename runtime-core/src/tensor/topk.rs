@@ -9,6 +9,8 @@
 /// dereference `as_ptr()` + index, no out-of-bounds access).
 #[inline(always)]
 pub unsafe fn recent_contains(recent: &[i64], target: i64) -> bool {
+    // The body is unsafe only on some targets.
+    #[allow(unused_unsafe)]
     unsafe {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         {

@@ -165,6 +165,8 @@ pub unsafe extern "C" fn nue_prefill_graph_load(
     kv_heads: i64,
     head_dim: i64,
 ) -> i64 {
+    // The body is unsafe only on some targets.
+    #[allow(unused_unsafe)]
     unsafe {
         #[cfg(target_os = "macos")]
         {
@@ -215,6 +217,8 @@ pub unsafe extern "C" fn nue_prefill_graph_kv_copy(
     head_dim: i64,
     dst_ptr: i64,
 ) -> i64 {
+    // The body is unsafe only on some targets.
+    #[allow(unused_unsafe)]
     unsafe {
         #[cfg(target_os = "macos")]
         {

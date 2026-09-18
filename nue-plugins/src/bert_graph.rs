@@ -296,6 +296,8 @@ pub unsafe extern "C" fn nue_bert_graph_load(
     hidden: i64,
     kind: i64,
 ) -> i64 {
+    // The body is unsafe only on some targets.
+    #[allow(unused_unsafe)]
     unsafe {
         #[cfg(target_os = "macos")]
         {

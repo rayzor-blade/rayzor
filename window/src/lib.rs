@@ -136,16 +136,20 @@ mod native_ffi {
     pub unsafe extern "C" fn rayzor_window_get_display_handle(
         win: *mut NativeWindow,
     ) -> *mut c_void {
-        if win.is_null() {
-            return std::ptr::null_mut();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            (*win).inner.display
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            std::ptr::null_mut()
+        // The body is unsafe only on some targets.
+        #[allow(unused_unsafe)]
+        unsafe {
+            if win.is_null() {
+                return std::ptr::null_mut();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                (*win).inner.display
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::ptr::null_mut()
+            }
         }
     }
 

@@ -115,47 +115,49 @@ pub fn dot_f32_simd(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
-    use core::arch::x86_64::*;
-    let pa = a.as_ptr();
-    let pb = b.as_ptr();
-    let mut acc0 = _mm256_setzero_ps();
-    let mut acc1 = _mm256_setzero_ps();
-    let mut acc2 = _mm256_setzero_ps();
-    let mut acc3 = _mm256_setzero_ps();
-    let main = n & !31; // 4×AVX-256 lanes = 32 elements
-    let mut i = 0;
-    while i < main {
-        let va0 = _mm256_loadu_ps(pa.add(i));
-        let vb0 = _mm256_loadu_ps(pb.add(i));
-        let va1 = _mm256_loadu_ps(pa.add(i + 8));
-        let vb1 = _mm256_loadu_ps(pb.add(i + 8));
-        let va2 = _mm256_loadu_ps(pa.add(i + 16));
-        let vb2 = _mm256_loadu_ps(pb.add(i + 16));
-        let va3 = _mm256_loadu_ps(pa.add(i + 24));
-        let vb3 = _mm256_loadu_ps(pb.add(i + 24));
-        acc0 = _mm256_fmadd_ps(va0, vb0, acc0);
-        acc1 = _mm256_fmadd_ps(va1, vb1, acc1);
-        acc2 = _mm256_fmadd_ps(va2, vb2, acc2);
-        acc3 = _mm256_fmadd_ps(va3, vb3, acc3);
-        i += 32;
+    unsafe {
+        use core::arch::x86_64::*;
+        let pa = a.as_ptr();
+        let pb = b.as_ptr();
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        let main = n & !31; // 4×AVX-256 lanes = 32 elements
+        let mut i = 0;
+        while i < main {
+            let va0 = _mm256_loadu_ps(pa.add(i));
+            let vb0 = _mm256_loadu_ps(pb.add(i));
+            let va1 = _mm256_loadu_ps(pa.add(i + 8));
+            let vb1 = _mm256_loadu_ps(pb.add(i + 8));
+            let va2 = _mm256_loadu_ps(pa.add(i + 16));
+            let vb2 = _mm256_loadu_ps(pb.add(i + 16));
+            let va3 = _mm256_loadu_ps(pa.add(i + 24));
+            let vb3 = _mm256_loadu_ps(pb.add(i + 24));
+            acc0 = _mm256_fmadd_ps(va0, vb0, acc0);
+            acc1 = _mm256_fmadd_ps(va1, vb1, acc1);
+            acc2 = _mm256_fmadd_ps(va2, vb2, acc2);
+            acc3 = _mm256_fmadd_ps(va3, vb3, acc3);
+            i += 32;
+        }
+        let octo = n & !7;
+        while i < octo {
+            let va = _mm256_loadu_ps(pa.add(i));
+            let vb = _mm256_loadu_ps(pb.add(i));
+            acc0 = _mm256_fmadd_ps(va, vb, acc0);
+            i += 8;
+        }
+        let sum_vec = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+        // Horizontal sum: hadd doesn't do across lanes, do it manually.
+        let mut tmp = [0f32; 8];
+        _mm256_storeu_ps(tmp.as_mut_ptr(), sum_vec);
+        let mut sum = tmp.iter().sum::<f32>();
+        while i < n {
+            sum += *pa.add(i) * *pb.add(i);
+            i += 1;
+        }
+        sum
     }
-    let octo = n & !7;
-    while i < octo {
-        let va = _mm256_loadu_ps(pa.add(i));
-        let vb = _mm256_loadu_ps(pb.add(i));
-        acc0 = _mm256_fmadd_ps(va, vb, acc0);
-        i += 8;
-    }
-    let sum_vec = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-    // Horizontal sum: hadd doesn't do across lanes, do it manually.
-    let mut tmp = [0f32; 8];
-    _mm256_storeu_ps(tmp.as_mut_ptr(), sum_vec);
-    let mut sum = tmp.iter().sum::<f32>();
-    while i < n {
-        sum += *pa.add(i) * *pb.add(i);
-        i += 1;
-    }
-    sum
 }
 
 /// Pre-quantise a contiguous f32 X span of length `k` into `k / 256` `Q8KBlock`

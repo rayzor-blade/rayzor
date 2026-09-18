@@ -65,11 +65,13 @@ pub unsafe fn dot_i8_i8(a: *const i8, b: *const i8, k: usize) -> i32 {
 #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
 #[inline]
 pub unsafe fn dot_i8_i8(a: *const i8, b: *const i8, k: usize) -> i32 {
-    let mut sum = 0i32;
-    for i in 0..k {
-        sum += (*a.add(i) as i32) * (*b.add(i) as i32);
+    unsafe {
+        let mut sum = 0i32;
+        for i in 0..k {
+            sum += (*a.add(i) as i32) * (*b.add(i) as i32);
+        }
+        sum
     }
-    sum
 }
 
 /// Dequant + matmul kernel for INT8-quantised A times f32 B.
